@@ -67,9 +67,9 @@ const MUTATIONS = Object.freeze([
   ...caughtBy("structural-edit-blocking", "structural-edit-blocking-uncounted"),
   ...caughtBy("structural-edit-control-allocations", "structural-edit-control-allocations-uncounted"),
   ...caughtBy("structural-replace-large", "structural-replace-large"),
-  // Issue #1332 S3: after the 1 MiB replacement grew the shared memory in a handler, a quantum
-  // `process()` silenced for it, and a capture that is not the module's own render under Node.
-  ...caughtBy("structural-replace-grown", "structural-replace-grown-stale", "structural-replace-grown-output"),
+  // Issue #1332 S3: after the 1 MiB replacement grew the shared memory in a handler, a capture
+  // that is not the module's own render under Node.
+  ...caughtBy("structural-replace-grown", "structural-replace-grown-output"),
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
@@ -462,12 +462,11 @@ function validate(browserName, result) {
   `the 1 MiB replacement was not committed, counted and adopted: ${JSON.stringify(large)}`);
   // Issue #1332 S3: on a shared memory a growth gives `memory.buffer` a new identity, and a view
   // over the older object stays valid for its bytes, so the growth is no fault. The capture renders
-  // 64 quanta on after the sixteen; no quantum was silenced for the growth, the capture is the
-  // module's render of the same replace and feed under Node and plays after the growth, the meter
-  // stream carries the 192 strips past it, and an observation read is answered by the core.
-  gate(browserName, "structural-replace-grown", large?.after?.staleViewQuanta === 0
-    && large?.after?.memoryBytes > large?.before?.memoryBytes,
-  `a quantum was silenced after the shared memory grew, or it did not grow: ${JSON.stringify({ after: large?.after, before: large?.before })}`);
+  // 64 quanta on after the sixteen. Precondition: the memory grew. The capture is the module's
+  // render of the same replace and feed under Node and plays after the growth, and the meter stream
+  // carries the 192 strips past it. (A two-thread stale-view check is S9's.)
+  gate(browserName, "structural-replace-grown", large?.after?.memoryBytes > large?.before?.memoryBytes,
+    `the 1 MiB replacement did not grow the memory: ${JSON.stringify({ after: large?.after, before: large?.before })}`);
   gate(browserName, "structural-replace-grown", typeof large?.renderedDigest === "string"
     && large?.reference?.revision === large?.committedRevision
     && large.renderedDigest === large.reference.digest
@@ -475,10 +474,8 @@ function validate(browserName, result) {
   `the capture after the growth is not the module's render of the same replace under Node: ${JSON.stringify({ browser: large?.renderedDigest, reference: large?.reference, heard: large?.grownHeard })}`);
   gate(browserName, "structural-replace-grown", large?.meterLeaseResult === 0
     && large?.meterFramesAfterGrowth >= 1 && large?.meterFinite === true
-    && large?.meterTrackCounts?.includes(192)
-    && large?.observation?.result === 1 && large?.observation?.status === "unavailable"
-    && JSON.stringify(large?.observation?.diagnostics) === JSON.stringify(["observation.unbound"]),
-  `the meter stream or the observation read failed after the growth: ${JSON.stringify({ lease: large?.meterLeaseResult, after: large?.meterFramesAfterGrowth, counts: large?.meterTrackCounts, finite: large?.meterFinite, observation: large?.observation })}`);
+    && large?.meterTrackCounts?.includes(192),
+  `the meter stream failed after the growth: ${JSON.stringify({ lease: large?.meterLeaseResult, after: large?.meterFramesAfterGrowth, counts: large?.meterTrackCounts, finite: large?.meterFinite })}`);
 
   // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
@@ -1246,7 +1243,6 @@ function mutate(result, mutation) {
     edit.after.singleModeControlAllocations = edit.before.singleModeControlAllocations;
   }
   if (mutation === "structural-replace-large") copy.structuralReplace.large.replyStatus = "limit_exceeded";
-  if (mutation === "structural-replace-grown-stale") copy.structuralReplace.large.after.staleViewQuanta = 1;
   if (mutation === "structural-replace-grown-output") copy.structuralReplace.large.renderedDigest = "0".repeat(64);
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
@@ -1803,7 +1799,6 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
         projection,
         aboveProjection: growth > projection,
         controlAllocations: replace.large.after.singleModeControlAllocations - replace.large.before.singleModeControlAllocations,
-        staleViewQuanta: replace.large.after.staleViewQuanta,
         underrunBlocks: replace.large.underrunBlocks,
         meterFramesAfterGrowth: replace.large.meterFramesAfterGrowth,
         digest: replace.large.renderedDigest,

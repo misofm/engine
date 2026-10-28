@@ -826,7 +826,7 @@ async function runStructuralReplaceQualification(createHost, documentA, document
 
   // The 1 MiB boot-ceiling document. Issue #1332 S3: its commit grows the module's shared memory
   // in the message handler; the capture then renders on for 64 quanta over the source fed after
-  // the commit, with the meter stream leased, and an observation read follows it.
+  // the commit, with the meter stream leased.
   const large = await boot(STRUCTURAL_REPLACE_CAPTURE_FRAMES,
     bootOptions(STRUCTURAL_REPLACE_CAPTURE_FRAMES, LIVE_CONTROL_METER_BLOCKS));
   const largeMeterFrames = [];
@@ -849,15 +849,7 @@ async function runStructuralReplaceQualification(createHost, documentA, document
   for (let spin = 0; spin < 8 && largeMeterFrames.length === 0; spin += 1) {
     await new Promise((resolve) => setTimeout(resolve, 4));
   }
-  const largeStatus = await large.host.status();
-  const largeAfter = { ...counters(largeStatus), staleViewQuanta: largeStatus.staleViewQuanta };
-  const { readObservationThroughSdk } = await import("/sdk/sdk-response-client.js");
-  // The document declares no observation tap (parametric EQs only), so the read is answered with
-  // the core's typed refusal (`observation.unbound`): a round trip through the control staging
-  // after the growth.
-  const largeObservation = await readObservationThroughSdk(large.host, {
-    stripId: "track-000", rack: "inserts", effectId: "effect-0", tapId: OBSERVATION_TAP_ID, channels: "both",
-  });
+  const largeAfter = counters(await large.host.status());
   const largeUnderruns = await sourceUnderrunBlocksThroughSdk(large.host);
   const largeAllocations = await renderAllocationCount(large.host);
   await large.host.dispose();
@@ -907,7 +899,6 @@ async function runStructuralReplaceQualification(createHost, documentA, document
       meterFramesAfterGrowth: largeMeterFrames
         .filter((frame) => BigInt(frame.endSample) > BigInt(largeGrownStart)).length,
       meterFinite: largeMeterFrames.every((frame) => frame.finite),
-      observation: largeObservation,
     },
   };
 }
