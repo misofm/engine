@@ -2575,7 +2575,7 @@ impl AudioWorkletEngineHost {
     /// it after a control call that may publish a plan and names it to the worklet, whose message
     /// handler makes sure its views cover the header and its frame before render adopts the plan.
     /// Only an address: nothing here dereferences it, and after a supersession it may name tables
-    /// already freed (see [`SuccessorWords`]).
+    /// already freed (the successor record's rule, #1290d1).
     #[must_use]
     pub fn successor_header_address(&self) -> usize {
         self.control
