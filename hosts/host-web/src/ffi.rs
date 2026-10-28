@@ -492,7 +492,9 @@ pub extern "C" fn miso_engine_web_v1_render_allocation_count() -> u32 {
 /// #1332 D1): its boot, its control messages and its service steps. In `single` mode, a page
 /// without cross-origin isolation, the worklet's message handler runs the control work, so this is
 /// the count of the one place the engine allocates on an audio thread; the host reports it as
-/// `singleModeControlAllocations`. Control side only, never `process()`.
+/// `singleModeControlAllocations`. Since #1332 S6 the count is the calling instance's own, as the
+/// render-locked count is: on one shared memory the Worker's and the worklet's are separate.
+/// Control side only, never `process()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_control_allocation_count() -> u32 {
     control_allocation_count()
@@ -1036,10 +1038,16 @@ pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> 
                 host.render_next()
             }
             RenderTarget::Half(render) => {
-                if render.status().state == STATE_READY
-                    && render.status().quantum_frames != actual_frames
-                {
-                    return render.reject_output_quantum(actual_frames);
+                if render.status().state == STATE_READY {
+                    // #1332 S6: a render-only instance runs on a reserved stack with no guard
+                    // page; its canary is checked before every block, and the first bad one fails
+                    // the session.
+                    if !handoff::bound_canary_intact() {
+                        return render.fail(RESULT_INTERNAL, STACK_CANARY_DIAGNOSTIC);
+                    }
+                    if render.status().quantum_frames != actual_frames {
+                        return render.reject_output_quantum(actual_frames);
+                    }
                 }
                 render.render_next()
             }
@@ -1445,6 +1453,9 @@ pub extern "C" fn miso_engine_web_v1_host_release(handle: u32) -> u64 {
     render_locked(|| release_render_half(handle))
 }
 
+/// The diagnostic of a render-only session whose reserved stack's canary was overwritten.
+const STACK_CANARY_DIAGNOSTIC: &[u8] = b"web.instance.stack_canary\t$\n";
+
 fn release_render_half(handle: u32) -> u64 {
     if handle == 0 {
         return 0;
@@ -1477,7 +1488,7 @@ fn release_render_half(handle: u32) -> u64 {
             return 0;
         };
         if !handoff::bound_canary_intact() {
-            let _ = render.fail(RESULT_INTERNAL, b"web.instance.stack_canary\t$\n");
+            let _ = render.fail(RESULT_INTERNAL, STACK_CANARY_DIAGNOSTIC);
         }
         match handoff::deposit(handle, render) {
             Ok(token) => {

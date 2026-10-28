@@ -38,7 +38,7 @@
 #![allow(unsafe_code)]
 
 use crate::RenderHost;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// How many released render halves the registry holds at once. One Worker instance holds one host
 /// and releases one half; the other entries are slack for a release whose adoption is pending
@@ -176,6 +176,9 @@ pub struct WebInstanceReservation {
     pub stack_bottom: u32,
 }
 
+/// Exact byte size of [`WebInstanceReservation`].
+pub const INSTANCE_RESERVATION_BYTES: u32 = size_of::<WebInstanceReservation>() as u32;
+
 /// The full-width addresses of one reservation, for a native caller whose addresses do not fit
 /// the record's words.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,12 +198,15 @@ pub struct Reservation {
 struct Reserved {
     record: AtomicUsize,
     canary: AtomicUsize,
+    /// Whether an instance has bound the reservation: one instance per stack, ever.
+    bound: AtomicBool,
 }
 
 static RESERVED: [Reserved; RESERVATIONS] = [const {
     Reserved {
         record: AtomicUsize::new(0),
         canary: AtomicUsize::new(0),
+        bound: AtomicBool::new(false),
     }
 }; RESERVATIONS];
 
@@ -240,7 +246,7 @@ pub(crate) fn reserve(tls_size: u32, tls_align: u32) -> Option<Reservation> {
     let tls_base = base + tls_offset;
     let word = |address: usize| u32::try_from(address).unwrap_or(0);
     let record: &'static mut WebInstanceReservation = Box::leak(Box::new(WebInstanceReservation {
-        struct_size: u32::try_from(size_of::<WebInstanceReservation>()).unwrap_or(0),
+        struct_size: INSTANCE_RESERVATION_BYTES,
         tls_base: word(tls_base),
         stack_top: word(stack_top),
         stack_bottom: word(stack_bottom),
@@ -272,7 +278,9 @@ thread_local! {
 
 // REALTIME_POLICY_BEGIN: #1332 S6, the bind and the canary check: loads and compares only.
 /// Bind this instance to the reservation whose record is at `record`: `true` when this module
-/// made it and its canary is intact. Nothing is dereferenced for an address it did not make.
+/// made it, no instance has bound it before (a compare-and-swap marks it bound, so a second bind
+/// of the same stack refuses), and its canary is intact. Nothing is dereferenced for an address
+/// it did not make. An instance binds once.
 pub(crate) fn bind(record: usize) -> bool {
     if record == 0 {
         return false;
@@ -283,8 +291,18 @@ pub(crate) fn bind(record: usize) -> bool {
     else {
         return false;
     };
+    if BOUND_CANARY.try_with(core::cell::Cell::get).unwrap_or(0) != 0 {
+        return false;
+    }
     let canary = slot.canary.load(Ordering::Acquire);
     if canary == 0 || !canary_intact(canary) {
+        return false;
+    }
+    if slot
+        .bound
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
         return false;
     }
     BOUND_CANARY.with(|bound| bound.set(canary));
@@ -292,20 +310,22 @@ pub(crate) fn bind(record: usize) -> bool {
 }
 
 /// Whether the canary of the reservation this instance is bound to is intact; `true` for an
-/// instance bound to none.
+/// instance bound to none. Eight word loads and compares: the render export checks it before
+/// every block of a bound render-only session, and the release once more.
 pub(crate) fn bound_canary_intact() -> bool {
     let canary = BOUND_CANARY.try_with(core::cell::Cell::get).unwrap_or(0);
     canary == 0 || canary_intact(canary)
 }
 
 fn canary_intact(canary: usize) -> bool {
-    let canary: *const u8 = core::ptr::with_exposed_provenance(canary);
-    (0..CANARY_BYTES).all(|offset| {
-        // SAFETY: `canary` is a listed reservation's block, whose first `CANARY_BYTES` are the
-        // canary; the block is leaked, so it is live. A volatile read: an overflow writes it
-        // behind the compiler's back.
-        let byte = unsafe { canary.add(offset).read_volatile() };
-        byte == CANARY_PATTERN[offset % CANARY_PATTERN.len()]
+    const WORDS: usize = CANARY_BYTES / size_of::<u64>();
+    let expected = u64::from_ne_bytes(CANARY_PATTERN);
+    let canary: *const u64 = core::ptr::with_exposed_provenance(canary);
+    (0..WORDS).all(|word| {
+        // SAFETY: `canary` is a listed reservation's block, aligned to at least 16, whose first
+        // `CANARY_BYTES` are the canary; the block is leaked, so it is live. A volatile read: an
+        // overflow writes it behind the compiler's back.
+        unsafe { canary.add(word).read_volatile() == expected }
     })
 }
 // REALTIME_POLICY_END

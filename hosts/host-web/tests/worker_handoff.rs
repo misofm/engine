@@ -15,8 +15,8 @@ use std::alloc::System;
 use std::sync::{Barrier, Mutex};
 
 use host_web::{
-    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_WRONG_STATE, RenderLockedAllocator, Reservation,
-    STATE_FAILED, STATE_READY, WebBootOptions, native_staging,
+    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_WRONG_STATE, RenderLockedAllocator,
+    Reservation, STATE_FAILED, STATE_READY, WebBootOptions, native_staging,
 };
 use protocol::{
     CommandPayload, DecodeScratch, DecodedEventPayload, DecodedSuccessResponsePayload,
@@ -313,6 +313,11 @@ fn a_render_half_renders_on_another_instance_without_allocating_and_comes_back()
                 .expect("reserved")
                 .record;
             assert_eq!(native_staging::instance_bind(record), RESULT_OK);
+            assert_eq!(
+                native_staging::instance_bind(record),
+                RESULT_INVALID_ARGUMENT,
+                "an instance binds once"
+            );
             let before = host_web::miso_engine_web_v1_render_allocation_count();
             let taken = *token.lock().expect("token");
             assert_eq!(host_web::miso_engine_web_v1_host_adopt(taken), RESULT_OK);
@@ -400,6 +405,16 @@ fn a_render_half_renders_on_another_instance_without_allocating_and_comes_back()
             *token.lock().expect("token") = released;
             step.wait(); // A
             step.wait(); // B
+            let record = reservation
+                .lock()
+                .expect("reservation")
+                .expect("reserved")
+                .record;
+            assert_eq!(
+                native_staging::instance_bind(record),
+                RESULT_INVALID_ARGUMENT,
+                "a second instance cannot bind a stack another instance runs on"
+            );
             assert_eq!(host_web::miso_engine_web_v1_service(handle), RESULT_OK);
             spectrum_arm(handle, 2);
             step.wait(); // C
@@ -411,8 +426,16 @@ fn a_render_half_renders_on_another_instance_without_allocating_and_comes_back()
                 "the capture is read while the half renders elsewhere"
             );
             response_get(handle, 4);
+            // While the worklet renders, polls, copies its output and releases, this instance's
+            // control count does not move: each instance counts its own (#1332 S6).
+            let quiet = host_web::miso_engine_web_v1_control_allocation_count();
             step.wait(); // E
             step.wait(); // F
+            assert_eq!(
+                host_web::miso_engine_web_v1_control_allocation_count(),
+                quiet,
+                "the worklet's allocations moved the Worker's control count"
+            );
             assert_eq!(host_web::miso_engine_web_v1_service(handle), RESULT_OK);
             assert!(
                 drain_response_ready(handle),
@@ -746,7 +769,8 @@ fn an_occupied_slot_refuses_a_second_token_and_leaves_it_unconsumed() {
 /// A stack canary overwritten while the worklet renders is caught at its release.
 ///
 /// Test value: red if `host_release` hands the half back without checking the bound canary, so
-/// a stack overflow of the worklet instance goes unreported and the session keeps running.
+/// a stack overflow of the worklet instance after its last block goes unreported and the session
+/// keeps running.
 #[test]
 fn an_overwritten_stack_canary_fails_the_session_at_the_release() {
     let _turn = TURN
@@ -765,11 +789,6 @@ fn an_overwritten_stack_canary_fails_the_session_at_the_release() {
             let mut bits = Vec::new();
             render_blocks(handle, 1, &mut bits);
             native_staging::overwrite_canary(&reservation);
-            assert_eq!(
-                native_staging::instance_bind(reservation.record),
-                RESULT_INVALID_ARGUMENT,
-                "a bind checks the canary too"
-            );
             let back = host_web::miso_engine_web_v1_host_release(handle);
             assert_ne!(back, 0, "the half still goes back, failed");
             shared.lock().expect("shared").1 = back;
@@ -800,6 +819,111 @@ fn an_overwritten_stack_canary_fails_the_session_at_the_release() {
                 .starts_with("web.instance.stack_canary"),
             "the diagnostic names the canary"
         );
+        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+    });
+}
+
+/// A stack canary overwritten between two blocks fails the session at the next block.
+///
+/// Test value: red if the render export checks the canary only at the release, so a worklet whose
+/// stack overflowed keeps rendering over corrupted memory until its teardown.
+#[test]
+fn an_overwritten_stack_canary_fails_the_next_block() {
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let step = Barrier::new(2);
+    let shared = Mutex::new((0_u32, 0_u64, None::<Reservation>));
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let _guard = AbortOnPanic;
+            step.wait();
+            let (handle, token, reservation) = *shared.lock().expect("shared");
+            let reservation = reservation.expect("reserved");
+            assert_eq!(native_staging::instance_bind(reservation.record), RESULT_OK);
+            assert_eq!(host_web::miso_engine_web_v1_host_adopt(token), RESULT_OK);
+            let mut bits = Vec::new();
+            render_blocks(handle, 2, &mut bits);
+            native_staging::overwrite_canary(&reservation);
+            assert_eq!(
+                host_web::miso_engine_web_v1_render(handle, QUANTUM_FRAMES),
+                RESULT_INTERNAL,
+                "the first block after the overflow fails"
+            );
+            let status = native_staging::render_status(handle).expect("status");
+            assert_eq!(status.state, STATE_FAILED);
+            assert_eq!(
+                status.rendered_quanta, 2,
+                "the failed block rendered nothing"
+            );
+            assert!(
+                String::from_utf8_lossy(&native_staging::render_diagnostic(handle))
+                    .starts_with("web.instance.stack_canary"),
+                "the render diagnostic names the canary"
+            );
+            let back = host_web::miso_engine_web_v1_host_release(handle);
+            assert_ne!(back, 0);
+            shared.lock().expect("shared").1 = back;
+            step.wait();
+        });
+        let _guard = AbortOnPanic;
+        let handle = boot();
+        let reservation =
+            native_staging::instance_reserve(TLS_SIZE, TLS_ALIGN).expect("a reservation");
+        let token = host_web::miso_engine_web_v1_host_release(handle);
+        *shared.lock().expect("shared") = (handle, token, Some(reservation));
+        step.wait();
+        step.wait();
+        let back = shared.lock().expect("shared").1;
+        assert_eq!(host_web::miso_engine_web_v1_host_adopt(back), RESULT_OK);
+        assert_eq!(
+            native_staging::render_status(handle).map(|status| status.state),
+            Some(STATE_FAILED)
+        );
+        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+    });
+}
+
+/// A release into a full registry hands back nothing and leaves the half where it was.
+///
+/// Test value: red if a release that finds every entry taken loses the half (the host can no
+/// longer render, or its plan is dropped) or reports a token nothing holds.
+#[test]
+fn a_release_into_a_full_registry_keeps_the_half() {
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let full = Barrier::new(host_web::HANDOFF_SLOTS + 1);
+    let done = Barrier::new(host_web::HANDOFF_SLOTS + 1);
+    std::thread::scope(|scope| {
+        for _ in 0..host_web::HANDOFF_SLOTS {
+            scope.spawn(|| {
+                let _guard = AbortOnPanic;
+                let handle = boot();
+                let token = host_web::miso_engine_web_v1_host_release(handle);
+                assert_ne!(token, 0, "a free entry takes the half");
+                full.wait();
+                done.wait();
+                assert_eq!(host_web::miso_engine_web_v1_host_adopt(token), RESULT_OK);
+                assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+            });
+        }
+        let _guard = AbortOnPanic;
+        let handle = boot();
+        full.wait();
+        assert_eq!(
+            host_web::miso_engine_web_v1_host_release(handle),
+            0,
+            "every entry is taken"
+        );
+        let mut bits = Vec::new();
+        render_blocks(handle, 2, &mut bits);
+        assert_eq!(
+            native_staging::render_status(handle).map(|status| status.rendered_quanta),
+            Some(2),
+            "the host still renders: its half stayed"
+        );
+        done.wait();
         assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
     });
 }

@@ -577,6 +577,31 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64[2]"
         }
       ]
+    },
+    "instanceReservation": {
+      "bytes": 16,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "tlsBase",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "stackTop",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "stackBottom",
+          "offset": 12,
+          "type": "u32"
+        }
+      ]
     }
   },
   "constants": {

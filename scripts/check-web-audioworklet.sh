@@ -565,8 +565,11 @@ printf '%s
 # Issue #1332 S6: the worklet in `worker` mode adopts the render half at its start and releases it
 # at teardown, and the Worker calls the same two exports to hand it out and take it back. Neither
 # may reach an allocator, a deallocator or drop glue: the release and the adoption exchange
-# preallocated boxes, and every refusal path forgets or redeposits what it holds.
-for export in miso_engine_web_v1_host_adopt miso_engine_web_v1_host_release; do
+# preallocated boxes, and every refusal path forgets or redeposits what it holds. The worklet's
+# bind and its render-diagnostic reads are held to the same rule.
+for export in miso_engine_web_v1_host_adopt miso_engine_web_v1_host_release \
+  miso_engine_web_v1_instance_bind miso_engine_web_v1_render_diagnostic_ptr \
+  miso_engine_web_v1_render_diagnostic_bytes; do
   printf '%s
 ' "$named_disassembly" |
     python3 -B "$callgraph" --callgraph "$export" --render-thread || exit 1

@@ -43,10 +43,8 @@
 //!
 //! The flag is a const-initialised `Cell<bool>` thread local. It has no destructor, so it
 //! registers nothing with std: on the atomic module it is an instance-local slot. Since #1332 S6
-//! the render-locked counter is one too, so on one shared memory each instance (the Worker, the
-//! worklet) reports its own count. The control counter is a process-wide `AtomicU64`: on one
-//! shared memory both instances count into one copy (#1331 recipe rule 3), so a page in `worker`
-//! mode reads the two instances' control allocations together.
+//! both counters are thread locals too (#1331 recipe rule 3), so on one shared memory each
+//! instance (the Worker, the worklet) reports its own counts.
 //!
 //! The cost when unlocked is one thread-local load and one branch per allocator call. There is no
 //! nesting and no RAII guard: the release profile aborts on panic, so a panicking body never
@@ -56,7 +54,6 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::Cell;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 thread_local! {
     static RENDER_LOCKED: Cell<bool> = const { Cell::new(false) };
@@ -64,12 +61,11 @@ thread_local! {
     /// destructor-free thread local like the flag, so on one shared memory the Worker's count and
     /// the worklet's are their own (#1331 recipe rule 3). Saturating.
     static RENDER_ALLOCATIONS: Cell<u32> = const { Cell::new(0) };
+    /// The allocator calls made while no render-locked window was open (#1381a), per instance
+    /// since #1332 S6, like the render count. Wide, so that a long session cannot wrap it to a
+    /// small number; the export that reports it is 32 bits and saturates (batch 7 review).
+    static CONTROL_ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
 }
-
-/// The allocator calls made while no render-locked window was open (#1381a). Wide, so that a long
-/// session cannot wrap it to a small number; the export that reports it is 32 bits and saturates
-/// (batch 7 review).
-static CONTROL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
 /// A global allocator that counts every call made while the current thread is render-locked, and
 /// every other call in the control counter, then forwards it unchanged to the wrapped allocator.
@@ -92,7 +88,7 @@ fn count_call() {
     if locked() {
         let _ = RENDER_ALLOCATIONS.try_with(|count| count.set(count.get().saturating_add(1)));
     } else {
-        CONTROL_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        let _ = CONTROL_ALLOCATIONS.try_with(|count| count.set(count.get().saturating_add(1)));
     }
 }
 
@@ -167,7 +163,7 @@ pub extern "C" fn miso_engine_web_v1_render_lock_probe(inside: u32) -> u32 {
 /// (#1381a): its boot, control messages and service steps. It saturates at `u32::MAX` and never
 /// wraps.
 pub(crate) fn control_allocation_count() -> u32 {
-    u32::try_from(CONTROL_ALLOCATIONS.load(Ordering::Relaxed)).unwrap_or(u32::MAX)
+    u32::try_from(CONTROL_ALLOCATIONS.try_with(Cell::get).unwrap_or(0)).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -268,9 +264,9 @@ mod tests {
         );
         // The control counter is wide and its reader saturates: past `u32::MAX` calls it reads
         // `u32::MAX` and never wraps to a small number.
-        CONTROL_ALLOCATIONS.store(u64::from(u32::MAX) - 1, Ordering::Relaxed);
+        CONTROL_ALLOCATIONS.with(|count| count.set(u64::from(u32::MAX) - 1));
         exercise(false);
         assert_eq!(control_allocation_count(), u32::MAX);
-        CONTROL_ALLOCATIONS.store(0, Ordering::Relaxed);
+        CONTROL_ALLOCATIONS.with(|count| count.set(0));
     }
 }
