@@ -70,7 +70,7 @@ pub use compile::{
     CompiledChildren, RuntimePreparer, compile_children, compile_children_with_boot_command,
 };
 pub use control::{
-    CommandError, EventError, EventLane, ObservationChange, ObservationForward,
+    CarriedTaps, CommandError, EventError, EventLane, ObservationChange, ObservationForward,
     ObservationKeyError, ObservationKeyRef, ObservationLimit, ObservationRefusal,
     REPREPARE_REQUIRED, ResolvedObservationTap, SessionSeekFailure, SessionState, SourceFailure,
     SourceRefusalKind, TransitionStep, resolve_observation_tap,

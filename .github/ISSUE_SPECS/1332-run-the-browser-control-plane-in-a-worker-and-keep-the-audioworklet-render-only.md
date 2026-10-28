@@ -720,3 +720,75 @@ render-thread table already lists (`adoptRenderHalf`, `releaseRenderHalf`,
 - **S8 note.** An orphaned render half (the Worker disposed while the half was away) must be
   disposable: `instance_bind` marks the instance render-only, and dispose on an unbound instance
   may free an adopted half.
+
+## S6b evidence (2026-10-28): `OBSERVATION_READ` from the Worker
+
+Slice S6b, branch `codex/issue-1332-observation-endpoints` from S6 (`62e6771ba`). Root ruling
+R-S6b, option (b): the control side holds read-only observation endpoints in the epoch's
+`ObservationIndex`, as the C ABI does; the render half keeps its acknowledging readers. This
+amends #1589 R2 (the readers moved into the plan so the swap block could pair them and lending
+them to control was free on one thread). Class A: no rendered bit moved; no SDK or C ABI change
+(same wire, capability bit 15).
+
+- **The endpoint** (`crates/engine/src/realtime/observe.rs`): `ObservationView`, an `Arc` clone of
+  the tap's seqlock cell with `read`/`read_state` and no `acknowledge`, made by
+  `ObservationReader::view` (a reference-count increment). The cell keeps one writer of its
+  `consumed` word: the acknowledging reader, which the meter fold uses.
+- **The index holds the views** (`crates/host-core/src/observation.rs`): `ObservationIndex::new`
+  takes the handle list its positions name and keeps one view per reader in handle order, with a
+  start table per handle. `read_with`/`read_into` no longer take a handle list: the read goes
+  through the index alone, so it runs on whatever thread holds the epoch. The tap's descriptor
+  comes from the index entry (the producer's, the same static).
+- **Pairing at promotion, from the swap record** (#1674's code): `CarriedTaps` is now made for
+  every meter-delivery plan with readers, wherever they are kept. Its render-side write moved into
+  `CarriedTaps::record`, called by the C ABI's attachment and, through a new preparer hook
+  `RuntimePreparer::keep_carried_taps`, by the browser's `RenderCompanions::adopt_predecessor`
+  (the plan's one attachment). `pair_observations` exchanges the indexes' views with
+  `ObservationIndex::pair_carried` beside the C ABI's handle swap, with the same three states
+  (written, pending, reclaimed).
+- **One read path.** The lent-readers branch (`command_with_plan`'s `readers` argument, the
+  epoch-mismatch fault) is deleted: single mode reads through the views too, paired at the
+  promotion its own service step makes before the read.
+
+Accounting. Per tap one pointer (the view; no new slot). Per plan the view table and the start
+table (one `u32` per handle and one more). A browser plan with readers now also has the carried-tap
+record (8 B per handle and its shared header), which the C ABI already had; `RenderCompanions`
+gains one pointer. The direct oracle over S6 (`87157e1c…`) and S6b (`1cacfbbf…`): every PCM
+digest, status snapshot and timeline equal; `bridgeMetadataBytes`/`bridgeRetainedBytes` +96 B
+(the host shell's inline epoch structures: 16 B per `ObservationIndex` on wasm32) and
+`graphIncrementalPlanBytes`/`graphSessionPlusPlanBytes` +4 B (the companions' pointer); the
+identity fixture declares no tap, so no table row moves. Against main (`2daf4fb3…`) the same, plus
+S6's 2312 B.
+
+C ABI delta (no wire or API change): `ObservationIndex::retained_bytes` now charges the view and
+start tables, so a C ABI plan with taps reports more retained bytes, and its admission charge rises
+by 8 B per tap plus 4 B per handle and one more (64-bit). Its carried-tap record is unchanged.
+
+Tests (one per claim):
+1. `hosts/host-web/tests/worker_handoff.rs`,
+   `the_worker_reads_an_observation_tap_while_the_worklet_renders`: the Worker arms `comp0`'s
+   console compressor tap and releases; the worklet renders six blocks; the Worker's read equals a
+   single instance's row (Ready, a nonzero reduction). The Worker then rebuilds (a spectrum
+   configure), the worklet renders across the swap that carries the tap, and the Worker's read is
+   Ready and equal to the single instance's. Red on S6 (`Err("observation.unbound")`), and with
+   `ObservationIndex::pair_carried` removed (`Pending` for `Ready`).
+The view type has no `acknowledge`, so the control side cannot write the `consumed` word; a
+read moving no word stays `selected_observation_reads_keep_same_track_owner_windows_and_sequences`'s.
+(A fold-acknowledges test was written and deleted at verify: the word has no production reader.)
+Single mode is unchanged: every existing host-web observation test passes through the new path.
+
+Verify fold (S6b verify PASS): the control plane never replaces a preparer's host attachment
+with its own carried-tap attachment; a preparer that returns the record for a plan that already
+carries an attachment is refused (`host.observation.attachment`), and the hook's documentation
+says it goes with `kept_observations`. No unit test: no preparer in the tree reaches the
+refusal, and building one needs a tap fixture and an attachment type for one branch.
+
+Gates, all green: the lint job's steps (fmt, workspace clippy `-D warnings`, `cargo doc -D
+warnings`, every policy script); `cargo test -p host-core -p control-plane -p capi -p host-web -p
+engine --all-targets` with the CI feature set; `realtime_policy` (291 regions: `CarriedTaps::record`
+is the new one, its body moved from the C ABI's attachment hook); `build-web-audioworklet.sh`,
+`check-web-audioworklet.sh` (render closure allocation-free and trap-free as before),
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py`,
+`test-web-audioworklet.sh`, the render-lock probe; both local browser legs, `npm run qualify --
+--check-matrix --self-test-mutations` on Chromium 151.0.7922.34 and WebKit 26.5 with a private null
+PulseAudio sink: all qualification gates passed.

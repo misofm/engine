@@ -86,13 +86,21 @@ fn boot() -> u32 {
 }
 
 fn frame(request: u64, payload: CommandPayload<'_>) -> Vec<u8> {
+    frame_at(request, ExpectedRevision::Any, payload)
+}
+
+fn frame_at(
+    request: u64,
+    expected_revision: ExpectedRevision,
+    payload: CommandPayload<'_>,
+) -> Vec<u8> {
     let codec = ProtocolCodec::default();
     let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
     let length = codec
         .encode_command_frame_into(
             &TypedCommandFrame {
                 request_id: RequestId::new(request).expect("nonzero request"),
-                expected_revision: ExpectedRevision::Any,
+                expected_revision,
                 payload,
             },
             &mut bytes,
@@ -113,6 +121,11 @@ fn command(handle: u32, request: u64, payload: CommandPayload<'_>) -> Vec<u8> {
 }
 
 fn spectrum_configure(handle: u32, request: u64) {
+    spectrum_configure_target(handle, request, "eq0");
+}
+
+/// Configure one spectrum capture of `target`'s post-pan point: a rebuild.
+fn spectrum_configure_target(handle: u32, request: u64, target: &str) {
     let response = command(
         handle,
         request,
@@ -120,7 +133,7 @@ fn spectrum_configure(handle: u32, request: u64) {
             form: protocol::SpectrumForm::Single,
             entries: vec![protocol::SpectrumEntry {
                 target_kind: protocol::SpectrumTargetKind::TrackPostPan,
-                target_id: "eq0".to_owned(),
+                target_id: target.to_owned(),
                 channels: ParameterChannel::Both,
             }],
             maximum_capture_bytes: 1 << 20,
@@ -460,6 +473,220 @@ fn a_render_half_renders_on_another_instance_without_allocating_and_comes_back()
     for (block, (got, want)) in bits.iter().zip(&expected).enumerate() {
         assert_eq!(got, want, "block {block}: the bits of the single instance");
     }
+}
+
+const COMPRESSOR_FIXTURE: &str =
+    include_str!("../../../fixtures/session/v1/compressor-bank-observation.json");
+
+/// Boot the compressor fixture on this thread's instance and feed `FED_BLOCKS` quanta loud enough
+/// that every track's console compressor reduces gain.
+fn boot_compressors() -> u32 {
+    let length =
+        native_staging::boot(options(), COMPRESSOR_FIXTURE.as_bytes()).expect("the fixture stages");
+    let handle = host_web::miso_engine_web_v1_boot(length);
+    assert_ne!(handle, 0, "the fixture boots");
+    for block in 0..FED_BLOCKS {
+        assert!(native_staging::source_id(handle, SOURCE_ID));
+        assert!(native_staging::source_pcm(
+            handle,
+            0.9 + 0.002 * block as f32
+        ));
+        let result = host_web::miso_engine_web_v1_source_submit(
+            handle,
+            SOURCE_ID.len() as u32,
+            1,
+            block as u64 * u64::from(QUANTUM_FRAMES),
+            2,
+            QUANTUM_FRAMES,
+            0,
+        );
+        assert_eq!(result, RESULT_OK, "block {block}: the feed");
+    }
+    handle
+}
+
+fn stable(id: &str) -> session::StableId {
+    session::StableId::parse(id).expect("a stable ID")
+}
+
+/// Arm `comp0`'s console compressor gain-reduction tap with a two-block window.
+fn arm_compressor_tap(handle: u32, request: u64) {
+    let edits = [protocol::SessionEdit::Observe {
+        strip_id: stable("comp0"),
+        section: controls::TapSection::Console(stable("comp")),
+        tap_id: 1,
+        armed: true,
+        window_blocks: 2,
+        arm_tag: 0,
+    }];
+    // The fixture's revision: the arm is the session's first commit.
+    let bytes = frame_at(
+        request,
+        ExpectedRevision::Exact(protocol::SessionRevision(1)),
+        CommandPayload::SessionTransactionApply(&edits),
+    );
+    let (result, response) =
+        native_staging::control_command(handle, &bytes).expect("a live control half");
+    assert_eq!(result, RESULT_OK);
+    let mut fields = [0_u16; 64];
+    assert!(
+        matches!(
+            ProtocolCodec::default()
+                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                .expect("a response"),
+            DecodedTypedResponseFrame::Success { .. }
+        ),
+        "the arm applies"
+    );
+}
+
+/// `OBSERVATION_READ` of the armed tap: its row, or the refusal's diagnostic codes.
+fn read_compressor_tap(handle: u32, request: u64) -> Result<protocol::ObservationReadRow, String> {
+    let read = protocol::ObservationReadRequest {
+        selections: vec![protocol::ObservationReadSelection {
+            strip_id: stable("comp0"),
+            section: controls::TapSection::Console(stable("comp")),
+            tap_id: 1,
+            channels: ParameterChannel::Both,
+        }],
+    };
+    let bytes = frame(request, CommandPayload::ObservationRead(&read));
+    let (result, response) =
+        native_staging::control_command(handle, &bytes).expect("a live control half");
+    assert_eq!(result, RESULT_OK);
+    let mut fields = [0_u16; 256];
+    match ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("a response")
+    {
+        DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::ObservationRead(page),
+            ..
+        } => Ok(page.rows[0]),
+        DecodedTypedResponseFrame::NonOk { payload, .. } => Err(payload
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.to_string())
+            .collect::<Vec<_>>()
+            .join(",")),
+        DecodedTypedResponseFrame::Success { .. } => panic!("an observation read page"),
+    }
+}
+
+/// Blocks rendered before the read, and after the rebuild.
+const OBSERVED_BLOCKS: usize = 6;
+
+/// The two rows a single instance reads for the observation script: after `OBSERVED_BLOCKS`, and
+/// after a rebuild (a spectrum configure) and `OBSERVED_BLOCKS` more.
+fn single_instance_rows() -> [protocol::ObservationReadRow; 2] {
+    std::thread::spawn(|| {
+        let handle = boot_compressors();
+        arm_compressor_tap(handle, 1);
+        assert_eq!(
+            host_web::miso_engine_web_v1_meter_lease(handle, 1),
+            RESULT_OK
+        );
+        let mut bits = Vec::new();
+        render_blocks(handle, OBSERVED_BLOCKS, &mut bits);
+        assert_eq!(host_web::miso_engine_web_v1_service(handle), RESULT_OK);
+        let before = read_compressor_tap(handle, 2).expect("a page");
+        spectrum_configure_target(handle, 3, "comp0");
+        render_blocks(handle, OBSERVED_BLOCKS, &mut bits);
+        assert_eq!(host_web::miso_engine_web_v1_service(handle), RESULT_OK);
+        let after = read_compressor_tap(handle, 4).expect("a page");
+        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+        [before, after]
+    })
+    .join()
+    .expect("the single-instance run completes")
+}
+
+/// #1332 S6b (root ruling R-S6b): the Worker reads an observation tap while the worklet renders.
+/// Thread 1 (the Worker) arms `comp0`'s compressor tap and releases; thread 2 (the worklet) adopts
+/// and renders; the Worker's `OBSERVATION_READ` returns the tap's window; the Worker rebuilds (a
+/// spectrum configure), the worklet adopts the successor, which carries the tap, and the Worker's
+/// read is ready again. Both rows equal a single instance's for the same script.
+///
+/// Test value: red if the control side has no endpoint of the tap while the render half is away
+/// (S6 answered `observation.unbound`), or if its endpoints do not pair from the swap record at
+/// the promotion, so after a carried rebuild it reads the successor's fresh slot, which nothing
+/// publishes to (`Pending`).
+#[test]
+fn the_worker_reads_an_observation_tap_while_the_worklet_renders() {
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let expected = single_instance_rows();
+    for row in &expected {
+        assert_eq!(row.status, protocol::ObservationRowStatus::Ready);
+        assert!(
+            row.left.is_some_and(|db| db != 0.0),
+            "the compressor reduces: {row:?}"
+        );
+    }
+
+    let step = Barrier::new(2);
+    let token = Mutex::new(0_u64);
+    let handle_slot = Mutex::new(0_u32);
+    let rows = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let _guard = AbortOnPanic;
+            step.wait(); // A: the token is out.
+            let handle = *handle_slot.lock().expect("handle");
+            let taken = *token.lock().expect("token");
+            assert_eq!(host_web::miso_engine_web_v1_host_adopt(taken), RESULT_OK);
+            assert_eq!(
+                host_web::miso_engine_web_v1_meter_lease(handle, 1),
+                RESULT_OK
+            );
+            let mut bits = Vec::new();
+            render_blocks(handle, OBSERVED_BLOCKS, &mut bits);
+            step.wait(); // B: rendered.
+            step.wait(); // C: the rebuild is published.
+            render_blocks(handle, OBSERVED_BLOCKS, &mut bits);
+            step.wait(); // D: rendered across the swap.
+            step.wait(); // E: read.
+            *token.lock().expect("token") = host_web::miso_engine_web_v1_host_release(handle);
+            step.wait(); // F: the half is back in the registry.
+        });
+        let worker = scope.spawn(|| {
+            let _guard = AbortOnPanic;
+            let handle = boot_compressors();
+            *handle_slot.lock().expect("handle") = handle;
+            arm_compressor_tap(handle, 1);
+            let released = host_web::miso_engine_web_v1_host_release(handle);
+            assert_ne!(released, 0, "the release hands out a token");
+            *token.lock().expect("token") = released;
+            step.wait(); // A
+            step.wait(); // B
+            assert_eq!(host_web::miso_engine_web_v1_service(handle), RESULT_OK);
+            let before = read_compressor_tap(handle, 2);
+            spectrum_configure_target(handle, 3, "comp0");
+            step.wait(); // C
+            step.wait(); // D
+            assert_eq!(host_web::miso_engine_web_v1_service(handle), RESULT_OK);
+            let after = read_compressor_tap(handle, 4);
+            step.wait(); // E
+            step.wait(); // F
+            let back = *token.lock().expect("token");
+            assert_eq!(host_web::miso_engine_web_v1_host_adopt(back), RESULT_OK);
+            assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+            (before, after)
+        });
+        worker.join().expect("the Worker thread")
+    });
+    let (before, after) = rows;
+    assert_eq!(
+        before,
+        Ok(expected[0]),
+        "the Worker reads the tap the worklet renders"
+    );
+    assert_eq!(
+        after.as_ref().map(|row| row.status).map_err(Clone::clone),
+        Ok(protocol::ObservationRowStatus::Ready),
+        "the carried tap reads ready after the rebuild"
+    );
+    assert_eq!(after, Ok(expected[1]), "the carried tap's window");
 }
 
 /// A second token into an occupied slot, a stale token and a foreign token.
