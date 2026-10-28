@@ -9,13 +9,14 @@
 // browser module whose `#[global_allocator]` is unregistered or differently cfg'd counts nothing,
 // which every zero gate passes and this one does not.
 import { readFile } from "node:fs/promises";
+import { sharedMemoryImports } from "../sdk/src/core/memory.ts";
 
 if (process.argv.length !== 3) {
   console.error("usage: node scripts/test-render-lock-probe.mjs PROBE_MODULE");
   process.exit(2);
 }
 const bytes = await readFile(process.argv[2]);
-const { instance } = await WebAssembly.instantiate(bytes, {});
+const { instance } = await WebAssembly.instantiate(bytes, sharedMemoryImports());
 const probe = instance.exports.miso_engine_web_v1_render_lock_probe;
 if (typeof probe !== "function") {
   console.error("the module has no miso_engine_web_v1_render_lock_probe export");

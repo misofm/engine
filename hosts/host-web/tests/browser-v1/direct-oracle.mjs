@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { sharedMemoryImports } from "../../../../sdk/src/core/memory.ts";
 
 const ABI_LAYOUT = JSON.parse(await readFile(
   new URL("../../../../sdk/assets/miso-engine-v1-abi-layout.json", import.meta.url),
@@ -186,7 +187,7 @@ function pcmSha256(channels) {
 }
 
 async function runBackend(modulePath, expectedBackend, sessionDocument, source) {
-  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
+  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), sharedMemoryImports());
   const exports = instance.exports;
   assert.equal(exports.miso_engine_web_v1_abi_version(), ABI_VERSION);
   const handle = boot(exports, sessionDocument);
@@ -294,7 +295,7 @@ function drainControlEvents(exports, handle) {
 }
 
 async function runSetControlTimeline(modulePath, sessionDocument, sourceId, frames) {
-  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
+  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), sharedMemoryImports());
   const exports = instance.exports;
   const handle = boot(exports, sessionDocument);
   assert.equal(exports.miso_engine_web_v1_control_revision(handle), 1n);
@@ -345,7 +346,7 @@ async function runSetControlTimeline(modulePath, sessionDocument, sourceId, fram
 /// committed `set-control-frames/observe-*.bin` frames the native twin sends (#1589c); without it
 /// the leg sends no frame at all.
 async function runObservationTimeline(modulePath, sessionDocument, sourceId, observe, masterFrame, observeFrames) {
-  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
+  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), sharedMemoryImports());
   const exports = instance.exports;
   const handle = boot(exports, sessionDocument, [0n, BigInt(OBSERVATION_WINDOW_BLOCKS), 0n, 0n]);
   // Issue #1689 D6: the master is the track's `master` row, the committed `master.bin` frame the
@@ -451,7 +452,7 @@ const AUTOMATION_SEEK_BLOCK = 40;
 const AUTOMATION_SEEK_TIMELINE = 30000;
 const AUTOMATION_SOURCES = [["src-t1", [40503, 30011]], ["src-t2", [52153, 18749]]];
 async function runAutomationTimeline(modulePath, sessionDocument) {
-  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
+  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), sharedMemoryImports());
   const exports = instance.exports;
   const handle = boot(exports, sessionDocument);
 

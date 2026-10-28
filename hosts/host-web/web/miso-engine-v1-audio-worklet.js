@@ -40,6 +40,12 @@ const SEEK_REPORT_WORDS = [
 const PLAN_LATENCY_BYTES = 64;
 const PLAN_LATENCY_WORDS = [["samples", 8], ["tailKind", 16], ["tailSamples", 24]];
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
+// Issue #1380 D1: the shared linear memory the module imports as `env.memory`, in 64 KiB pages:
+// the ABI layout document's `memory.initialPages` and `memory.maximumPages` (512 MiB). The module's
+// import declares exactly these limits (`check-web-audioworklet.sh`), and the hermetic suite holds
+// the memory this file creates to the layout's.
+const MEMORY_INITIAL_PAGES = 20;
+const MEMORY_MAXIMUM_PAGES = 8192;
 
 // The telemetry window: 128 blocks is ~341 ms at 48 kHz with a 128-frame quantum, long enough for
 // a millisecond-resolution clock to accumulate a usable ratio and short enough to be a live meter.
@@ -86,6 +92,19 @@ function renderClock() {
     return { read: () => globalThis.performance.now(), resolutionMs: 0.005 };
   }
   return { read: () => Date.now(), resolutionMs: 1 };
+}
+
+/// Issue #1380 D3: the worklet's one instantiation helper. A fresh shared memory per instance: one
+/// instance runs on it and nothing else shares it. Every engine creates a shared
+/// `WebAssembly.Memory` in a worklet whether or not the page is cross-origin isolated (#1331a
+/// recipe rule 4), so this is the same on every page.
+function sharedMemoryImports() {
+  const memory = new WebAssembly.Memory({
+    initial: MEMORY_INITIAL_PAGES,
+    maximum: MEMORY_MAXIMUM_PAGES,
+    shared: true,
+  });
+  return { env: { memory } };
 }
 
 function exactFields(value, fields) {
@@ -258,7 +277,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         || !exactFields(init.options, OPTION_FIELDS)) {
       return RESULT_INVALID_ARGUMENT;
     }
-    this.instance = new WebAssembly.Instance(init.module, {});
+    this.instance = new WebAssembly.Instance(init.module, sharedMemoryImports());
     this.exports = this.instance.exports;
     if (this.exports.miso_engine_web_v1_abi_version() !== ABI_VERSION) {
       return 2;

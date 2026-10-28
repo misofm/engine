@@ -67,6 +67,8 @@ const { stallToleranceMs, reserveQuanta } = ABI.constants.sourceRing;
 const layout = {
   abiVersion: ABI.abiVersion,
   bootOptionsBytes: ABI.structures.bootOptions.bytes,
+  // #1380 D3: the shared memory each boot's instance imports, at the ABI layout's page counts.
+  memoryPages: ABI.memory,
   offsets: Object.fromEntries(["structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
     "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
     "liveControlMeterBlocks", "reserved3", "reserved2",
@@ -94,7 +96,10 @@ registerProcessor("rebuild-cost", class extends AudioWorkletProcessor {
   bootOnce() {
     const o = this.o;
     const L = o.layout;
-    const e = new WebAssembly.Instance(o.module, {}).exports;
+    const memory = new WebAssembly.Memory({
+      initial: L.memoryPages.initialPages, maximum: L.memoryPages.maximumPages, shared: true,
+    });
+    const e = new WebAssembly.Instance(o.module, { env: { memory } }).exports;
     // Every pointer is read before \`memory.buffer\`: an export that grows memory detaches it.
     const optionsPointer = e.miso_engine_web_v1_boot_options_ptr();
     const view = new DataView(e.memory.buffer, optionsPointer, L.bootOptionsBytes);

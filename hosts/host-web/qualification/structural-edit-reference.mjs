@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { sharedMemoryImports } from "../../../sdk/src/core/memory.ts";
 
 const BOOT_OPTIONS_BYTES = 64;
 const SAMPLE_RATE = 48000;
@@ -91,7 +92,7 @@ function digest(planes) {
 export async function structuralEditReference({
   modulePath, documentA, documentB, source, frame, sourceRingFrames, blocks, replaceBlock,
 }) {
-  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
+  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), sharedMemoryImports());
   const exports = instance.exports;
   const handle = boot(exports, documentA, sourceRingFrames);
   for (const block of source.blocks) {

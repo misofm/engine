@@ -652,7 +652,9 @@ export class WasmBoundary {
   #readIdBuffer(length: number): string {
     if (length === 0) return "";
     const { pointer } = this.#buffer("sourceId");
-    return new TextDecoder().decode(new Uint8Array(this.#exports.memory.buffer, pointer, length));
+    // `.slice()`: the module's memory is shared (#1380), and a decoder is not required to read a
+    // view of a `SharedArrayBuffer`; the copy is the id's own bytes.
+    return new TextDecoder().decode(new Uint8Array(this.#exports.memory.buffer, pointer, length).slice());
   }
 
   #stageSourceId(sourceId: string): number {
@@ -1452,7 +1454,7 @@ function bootFailure(
   const result = Number(exports.miso_engine_web_v1_boot_result());
   const length = Number(exports.miso_engine_web_v1_boot_diagnostic_bytes());
   const text = documentPointer !== 0 && length > 0
-    ? new TextDecoder().decode(new Uint8Array(exports.memory.buffer, documentPointer, length))
+    ? new TextDecoder().decode(new Uint8Array(exports.memory.buffer, documentPointer, length).slice())
     : "";
   const code = resultName(result, "boot");
   return new MisoEngineError(message, {

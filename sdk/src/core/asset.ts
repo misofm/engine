@@ -1,6 +1,7 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { PROVENANCE } from "../generated/provenance.ts";
 import { MisoEngineError, MisoUsageError } from "./errors.ts";
+import { sharedMemoryImports } from "./memory.ts";
 import { hexLower } from "./hex.ts";
 
 /**
@@ -118,7 +119,7 @@ export class MisoEngineAsset {
    * a mix switch and a `validate()` both make one. What must never happen twice is the compile.
    */
   async instantiate(): Promise<WebAssembly.Instance> {
-    const instance = await WebAssembly.instantiate(this.#module, {});
+    const instance = await WebAssembly.instantiate(this.#module, sharedMemoryImports());
     const exports = instance.exports as Record<string, unknown>;
     const versionExport = exports[ABI_LAYOUT.stagingSequence[0]];
     if (typeof versionExport !== "function") {

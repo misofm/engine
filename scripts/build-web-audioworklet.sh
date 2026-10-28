@@ -168,13 +168,31 @@ sysroot=$(RUSTUP_TOOLCHAIN="$channel" rustc --print sysroot)
 remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/repo"
 remap+=" --remap-path-prefix=$sysroot=/rustc-sysroot"
 
+# Issue #1380 D1: the module imports one shared linear memory, `env.memory`, and re-exports it as
+# `memory`. `+atomics` makes std's locks and thread locals real (the reason `-Zbuild-std` exists,
+# #1334); `--shared-memory` makes lld initialise the data segments once, from a start function, so a
+# second instance on the same memory (#1332) does not re-run them. The page counts are
+# `WASM_INITIAL_MEMORY_PAGES` and `WASM_MAXIMUM_MEMORY_PAGES` in `hosts/host-web/src/lib.rs`, spelled
+# again here because this script must build without cargo running anything first (its mocked-cargo
+# contract test and the identity twin's bare toolchain); `check-web-audioworklet.sh` holds the
+# module's import limits equal to the ABI layout document's `memory` rows, which the generator
+# emits from those constants, so the two spellings cannot drift unseen. The atomic build prints
+# `unstable feature specified for -Ctarget-feature: atomics` once; it is harmless (#1331a-2).
+# The stem-identity BLAKE3 module stays on plain `+simd128`: it is a separate, unshared module.
+wasm_initial_memory_pages=20
+wasm_maximum_memory_pages=8192
+module_flags="-C target-feature=+simd128,+atomics,+bulk-memory,+mutable-globals"
+module_flags+=" -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--export-memory"
+module_flags+=" -C link-arg=--initial-memory=$((wasm_initial_memory_pages * 65536))"
+module_flags+=" -C link-arg=--max-memory=$((wasm_maximum_memory_pages * 65536))"
+
 (
   # Issue #2067: cargo reads CARGO_ENCODED_RUSTFLAGS before RUSTFLAGS, so a caller's exported
   # value would silently replace every flag below; the subshell drops it for this build only.
   unset CARGO_ENCODED_RUSTFLAGS
   cd "$repo_root"
   RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$simd_target" \
-    RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
+    RUSTFLAGS="$module_flags $strip_flag $remap" \
     cargo build --locked --release -Zbuild-std=std,panic_abort ${features[@]+"${features[@]}"} --target wasm32-unknown-unknown -p host-web
   # Issue #2111: the stem identities' WebAssembly SIMD BLAKE3, `hosts/blake3-web`, ships in the
   # delivery closure as `miso-engine-v1-blake3.simd128.wasm`. A browser Wasm artifact like the one

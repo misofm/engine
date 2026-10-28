@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
+import { sharedMemoryImports } from "../sdk/src/core/memory.ts";
 
 const ABI_VERSION = 0x00010000;
 const BOOT_OPTIONS_BYTES = 64;
@@ -44,7 +45,7 @@ function stage(instance, maximumMemoryBytes) {
 }
 
 {
-  const instance = await WebAssembly.instantiate(compiledModule, {});
+  const instance = await WebAssembly.instantiate(compiledModule, sharedMemoryImports());
   const initialBytes = instance.exports.memory.buffer.byteLength;
   const { exports, pointer } = stage(instance, 0n);
   const handle = exports.miso_engine_web_v1_boot(document.byteLength);
@@ -67,7 +68,7 @@ function stage(instance, maximumMemoryBytes) {
 }
 
 {
-  const instance = await WebAssembly.instantiate(compiledModule, {});
+  const instance = await WebAssembly.instantiate(compiledModule, sharedMemoryImports());
   const pin = BigInt(document.byteLength) * PARSE_TRANSIENT_MULTIPLIER;
   const { exports, pointer } = stage(instance, pin - 1n);
   const stagedBytes = exports.memory.buffer.byteLength;

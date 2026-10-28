@@ -282,7 +282,7 @@ cp "$repo_root/scripts/build-web-audioworklet.sh" "$repo_root/scripts/strip-wasm
   "$copy/scripts/"
 cp "$repo_root/rust-toolchain.toml" "$copy/"
 run_module_only "$copy" "$scratch/flag-before" "$scratch/flag-before.log"
-sed -i 's/-C target-feature=+simd128 /-C target-feature=+simd128 -C opt-level=s /' \
+sed -i 's/+mutable-globals"$/+mutable-globals -C opt-level=s"/' \
   "$copy/scripts/build-web-audioworklet.sh"
 run_module_only "$copy" "$scratch/flag-after" "$scratch/flag-after.log"
 ! cmp -s "$scratch/flag-before/$module_name" "$scratch/flag-after/$module_name" &&
@@ -340,11 +340,17 @@ rm -f "$mock_bin/cargo.log"
   exit 1
 }
 # The delivery build's cargo lines (logged by the mock above) -- the worklet module's and, since
-# #2111, the BLAKE3 module's -- run on that channel, with std rebuilt and simd128 on.
+# #2111, the BLAKE3 module's -- run on that channel, with std rebuilt and simd128 on. Issue #1380
+# D1: the worklet module alone adds atomics and links one imported, re-exported shared memory; the
+# BLAKE3 module stays plain.
+module_features='+simd128,+atomics,+bulk-memory,+mutable-globals'
+module_links='-C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--export-memory -C link-arg=--initial-memory=[0-9]* -C link-arg=--max-memory=536870912'
 [[ $(grep -c ' build ' "$scratch/module-full.log") == 2 &&
   $(grep ' build ' "$scratch/module-full.log" | grep -c -- \
-    "^RUSTUP_TOOLCHAIN=$channel RUSTFLAGS=-C target-feature=+simd128 .* build --locked --release -Zbuild-std=std,panic_abort .*--target wasm32-unknown-unknown -p \(host-web\|blake3-web\)$") == 2 ]] || {
-  echo "a shipped cargo line does not run on the [browser-artifact] channel with -Zbuild-std and simd128" >&2
+    "^RUSTUP_TOOLCHAIN=$channel RUSTFLAGS=-C target-feature=$module_features $module_links .* build --locked --release -Zbuild-std=std,panic_abort .*--target wasm32-unknown-unknown -p host-web$") == 1 &&
+  $(grep ' build ' "$scratch/module-full.log" | grep -c -- \
+    "^RUSTUP_TOOLCHAIN=$channel RUSTFLAGS=-C target-feature=+simd128 -C strip.* build --locked --release -Zbuild-std=std,panic_abort .*--target wasm32-unknown-unknown -p blake3-web$") == 1 ]] || {
+  echo "a shipped cargo line does not run on the [browser-artifact] channel with -Zbuild-std and its features (the worklet module: atomics on one shared imported memory; BLAKE3: simd128 alone)" >&2
   exit 1
 }
 toolchain_copy="$scratch/toolchain-copy"
