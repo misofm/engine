@@ -939,6 +939,69 @@ Slice S7 of the #1332 build plan (#1332(b1)), branch `codex/issue-1332-worker-js
   directly (terminates the Worker, disconnects the node) and rejects with a typed reason; the
   Worker then disposes with no token.
 
+## S8 evidence (2026-10-28): the failure paths of `worker` mode
+
+Slice S8 of the #1332 build plan, branch `codex/issue-1332-failure` from S7 (`28bb9f849`).
+
+- **Teardown when nobody answers (root S8 requirement).** Two bounds. The page waits at most
+  `DISPOSE_TIMEOUT_MS` = 5 s for a dispose reply; past it, it tears down (terminates the Worker,
+  disconnects the node) and rejects with `{tag: "miso.teardown.v1", requestId: 0, result: 255,
+  reason: "dispose-timeout"}`. The control Worker waits at most `RELEASE_TIMEOUT_MS` = 2 s for
+  the worklet's `miso.released.v1`; past it, it disposes the host with no token and answers the
+  dispose `{tag: "miso.teardown.v1", requestId, result: 255, reason: "release-timeout"}`, which the
+  page rejects with (and tears down). 2 s is about 750 quanta at 48 kHz / 128 and leaves the Worker
+  3 s to dispose and answer inside the page's bound. **Deviation from the root text (for root):**
+  a closed context alone does not tear down. An `OfflineAudioContext` is `closed` once it
+  rendered and its worklet still answers the dispose (the S7 worker smoke and the SDK's
+  resident-observation browser leg dispose after `startRendering`; a first build that rejected
+  `context-closed` at once failed that leg on both engines). So `context.state === "closed"` only
+  names the reason when the 5 s bound expires (`context-closed` instead of `dispose-timeout`); in
+  `worker` mode the Worker's 2 s release bound answers first. In `single` mode a teardown is
+  terminal: no retry and no tick restart. New public type `MisoTeardown` (`.d.ts` and
+  `sdk/src/browser/shipped-host.d.ts`).
+- **Timers.** The page has no clock and one timer site, so the deadline uses it: the site is now
+  `startTimer(periodMs, run)` between `SERVICE_TICK_BEGIN`/`SERVICE_TICK_END`, called by the
+  single-mode service tick and by the dispose deadline (fires once, cleared); the timer policy
+  is unchanged (one site, in the markers), its comment updated. The Worker keeps its service
+  tick running during a dispose for the release deadline only, and reads `performance.now()`.
+- **Orphaned render half (S8 note).** `miso_engine_web_v1_dispose` on an instance that bound no
+  reservation frees a render-only session (a half adopted after its host was disposed); a bound
+  instance (`instance_bind`, the worklet) still refuses `WRONG_STATE`. The Worker reclaims a
+  `miso.released.v1` that arrives after its dispose finished: adopt (into the empty slot), then
+  dispose. Native test `an_orphaned_render_half_is_freed_by_the_worker_that_adopts_it_back`
+  (`hosts/host-web/tests/worker_handoff.rs`). In the browser an orphaned half is freed by dropping
+  that engine's memory: each worker-mode engine has its own `WebAssembly.Memory` and Worker, and
+  the page terminates the Worker and disconnects the node at every teardown. `reclaimOrphan` is a
+  fallback that runs only in the gap between the Worker's answer and the page's terminate.
+  The two canary tests moved to `worker_handoff_canary.rs` (helpers in `tests/handoff/mod.rs`):
+  a process holds at most four reservations, never freed, so each binary now reserves two.
+- **Render failure reaches the page.** `process()` posts no fatal, so the Worker's tick sends
+  `miso.render-check.v1` to the worklet at most every 50 ms; a worklet whose render failed sticky
+  posts `miso.error.v1 {requestId: 0, result}` to the page once, and the worker-mode host fails
+  sticky with that typed record (single mode unchanged). Accepted (S8 verify): a render fatal
+  posted in the same window as a `dispose()` rejects the dispose with the render error instead
+  of resolving; the rejection is typed and bounded, and the memory goes with the engine.
+- **Construction failure after adoption.** The worklet sets `workerMode` before any check (so it
+  takes the control port even when its options are refused); a construction that fails after the
+  adoption releases the half at once (`host_release`, render-locked) and answers the Worker's
+  release with that token, once; before the adoption it answers `0n`. The page, when the factory
+  fails after the node was built, sends the Worker `miso.dispose.v1 {requestId: 1}` and waits for
+  its answer (bounded, 5 s) before terminating it. With a zero token the Worker also adopts the
+  boot's token, so a half the worklet never adopted comes back from the registry.
+- **Qualification server** answers `/favicon.ico` with 204, so a leg's console carries no 404 for
+  the icon the browser asks for on its own.
+- **Worker `error` after boot** fails the host and terminates the Worker; a later dispose rejects
+  at once with the host's error and posts nothing.
+- **Tests, red on mutants** (`scripts/test-web-audioworklet.mjs`): page deadline removed ("no
+  reply on a closed context tears down"); a closed context named `dispose-timeout`; single mode
+  rejecting at once on a closed context (the offline dispose resolves); Worker error not
+  terminating; dispose
+  after a Worker error posting ("the dispose tears down at once"); requestId-0 fatal untyped (255
+  !== 9); factory skips the Worker dispose; `release-timeout` reply refused; worklet ignores the
+  render check; worklet keeps the half after a failed construction; worklet answers a release
+  twice; Worker release without deadline, without the boot token, dropping the orphan, posting no
+  render check. Native: dispose always refusing
+  a render-only session, and dispose freeing on a bound instance, both abort the test.
 ## S9 evidence (2026-10-28): the isolated (worker-mode) qualification leg
 
 Slice S9 of the #1332 build plan, branch `codex/issue-1332-isolated-leg` from S7 (`28bb9f849`). No

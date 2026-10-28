@@ -1403,6 +1403,10 @@ pub extern "C" fn miso_engine_web_v1_status_ptr(handle: u32) -> u32 {
 }
 
 /// Quiescently dispose the live handle; zero is an explicit no-op.
+///
+/// #1332 S8: on an instance that bound no reservation, a render-only session (a half adopted
+/// after its host was disposed) is freed; a bound (render-only) instance refuses with
+/// [`RESULT_WRONG_STATE`] and frees nothing.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
     if handle == 0 {
@@ -1423,8 +1427,17 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
                 return RESULT_INVALID_ARGUMENT;
             };
             // #1332 S6: a render-only instance holds no host; its half goes back by a release.
+            // #1332 S8: an orphaned half -- the Worker disposed its host while the half was
+            // away, then adopted the half when it came back -- is freed here: only an instance
+            // that bound no reservation (`instance_bind` marks the render-only one) frees it,
+            // never the worklet, whose render thread must not free.
             if live.host.is_none() {
-                return RESULT_WRONG_STATE;
+                if handoff::instance_bound() {
+                    return RESULT_WRONG_STATE;
+                }
+                drop(live_slot.take());
+                boot.reset_after_dispose();
+                return RESULT_OK;
             }
             let Some(mut live) = live_slot.take() else {
                 return RESULT_INTERNAL;

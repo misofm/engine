@@ -543,6 +543,19 @@ export interface MisoWorkerFailed {
   readonly reason: "worker-failed";
 }
 
+/// The typed reason a dispose ended in a teardown nobody answered (issue 1332 S8). The page has
+/// terminated the control Worker and disconnected the node. `context-closed` and
+/// `dispose-timeout`: no dispose reply within 5 s, on a closed context and on one that is not;
+/// `release-timeout` (`"worker"` mode, carrying the dispose's request ID): the worklet did not
+/// release its render half within 2 s, and the Worker disposed without it. `requestId` is `0`
+/// for the two reasons the page itself finds.
+export interface MisoTeardown {
+  readonly tag: "miso.teardown.v1";
+  readonly requestId: number;
+  readonly result: 255;
+  readonly reason: "context-closed" | "dispose-timeout" | "release-timeout";
+}
+
 export interface MisoAudioWorkletHost {
   readonly node: AudioWorkletNode;
   readonly backend: MisoWebBackend;
@@ -621,6 +634,9 @@ export interface MisoAudioWorkletHost {
   /// @internal The count of engine events that arrived while no listener was subscribed (issue
   /// 1570b D5). Such an event is dropped here, which changes no engine state.
   readonly discardedControlEvents: number;
+  /// Dispose the host. Every later call returns the same promise once it ended in teardown. It
+  /// rejects with the engine's error, or with a `MisoTeardown` when nobody answered (issue 1332
+  /// S8); the node is disconnected (and in `"worker"` mode the Worker terminated) either way.
   dispose(): Promise<void>;
 }
 
