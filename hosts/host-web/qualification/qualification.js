@@ -1336,10 +1336,10 @@ async function renderUntil(context, condition, what, describe, started, atDeadli
 /// 1. suspended, the run feeds the source, subscribes, and reads the host status (`R1`);
 /// 2. one trusted click resumes the context; the run waits until a status read exceeds `R1` and
 ///    armed frames have arrived;
-/// 3. it unsubscribes. In `single` mode the acknowledgement and the meter frames travel one FIFO
-///    port, so a frame received after the acknowledgement resolved was polled after the tap was
-///    disarmed; in `worker` mode only a frame rendered past the boundary read after it was
-///    (`disarmRule`, #1332 S9);
+/// 3. it unsubscribes. The acknowledgement and the meter frames reach the page in order -- one FIFO
+///    port in `single` mode; in `worker` mode the host delivers the Worker's reply only after a
+///    fence on the worklet's port (#1332 S9) -- so a frame received after the acknowledgement
+///    resolved was polled after the tap was disarmed;
 /// 4. under one deadline from the acknowledgement it waits for [`UNSUBSCRIBE_SIGNAL_FRAMES`] frames
 ///    received after it that peak above [`UNSUBSCRIBE_PEAK_FLOOR`], each frame counted once whatever
 ///    its block count (D4). At the deadline a render that moved 48 blocks is a `shortfall`; one that
@@ -1439,7 +1439,6 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
       frames.push({
         trackGrDb: frame.trackGrDb[0],
         peak: Math.max(frame.peaks[0], frame.peaks[1]),
-        endSample: frame.endSample,
       });
       seen(frame.endSample / BigInt(QUANTUM_FRAMES));
       topUp();
@@ -1493,7 +1492,8 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   const unsubscribed = await request("observe (unsubscribe)", "observe",
     // #2087: a disarm names its arm by the tag the subscribe's reply gave.
     () => observeThroughSdk(host, { ...subscription, armed: false, armTag: BigInt(subscribed.armTag ?? 0) }));
-  // Everything received from here on was polled after the tap was disarmed: the same port, in order.
+  // Everything received from here on was polled after the tap was disarmed: the same port, in order
+  // (in `worker` mode, after the host's fence on the worklet's port, #1332 S9).
   const acknowledgedAt = performance.now();
   const acknowledgedAtFrame = frames.length;
   const boundary = (await status("status (boundary)")).renderedQuanta;
@@ -1529,18 +1529,6 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   // The reduction is checked on every frame received after the acknowledgement, up to the dispose;
   // the signal and low-peak counts on the frames of the wait, while the feed ran.
   const everyAfter = frames.slice(acknowledgedAtFrame);
-  // Issue #1332 S9: which frames the disarm must have reached. In `single` mode the acknowledgement
-  // and the meter frames travel the worklet's one FIFO port, so every frame received after the
-  // acknowledgement was rendered after the disarm. In `worker` mode the acknowledgement comes from
-  // the Worker and the frames from the worklet, so a frame rendered before the disarm can still be
-  // in flight when the acknowledgement lands. There the disarm reaches render no later than the
-  // first block that begins after the submit returns (D15-2), and `boundary` was read from the
-  // worklet after the acknowledgement: every frame whose window ends past it was rendered after the
-  // disarm.
-  const disarmRule = host.instanceMode === "worker" ? "render-position" : "port-order";
-  const disarmed = disarmRule === "port-order"
-    ? everyAfter
-    : everyAfter.filter((frame) => frame.endSample > boundary * BigInt(QUANTUM_FRAMES));
   const low = afterList.filter((frame) => frame.peak <= UNSUBSCRIBE_PEAK_FLOOR);
   return {
     contextStateBeforeBoot: stateBeforeBoot,
@@ -1562,9 +1550,6 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     lowPeakFramesAfterAcknowledgement: low.length,
     minimumPeakAfterAcknowledgement: afterList.reduce((lowest, frame) => Math.min(lowest, frame.peak), Infinity),
     maximumTrackGrDbAfterAcknowledgement: maximumGrDb(everyAfter),
-    disarmRule,
-    framesAfterDisarm: disarmed.length,
-    maximumTrackGrDbAfterDisarm: maximumGrDb(disarmed),
     signalShortfall,
     feedBehind,
     sourceExhausted,
@@ -1590,8 +1575,7 @@ export function unsubscribeFailures(run) {
     failures.push("render-between");
   }
   if (run.unsubscribeResult !== RESULT_OK || run.unsubscribePath !== "monitor") failures.push("unsubscribe-ack");
-  // Issue #1332 S9: over the frames the disarm must have reached (`disarmRule`, recorded by the run).
-  if (run.maximumTrackGrDbAfterDisarm !== 0 || !(run.framesAfterDisarm >= 1)) {
+  if (run.maximumTrackGrDbAfterAcknowledgement !== 0 || !(run.framesAfterAcknowledgement >= 1)) {
     failures.push("reduction");
   }
   if (run.signalShortfall !== false || run.sourceExhausted !== null

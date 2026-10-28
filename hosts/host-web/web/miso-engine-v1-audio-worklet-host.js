@@ -817,6 +817,8 @@ class MisoAudioWorkletHost {
                   ? "miso.seek-report.v1"
                 : pending.response === "planLatency"
                   ? "miso.plan-latency.v1"
+                : pending.response === "fence"
+                  ? "miso.fence.v1"
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
@@ -857,6 +859,7 @@ class MisoAudioWorkletHost {
       && validU32(message.staleViewQuanta)
       && validU32(message.meterFramesSkipped)
     );
+    const validFence = pending.response !== "fence" || message.result === RESULT_OK;
     const validRenderAllocations = pending.response !== "renderAllocations"
       || (message.result === RESULT_OK && validU32(message.count));
     const validSessionSeek = pending.response !== "sessionSeek"
@@ -879,8 +882,29 @@ class MisoAudioWorkletHost {
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
         || !validSourcePlanes || !validStatus || !validRenderAllocations || !validControl || !validSessionMap
-        || !validSessionSeek || !validSeekReport || !validPlanLatency) {
+        || !validSessionSeek || !validSeekReport || !validPlanLatency || !validFence) {
       this.#fail(webError(255, message.requestId));
+      return;
+    }
+    // Issue #1332 S9: the fence (below) answered on the worklet's port; its control reply is
+    // delivered now, after every meter frame the worklet posted before it.
+    if (pending.response === "fence") {
+      this.#release(pending);
+      const control = pending.control;
+      if (this.#pending.get(control.requestId) !== control) return;
+      this.#release(control);
+      control.resolve(control.held);
+      return;
+    }
+    // Issue #1332 S9: in `worker` mode a control reply comes from the Worker while the meter
+    // frames come from the worklet, so a frame rendered before the reply's edit took effect can
+    // still be in flight on the worklet's port when the reply lands. The reply is held until a
+    // `miso.fence.v1` round trip on that port completes: the worklet answers it from its message
+    // handler, between two quanta, so every frame posted before it arrives first, and every block
+    // after it began after the Worker's submit returned, which the edit has reached (D15-2). A page
+    // therefore never receives a pre-edit frame after the reply, as on single mode's one port.
+    if (pending.response === "control" && this.#worker !== undefined) {
+      this.#holdForFence(pending, Object.freeze(message));
       return;
     }
     this.#release(pending);
@@ -888,6 +912,26 @@ class MisoAudioWorkletHost {
       pending.reject(webError(message.result, message.requestId));
     } else {
       pending.resolve(Object.freeze(message));
+    }
+  }
+
+  /// Issue #1332 S9: keep `control` unsettled with its reply and send the fence it waits for. The
+  /// fence is a request of its own, on the worklet's port, under the host's one strictly
+  /// increasing request ID; a failure or a teardown rejects both with the host's typed outcome.
+  #holdForFence(control, reply) {
+    const requestId = this.#allocateRequestId();
+    if (requestId === null) {
+      this.#fail(webError(255, control.requestId));
+      return;
+    }
+    control.held = reply;
+    this.#pending.set(requestId, {
+      requestId, response: "fence", control, resolve: () => undefined, reject: () => undefined,
+    });
+    try {
+      this.#renderPort.postMessage({ tag: "miso.fence.v1", requestId });
+    } catch (_) {
+      this.#fail(webError(255, requestId));
     }
   }
 
@@ -1171,6 +1215,10 @@ class MisoAudioWorkletHost {
   /// edits, `CONTROL_LIST_GET`, `CONTROL_STATE_GET`, `SESSION_SNAPSHOT_GET`, the counter and
   /// capability queries. The host decodes nothing in it and the engine decodes it once, in the
   /// worklet's message handler, never in `process()`.
+  ///
+  /// In `worker` mode the Worker's reply is delivered only after a `miso.fence.v1` round trip on
+  /// the worklet's port (#1332 S9), so no meter frame rendered before the edit took effect arrives
+  /// after it; this costs up to about one quantum per call.
   ///
   /// The reply is `{ result, response, revision }`: `response` is the response frame bytes
   /// unchanged on `RESULT_OK` (a refused transaction is still an ok call with a non-ok response

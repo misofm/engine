@@ -98,8 +98,6 @@ const MUTATIONS = Object.freeze([
   // Issue #1535 D9: a never-armed run that received no frame proves nothing.
   ...caughtBy("observation-disarmed", "observation-disarmed", "observation-disarmed-empty"),
   ...caughtBy("observation-identity", "observation-identity"),
-  // Issue #1332 S9: a single-leg unsubscribe checked only past the render boundary.
-  ...onLeg("single", caughtBy("observation-unsubscribe-rule", "observation-unsubscribe-rule")),
   ...caughtBy("observation-window", "observation-window"),
   ...caughtBy("sdk-observation-subscription", "sdk-observation-subscription-window-reversed",
     "sdk-observation-subscription-window-malformed"),
@@ -600,12 +598,6 @@ function validate(browserName, result, leg) {
   const unsubscribeFailed = unsubscribeFailures(unsubscribe);
   gate(browserName, "observation-unsubscribe", unsubscribeFailed.length === 0,
     `${unsubscribeFailed.join(", ")}: ${JSON.stringify(unsubscribe ?? null)}`);
-  // Issue #1332 S9: the leg's disarm rule. The single leg holds every frame after the
-  // acknowledgement (one FIFO port); only the worker leg, whose acknowledgement and frames travel two
-  // ports, may hold just the frames rendered past the boundary read after it.
-  gate(browserName, "observation-unsubscribe-rule",
-    unsubscribe?.disarmRule === (worker ? "render-position" : "port-order"),
-  `the ${leg} leg checked the unsubscribe by the wrong rule: ${unsubscribe?.disarmRule}`);
   gate(browserName, "observation-identity", observation?.identicalAudio === true,
     "arming a declared tap moved a rendered sample");
   // Every real `AudioContext.resume()` ran inside a trusted click (the page counts them, split by
@@ -1359,7 +1351,6 @@ function mutate(result, mutation, leg) {
   if (mutation === "observation-disarmed") copy.observation.disarmed.maximumTrackGrDb = 1;
   if (mutation === "observation-disarmed-empty") copy.observation.disarmed.frames = 0;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
-  if (mutation === "observation-unsubscribe-rule") copy.observation.unsubscribe.disarmRule = "render-position";
   if (mutation === "resume-clicks-direct") copy.resumes.direct = 1;
   if (mutation === "sdk-track-response-worker") copy.sdkResponse.observations.managedResponse.responseWorkersCreated = 1;
   if (mutation === "sdk-track-response-unchanged") copy.sdkResponse.observations.managedResponse.unchangedOverRenders = false;
@@ -1508,8 +1499,6 @@ function unsubscribeFailureProofs() {
     unsubscribePath: "monitor",
     framesAfterAcknowledgement: 60,
     maximumTrackGrDbAfterAcknowledgement: 0,
-    framesAfterDisarm: 60,
-    maximumTrackGrDbAfterDisarm: 0,
     signalShortfall: false,
     signalFramesAfterAcknowledgement: 48,
     lowPeakFramesAfterAcknowledgement: 0,
@@ -1527,8 +1516,8 @@ function unsubscribeFailureProofs() {
     ["armed path", { subscribePath: null }, ["armed"]],
     ["render-between", { renderedBeforeUnsubscribe: "3" }, ["render-between"]],
     ["unsubscribe-ack", { unsubscribePath: null }, ["unsubscribe-ack"]],
-    ["reduction", { maximumTrackGrDbAfterDisarm: 1 }, ["reduction"]],
-    ["reduction, no frame (D9)", { framesAfterDisarm: 0 }, ["reduction"]],
+    ["reduction", { maximumTrackGrDbAfterAcknowledgement: 1 }, ["reduction"]],
+    ["reduction, no frame (D9)", { framesAfterAcknowledgement: 0 }, ["reduction"]],
     ["shortfall frames", { signalFramesAfterAcknowledgement: 47 }, ["shortfall"]],
     ["shortfall flag", { signalShortfall: true }, ["shortfall"]],
     ["shortfall, source exhausted", { sourceExhausted: { renderBlock: 481, fed: 512 } }, ["shortfall"]],
@@ -1955,8 +1944,6 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
       // and never fails (root ruling R1).
       process.stdout.write(`${label}: observation-unsubscribe: ${JSON.stringify({
         framesAfterAcknowledgement: unsubscribe.framesAfterAcknowledgement,
-        disarmRule: unsubscribe.disarmRule,
-        framesAfterDisarm: unsubscribe.framesAfterDisarm,
         signalFramesAfterAcknowledgement: unsubscribe.signalFramesAfterAcknowledgement,
         lowPeakFramesAfterAcknowledgement: unsubscribe.lowPeakFramesAfterAcknowledgement,
         minimumPeakAfterAcknowledgement: unsubscribe.minimumPeakAfterAcknowledgement,
