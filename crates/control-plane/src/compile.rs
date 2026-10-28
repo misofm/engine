@@ -37,7 +37,8 @@ pub(crate) struct PreparedRuntime {
     /// strip's consumer in `meters`, the meter frame's strip order. Empty with `observations`.
     pub(crate) observation_strips: Box<[u32]>,
     /// The record of the observation readers the plan's swap block carries (#1587b), shared with
-    /// the plan's attachment; `None` for an adapter whose preparer keeps its readers.
+    /// the plan's attachment (the control plane's own, or, #1332 S6b, the preparer's:
+    /// [`RuntimePreparer::keep_carried_taps`]); `None` for a plan with no reader.
     pub(crate) carried_taps: Option<std::sync::Arc<crate::control::CarriedTaps>>,
     /// The plan's effect instances by stable key, for `OBSERVATION_READ` (#1586 D6): empty for an
     /// adapter that does not serve the `Observe` edit.
@@ -946,12 +947,21 @@ pub(crate) fn observation_index(
         });
     }
     // Two instances at one stable key would be a preparation fault: the session model has none.
-    host_core::observation::ObservationIndex::new(entries).map_err(|_| {
-        prepare_failure(PrepareDiagnostics::fixed(
-            host_core::PrepareRejection::Graph,
-            "host.observation.index",
-        ))
-    })
+    // #1332 S6b: the index keeps a read-only view of every reader, for the read on any thread.
+    host_core::observation::ObservationIndex::new(entries, observations).map_err(
+        |error| match error {
+            host_core::observation::ObservationIndexError::Allocation => {
+                failure(ResourceFault::Allocation)
+            }
+            host_core::observation::ObservationIndexError::DuplicateKey
+            | host_core::observation::ObservationIndexError::Handle => {
+                prepare_failure(PrepareDiagnostics::fixed(
+                    host_core::PrepareRejection::Graph,
+                    "host.observation.index",
+                ))
+            }
+        },
+    )
 }
 
 /// The observation rows of `effects`, the newest plan's producers, and the `handle_bytes` of the
@@ -1754,7 +1764,8 @@ pub trait RuntimePreparer: Send {
     /// The observation readers this preparer moved out of the handles into `host`'s plan, its own
     /// host attachment (#1589 R2): the browser's render half keeps them, pairs them at the swap
     /// block and folds their gain reduction. The plan's `OBSERVATION_READ` index is then built
-    /// over this list, so the session's one index addresses the readers where they are. Empty, the
+    /// over this list and keeps a read-only view of each reader (#1332 S6b), so the read serves on
+    /// the control thread while the plan renders on another. Empty, the
     /// default, for a preparer that leaves them in the handles, whose epoch keeps them.
     fn kept_observations<'p>(
         &self,
@@ -1787,6 +1798,26 @@ pub trait RuntimePreparer: Send {
     ) -> Option<host_core::MeterFrameProducer> {
         let _ = plan;
         Some(producer)
+    }
+
+    /// Keep the plan's carried-tap record (#1587b) in the preparer's own host attachment of
+    /// `plan` (#1332 S6b), whose swap-block hook then writes it ([`crate::CarriedTaps::record`]):
+    /// a preparer that sets an attachment of its own (the browser's, which keeps its readers
+    /// there) stores `record` and returns `None`. The default returns it, and the control plane
+    /// sets its own attachment on the plan. Control thread, before publication.
+    ///
+    /// This hook and [`Self::kept_observations`] go together: a preparer that keeps its readers
+    /// in its own attachment must keep the record there too. The control plane never replaces an
+    /// attachment: a record returned for a plan that already carries one refuses the preparation
+    /// (`host.observation.attachment`), since the replaced attachment's hooks would stop running
+    /// and the carried taps would stop pairing.
+    fn keep_carried_taps(
+        &self,
+        plan: &mut engine::realtime::PreparedRenderPlan,
+        record: std::sync::Arc<crate::CarriedTaps>,
+    ) -> Option<std::sync::Arc<crate::CarriedTaps>> {
+        let _ = plan;
+        Some(record)
     }
 
     /// Stamp `plan` with what the commit that publishes it leaves (#1332 S5): `committed` is the
@@ -1947,40 +1978,65 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         }
         strips.into_boxed_slice()
     };
-    // #1587b: the record of the readers the plan's swap block carries, for an adapter whose
-    // control plane serves the meter batches (the C ABI's), whose preparer sets no attachment of
-    // its own, and a plan with observation readers. The hook runs at a swap only when both plans
-    // have an attachment, which is every swap that can carry a tap: a plan with no reader has no
-    // tap to give or take.
-    let carried_taps = if A::METER_DELIVERY && !observations.is_empty() {
-        Some(std::sync::Arc::new(
-            crate::control::CarriedTaps::new(observations.len())
-                .map_err(|_| failure(ResourceFault::Allocation))?,
-        ))
-    } else {
-        None
-    };
-    let carried_taps_bytes = if carried_taps.is_some() {
-        crate::control::CarriedTaps::retained_bytes(observations.len())
-            .and_then(|bytes| u64::try_from(bytes).ok())
-            .ok_or_else(|| failure(ResourceFault::Arithmetic))?
-    } else {
-        0
-    };
     // #1586 D6, R1: the index of an adapter that serves `OBSERVATION_READ`, from the producers
     // (every instance, so an instance with no tap reads as unbound) and the readers' positions:
     // in the epoch's list, or (#1589 R2) in the list the preparer keeps in the plan (the
-    // browser's), the session's one index either way.
+    // browser's), the session's one index either way. It holds a read-only view of every reader
+    // (#1332 S6b), so the read never needs the list.
     let mut prepared = prepared;
-    let observation_index = if A::OBSERVE_EDIT {
+    let (observation_index, observed) = if A::OBSERVE_EDIT {
         let readers = if observations.is_empty() {
             preparer.kept_observations(&mut prepared)
         } else {
             &observations
         };
-        observation_index(&effects, readers)?
+        (observation_index(&effects, readers)?, readers.len())
     } else {
-        host_core::observation::ObservationIndex::default()
+        (
+            host_core::observation::ObservationIndex::default(),
+            observations.len(),
+        )
+    };
+    // #1587b, #1332 S6b: the record of the readers the plan's swap block carries, for an adapter
+    // whose control plane serves the meter batches and a plan with observation readers, wherever
+    // they are kept: the control side pairs its readers (the C ABI's) and its index's views from it
+    // at promotion. The hook runs at a swap only when both plans have an attachment, which is every
+    // swap that can carry a tap: a plan with no reader has no tap to give or take.
+    let carried_taps = if A::METER_DELIVERY && observed != 0 {
+        Some(std::sync::Arc::new(
+            crate::control::CarriedTaps::new(observed)
+                .map_err(|_| failure(ResourceFault::Allocation))?,
+        ))
+    } else {
+        None
+    };
+    // The record goes into the preparer's own attachment if it keeps one (the browser's), into
+    // the control plane's otherwise.
+    let own_attachment = match &carried_taps {
+        Some(record) => preparer
+            .keep_carried_taps(&mut prepared.plan, std::sync::Arc::clone(record))
+            .map(|record| {
+                if prepared.plan.has_host_attachment() {
+                    return Err(prepare_failure(PrepareDiagnostics::fixed(
+                        host_core::PrepareRejection::Platform,
+                        "host.observation.attachment",
+                    )));
+                }
+                prepared
+                    .plan
+                    .set_host_attachment(Box::new(crate::control::CarriedTapsAttachment(record)));
+                Ok(())
+            })
+            .transpose()?
+            .is_some(),
+        None => false,
+    };
+    let carried_taps_bytes = if carried_taps.is_some() {
+        crate::control::CarriedTaps::retained_bytes(observed, own_attachment)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))?
+    } else {
+        0
     };
     let observation_bytes = observation_handle_bytes(&observations, &observation_strips)?
         .checked_add(
@@ -2043,11 +2099,6 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // #1502 D1: the plan's control handle moves into its provider epoch, so the gate, the cells
     // and the producers that write them follow one routing.
     let mut plan = prepared.plan;
-    if let Some(record) = &carried_taps {
-        plan.set_host_attachment(Box::new(crate::control::CarriedTapsAttachment(
-            std::sync::Arc::clone(record),
-        )));
-    }
     // #1332: the ring's render half rides the plan itself when the preparer keeps it there, so
     // the plan carries it through the exchange to whichever thread renders it.
     let meter_frames = meter_frames.map(|ring| {

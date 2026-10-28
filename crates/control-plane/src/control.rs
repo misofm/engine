@@ -75,15 +75,17 @@ pub struct ProviderEpoch {
     /// effect instance in `HostLiveControlHandles::effect_observations` order: the windows a tap an
     /// `Observe` edit armed publishes. Empty for a host whose preparer keeps them itself (the
     /// browser's). Their slots are `Arc`s shared with the plan's lanes, as the meters' rings are.
-    /// `OBSERVATION_READ` reads them through [`Self::observation_index`] (#1586 D6).
-    /// The meter delivery's gain reduction reads them too (#1587b).
+    /// The meter delivery's gain reduction reads and acknowledges them (#1587b);
+    /// `OBSERVATION_READ` reads the same slots through [`Self::observation_index`]'s read-only
+    /// views (#1586 D6, #1332 S6b).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
     /// Each observation handle's strip (#1587b), in `observations` order: its frame strip by
     /// [`strip_meter_index`], the rule a meter entry's strip resolves by, `u32::MAX` for none;
     /// built with the plan.
     pub(crate) observation_strips: Box<[u32]>,
     /// The observation readers the swap block that adopted this epoch's plan carried (#1587b),
-    /// shared with the plan's attachment; `None` for a host whose preparer keeps its readers.
+    /// shared with the plan's attachment (the control plane's, or the preparer's own, #1332 S6b);
+    /// `None` for a plan with no reader or an adapter without a meter delivery.
     pub(crate) carried_taps: Option<std::sync::Arc<CarriedTaps>>,
     /// The epoch this one displaced, while their observation readers wait to be paired: this
     /// epoch was promoted before render wrote `carried_taps` ([`CarriedTaps`]'s three states).
@@ -99,7 +101,9 @@ pub struct ProviderEpoch {
     /// [`Self::observations`] (#1586 D3, R1): built with the epoch, on the control thread, so a
     /// read resolves a stable address without allocating. For a host whose preparer keeps the
     /// readers in its plan (the browser's), the positions are in that list
-    /// ([`crate::RuntimePreparer::kept_observations`], #1589 R2): the plan's one index.
+    /// ([`crate::RuntimePreparer::kept_observations`], #1589 R2): the plan's one index. It holds a
+    /// read-only view of every reader (#1332 S6b), paired with the readers from `carried_taps` at
+    /// promotion, so the read runs on the control thread wherever the readers are.
     pub(crate) observation_index: host_core::observation::ObservationIndex,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
@@ -331,11 +335,9 @@ fn spectrum_invariant(failure: CompileFailure) -> CommandError {
     }
 }
 
-/// The plan a host lends one command ([`SessionState::command_with_plan`]), with the reader
-/// list of its running plan.
+/// The plan a host lends one command ([`SessionState::command_with_plan`]).
 struct LentPlan<'a, A: ControlAdapter> {
     plan: &'a mut PlanState<A>,
-    readers: fn(&mut PlanState<A>) -> &[host_core::EffectObservationHandle],
 }
 
 /// How a `SPECTRUM_CONFIGURE` is refused (#1594 D4): a typed reply, recorded for replay, or a
@@ -1765,7 +1767,8 @@ impl<'a> ProviderEpochs<'a> {
 
 /// The observation reader pairs the swap block that adopted a plan carried (#1674's observation
 /// half, #1587b): the swap record's [`engine::realtime::ObserverKind::Observation`] entries,
-/// which render copies here in that block ([`CarriedTapsAttachment`]) and the control thread
+/// which render copies here in that block ([`Self::record`], through the plan's host attachment:
+/// the control plane's own or, #1332 S6b, the preparer's) and the control thread
 /// reads when it promotes the plan's epoch. The record is what actually carried: a tap enters it
 /// only when its effect's restore succeeded at the swap, which preparation cannot know (#1674 R1).
 ///
@@ -1773,7 +1776,7 @@ impl<'a> ProviderEpochs<'a> {
 /// paired at most once), so render writes into storage it never grows. A plan is adopted at most
 /// once, so the pairs are written once; `count` is stored last, with `Release`.
 ///
-/// **Three states (#1587b attempt 4).** `count` starts at [`Self::UNWRITTEN`]: render has not run
+/// **Three states (#1587b attempt 4).** `count` starts at `UNWRITTEN`: render has not run
 /// the plan's swap block. Render claims a candidate a little before it carries into it
 /// (`plan_exchange`'s claim, then `carry_from`), and the control thread promotes a claimed
 /// candidate (`withdraw_pending_candidate`) without waiting, so a promotion can find the record
@@ -1788,7 +1791,7 @@ impl<'a> ProviderEpochs<'a> {
 ///
 /// While the mark stands the epoch's readers are the successor's own, which no carried tap
 /// publishes to: the strip shows no reading, never a wrong one.
-pub(crate) struct CarriedTaps {
+pub struct CarriedTaps {
     pairs: Box<[[core::sync::atomic::AtomicU32; 2]]>,
     count: core::sync::atomic::AtomicU32,
 }
@@ -1810,14 +1813,49 @@ impl CarriedTaps {
         })
     }
 
-    /// The heap a record of `handles` pairs holds with its attachment: the attachment's box, the
-    /// shared allocation (its two counts and the record) and the pairs.
-    pub(crate) fn retained_bytes(handles: usize) -> Option<usize> {
+    /// The heap a record of `handles` pairs holds: the shared allocation (its two counts and the
+    /// record), the pairs and, with `attachment`, the [`CarriedTapsAttachment`]'s box (a preparer
+    /// that keeps the record in its own attachment charges its field with that attachment).
+    pub(crate) fn retained_bytes(handles: usize, attachment: bool) -> Option<usize> {
         handles
             .checked_mul(size_of::<[core::sync::atomic::AtomicU32; 2]>())?
-            .checked_add(size_of::<CarriedTapsAttachment>())?
+            .checked_add(if attachment {
+                size_of::<CarriedTapsAttachment>()
+            } else {
+                0
+            })?
             .checked_add(2 * size_of::<usize>() + size_of::<Self>())
     }
+
+    // REALTIME_POLICY_BEGIN: #1587b, #1332 S6b, the swap block's carried observation readers.
+    /// Copy the swap record's observation entries into this record: the render side's half of the
+    /// control side's pairing at promotion. Render thread, in the swap block of the plan this
+    /// record belongs to, through its host attachment's
+    /// [`engine::realtime::HostAttachment::adopt_predecessor`]: atomic stores into storage sized at
+    /// preparation; an entry past it, or whose index does not fit a `u32`, is skipped.
+    pub fn record(&self, carries: &[engine::realtime::ObserverCarry]) {
+        let mut written = 0_u32;
+        let mut slots = self.pairs.iter();
+        for carry in carries {
+            if carry.kind != engine::realtime::ObserverKind::Observation {
+                continue;
+            }
+            let (Ok(successor), Ok(predecessor)) = (
+                u32::try_from(carry.successor),
+                u32::try_from(carry.predecessor),
+            ) else {
+                continue;
+            };
+            let Some([into, from]) = slots.next() else {
+                break;
+            };
+            into.store(successor, Ordering::Relaxed);
+            from.store(predecessor, Ordering::Relaxed);
+            written += 1;
+        }
+        self.count.store(written, Ordering::Release);
+    }
+    // REALTIME_POLICY_END
 
     /// `count` before render ran the plan's swap block.
     const UNWRITTEN: u32 = u32::MAX;
@@ -1855,11 +1893,19 @@ fn pair_observations(successor: &mut ProviderEpoch, predecessor: &mut ProviderEp
     };
     // One record at a time: `pair_carried_observations` takes a slice, and the record's pairs
     // are atomics, so collecting them would allocate; a one-element slice per pair does not.
+    // The epochs' acknowledging readers (the C ABI's; none for a preparer that keeps them in the
+    // plan) and their indexes' read-only views (#1332 S6b), at the same positions.
     for carry in carries {
+        let carry = core::slice::from_ref(&carry);
         host_core::pair_carried_observations(
             &mut successor.observations,
             &mut predecessor.observations,
-            core::slice::from_ref(&carry),
+            carry,
+        );
+        host_core::observation::ObservationIndex::pair_carried(
+            &mut successor.observation_index,
+            &mut predecessor.observation_index,
+            carry,
         );
     }
     true
@@ -1875,35 +1921,14 @@ impl engine::realtime::HostAttachment for CarriedTapsAttachment {
     }
 
     // REALTIME_POLICY_BEGIN: #1587b, the swap block's carried observation readers.
-    /// Copy the swap record's observation entries into the plan's [`CarriedTaps`]. Render thread,
-    /// in the swap block: atomic stores into storage sized at preparation; an entry past it, or
-    /// whose index does not fit a `u32`, is skipped.
+    /// Copy the swap record's observation entries into the plan's [`CarriedTaps`]
+    /// ([`CarriedTaps::record`]). Render thread, in the swap block.
     fn adopt_predecessor(
         &mut self,
         _predecessor: &mut dyn engine::realtime::HostAttachment,
         carries: &[engine::realtime::ObserverCarry],
     ) {
-        let record = &*self.0;
-        let mut written = 0_u32;
-        let mut slots = record.pairs.iter();
-        for carry in carries {
-            if carry.kind != engine::realtime::ObserverKind::Observation {
-                continue;
-            }
-            let (Ok(successor), Ok(predecessor)) = (
-                u32::try_from(carry.successor),
-                u32::try_from(carry.predecessor),
-            ) else {
-                continue;
-            };
-            let Some([into, from]) = slots.next() else {
-                break;
-            };
-            into.store(successor, Ordering::Relaxed);
-            from.store(predecessor, Ordering::Relaxed);
-            written += 1;
-        }
-        record.count.store(written, Ordering::Release);
+        self.0.record(carries);
     }
     // REALTIME_POLICY_END
 }
@@ -4210,11 +4235,6 @@ where
     /// blocks (the browser, whose one instance renders and serves control), lent for this call
     /// only:
     ///
-    /// - An adapter whose preparer keeps its plans' observation readers in the plan
-    ///   ([`crate::RuntimePreparer::kept_observations`]) reads them with `readers`, the reader
-    ///   list of the plan render runs. An `OBSERVATION_READ` reads them through the running plan's
-    ///   index (#1589 R2) and faults (`Internal`) when the plan's epoch is any other plan's, so the
-    ///   index and the readers are always one plan's.
     /// - A `SPECTRUM_CONFIGURE` that prepares a successor before the plan's first block has the
     ///   plan adopt it in place (#1597, through
     ///   [`engine::realtime::RealtimePlanOwner::adopt_before_first_block`]) and promotes it, so
@@ -4230,14 +4250,8 @@ where
         document: &[u8],
         output_capacity: u64,
         plan: &mut PlanState<A>,
-        readers: fn(&mut PlanState<A>) -> &[host_core::EffectObservationHandle],
     ) -> Result<usize, CommandError> {
-        self.command_with_readers(
-            request,
-            document,
-            output_capacity,
-            Some(LentPlan { plan, readers }),
-        )
+        self.command_with_readers(request, document, output_capacity, Some(LentPlan { plan }))
     }
 
     /// The `OBSERVATION_READ` index of the plan of epoch `epoch` (#1586 D6, #1589 R2): the
@@ -4316,11 +4330,7 @@ where
             }
             // #1586 D6: the read, which allocates nothing.
             PreparedCommandFrame::ObservationRead(prepared) => {
-                let readers = lent.map(|lent| {
-                    let epoch = lent.plan.owner().active_epoch().0;
-                    (epoch, (lent.readers)(lent.plan))
-                });
-                self.observation_read(prepared, request, readers)
+                self.observation_read(prepared, request)
             }
             PreparedCommandFrame::Structural(prepared) => {
                 let prepared = ObservedPreparedToken::new(prepared);
@@ -4613,7 +4623,6 @@ where
         &mut self,
         prepared: protocol::PreparedObservationRead,
         request: &[u8],
-        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
     ) -> Result<usize, CommandError> {
         let mut selections = [protocol::ObservationSelectionRef::EMPTY;
             protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS];
@@ -4641,7 +4650,7 @@ where
         }
         let mut rows = core::mem::take(&mut self.observation_rows);
         let outcome = match rows.get_mut(..count) {
-            Some(table) => self.read_observation_rows(&selections[..count], table, readers),
+            Some(table) => self.read_observation_rows(&selections[..count], table),
             None => Err(None),
         };
         let observed_sample = self.shared.render_sample.load(Ordering::Acquire);
@@ -4687,27 +4696,18 @@ where
         result
     }
 
-    /// Reads one row per selection into `rows` on the running plan's readers, or on the readers an
-    /// adapter lent with their plan's epoch (#1589 R2), with the whole batch checked first (#1586
-    /// D4): the core read and the wire rows, no allocation. `Err(None)` for a refusal the codec
-    /// rules out (an internal fault), and for lent readers whose epoch is not the running plan's:
-    /// the index and the readers are always one plan's.
+    /// Reads one row per selection into `rows` through the running plan's index, whose read-only
+    /// views follow the slots that render (#1332 S6b: on any control thread, whichever thread the
+    /// acknowledging readers are on), with the whole batch checked first (#1586 D4): the core read
+    /// and the wire rows, no allocation. `Err(None)` for a refusal the codec rules out (an internal
+    /// fault).
     fn read_observation_rows(
         &self,
         selections: &[protocol::ObservationSelectionRef<'_>],
         rows: &mut [protocol::ObservationReadRow],
-        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
     ) -> Result<(), Option<host_core::observation::ObservationReadError>> {
-        // One plan: the lent readers are the running plan's, since `command_with_readers` serviced
-        // first, so they read through the running plan's index; another epoch is a fault.
-        let handles = match readers {
-            Some((epoch, _)) if epoch != self.providers.epoch => return Err(None),
-            Some((_, handles)) => handles,
-            None => &*self.providers.observations,
-        };
         host_core::observation::read_with(
             &self.providers.observation_index,
-            handles,
             selections,
             |selection| {
                 Ok::<_, host_core::observation::ObservationReadError>(core_selection(selection))

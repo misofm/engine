@@ -996,6 +996,11 @@ impl PreparedRenderPlan {
     pub fn set_host_attachment(&mut self, value: Box<dyn HostAttachment>) {
         self.host_attachment = Some(value);
     }
+    /// Whether the plan carries a host attachment of any type. Control side only.
+    #[must_use]
+    pub fn has_host_attachment(&self) -> bool {
+        self.host_attachment.is_some()
+    }
     /// The attachment as a `T`, or `None` when the plan carries none or carries another type.
     /// Control side only: render never calls this.
     pub fn host_attachment_mut<T: 'static>(&mut self) -> Option<&mut T> {
