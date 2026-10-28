@@ -55,10 +55,9 @@ use crate::render_lock::{control_allocation_count, render_allocation_count, rend
 // Named by the exports' result docs only.
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM,
-    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,
-    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
-    RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_WRONG_STATE, RenderHost, STATE_READY,
-    WebBootOptions, WebStatus,
+    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
+    RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
+    RESULT_WRONG_STATE, RenderHost, STATE_READY, WebBootOptions, WebStatus,
 };
 #[cfg(doc)]
 use crate::{RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL};
@@ -150,7 +149,10 @@ impl BootStaging {
     fn record_failure_owned(&mut self, failure: BootFailure) {
         self.result = failure.result();
         let mut diagnostic = Vec::new();
-        if diagnostic.try_reserve_exact(failure.diagnostic().len()).is_ok() {
+        if diagnostic
+            .try_reserve_exact(failure.diagnostic().len())
+            .is_ok()
+        {
             diagnostic.extend_from_slice(failure.diagnostic());
         }
         self.diagnostic_bytes = u32::try_from(diagnostic.len()).unwrap_or(0);
@@ -639,9 +641,7 @@ fn stage_replace_document(handle: u32, len: u32) -> *mut u8 {
             // Assignment frees the earlier bytes; the `ManuallyDrop` registers no destructor.
             *staging.document = Vec::new();
             staging.document_valid = false;
-            if host.status().state != STATE_READY
-                || len == 0
-                || len > host.maximum_document_bytes()
+            if host.status().state != STATE_READY || len == 0 || len > host.maximum_document_bytes()
             {
                 return ptr::null_mut();
             }

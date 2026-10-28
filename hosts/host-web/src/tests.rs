@@ -402,7 +402,10 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     crate::ffi::test_stage_options(boot_options(128));
     let _ = miso_engine_web_v1_document_ptr(2 << 20);
     assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
-    assert_eq!(crate::ffi::test_document_staging(), (true, 2 << 20, 2 << 20));
+    assert_eq!(
+        crate::ffi::test_document_staging(),
+        (true, 2 << 20, 2 << 20)
+    );
 
     let document = one_track_session(128);
     let handle = crate::ffi::test_boot(document.as_bytes(), boot_options(128));
@@ -554,7 +557,10 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
         },
     );
     assert_ne!(handle, 0);
-    assert!(!crate::ffi::test_replace_document(handle, &vec![b' '; word + 1]));
+    assert!(!crate::ffi::test_replace_document(
+        handle,
+        &vec![b' '; word + 1]
+    ));
     assert_eq!(crate::ffi::test_document_staging(), (false, 0, 0));
     replace(handle, 1, word, -9.0);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
@@ -1221,7 +1227,10 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
             .as_bytes()
         );
     }
-    let [(small, small_exact, small_control), (large, large_exact, large_control)] = charged[..]
+    let [
+        (small, small_exact, small_control),
+        (large, large_exact, large_control),
+    ] = charged[..]
     else {
         panic!("two frames")
     };
@@ -9813,7 +9822,6 @@ fn a_flat_fader_automation_renders_the_static_fader_bits_in_the_browser() {
     }
 }
 
-
 // Issue #2191: the control frame is a boot word. The frame-scaled control rows, the replay cache
 // and the page's staging follow it, so a bus add over a 64-track console (one route per track,
 // more than the 16 KiB the browser had compiled in) commits under a larger word.
@@ -9916,7 +9924,10 @@ mod configured_frame {
         assert_eq!(model.tracks.len(), 64);
         let add = bus_add(&model);
         for (word, frame) in [
-            (u64::from(MINIMUM_CONTROL_FRAME_BYTES), MINIMUM_CONTROL_FRAME_BYTES),
+            (
+                u64::from(MINIMUM_CONTROL_FRAME_BYTES),
+                MINIMUM_CONTROL_FRAME_BYTES,
+            ),
             (32 << 10, 32 << 10),
             (0, DEFAULT_CONTROL_FRAME_BYTES),
         ] {
@@ -9992,7 +10003,10 @@ mod configured_frame {
                 assert_eq!(host.committed_revision(), revision + 1);
             }
 
-            assert!(host.control_request_mut(frame).is_some_and(|staging| staging.len() == frame as usize));
+            assert!(
+                host.control_request_mut(frame)
+                    .is_some_and(|staging| staging.len() == frame as usize)
+            );
             assert!(host.control_request_mut(frame + 1).is_none());
             assert_eq!(host.control_command(frame + 1), RESULT_INVALID_ARGUMENT);
             assert_eq!(

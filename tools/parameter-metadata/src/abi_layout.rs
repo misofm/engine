@@ -59,9 +59,10 @@ use host_core::{LAUNCH_SAMPLE_RATES, RESPONSE_MAXIMUM_POINTS};
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_DIAGNOSTIC,
     BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
-    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES,
-    INSTANCE_RESERVATION_BYTES, METER_HEADER_BYTES, PARSE_TRANSIENT_MULTIPLIER, PLAN_LATENCY_BYTES,
-    RACK_CONSOLE, RACK_INSERTS, RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH,
+    DEFAULT_CONTROL_FRAME_BYTES, DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS,
+    DIAGNOSTIC_BYTES, INSTANCE_RESERVATION_BYTES, MAXIMUM_CONTROL_FRAME_BYTES, METER_HEADER_BYTES,
+    MINIMUM_CONTROL_FRAME_BYTES, PARSE_TRANSIENT_MULTIPLIER, PLAN_LATENCY_BYTES, RACK_CONSOLE,
+    RACK_INSERTS, RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH,
     RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL,
     RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
     RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED,
@@ -696,6 +697,11 @@ pub fn render() -> String {
             ]),
             // Issue #2191: the document's default limit is `budget / parseTransientMultiplier`.
             parse_transient_multiplier: PARSE_TRANSIENT_MULTIPLIER,
+            // Issue #2191: the control frame a zero `maximumControlFrameBytes` selects, and the
+            // word's bounds.
+            default_control_frame_bytes: DEFAULT_CONTROL_FRAME_BYTES,
+            minimum_control_frame_bytes: MINIMUM_CONTROL_FRAME_BYTES,
+            maximum_control_frame_bytes: MAXIMUM_CONTROL_FRAME_BYTES,
             maximum_source_channels: session::SOURCE_CHANNELS_LAUNCH_MAXIMUM,
             diagnostic_bytes: DIAGNOSTIC_BYTES,
             default_meter_blocks: DEFAULT_METER_BLOCKS,
@@ -796,6 +802,9 @@ struct Constants<'a> {
     buffer_kinds: Vec<NamedValue<'a>>,
     racks: Vec<NamedValue<'a>>,
     parse_transient_multiplier: u64,
+    default_control_frame_bytes: u32,
+    minimum_control_frame_bytes: u32,
+    maximum_control_frame_bytes: u32,
     maximum_source_channels: u32,
     diagnostic_bytes: u32,
     default_meter_blocks: u32,

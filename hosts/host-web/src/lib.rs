@@ -3730,9 +3730,8 @@ pub(crate) fn document_length_refusal(
     }
     let budget = memory_budget(options);
     let projection = u64::from(document_bytes) * PARSE_TRANSIENT_MULTIPLIER;
-    (projection > budget).then(|| {
-        BootFailure::projected_budget("host.budget.parse_projection", projection, budget)
-    })
+    (projection > budget)
+        .then(|| BootFailure::projected_budget("host.budget.parse_projection", projection, budget))
 }
 
 /// The control frame `options` select (issue #2191): [`DEFAULT_CONTROL_FRAME_BYTES`] for a zero
@@ -3742,9 +3741,9 @@ pub(crate) fn document_length_refusal(
 pub(crate) fn resolved_control_frame_bytes(options: &WebBootOptions) -> Option<u32> {
     match options.maximum_control_frame_bytes {
         0 => Some(DEFAULT_CONTROL_FRAME_BYTES),
-        word => u32::try_from(word)
-            .ok()
-            .filter(|frame| (MINIMUM_CONTROL_FRAME_BYTES..=MAXIMUM_CONTROL_FRAME_BYTES).contains(frame)),
+        word => u32::try_from(word).ok().filter(|frame| {
+            (MINIMUM_CONTROL_FRAME_BYTES..=MAXIMUM_CONTROL_FRAME_BYTES).contains(frame)
+        }),
     }
 }
 

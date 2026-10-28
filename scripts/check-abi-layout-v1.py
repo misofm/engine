@@ -22,8 +22,10 @@ they are the rules here:
 * the `bootOptions` block is 64 bytes and names exactly the eleven boot words, with the two
   `require_*` words and the three `liveControl*` words present under those exact spellings, because
   the SDK's scratch/worklet equality rule (adopted ruling finding 3) is written in terms of them.
-  The word at offset 32 is `maximumControlFrameBytes` (issue #2191; it was the command-queue word
-  until slice #1565A deleted it);
+  The word at offset 32 is `maximumControlFrameBytes` and the word at offset 48 is
+  `maximumDocumentBytes` (issue #2191; they were the retired command-queue and observation-taps
+  words), with the control frame's default and bounds in `constants` beside the parse
+  multiplier that sets the document's default limit;
 * `resultCodes` is the eleven-value frozen ladder with no duplicate value and no duplicate name;
 * `bootResultAliases` is exactly three rows, every one of which **re-uses** a value that
   `resultCodes` already names under a *different* name -- that is what makes it an alias table
@@ -346,7 +348,8 @@ def validate(document: object) -> None:
     require(isinstance(constants, dict), "constants is an object")
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
-        "parseTransientMultiplier", "maximumSourceChannels", "diagnosticBytes",
+        "parseTransientMultiplier", "defaultControlFrameBytes", "minimumControlFrameBytes",
+        "maximumControlFrameBytes", "maximumSourceChannels", "diagnosticBytes",
         "defaultMeterBlocks",
         "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
         "racks",
@@ -377,6 +380,9 @@ def validate(document: object) -> None:
 
     for name, expected in (
         ("parseTransientMultiplier", 20),
+        ("defaultControlFrameBytes", 256 << 10),
+        ("minimumControlFrameBytes", 16 << 10),
+        ("maximumControlFrameBytes", 16 << 20),
         ("maximumSourceChannels", 2),
         ("diagnosticBytes", 1 << 14),
         ("defaultMeterBlocks", 12),
