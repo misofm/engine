@@ -259,3 +259,14 @@ parameter-metadata debug tests, `realtime_policy`, `test-web-audioworklet.sh`,
 `check-sdk-generated`, `check-sdk-types` (686 pass), `check-sdk-headless`, `sdk-package.sh check`).
 Not changed: `.github/workflows/qualification.yml:400`'s comment still says "no imports, no shared
 memory, no atomics"; a workflow edit is outside this worker's scope.
+
+**After merging `origin/main` at `1f0934b7e` (#2176, #1332 S5; no conflict).** Merged module
+`2daf4fb375264991009b6c4b560297f45038e8df10b3b90f7a7a6e2209bd9239`; that main's own module
+`e80d96fe...`. `direct-oracle.mjs` print output byte-identical between the two. Render closures
+equal to that main's: `render` closure=38, indirect_sites=11, members=5, atomic_waits=0;
+`meter_poll` closure=14, indirect_sites=2; no call-graph pin moved. Re-run on the merged tree, all
+pass: the lint job's 51 steps (fmt, clippy `--all-features -D warnings`, `cargo doc -D warnings`,
+every policy script incl. `check-lane-policy.sh`, the builder contract), host-web +
+parameter-metadata debug tests (196 pass), `realtime_policy`, `check-web-audioworklet.sh`,
+`test-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`, scalar-oracle,
+V8 spill, render-lock probe, the SDK job, and both browser legs (chromium 151.0.7922.34, webkit 26.5).
