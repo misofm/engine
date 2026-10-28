@@ -2035,7 +2035,9 @@ async function testMainRealm() {
               response: new Uint8Array([1]), revision: 3n,
             });
           } else if (message.tag === "miso.dispose.v1") {
-            reply({ tag: "miso.ack.v1", requestId: message.requestId, result: 0 });
+            // `disposeTrap`: the Worker's dispose traps, which reaches the page as `error`.
+            if (workerBehaviour === "disposeTrap") queueMicrotask(() => this.onerror?.({ preventDefault() {} }));
+            else reply({ tag: "miso.ack.v1", requestId: message.requestId, result: 0 });
           }
         }
         terminate() {
@@ -2095,6 +2097,29 @@ async function testMainRealm() {
         await host.dispose();
         assert.equal(worker.posts.at(-1).tag, "miso.dispose.v1", "dispose goes to the Worker");
         assert.equal(worker.terminated, true, "the Worker ends after its dispose reply");
+        assert.equal(node.disconnectCount, 1, "and the node is disconnected");
+
+        // The worker-mode dispose contract: a dispose that fails (a trap in the Worker's dispose)
+        // rejects with the typed error and still tears down once; every later call returns the
+        // same settled promise, and no second dispose is sent.
+        {
+          const trapped = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          const trappedWorker = workers.at(-1);
+          const trappedNode = FakeNode.latest;
+          workerBehaviour = "disposeTrap";
+          const first = trapped.dispose();
+          await errorResult(first, 255);
+          workerBehaviour = "ready";
+          assert.equal(trappedWorker.terminated, true, "a failed dispose still terminates the Worker");
+          assert.equal(trappedNode.disconnectCount, 1, "and disconnects the node once");
+          assert.equal(trapped.dispose(), first, "a later dispose returns the same promise");
+          await errorResult(trapped.dispose(), 255);
+          assert.equal(trappedWorker.posts.filter((message) => message.tag === "miso.dispose.v1").length, 1);
+          assert.equal(trappedNode.disconnectCount, 1, "teardown runs exactly once");
+        }
 
         // S7 verify attempt 3: a request sent behind a dispose is refused locally (it cannot fail
         // the host and reject the dispose); a second dispose is the first one's promise (one
@@ -4515,7 +4540,22 @@ async function testControlWorker() {
       ], "both disposes are answered together");
       assert.equal(posts.some((message) => message.tag === "miso.error.v1"), false,
         "no refusal during the dispose is sticky");
+      send({ tag: "miso.dispose.v1", requestId: 9 });
+      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 9, result: 0 },
+        "a dispose after the host is freed is answered at once with the outcome");
       assert.equal(intervals[0].cleared, true, "dispose stops the tick");
+    }
+    // A trap in the Worker's dispose is a final outcome: the dispose is answered 255, and a later
+    // dispose is answered at once with it (it never joins a dispose that will not complete).
+    {
+      const { workletPosts, send, fromWorklet } = await boot();
+      fake.exports.miso_engine_web_v1_dispose = () => { throw new Error("trap"); };
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      assert.ok(workletPosts.some((message) => message.tag === "miso.release.v1"));
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 1, result: 255 });
+      send({ tag: "miso.dispose.v1", requestId: 2 });
+      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 2, result: 255 });
     }
     // D6: a refused boot answers with the engine's result code and releases nothing.
     {

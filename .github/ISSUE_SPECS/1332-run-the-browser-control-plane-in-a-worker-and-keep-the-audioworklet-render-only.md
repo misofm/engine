@@ -910,3 +910,21 @@ Slice S7 of the #1332 build plan (#1332(b1)), branch `codex/issue-1332-worker-js
   on attempt 2: "C at A's address with A's words is cut and adopted").
 - Header addresses from the `i32` exports are normalised with `>>> 0`. The memory is capped at
   512 MiB (8192 pages), so no address reaches 2 GiB.
+
+### S7 attempt 4: the worker-mode dispose contract (root decision, 2026-10-28)
+
+- **Root decision.** In `worker` mode a dispose always ends in teardown. (1) A clean dispose
+  resolves and a failed one rejects with the typed error; either way the page terminates the
+  Worker and disconnects the node exactly once (`#disposeWorkerMode`: `try`/`finally` around one
+  `#teardown`). (2) The dispose promise is created once and every later `dispose()` returns it,
+  settled or not; there is no retry in worker mode (a failed host is unusable). (3) The Worker
+  answers a dispose request that arrives after its dispose finished (freed, or failed by a trap
+  in the adoption or the dispose, which it catches and answers 255) at once with that outcome,
+  never by joining a dispose that will not complete. `single` mode keeps its retry: a failed
+  single-mode dispose drops its promise and restarts the service tick it stopped.
+- Tests red on attempt 3: a Worker dispose that traps rejects the page's dispose with 255, still
+  terminates the Worker and disconnects the node once, and a second `dispose()` returns the same
+  rejected promise ("a failed dispose still terminates the Worker"); the clean dispose test checks
+  the node is disconnected; a dispose after the host is freed is answered at once ("a dispose
+  after the host is freed is answered at once with the outcome"); a trap in the Worker's dispose
+  is answered 255 (red without the catch).

@@ -117,6 +117,8 @@ class ControlWorker {
     // The page's dispose requests, answered together once the host is freed (a second dispose
     // while one runs joins it; it posts no second release).
     this.disposeRequestIds = [];
+    // The result of the finished dispose (undefined until then); a later dispose request gets it.
+    this.disposeOutcome = undefined;
     // Set once a dispose began: every later control call is refused `WRONG_STATE`.
     this.disposing = false;
     scope.onmessage = (event) => this.onPageMessage(event.data);
@@ -132,7 +134,13 @@ class ControlWorker {
       if (result !== RESULT_OK) this.failBoot(result);
       return;
     }
-    if (this.disposed) return;
+    if (this.disposed) {
+      // Only a dispose is answered once the host is gone: with the finished dispose's outcome.
+      if (message?.tag === "miso.dispose.v1" && Number.isSafeInteger(message.requestId)) {
+        this.acknowledge(message.requestId, this.disposeOutcome ?? RESULT_INTERNAL);
+      }
+      return;
+    }
     this.receive(message);
     const requestId = message?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
     this.afterControl(requestId);
@@ -761,6 +769,9 @@ class ControlWorker {
 
   /// D4: the worklet releases the render half and posts its token; this Worker adopts it back,
   /// disposes the host (the only place that frees it) and answers the page's dispose.
+  /// A dispose request that arrives once a dispose finished (the host freed, or the attempt
+  /// failed: `disposed` is set either way) is answered at once with that outcome in
+  /// `onPageMessage`: it never joins a dispose that will not complete.
   beginDispose(requestId) {
     this.disposeRequestIds.push(requestId);
     if (this.disposing) return;
@@ -770,18 +781,23 @@ class ControlWorker {
   }
 
   finishDispose(token) {
-    if (this.disposeRequestIds.length === 0 || this.disposed) return;
+    if (this.disposeRequestIds.length === 0 || this.disposeOutcome !== undefined) return;
     const e = this.exports;
-    // A half that never came back (a zero token) is left where it is: dispose then marks the
-    // lifecycle disposed, so that half silences, and frees the control half (#1332 S6).
-    if (token !== 0n) e.miso_engine_web_v1_host_adopt(token);
-    // Every status read still in flight is answered before the host is freed.
-    while (this.statusReads.length > 0) this.answerStatus(this.statusReads.shift(), null);
-    const result = e.miso_engine_web_v1_dispose(this.handle);
-    if (result === RESULT_OK) {
-      this.disposed = true;
-      this.handle = 0;
+    let result;
+    try {
+      // A half that never came back (a zero token) is left where it is: dispose then marks the
+      // lifecycle disposed, so that half silences, and frees the control half (#1332 S6).
+      if (token !== 0n) e.miso_engine_web_v1_host_adopt(token);
+      // Every status read still in flight is answered before the host is freed.
+      while (this.statusReads.length > 0) this.answerStatus(this.statusReads.shift(), null);
+      result = e.miso_engine_web_v1_dispose(this.handle);
+    } catch (_) {
+      // A trap in the adoption or the dispose: the instance is unusable; the outcome is final.
+      result = RESULT_INTERNAL;
     }
+    this.disposed = true;
+    this.handle = 0;
+    this.disposeOutcome = result;
     for (const requestId of this.disposeRequestIds) this.acknowledge(requestId, result);
     this.disposeRequestIds = [];
   }

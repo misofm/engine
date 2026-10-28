@@ -1191,20 +1191,45 @@ class MisoAudioWorkletHost {
     return this.#discardedControlEvents;
   }
 
+  /// The worker-mode dispose contract (#1332 S7, root): the promise is created once and every
+  /// later call returns it, settled or not; it resolves for a clean dispose and rejects with the
+  /// typed error otherwise, and either way the page terminates the Worker and disconnects the node,
+  /// exactly once. A failed worker-mode host is unusable, so there is no retry. In `single` mode a
+  /// failed dispose may be retried: the promise is dropped and the service tick it stopped runs
+  /// again.
   dispose() {
-    // A dispose that failed may be retried.
-    this.#disposePromise ??= this.#dispose().catch((error) => {
+    if (this.#worker !== undefined) {
+      this.#disposePromise ??= this.#disposeWorkerMode();
+      return this.#disposePromise;
+    }
+    this.#disposePromise ??= this.#disposeSingleMode().catch((error) => {
       this.#disposePromise = null;
+      if (!this.#disposed && this.#serviceTick === null) this.#startServiceTick();
       throw error;
     });
     return this.#disposePromise;
   }
 
-  async #dispose() {
+  async #disposeWorkerMode() {
+    try {
+      await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
+    } finally {
+      this.#teardown();
+    }
+  }
+
+  async #disposeSingleMode() {
     if (this.#disposed) return;
     this.#stopServiceTick();
     await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
+    this.#teardown();
+  }
+
+  /// Runs once, after the dispose reply (or, in worker mode, its failure).
+  #teardown() {
+    if (this.#disposed) return;
     this.#disposed = true;
+    this.#stopServiceTick();
     // No request promise outlives the host: whatever is still unsettled (a reply the dispose
     // overtook) rejects with the typed disposed error.
     const unsettled = [...this.#pending.values()];
