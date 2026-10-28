@@ -95,6 +95,36 @@ pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
 /// more than seven times the measured ~70 MiB worst transient at the 1 MiB document cap.
 pub const DEFAULT_MAXIMUM_MEMORY_BYTES: u64 = 512 << 20;
 
+/// Initial size, in 64 KiB pages, of the shared linear memory the browser module imports (issue
+/// #1380 D1).
+///
+/// Every instantiation site creates `new WebAssembly.Memory({ initial, maximum, shared: true })`
+/// with this count, read from the ABI layout document's `memory.initialPages`, and
+/// `scripts/build-web-audioworklet.sh` links the module with `--initial-memory` of exactly this
+/// many pages. It is the linker's own minimum for today's module: the 1 MiB stack plus the static
+/// data and the thread-local block. Boot grows the memory past it on every session, so a larger
+/// value would only add pages the allocator never uses (it hands out only pages it grew itself).
+/// A module whose data outgrows it fails to link, loudly, and the fix is to raise this count.
+pub const WASM_INITIAL_MEMORY_PAGES: u32 = 20;
+
+/// Maximum size, in 64 KiB pages, of the shared linear memory the browser module imports: 512
+/// MiB (issue #1380 D1, owner decision of 2026-10-27).
+///
+/// A shared memory must declare its maximum, and a browser reserves it up front; 8192 pages is
+/// what #1331a reserved and ran in desktop Chromium and WebKit. It is the module's hard ceiling,
+/// so boot refuses a `maximum_memory_bytes` above it with `web.boot.memory_maximum` (D2) rather
+/// than fail later inside `memory.grow`. [`DEFAULT_MAXIMUM_MEMORY_BYTES`] equals it.
+pub const WASM_MAXIMUM_MEMORY_PAGES: u32 = 8192;
+
+/// Bytes in one WebAssembly page.
+pub const WASM_PAGE_BYTES: u64 = 1 << 16;
+
+const _: () = assert!(
+    DEFAULT_MAXIMUM_MEMORY_BYTES <= WASM_MAXIMUM_MEMORY_PAGES as u64 * WASM_PAGE_BYTES,
+    "the default boot budget must fit the module's maximum memory"
+);
+const _: () = assert!(WASM_INITIAL_MEMORY_PAGES <= WASM_MAXIMUM_MEMORY_PAGES);
+
 /// Fixed live diagnostic capacity after a successful boot.
 pub const DIAGNOSTIC_BYTES: u32 = 1 << 14;
 
@@ -378,6 +408,7 @@ pub struct WebBootOptions {
     /// Must be zero.
     pub reserved0: u32,
     /// Total boot memory budget, or zero for [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
+    /// Above [`WASM_MAXIMUM_MEMORY_PAGES`] pages boot refuses it with `web.boot.memory_maximum`.
     pub maximum_memory_bytes: u64,
     /// Must be zero. This was the live-command queue word until #1565 deleted the browser's own
     /// value commands; the offset keeps its place and the word is refused when nonzero
@@ -3488,6 +3519,15 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
         return Err(BootFailure::fixed(
             RESULT_REFUSED_OPTIONS,
             "web.options.reserved3",
+        ));
+    }
+    // #1380 D2: the module's shared memory cannot grow past its declared maximum, so a budget
+    // above it is refused here, typed, rather than accepted and failed later as a `memory.grow`
+    // trap.
+    if options.maximum_memory_bytes > u64::from(WASM_MAXIMUM_MEMORY_PAGES) * WASM_PAGE_BYTES {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.boot.memory_maximum",
         ));
     }
     if options.live_control_meter_blocks > u64::from(u32::MAX) {

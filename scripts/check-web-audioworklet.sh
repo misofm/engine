@@ -79,26 +79,62 @@ check_timer_policy() {
 # Owner decision W4-D1 (#83): exactly one artifact ships and it is built with `+simd128`. The
 # scalar artifact and the dual-artifact selection are gone, so this file no longer has a
 # "scalar must contain no vector opcode" leg. No scalar wasm build is left at all: `lane` refuses
-# wasm32 without `simd128` at compile time (issue #1062), and this file's atomics, import and
-# shared-memory checks on the shipped module took over the retired scalar atomics inspection.
+# wasm32 without `simd128` at compile time (issue #1062). Issue #1380 D4: atomic opcodes are
+# allowed in the module (it is built with `+atomics` on a shared memory); the one atomic rule that
+# matters on the render thread, no `memory.atomic.wait` in a render export's closure, is the
+# call-graph gate's `--render-thread` (#1333 D4), below.
 check_opcode_policy() {
   local simd_text=$1
   grep -q 'f32x4.mul' <<<"$simd_text" || return 1
   grep -q 'f32x4.add' <<<"$simd_text" || return 1
   grep -q 'f32x4.sub' <<<"$simd_text" || return 1
   ! grep -Eqi 'relaxed' <<<"$simd_text" || return 1
-  check_no_atomic_opcodes "$simd_text"
 }
 
-# wasm-objdump annotates call instructions and function headers with Rust symbol names. A symbol
-# such as `core::sync::atomic::AtomicU8` is not an atomic Wasm instruction, so inspect only the
-# instruction column after `|` and remove its `<symbol>` annotation before matching opcodes.
-check_no_atomic_opcodes() {
-  local disassembly=$1
-  local instructions
-  instructions=$(awk -F'|' 'NF > 1 { print $2 }' <<<"$disassembly" | sed -E 's/<[^>]*>//g')
-  ! grep -Eqi '(^|[[:space:]])([[:alnum:]_]+\.)?atomic(\.|[[:space:]]|$)' <<<"$instructions"
+# Issue #1380 D4: the module's memory shape, read from `wasm-objdump -x`. Exactly one import, and it
+# is `env.memory`: a shared memory whose limits are the ABI layout document's `memory.initialPages`
+# and `memory.maximumPages`, the pages every instantiation site creates. The module defines no
+# memory of its own and still exports the imported one as `memory`. A second import, an unshared
+# memory or limits other than the layout's fail; `--self-test-module-shape` proves each one does.
+check_module_shape() {
+  local metadata=$1 initial=$2 maximum=$3
+  local imports
+  imports=$(awk '
+    /^Import\[/ { in_imports = 1; next }
+    in_imports && /^[A-Z][A-Za-z]+\[/ { in_imports = 0 }
+    in_imports { print }
+  ' <<<"$metadata")
+  grep -qx 'Import\[1\]:' <<<"$metadata" || return 1
+  [[ $(grep -c . <<<"$imports") == 1 ]] || return 1
+  [[ $imports == " - memory[0] pages: initial=$initial max=$maximum shared <- env.memory" ]] ||
+    return 1
+  ! grep -q '^Memory\[' <<<"$metadata" || return 1
+  grep -qx ' - memory\[0\] -> "memory"' <<<"$metadata"
 }
+
+if (($# == 1)) && [[ $1 == --self-test-module-shape ]]; then
+  valid=$'Type[1]:\n - type[0] () -> nil\nImport[1]:\n - memory[0] pages: initial=20 max=8192 shared <- env.memory\nFunction[1]:\n - func[0] sig=0\nExport[1]:\n - memory[0] -> "memory"'
+  check_module_shape "$valid" 20 8192 || {
+    echo "the valid module shape was refused" >&2
+    exit 1
+  }
+  mutate() {
+    local name=$1 metadata=$2
+    if check_module_shape "$metadata" 20 8192; then
+      echo "module-shape mutation escaped policy: $name" >&2
+      exit 1
+    fi
+  }
+  mutate "a second import" "${valid/Import\[1\]:$'\n'/Import[2]:$'\n' - func[0] sig=0 <- env.now$'\n'}"
+  mutate "an unshared memory" "${valid/ shared <- / <- }"
+  mutate "limits other than the layout's" "${valid/max=8192/max=16384}"
+  mutate "an initial size other than the layout's" "${valid/initial=20/initial=17}"
+  # The import stays exactly as valid: only the "defines no memory of its own" rule can see this.
+  mutate "a memory defined beside the import" "${valid/$'\n'Function\[1\]:/$'\n'Memory[1]:$'\n' - memory[1] pages: initial=1$'\n'Function[1]:}"
+  mutate "the memory no longer exported" "${valid/ - memory\[0\] -> \"memory\"/ - func[0] -> \"start\"}"
+  echo "web AudioWorklet module-shape mutations passed"
+  exit 0
+fi
 
 if (($# == 1)) && [[ $1 == --self-test-opcodes ]]; then
   valid_simd=$'f32x4.mul\nf32x4.add\nf32x4.sub'
@@ -107,25 +143,13 @@ if (($# == 1)) && [[ $1 == --self-test-opcodes ]]; then
     $'f32x4.add\nf32x4.sub' \
     $'f32x4.mul\nf32x4.sub' \
     $'f32x4.mul\nf32x4.add' \
-    $'f32x4.mul\nf32x4.add\nf32x4.sub\ni8x16.relaxed_swizzle' \
-    $'f32x4.mul\nf32x4.add\nf32x4.sub\n000004: fe 10 | i32.atomic.load 0' \
-    $'f32x4.mul\nf32x4.add\nf32x4.sub\n000004: 00 00 | memory.atomic.notify 0'
+    $'f32x4.mul\nf32x4.add\nf32x4.sub\ni8x16.relaxed_swizzle'
   do
     if check_opcode_policy "$mutation"; then
       echo "missing/forbidden SIMD opcode mutation escaped policy" >&2
       exit 1
     fi
   done
-  symbol_only=$'000000 func[1] <core::sync::atomic::AtomicU8::load>:\n  000001: 10 00 | call 0 <core::sync::atomic::AtomicU8::load>'
-  if ! check_no_atomic_opcodes "$symbol_only"; then
-    echo "symbol annotation was mistaken for an atomic opcode" >&2
-    exit 1
-  fi
-  atomic_instruction=$'000002 func[2] <render>:\n  000003: fe 10 | i32.atomic.load 0'
-  if check_no_atomic_opcodes "$atomic_instruction"; then
-    echo "atomic opcode mutation escaped policy" >&2
-    exit 1
-  fi
   echo "web AudioWorklet opcode-policy mutations passed"
   exit 0
 fi
@@ -345,39 +369,33 @@ expected_functions=$(grep -vx memory <<<"$expected_exports")
   exit 1
 }
 
-for module in "$simd"; do
-  metadata=$(wasm-objdump -x "$module")
-  exports=$(awk '
-    /^Export\[/ { in_exports = 1; next }
-    in_exports && /^[A-Z][A-Za-z]+\[/ { in_exports = 0 }
-    in_exports && /-> "/ {
-      sub(/^.*-> "/, ""); sub(/".*$/, ""); print
-    }
-  ' <<<"$metadata" | sort)
-  [[ "$exports" == "$expected_exports" ]] || {
-    echo "unexpected Wasm exports in $module" >&2
-    diff -u <(printf '%s\n' "$expected_exports") <(printf '%s\n' "$exports") >&2 || true
-    exit 1
+layout_memory=$(python3 -B -c '
+import json, sys
+memory = json.load(open(sys.argv[1], encoding="utf-8"))["memory"]
+print(memory["initialPages"], memory["maximumPages"])
+' "$layout_json") || {
+  echo "cannot read the shared memory's page counts from $layout_json" >&2
+  exit 1
+}
+read -r initial_pages maximum_pages <<<"$layout_memory"
+metadata=$(wasm-objdump -x "$simd")
+exports=$(awk '
+  /^Export\[/ { in_exports = 1; next }
+  in_exports && /^[A-Z][A-Za-z]+\[/ { in_exports = 0 }
+  in_exports && /-> "/ {
+    sub(/^.*-> "/, ""); sub(/".*$/, ""); print
   }
-  if grep -Eq '^Import\[[1-9]' <<<"$metadata"; then
-    echo "Wasm imports are forbidden: $module" >&2
-    exit 1
-  fi
-  memory_record=$(awk '
-    /^Memory\[/ { in_memory = 1; next }
-    in_memory && /^[A-Z][A-Za-z]+\[/ { in_memory = 0 }
-    in_memory { print }
-  ' <<<"$metadata")
-  if grep -Eqi 'shared=yes|shared=true' <<<"$memory_record"; then
-    echo "shared Wasm memory is forbidden: $module" >&2
-    exit 1
-  fi
-  disassembly=$(wasm-objdump -d "$module")
-  if ! check_no_atomic_opcodes "$disassembly"; then
-    echo "atomics found: $module" >&2
-    exit 1
-  fi
-done
+' <<<"$metadata" | sort)
+[[ "$exports" == "$expected_exports" ]] || {
+  echo "unexpected Wasm exports in $simd" >&2
+  diff -u <(printf '%s\n' "$expected_exports") <(printf '%s\n' "$exports") >&2 || true
+  exit 1
+}
+check_module_shape "$metadata" "$initial_pages" "$maximum_pages" || {
+  echo "the module must import exactly one shared env.memory of $initial_pages..$maximum_pages pages (the ABI layout's) and export it as memory: $simd" >&2
+  awk '/^(Import|Memory)\[/ { p = 1; print; next } /^[A-Z][A-Za-z]+\[/ { p = 0 } p' <<<"$metadata" >&2
+  exit 1
+}
 
 simd_disassembly=$(wasm-objdump -d "$simd")
 if ! check_opcode_policy "$simd_disassembly"; then

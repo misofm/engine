@@ -34,7 +34,11 @@ they are the rules here:
 * the `sourceRing` rule carries every one of its inputs (#1406 D3): the stall ring's two and the
   warm-successor prime's three -- `primeGrowths`, `primeReserveQuanta` and one
   `primeLatencySamples` row per launch rate -- since a consumer that lacks any of them cannot
-  derive the ring the engine picks.
+  derive the ring the engine picks;
+* `memory` names the shared linear memory's page counts (#1380 D1): `maximumPages` is the 512 MiB
+  the owner fixed, `initialPages` is a positive count no larger, and the default boot budget fits
+  the maximum, so a consumer creating `new WebAssembly.Memory({initial, maximum, shared: true})`
+  from it can always boot the default.
 
 `--self-test` runs every rule against a valid document and against its own red mutation, so the
 validator is proved to discriminate before it is trusted.
@@ -205,6 +209,10 @@ STATUS_WATERMARK_OFFSETS = {
 # deleted; the observation edit and read are the core's frames. The exact structure, constant
 # and export sets above refuse them should they return.
 
+# Issue #1380 D1 (owner decision of 2026-10-27): the shared memory's maximum, 512 MiB in pages.
+MAXIMUM_MEMORY_PAGES = 8192
+PAGE_BYTES = 1 << 16
+
 WIDTHS = {"u8": 1, "u32": 4, "u64": 8, "f64": 8}
 
 
@@ -262,7 +270,7 @@ def validate(document: object) -> None:
     require(isinstance(document, dict), "the document is a JSON object")
     assert isinstance(document, dict)
     require(set(document) == {"schema", "abiVersion", "stagingSequence", "errorPhases",
-                              "exports", "structures", "constants"},
+                              "exports", "structures", "constants", "memory"},
             f"top-level keys are exact: {sorted(document)}")
     require(document["schema"] == SCHEMA, f"schema is {SCHEMA}")
     require(document["abiVersion"] == ABI_VERSION,
@@ -360,6 +368,17 @@ def validate(document: object) -> None:
     ):
         require(constants[name] == expected,
                 f"constants.{name} is {constants[name]}, expected {expected}")
+
+    memory = document["memory"]
+    require(isinstance(memory, dict) and set(memory) == {"initialPages", "maximumPages"},
+            "memory carries exactly initialPages/maximumPages")
+    require(all(type(memory[key]) is int for key in memory), "memory page counts are integers")
+    require(memory["maximumPages"] == MAXIMUM_MEMORY_PAGES,
+            f"memory.maximumPages is {memory['maximumPages']}, expected {MAXIMUM_MEMORY_PAGES}")
+    require(0 < memory["initialPages"] <= memory["maximumPages"],
+            "memory.initialPages is positive and no larger than maximumPages")
+    require(constants["defaultMaximumMemoryBytes"] <= memory["maximumPages"] * PAGE_BYTES,
+            "the default boot budget fits the shared memory's maximum")
 
     ring = constants["sourceRing"]
     require(isinstance(ring, dict) and set(ring) == {
@@ -517,7 +536,16 @@ def self_test() -> int:
                 return
         raise AssertionError("the inserts rack row exists in the valid fixture")
 
+    def memory_maximum_moves(document: dict) -> None:
+        document["memory"]["maximumPages"] = MAXIMUM_MEMORY_PAGES + 1
+
+    def memory_initial_exceeds_maximum(document: dict) -> None:
+        document["memory"]["initialPages"] = document["memory"]["maximumPages"] + 1
+
     mutations = [
+        ("the memory page counts are dropped", lambda d: d.pop("memory")),
+        ("the shared memory's maximum moves", memory_maximum_moves),
+        ("the initial memory exceeds the maximum", memory_initial_exceeds_maximum),
         ("an alias row is dropped", drop_alias),
         ("an alias repeats its base name", alias_repeats_base),
         ("an alias invents a value", alias_invents_value),

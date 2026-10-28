@@ -4,6 +4,7 @@ import { createEngine, scratchBootInWorker, scratchBootWithWorker, BrowserBootEr
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { moduleBytes } from "./support.mjs";
 import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
+import { sharedMemoryImports } from "../src/core/memory.ts";
 
 const shape = { sampleRateHz: 48000, quantumFrames: 128, tracks: [], submixes: [] };
 class FakeWorker {
@@ -281,7 +282,7 @@ test("preparation compiles once, disposes scratch, and yields fresh stateful liv
   finally { WebAssembly.compile = compile; WasmBoundary.prototype.dispose = dispose; }
   assert.equal(compiles, 1); assert.equal(disposals, 1);
   const referenceModule = await compile(bytes);
-  const boot = module => WasmBoundary.boot({ instantiate: () => WebAssembly.instantiate(module, {}) }, document, options);
+  const boot = module => WasmBoundary.boot({ instantiate: () => WebAssembly.instantiate(module, sharedMemoryImports()) }, document, options);
   const live = await boot(prepared.module), reference = await boot(referenceModule);
   try {
     assert.equal(live.renderedQuanta(), 0n); assert.deepEqual(live.shape(), prepared.shape);
@@ -356,7 +357,7 @@ for (const cloneFault of [false, true]) test(`actual prepared worker structured 
     const pending = prepareBrowserSessionWithWorker({ document: new TextEncoder().encode(sessionDocument()), options: {}, moduleUrl: "wasm", createWorker: () => worker });
     worker.emit("message", { type: "worker-ready" });
     if (cloneFault) await assert.rejects(pending, error => error.name === "DataCloneError");
-    else { const prepared = await pending; assert.ok(prepared.module instanceof WebAssembly.Module); assert.notEqual(prepared.module, sentModule); await WebAssembly.instantiate(prepared.module, {}); }
+    else { const prepared = await pending; assert.ok(prepared.module instanceof WebAssembly.Module); assert.notEqual(prepared.module, sentModule); await WebAssembly.instantiate(prepared.module, sharedMemoryImports()); }
     worker.assertClosed();
   } finally { globalThis.self = previous.self; globalThis.fetch = previous.fetch; }
 });

@@ -2682,6 +2682,7 @@ async function testProcessor() {
   const originalProcessor = globalThis.AudioWorkletProcessor;
   const originalRegister = globalThis.registerProcessor;
   const originalInstance = WebAssembly.Instance;
+  const originalMemory = WebAssembly.Memory;
   const originalSampleRate = globalThis.sampleRate;
   const originalRenderQuantumSize = globalThis.renderQuantumSize;
   const originalTextEncoder = globalThis.TextEncoder;
@@ -2751,9 +2752,39 @@ async function testProcessor() {
   globalThis.sampleRate = 48000;
   globalThis.renderQuantumSize = 64;
   globalThis.TextEncoder = undefined;
+  // Issue #1380 D3: every instance the worklet makes imports exactly `{ env: { memory } }`, a
+  // memory it created itself as shared at the ABI layout's page counts. The stub records each
+  // descriptor (no real 512 MiB reservation per case); a violation is collected rather than thrown,
+  // since the worklet turns a throw at instantiation into a typed failure, and checked at the end.
+  const memoryDescriptors = new WeakMap();
+  // A memory one instance already imported: a second instance on it would share it (#1380 D3).
+  const importedMemories = new WeakSet();
+  const importViolations = [];
+  let importsChecked = 0;
+  WebAssembly.Memory = class {
+    constructor(descriptor) {
+      memoryDescriptors.set(this, { ...descriptor });
+      this.buffer = new SharedArrayBuffer(descriptor.initial * 65536);
+    }
+  };
+  const expectedMemory = {
+    initial: abiLayout.memory.initialPages,
+    maximum: abiLayout.memory.maximumPages,
+    shared: true,
+  };
   WebAssembly.Instance = class {
-    constructor() {
+    constructor(_module, imports) {
       instanceCount += 1;
+      importsChecked += 1;
+      try {
+        assert.deepEqual(Object.keys(imports), ["env"]);
+        assert.deepEqual(Object.keys(imports.env), ["memory"]);
+        assert.deepEqual(memoryDescriptors.get(imports.env.memory), expectedMemory);
+        assert.ok(!importedMemories.has(imports.env.memory), "the memory is fresh for this instance");
+        importedMemories.add(imports.env.memory);
+      } catch (error) {
+        importViolations.push(error.message);
+      }
       if (throwInstance) throw new Error("synthetic instantiation failure");
       this.exports = recordingExports(nextFake.exports, latestPort);
     }
@@ -3929,6 +3960,9 @@ async function testProcessor() {
       assert.ok(recordedPostConstructionCalls.has(name),
         `the recording proxy saw the engine worklet call ${name} after construction`);
     }
+    assert.ok(importsChecked > 0, "the worklet instantiated the module at least once");
+    assert.deepEqual(importViolations, [],
+      "every worklet instance imports one fresh shared memory at the ABI layout's pages");
     const unlisted = [...recordedPostConstructionCalls].filter((name) => !engineRenderThreadExports.has(name));
     assert.deepEqual(unlisted, [],
       `the engine worklet calls these exports after construction, and tools/realtime-policy/render-thread-exports.json does not list them for it: ${unlisted.map((name) => renderThreadPrefix + name).join(", ")}`);
@@ -3940,6 +3974,7 @@ async function testProcessor() {
     else globalThis.renderQuantumSize = originalRenderQuantumSize;
     globalThis.TextEncoder = originalTextEncoder;
     WebAssembly.Instance = originalInstance;
+    WebAssembly.Memory = originalMemory;
   }
 }
 

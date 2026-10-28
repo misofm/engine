@@ -66,8 +66,9 @@ use host_web::{
     RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
     RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
     RESULT_WRONG_STATE, SEEK_REPORT_BYTES, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED,
-    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebMeterHeader, WebPlanLatency,
-    WebPlanWatermark, WebResourceReport, WebSeekReport, WebStatus,
+    STATE_READY, STATUS_BYTES, WASM_INITIAL_MEMORY_PAGES, WASM_MAXIMUM_MEMORY_PAGES,
+    WATERMARK_BYTES, WebBootOptions, WebMeterHeader, WebPlanLatency, WebPlanWatermark,
+    WebResourceReport, WebSeekReport, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -663,6 +664,10 @@ pub fn render() -> String {
                     .collect(),
             },
         },
+        memory: Memory {
+            initial_pages: WASM_INITIAL_MEMORY_PAGES,
+            maximum_pages: WASM_MAXIMUM_MEMORY_PAGES,
+        },
     };
     json::document(&document)
 }
@@ -677,6 +682,17 @@ struct Document<'a> {
     exports: &'a [&'a str],
     structures: Entries<Structure<'a>>,
     constants: Constants<'a>,
+    memory: Memory,
+}
+
+/// The `memory` object (issue #1380 D1): the page counts of the shared `WebAssembly.Memory` every
+/// instantiation site creates and passes as `env.memory`. The module's own import declares the
+/// same limits, which `check-web-audioworklet.sh` holds equal to these.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Memory {
+    initial_pages: u32,
+    maximum_pages: u32,
 }
 
 #[derive(Serialize)]

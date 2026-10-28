@@ -37,9 +37,10 @@ Modes
     alternative matching; on an over-aligned path it can call `posix_memalign` with no `malloc`
     beside it. So any unmangled name that contains `free`, `alloc`, `memalign` or `sbrk` fails.
     This fails safe: an unmangled engine function whose name matches fails too, and the fix is to
-    rename it, not to relax the rule. This checker never sees an import: an import has no body,
-    so `wasm-objdump -d` prints no function header for it, and `check-web-audioworklet.sh`
-    refuses a module with any import before this gate runs. `scripts/test-web-audioworklet.sh`
+    rename it, not to relax the rule. This checker never sees an imported function: an import has
+    no body, so `wasm-objdump -d` prints no function header for it, and `check-web-audioworklet.sh`
+    refuses a module with any import but its one shared `env.memory` (#1380) before this gate
+    runs. `scripts/test-web-audioworklet.sh`
     runs `--self-test`, which pins these cases.
 
     `--trap-owner` never relaxes the allocation half of the gate, which is the half that matters:
@@ -55,11 +56,12 @@ Modes
 
     1. **Thread-local destructor registration.** A member whose name carries std's registration
        path -- `thread_local` + `destructors` + `register`, or `thread_local` + `guard` +
-       `enable` -- fails. With atomics std registers a destructor for a thread local that needs
-       drop, lazily and by allocating; on today's non-atomic module no such path exists.
+       `enable` -- fails. With atomics (the shipped build since #1380) std registers a destructor
+       for a thread local that needs drop, lazily and by allocating.
     2. **Atomic wait.** A member containing `memory.atomic.wait32` or `memory.atomic.wait64`
-       fails: render never blocks. Today's module carries no atomic opcode at all
-       (`check-web-audioworklet.sh` bans them outright), so this rule is in place before #1332.
+       fails: render never blocks. Since #1380 the module is built with atomics on a shared
+       memory, so std's lock, `Once` and the data-segment initialiser carry waits; this rule is what
+       keeps them out of every render-thread closure.
     3. **Pinned `call_indirect` sites.** The direct-call closure cannot see what an indirect call
        reaches -- the whole plan executor sits behind `Box<dyn PreparedPlanExecutor>` -- and
        resolving indirect calls by signature is not sound (it flags drop glue the render path

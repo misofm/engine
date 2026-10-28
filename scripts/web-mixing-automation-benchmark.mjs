@@ -69,6 +69,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { decodeControlReply, encodeControlTransaction } from "../sdk/src/core/control-frame.ts";
+import { sharedMemoryImports } from "../sdk/src/core/memory.ts";
 
 const ROOT = new URL("../", import.meta.url);
 const ABI_LAYOUT = JSON.parse(readFileSync(new URL("sdk/assets/miso-engine-v1-abi-layout.json", ROOT)));
@@ -273,7 +274,7 @@ function rebuildDocument(doc) {
 }
 
 function rebuildInstance(wasmModule) {
-  const e = new WebAssembly.Instance(wasmModule, {}).exports;
+  const e = new WebAssembly.Instance(wasmModule, sharedMemoryImports()).exports;
   assert.equal(e.miso_engine_web_v1_abi_version(), ABI_LAYOUT.abiVersion);
   const optionsPointer = e.miso_engine_web_v1_boot_options_ptr();
   const options = new DataView(e.memory.buffer, optionsPointer, ABI_LAYOUT.structures.bootOptions.bytes);
@@ -855,7 +856,7 @@ const wasmModule = new WebAssembly.Module(moduleBytes);
 
 function boot(document = mixingDocument) {
   const documentBytes = document.bytes;
-  const e = new WebAssembly.Instance(wasmModule, {}).exports;
+  const e = new WebAssembly.Instance(wasmModule, sharedMemoryImports()).exports;
   assert.equal(e.miso_engine_web_v1_abi_version(), ABI_LAYOUT.abiVersion);
   const optionsPointer = e.miso_engine_web_v1_boot_options_ptr();
   const options = new DataView(e.memory.buffer, optionsPointer, ABI_LAYOUT.structures.bootOptions.bytes);

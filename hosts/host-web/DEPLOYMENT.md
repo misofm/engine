@@ -12,7 +12,7 @@ Serve the Wasm response as exactly `Content-Type: application/wasm`. Serve both 
 
 Use versioned or content-addressed release URLs. Those immutable files may use `Cache-Control: public, max-age=31536000, immutable`; use `Cache-Control: no-cache` for an unversioned entry page so it revalidates and selects one coherent release. Do not publish changed bytes at an immutable URL or mix files from different releases.
 
-This host does not need extra response headers for the qualification in [BROWSER_DEPLOYMENT_MATRIX.md](./BROWSER_DEPLOYMENT_MATRIX.md). That statement is limited to this shipped message-copy artifact: the matrix does not qualify cross-origin isolation, `SharedArrayBuffer`, or a shared-memory Wasm build.
+The module is built with atomics and imports its linear memory (issue #1380): exactly one import, `env.memory`, a shared `WebAssembly.Memory` of `memory.initialPages` to `memory.maximumPages` pages (20 to 8192, so at most 512 MiB) from `miso-engine-v1-abi-layout.json`, which it re-exports as `memory`. The worklet creates that memory itself, one per instance; a host that instantiates the module itself does the same, `new WebAssembly.Memory({ initial, maximum, shared: true })` passed as `{ env: { memory } }`. Every qualified engine creates a shared memory on a page without cross-origin isolation, so this host needs no extra response headers for the qualification in [BROWSER_DEPLOYMENT_MATRIX.md](./BROWSER_DEPLOYMENT_MATRIX.md): such a page runs one instance per memory, D15-10's `single` mode, for good. A boot budget (`maximumMemoryBytes`) above the memory's maximum is refused with `web.boot.memory_maximum`. The cross-origin-isolated mode, a control Worker and the render-only worklet on one shared memory, is #1332's and is not qualified by the matrix.
 
 The matrix's `candidateCommit` is the immutable source candidate whose bytes produced the shipped
 artifact that was qualified. `qualification/generate-matrix.mjs` (run through `npm run matrix`)
@@ -34,6 +34,6 @@ npm ci
 npm run demo -- --artifacts "$artifacts"
 ```
 
-Open the printed loopback URL and press **Run qualification**. The server intentionally sends `Cache-Control: no-store` so a local run cannot reuse stale release bytes. It also intentionally sends no cross-origin-isolation headers.
+Open the printed loopback URL and press **Run qualification**. The server intentionally sends `Cache-Control: no-store` so a local run cannot reuse stale release bytes. It also intentionally sends no cross-origin-isolation headers: the shared-memory module runs on such a page as one instance.
 
 Normative references: [Web Audio API AudioWorklet](https://webaudio.github.io/web-audio-api/#AudioWorklet), [WebAssembly Web API media type](https://webassembly.github.io/spec/web-api/#streaming-modules), and [RFC 8246 immutable responses](https://www.rfc-editor.org/rfc/rfc8246).
