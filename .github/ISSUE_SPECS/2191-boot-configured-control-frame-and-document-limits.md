@@ -135,6 +135,31 @@ beside the frame): that is a protocol change and leaves replies and events at 16
 - Parse transient near the derived default (PR evidence, not committed; release, the dense
   shape of gate 5): 9,100 tracks x 4 effects, 24,968,199 bytes, parse + model + compile peak
   308,430,347 bytes = **12.353 bytes per input byte**, under the pinned 20.
+- Whole-boot shapes (native release, peak boot allocation per document byte, 512 MiB budget,
+  compact JSON with short IDs and empty `params`; measured once, not committed):
+
+  | Shape | Peak / byte | Outcome |
+  |---|---|---|
+  | worst-replace 1 MiB (padded) | 19.4 | boots |
+  | many buses (8 muted sends per track) | 15.5 | boots |
+  | console fixtures (sends, intended), scaled | 22.0 | boots |
+  | sparse / one bus per track | 23.3-24.2 / 23.7 | boots |
+  | dense, canonical / sparse, compact | 37.0-38.6 / 40.5 | boots |
+  | console-c1 scaled (4 slots) | 46.3 (2,048 tracks) | boots |
+  | 4 inserts per track | 41 (transient shaper) to 120 (true-peak limiter) | boots |
+  | 16 inserts per track | about 169 | boots |
+  | 16 console slots per track | 85 to 360 (true-peak limiter) | boots |
+  | 1 delay or reverb insert per track | 857-941 | boots |
+  | 4 delay or reverb inserts, 512 tracks (about 700 KB) | 2,093-2,266 | refused `host.effect.resource.limit` after a 1.46-1.58 GB peak |
+
+  Effect state does not scale with document bytes (a delay or reverb instance holds about 0.8 MB
+  for under 230 bytes of JSON), so no per-byte multiplier bounds the boot. **The derived document
+  default bounds the parse transient only, not effect-state growth.** The overshoot predates
+  #2191: the 700 KB 4-delay session is admitted under 0.9.0's 1 MiB cap and peaks at 1.5 GB there
+  too. Root ruling (option a, 2026-10-28): #2191 keeps the parse admission with the frame rows and
+  the `(budget - rows) / 20` default; the aggregate pre-allocation admission (effect state first,
+  then boot, replace and rebuild) is the successor, engine #2194, and is the reopening condition
+  for the document default.
 - **Does not hold for the whole boot** (stopped here, nothing adjusted): the same dense shape's
   full native `boot` peaks at about 38.6 bytes per input byte at every size (192 tracks: 20.4 MB
   for 527 KB; 1536: 162.6 MB for 4.2 MB; 3072: 325.3 MB for 8.4 MB). At 6,000 tracks (16.5 MB,
@@ -142,7 +167,8 @@ beside the frame): that is a protocol change and leaves replies and events at 16
   `host.budget.retained_exact` (538,058,071 > 536,870,912); at 9,100 tracks (25 MB) it peaks at
   939 MB before `graph.resource.limit`. The pre-allocation projections (`20 * document`, and the
   retained projection, which #239 allows to undershoot the exact row) admit documents whose
-  boot exceeds the budget; on wasm such a boot would exhaust the 512 MiB memory. Root to rule.
+  boot exceeds the budget; on wasm such a boot would exhaust the 512 MiB memory. Ruled above:
+  successor #2194.
 - Browser qualification: Chromium single and worker, WebKit single and worker, with
   `--self-test-mutations` (Chromium single with `--check-matrix`): `controlFrameBytes` 131,072,
   bus add frame 85,024 bytes, revision 0 -> 1, path rebuild, watermark 1, render allocations 0.
