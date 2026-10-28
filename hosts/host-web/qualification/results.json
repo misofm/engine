@@ -1,9 +1,9 @@
 {
   "schema": "miso.web.qualification.matrix.v1",
-  "candidateCommit": "2268d2b0ff831f7689d269ade027057ea533224d",
-  "wasmSha256": "df4a880085f673d6ba04f9bc26506fbe7c69350d53e7ac9b7843bda332444479",
+  "candidateCommit": "3bf0793e5e8af52af0fc5104c282439ba9037c88",
+  "wasmSha256": "b32a5429f80510e0957b9f6120d7ea0f0e9ad3f8e0fc4d38bb898b0b16553553",
   "blake3Qualification": {
-    "candidateCommit": "2268d2b0ff831f7689d269ade027057ea533224d",
+    "candidateCommit": "3bf0793e5e8af52af0fc5104c282439ba9037c88",
     "sha256": "ee373d2f549b0d33bdd0324a8833698158274f516e01a7b0c4018347991a18b1",
     "browsers": [
       {
@@ -24,6 +24,22 @@
   "browsers": [
     {
       "browser": "chromium",
+      "leg": "single",
+      "versionFloor": "151.0.7922.34",
+      "outcome": "simd128 supported",
+      "gates": {
+        "attestation": "pass",
+        "audioWorkletBoot": "pass",
+        "nativeCorpusDigest": "pass",
+        "controlPath": "pass",
+        "observation": "pass",
+        "mainThreadStall": "pass",
+        "sdkResponse": "pass"
+      }
+    },
+    {
+      "browser": "chromium",
+      "leg": "worker",
       "versionFloor": "151.0.7922.34",
       "outcome": "simd128 supported",
       "gates": {
@@ -38,6 +54,22 @@
     },
     {
       "browser": "webkit",
+      "leg": "single",
+      "versionFloor": "26.5",
+      "outcome": "simd128 supported",
+      "gates": {
+        "attestation": "pass",
+        "audioWorkletBoot": "pass",
+        "nativeCorpusDigest": "pass",
+        "controlPath": "pass",
+        "observation": "pass",
+        "mainThreadStall": "pass",
+        "sdkResponse": "pass"
+      }
+    },
+    {
+      "browser": "webkit",
+      "leg": "worker",
       "versionFloor": "26.5",
       "outcome": "simd128 supported",
       "gates": {
