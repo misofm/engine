@@ -752,7 +752,9 @@ export function largeReplaceSource() {
     blocks: Array.from({ length: STRUCTURAL_REPLACE_CAPTURE_BLOCKS }, (_, block) => ({
       startFrame: block * QUANTUM_FRAMES,
       frames: QUANTUM_FRAMES,
-      final: block === STRUCTURAL_REPLACE_CAPTURE_BLOCKS - 1,
+      // No block ends the region: the module refuses an end of region short of the 48,000 frames
+      // the source declares.
+      final: false,
       leftBase: ((block % 8) - 4) / 1024,
       leftStep: 1 / 65536,
     })),
@@ -851,7 +853,8 @@ async function runStructuralReplaceQualification(createHost, documentA, document
   const largeAfter = { ...counters(largeStatus), staleViewQuanta: largeStatus.staleViewQuanta };
   const { readObservationThroughSdk } = await import("/sdk/sdk-response-client.js");
   // The document declares no observation tap (parametric EQs only), so the read is answered with
-  // the core's typed refusal: a round trip through the control staging cut after the growth.
+  // the core's typed refusal (`observation.unbound`): a round trip through the control staging
+  // after the growth.
   const largeObservation = await readObservationThroughSdk(large.host, {
     stripId: "track-000", rack: "inserts", effectId: "effect-0", tapId: OBSERVATION_TAP_ID, channels: "both",
   });

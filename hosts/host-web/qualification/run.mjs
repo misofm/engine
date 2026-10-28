@@ -476,8 +476,8 @@ function validate(browserName, result) {
   gate(browserName, "structural-replace-grown", large?.meterLeaseResult === 0
     && large?.meterFramesAfterGrowth >= 1 && large?.meterFinite === true
     && large?.meterTrackCounts?.includes(192)
-    && large?.observation?.result === 1 && large?.observation?.status === "not_found"
-    && JSON.stringify(large?.observation?.diagnostics) === JSON.stringify(["observation.tap.unknown"]),
+    && large?.observation?.result === 1 && large?.observation?.status === "unavailable"
+    && JSON.stringify(large?.observation?.diagnostics) === JSON.stringify(["observation.unbound"]),
   `the meter stream or the observation read failed after the growth: ${JSON.stringify({ lease: large?.meterLeaseResult, after: large?.meterFramesAfterGrowth, counts: large?.meterTrackCounts, finite: large?.meterFinite, observation: large?.observation })}`);
 
   // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
