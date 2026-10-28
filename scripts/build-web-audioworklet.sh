@@ -185,6 +185,11 @@ module_flags="-C target-feature=+simd128,+atomics,+bulk-memory,+mutable-globals"
 module_flags+=" -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--export-memory"
 module_flags+=" -C link-arg=--initial-memory=$((wasm_initial_memory_pages * 65536))"
 module_flags+=" -C link-arg=--max-memory=$((wasm_maximum_memory_pages * 65536))"
+# Issue #1332 S6 (#1331 recipe rule 2): a second instance on the shared memory sets its own TLS
+# block and stack before any other export runs, through these linker symbols.
+module_flags+=" -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size"
+module_flags+=" -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
+module_flags+=" -C link-arg=--export=__stack_pointer"
 
 (
   # Issue #2067: cargo reads CARGO_ENCODED_RUSTFLAGS before RUSTFLAGS, so a caller's exported

@@ -230,6 +230,11 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
             "plan's `Box<dyn PreparedPlanExecutor>`; the runtime render-locked count covers them",
         ),
     },
+    # Issue #1332 S6: the handoff exports dispatch nothing dynamically. Each one's closure is its
+    # own body (the registry scan, the box exchange and the canary compare all inline), with no
+    # allocator, free or drop glue: a refusal path forgets or redeposits what it holds.
+    "miso_engine_web_v1_host_adopt": {},
+    "miso_engine_web_v1_host_release": {},
     "miso_engine_web_v1_meter_poll": {
         # #1332 S5: `RenderHalf::poll_meters` has a second caller (`RenderHost::poll_meters`), so
         # it is no longer inlined into the host's; the same two sites, by inlining only.

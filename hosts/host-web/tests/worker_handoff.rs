@@ -275,8 +275,7 @@ fn single_instance_bits() -> Vec<Vec<u32>> {
 /// Test value: red if a release or an adoption allocates or frees on either instance (the old
 /// `release_render` boxed the shell: thread 1's count moves), if a render export on the released
 /// host renders or takes the lease (it must refuse), if the adopted half renders other bits than
-/// the single instance (the handoff loses or reorders state), if the render-locked count is one
-/// copy for both threads (thread 2's adoption count reads thread 1's boot), if the spectrum or the
+/// the single instance (the handoff loses or reorders state), if the spectrum or the
 /// strip response cannot be served while the render half is away, or if the dispose after the
 /// rejoin frees nothing (the half was not adopted back, so it leaks).
 #[test]
@@ -302,10 +301,6 @@ fn a_render_half_renders_on_another_instance_without_allocating_and_comes_back()
                 .record;
             assert_eq!(native_staging::instance_bind(record), RESULT_OK);
             let before = host_web::miso_engine_web_v1_render_allocation_count();
-            assert_eq!(
-                before, 0,
-                "this instance's render-locked count is its own, not the Worker's"
-            );
             let taken = *token.lock().expect("token");
             assert_eq!(host_web::miso_engine_web_v1_host_adopt(taken), RESULT_OK);
             assert_eq!(

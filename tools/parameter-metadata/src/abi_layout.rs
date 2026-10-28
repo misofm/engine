@@ -119,7 +119,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 48] = [
+pub const EXPORTS: [&str; 55] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_command_ptr",
@@ -138,6 +138,10 @@ pub const EXPORTS: [&str; 48] = [
     "miso_engine_web_v1_declare_discontinuity",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
+    "miso_engine_web_v1_host_adopt",
+    "miso_engine_web_v1_host_release",
+    "miso_engine_web_v1_instance_bind",
+    "miso_engine_web_v1_instance_reserve",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -145,6 +149,8 @@ pub const EXPORTS: [&str; 48] = [
     "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
+    "miso_engine_web_v1_render_diagnostic_bytes",
+    "miso_engine_web_v1_render_diagnostic_ptr",
     "miso_engine_web_v1_replace_document_ptr",
     "miso_engine_web_v1_resolved_source_ring_frames",
     "miso_engine_web_v1_resource_ptr",
@@ -166,6 +172,7 @@ pub const EXPORTS: [&str; 48] = [
     "miso_engine_web_v1_source_seek_report_ptr",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_status_ptr",
+    "miso_engine_web_v1_successor_header_ptr",
     "miso_engine_web_v1_watermark_ptr",
     "miso_engine_web_v1_watermark_read",
 ];

@@ -62,6 +62,23 @@ impl Entry {
     }
 }
 
+/// The half as one address. Nothing is freed; the address must come back through [`from_raw`].
+fn into_raw(render: RenderHost) -> usize {
+    Box::into_raw(render.half).expose_provenance()
+}
+
+/// The half [`into_raw`] gave out.
+///
+/// # Safety
+///
+/// `raw` came from [`into_raw`] and has not been passed here since.
+unsafe fn from_raw(raw: usize) -> RenderHost {
+    // SAFETY: the caller's contract: `raw` is a live `Box<RenderHalf>` given out once, whose
+    // provenance `into_raw` exposed.
+    let half = unsafe { Box::from_raw(core::ptr::with_exposed_provenance_mut(raw)) };
+    RenderHost { half }
+}
+
 static ENTRIES: [Entry; HANDOFF_SLOTS] = [const { Entry::new() }; HANDOFF_SLOTS];
 static NEXT_SEQUENCE: AtomicU32 = AtomicU32::new(1);
 
@@ -74,7 +91,7 @@ pub(crate) fn deposit(handle: u32, render: RenderHost) -> Result<u64, RenderHost
         sequence = NEXT_SEQUENCE.fetch_add(2, Ordering::Relaxed).max(1);
     }
     let token = (u64::from(handle) << 32) | u64::from(sequence);
-    let raw = render.into_raw();
+    let raw = into_raw(render);
     for entry in &ENTRIES {
         if entry
             .half
@@ -86,7 +103,7 @@ pub(crate) fn deposit(handle: u32, render: RenderHost) -> Result<u64, RenderHost
         }
     }
     // SAFETY: `raw` came from `into_raw` just above and no entry took it.
-    Err(unsafe { RenderHost::from_raw(raw) })
+    Err(unsafe { from_raw(raw) })
 }
 
 /// Take the half `token` names and offer it to `accept`. `None` when no entry holds that token
@@ -110,7 +127,7 @@ pub(crate) fn take<R>(
     let raw = entry.half.load(Ordering::Acquire);
     // SAFETY: the token named this entry, so the deposit stored a live half's address before it
     // stored the token, and the claim above is the only one that can succeed for it.
-    let render = unsafe { RenderHost::from_raw(raw) };
+    let render = unsafe { from_raw(raw) };
     match accept(render) {
         Ok(value) => {
             entry.token.store(0, Ordering::Release);
@@ -118,7 +135,7 @@ pub(crate) fn take<R>(
             Some(Ok(value))
         }
         Err(render) => {
-            entry.half.store(render.into_raw(), Ordering::Release);
+            entry.half.store(into_raw(render), Ordering::Release);
             entry.token.store(token, Ordering::Release);
             Some(Err(()))
         }

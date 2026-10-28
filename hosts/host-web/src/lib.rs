@@ -3122,8 +3122,8 @@ impl RenderHalf {
 /// control path (S6's Worker rejoins before it disposes); a render half dropped on its own frees
 /// the plan wherever it is dropped.
 pub struct RenderHost {
-    /// Boxed, so the handle that crosses threads is one pointer.
-    half: Box<RenderHalf>,
+    /// Boxed, so the handle that crosses threads is one pointer (the handoff registry's word).
+    pub(crate) half: Box<RenderHalf>,
 }
 
 impl RenderHost {
@@ -3193,25 +3193,6 @@ impl RenderHost {
             .ready
             .as_ref()
             .map_or(&[], |ready| &ready.shape.meter_frame)
-    }
-
-    /// The half as one address, for the handoff registry (#1332 S6). Nothing is freed; the
-    /// address must come back through [`Self::from_raw`].
-    pub(crate) fn into_raw(self) -> usize {
-        Box::into_raw(self.half).expose_provenance()
-    }
-
-    /// The half [`Self::into_raw`] gave out.
-    ///
-    /// # Safety
-    ///
-    /// `raw` came from [`Self::into_raw`] and has not been passed here since.
-    #[allow(unsafe_code)]
-    pub(crate) unsafe fn from_raw(raw: usize) -> Self {
-        // SAFETY: the caller's contract: `raw` is a live `Box<RenderHalf>` given out once, whose
-        // provenance `into_raw` exposed.
-        let half = unsafe { Box::from_raw(core::ptr::with_exposed_provenance_mut(raw)) };
-        Self { half }
     }
 
     /// Make the next adopting block wait twice on `barrier` just before it takes the adopted
