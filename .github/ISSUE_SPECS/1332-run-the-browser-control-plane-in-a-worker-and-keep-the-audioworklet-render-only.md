@@ -557,3 +557,125 @@ Slice S3 of the #1332 build plan (#1332(c)), branch `codex/issue-1332-growth` fr
   quantum, so the old check could not fire on one thread. The row discriminates once the Worker
   grows the memory with no worklet handler between (S9's isolated leg runs the same row); until
   then the red evidence is the hermetic test and the policy mutation.
+
+## S6 evidence (2026-10-28): the render half crosses instances through the exports
+
+Slice S6 of the #1332 build plan (#1332(a2)), branch `codex/issue-1332-handoff` from S3, with main
+`9c46475ea` (#1380, S3) merged. No JS change; S7 wires the exports.
+
+- **Seven exports** (`hosts/host-web/src/ffi.rs`). `host_release(handle) -> u64`: on the instance
+  that booted the host, the render half leaves it (the host keeps its control half and the status
+  shell); on a render-only instance, the half it adopted leaves it, after the bound stack canary
+  is checked. `0` for a wrong handle, nothing to release, or a full registry (the half stays).
+  `host_adopt(token) -> u32`: into an empty slot only: an instance with no session becomes a
+  render-only session under the token's host handle (`token >> 32`), and the host that released
+  the half takes it back. `RESULT_WRONG_STATE` for a taken slot, `RESULT_INVALID_ARGUMENT` for a
+  token no release issued, one already taken, or another host's half; the token is unconsumed on
+  every refusal. `instance_reserve(tls_size, tls_align) -> u32`: one 2 MiB stack (O6) with a
+  64-byte canary below it and one TLS block, leaked, and a 16-byte record `{struct_size,
+  tls_base, stack_top, stack_bottom}`. **Deviation:** the coordinator's `instance_reserve()` takes
+  `__tls_size`/`__tls_align` as arguments, because a Wasm global is not addressable from Rust; the
+  page reads the exported globals. `instance_bind(record) -> u32`: the second instance names its
+  reservation (only one this module made), so `host_release` checks its canary; an overwritten
+  canary fails the session (`web.instance.stack_canary`, sticky `RESULT_INTERNAL`) and the half
+  still goes back, so the Worker sees the failure. `render_diagnostic_ptr/_bytes(handle)`: the
+  render-only session's fixed failure text. `successor_header_ptr(handle)`: the Worker's meter-view
+  hook (below). The module links `--export=__wasm_init_tls,__tls_size,__tls_align,__tls_base,
+  __stack_pointer`.
+- **Registry** (`hosts/host-web/src/handoff.rs`). Four entries of process statics, one copy on the
+  shared memory: a deposit claims a free entry by a CAS of its half word, then stores the token
+  (`handle << 32 | sequence`); an adoption claims by a CAS of the token to `CLAIMED`, then
+  confirms or redeposits. No allocation, free, lock or wait. A concurrent adoption of the same
+  token is refused while another instance decides (an adopter never waits).
+- **No allocation in a release or an adoption.** `AudioWorkletEngineHost` holds its render half in
+  a box and a spare status shell allocated at boot; release and adoption exchange the two boxes,
+  and every refusal path forgets or redeposits what it holds. The call-graph gate now holds
+  `host_adopt` and `host_release` (zero pinned indirect sites, `--render-thread`); red on a release
+  that boxes a new shell (`rust_oom` site and six trap owners appear). The bridge rows grow by
+  2312 B (two `RenderHalf` boxes counted in `bridgeMetadataBytes`), inside their ceilings.
+- **Render exports on either instance.** `render`, `meter_lease`, `meter_poll`,
+  `meter_header_ptr`, `status_ptr`, `buffer_ptr`/`buffer_capacity` (output PCM and meter frame)
+  serve a render-only session. On a host whose half is away, render and lease refuse
+  `RESULT_WRONG_STATE`, poll answers `0`. The lease and the output-quantum check moved into the
+  render half. The Worker's status is the shell: its `state` mirrors the lifecycle word at each
+  control call, `last_result` is the control half's, and a rebuild published while the half is
+  away counts no blocking rebuild (`blockingRebuilds` stays 0 in worker mode). Dispose on a
+  render-only instance refuses; dispose on a host whose half never came back sets the lifecycle to
+  disposed (that half silences) and frees the control half.
+- **Per-instance `RENDER_ALLOCATIONS`**: a const `thread_local!` `Cell<u32>` like the flag (#1331
+  recipe rule 3). The control counter stays one shared copy.
+- **Seek, spectrum, track response with the half away.** `seek_source` already routes through the
+  control plane without the plan (S5). `SPECTRUM_CONFIGURE` after the release publishes a
+  successor that the first block adopts (no in-place adoption: that needs the plan, and worker
+  mode configures boot taps through the boot command, #2166); its capture and a strip
+  `RESPONSE_GET` are served from the Worker while the worklet renders (test below).
+
+**Not done: `OBSERVATION_READ` from the Worker (design choice, stopped as briefed).** The browser
+preparer moves the observation readers into the plan's `RenderCompanions` (#1589 R2), because
+the render half folds their gain reduction and pairs them at the swap block. With the half away,
+`command_with_document` reads the epoch's own reader list, which is empty for the browser, so a
+bound tap answers `observation.unbound`. The readers are `Arc` slots readable from any thread, but
+the plan that holds them is owned by the render thread, so the Worker cannot borrow them. Options:
+(a) the preparer gives each tap a second read-only reader endpoint kept in the epoch (control
+side), built only in worker mode so single-mode rows do not move; (b) the readers go back to the
+epoch (the C ABI's shape) and the render half gets its own endpoints for the fold and the carry;
+(c) a page-side protocol in which the worklet answers reads. (a) or (b) touches the engine
+observation slot, the control-plane epoch and the accounting rows. Root to choose.
+
+**Meter-view hook for S7 (S5 verify MAJOR).** Deferring adoption until the worklet acknowledges
+a header needs a gate inside the engine's plan mailbox (the epoch is known only after the claim),
+which is beyond S6; S6 does not add it. What S6 exposes instead is the hook for a protocol that
+never cuts a view in `process()`: `successor_header_ptr` names the header of the newest committed
+replacement. Proposed for S7: the worklet keeps its meter views over the whole shared memory
+(one `Uint32Array`/`Float32Array` pair, re-cut only in a message handler), so following a retired
+header's `successor_pointer` in `process()` reads through views it already holds. After each
+control call that may publish a plan, the Worker posts `{header, memoryBytes}`; the worklet's
+handler re-cuts the whole-memory views when the memory has grown. `process()` posts no meter frame
+for a header or frame beyond its views and counts that quantum (possible only when a growth and an
+adoption fall inside one handler round trip). The pointer is advisory: it may name freed tables
+after a supersession, and the worklet reads through it only after render adopted that plan. If
+root wants the acknowledgement gate instead, it is an engine change (`enter_block` must not claim
+an epoch above a host-set limit) for a successor issue.
+
+Test: `hosts/host-web/tests/worker_handoff.rs` (test-support, the module's
+`RenderLockedAllocator`), three tests, each thread one instance:
+1. Thread 1 boots, reserves, releases (its render-locked count does not move); its render and
+   lease refuse; it configures the spectrum with the half away (`blockingRebuilds` 0, a successor
+   header named). Thread 2 binds, adopts, takes the lease, renders 28 blocks with the poll, then
+   releases: its render-locked count does not move from before the adoption to after the release
+   (every allocation and free of its exports). Meanwhile thread 1 arms and reads the spectrum
+   (`Ready`) and asks a strip `RESPONSE_GET` (`RESPONSE_READY`, ready). Thread 1 adopts back
+   (count unchanged), and its dispose frees. The 28 blocks equal, bit for bit, a single instance
+   running the same commands (whose configure adopts in place).
+2. Two hosts release; the worklet adopts A; B is refused `RESULT_WRONG_STATE`; A renders; a
+   consumed token adopts nothing; host A refuses host B's token (`RESULT_INVALID_ARGUMENT`) and B
+   later adopts its own (so it was unconsumed); both dispose.
+3. An overwritten canary: a second bind refuses, the release fails the session, the Worker
+   adopts it, its status is failed, its control calls refuse, the diagnostic names
+   `web.instance.stack_canary`.
+40 consecutive runs green. Red on mutants: canary check removed (test 3, state `2` for `3`); a
+render-only instance that takes a second half (test 1, "the slot is taken", `1` for `3`); a
+release that boxes a new shell (test 1, release count `1`); the shell's lease answering OK (test
+1); a rebuild counted as blocking with the half away (test 1, `Some(1)`); a global render counter
+(the `render_lock` unit test's new per-thread case, `10` for `5`).
+
+Gates, all green: `cargo test -p host-web -p control-plane -p capi --all-targets` with their
+test-support features; `parameter-metadata` and `realtime-policy` tests (the ABI layout self-test
+fixture regenerated); workspace clippy `-D warnings`, fmt, `cargo doc -D warnings`; every
+lint-job policy script including `check-lane-policy.sh`; `realtime_policy` (290 regions;
+`handoff.rs` joins the unsafe allowlist); `build-web-audioworklet.sh`,
+`check-web-audioworklet.sh` (export set 55 functions plus the five linker symbols),
+`test-web-audioworklet.sh`, `check-abi-layout-v1.py --self-test`,
+`check-browser-expected-resources.py --artifacts`; the SDK job's scripts (generated `abi.ts`
+changed); both local browser legs, `npm run qualify -- --check-matrix --self-test-mutations` on
+Chromium 151.0.7922.34 and WebKit 26.5 with a private null PulseAudio sink: all gates passed.
+
+No bit moved in single mode (PR evidence): `direct-oracle.mjs` print mode over the base module
+(`e18fb827a`, `2daf4fb3…`) and S6 (`87157e1c…`): every PCM digest, status snapshot and timeline
+equal; only `bridgeMetadataBytes` and `bridgeRetainedBytes` grew, by 2312 B.
+
+Remains for S7: the Worker file and both JS halves (`__wasm_init_tls`, `__stack_pointer`,
+`instance_bind`, `host_adopt` in the worklet; `instance_reserve`, `host_release`,
+`successor_header_ptr` in the Worker), the meter-view protocol above, the handler names the
+render-thread table already lists (`adoptRenderHalf`, `releaseRenderHalf`,
+`readRenderDiagnostic`), and reporting the shared control counter as shared in worker mode.
