@@ -113,6 +113,21 @@ export interface BootOptions {
   readonly sourceRingFrames?: number;
   /** Total boot memory budget. Absent selects the engine's default ceiling. */
   readonly maximumMemoryBytes?: bigint;
+  /**
+   * The control frame in bytes (issue #2191). Absent selects the engine's default (the ABI
+   * layout's `constants.defaultControlFrameBytes`, 128 KiB); the engine refuses a value below
+   * 16 KiB or above 16 MiB with `web.options.control_frame_bytes`. The frame bounds every
+   * control command, reply and event; the core reports it in `CAPABILITIES_GET`.
+   */
+  readonly maximumControlFrameBytes?: bigint;
+  /**
+   * The longest session document in bytes (issue #2191). Absent leaves the limit to the memory
+   * budget: a document of `n` bytes needs `n * constants.parseTransientMultiplier` bytes of it to
+   * parse, so the default budget admits about 25 MiB. A value is a tighter cap for documents from
+   * other people; the boot, `document_ptr` and a `SESSION_REPLACE` refuse a longer document
+   * with `web.document.maximum_bytes`, naming its bytes and the limit.
+   */
+  readonly maximumDocumentBytes?: bigint;
   /** The stream hop of the boot's spectrum taps, sent in the boot's `SPECTRUM_CONFIGURE`. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   /**
@@ -143,7 +158,9 @@ export interface BootOptions {
 export const POLICY_WORDS = Object.freeze([
   "sourceRingFrames",
   "maximumMemoryBytes",
+  "maximumControlFrameBytes",
   "liveControlMeterBlocks",
+  "maximumDocumentBytes",
 ] as const);
 
 /** The two words whose values are defined by the boot's role rather than shared. */
@@ -192,9 +209,9 @@ export function writeBootOptions(
   u32("requireQuantumFrames", options.requireQuantumFrames ?? 0);
   u32("sourceRingFrames", options.sourceRingFrames ?? 0);
   u64("maximumMemoryBytes", options.maximumMemoryBytes ?? 0n);
-  u64("reserved1", 0n);
+  u64("maximumControlFrameBytes", options.maximumControlFrameBytes ?? 0n);
   u64("liveControlMeterBlocks", BigInt(options.liveControls?.meterBlocks ?? 0));
-  u64("reserved3", 0n);
+  u64("maximumDocumentBytes", options.maximumDocumentBytes ?? 0n);
   u64("reserved2", 0n);
 
   // A detached copy, so a caller can compare two boots' option blocks after the fact without

@@ -1407,12 +1407,13 @@ function stage(
   const optionsPointer = Number(exports.miso_engine_web_v1_boot_options_ptr());
   const optionBytes = writeBootOptions(exports.memory, optionsPointer, options);
 
-  // 3. `document_ptr(len)` -- the admission gate. A document over the engine's maximum is refused
+  // 3. `document_ptr(len)` -- the admission gate. A document over the options' limit (the
+  //    budget's parse projection, or the `maximumDocumentBytes` word, issue #2191) is refused
   //    *here*, before a byte is copied and before any staging is allocated, which is what makes
   //    oversize admission cost no memory (issue #243 eval 3).
   const documentPointer = Number(exports.miso_engine_web_v1_document_ptr(document.byteLength));
   if (documentPointer === 0) {
-    throw bootFailure(exports, 0, "the engine refused to stage the document");
+    throw bootFailure(exports, "the engine refused to stage the document");
   }
   new Uint8Array(exports.memory.buffer, documentPointer, document.byteLength).set(document);
 
@@ -1434,7 +1435,7 @@ function stage(
   // 4. `boot(len)`.
   const handle = Number(exports.miso_engine_web_v1_boot(document.byteLength));
   if (handle === 0) {
-    throw bootFailure(exports, documentPointer, "the engine refused to boot the document");
+    throw bootFailure(exports, "the engine refused to boot the document");
   }
   return { handle, optionBytes };
 }
@@ -1442,19 +1443,19 @@ function stage(
 /**
  * Build the typed refusal for a failed staging or boot.
  *
- * The diagnostic is written *over the staged document buffer*, so it is read back from the pointer
- * `document_ptr` returned -- and when staging itself refused there is no buffer, which is exactly
- * why `boot_diagnostic_bytes` is zero on that path and the code alone carries the answer.
+ * The diagnostic is read where `boot_diagnostic_ptr` says (issue #2191): over the staged document
+ * after a refused boot, and in a buffer of its own after a refused `document_ptr`, which names the
+ * document's bytes and the limit it is over.
  */
 function bootFailure(
   exports: ExportTable,
-  documentPointer: number,
   message: string,
 ): MisoEngineError {
   const result = Number(exports.miso_engine_web_v1_boot_result());
   const length = Number(exports.miso_engine_web_v1_boot_diagnostic_bytes());
-  const text = documentPointer !== 0 && length > 0
-    ? new TextDecoder().decode(new Uint8Array(exports.memory.buffer, documentPointer, length).slice())
+  const pointer = Number(exports.miso_engine_web_v1_boot_diagnostic_ptr());
+  const text = pointer !== 0 && length > 0
+    ? new TextDecoder().decode(new Uint8Array(exports.memory.buffer, pointer, length).slice())
     : "";
   const code = resultName(result, "boot");
   return new MisoEngineError(message, {
@@ -1464,9 +1465,6 @@ function bootFailure(
     diagnostics: parseDiagnostics(text),
   });
 }
-
-/** The engine's maximum staged document length, from the generated document. */
-export const MAXIMUM_DOCUMENT_BYTES: number = ABI_LAYOUT.constants.maximumDocumentBytes;
 
 /** Byte size of the boot options block, from the generated document. */
 export const BOOT_OPTIONS_BYTES: number = structBytes("bootOptions");

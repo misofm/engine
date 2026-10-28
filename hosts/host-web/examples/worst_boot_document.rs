@@ -1,11 +1,14 @@
-//! Emit the accepted dense 192-track × 4-effect JSON document at the 1 MiB staging ceiling.
+//! Emit the accepted dense 192-track × 4-effect JSON document, padded to 1 MiB: the staging
+//! ceiling until issue #2191 made the memory budget the document's limit, kept as a
+//! representative point of the parse projection.
 
 use std::io::{self, Write as _};
 
-use host_web::MAXIMUM_DOCUMENT_BYTES;
 use session::{RouteSource, SendTap, StableId, canonical_session_json, parse_session_json};
 
 const TRACKS: usize = 192;
+/// The padded length: the retired 1 MiB ceiling, a representative point (issue #2191).
+const DOCUMENT_BYTES: usize = 1 << 20;
 
 fn main() -> io::Result<()> {
     let mut model = parse_session_json(include_str!(
@@ -47,8 +50,7 @@ fn main() -> io::Result<()> {
     let mut document = canonical_session_json(&model)
         .expect("worst accepted shape canonicalizes")
         .into_bytes();
-    let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
-    assert!(document.len() + 2 <= maximum);
-    document.resize(maximum, b' ');
+    assert!(document.len() + 2 <= DOCUMENT_BYTES);
+    document.resize(DOCUMENT_BYTES, b' ');
     io::stdout().write_all(&document)
 }

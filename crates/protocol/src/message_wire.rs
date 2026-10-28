@@ -1184,6 +1184,10 @@ pub struct MeterEntry {
 /// The most entries a meter table holds (#1583 D2).
 pub const MAXIMUM_METER_ENTRIES: usize = 256;
 
+/// The most counter IDs one counter list carries (#2191): the list is strictly ascending and the
+/// codec refuses a longer one on encode and on decode. A retained counter table needs no more.
+pub const MAXIMUM_COUNTER_ENTRIES: usize = 256;
+
 /// Complete endpoint-local telemetry configuration. It does not create meter production.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TelemetryConfiguration {
@@ -2639,7 +2643,7 @@ fn decode_counter_ids(bytes: &[u8]) -> Result<Vec<CounterId>, DecodeError> {
 
 fn check_counter_ids(ids: &[CounterId], allow_empty: bool) -> Result<(), DecodeError> {
     if (!allow_empty && ids.is_empty())
-        || ids.len() > 256
+        || ids.len() > MAXIMUM_COUNTER_ENTRIES
         || ids.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(DecodeError::InvalidTlv);

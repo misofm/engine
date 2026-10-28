@@ -14,6 +14,7 @@ import type { MisoAudioWorkletHost, MisoStatus } from "../../../sdk/src/browser/
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
 import { CATALOG } from "../../../sdk/src/generated/catalog.ts";
 import { effect, session } from "../../../sdk/src/core/session.ts";
+import { encodeSessionTransaction, transaction } from "../../../sdk/src/core/session-transaction.ts";
 import { MisoEngineError } from "../../../sdk/src/core/errors.ts";
 import type { ObservationReadResult } from "../../../sdk/src/core/observation.ts";
 import type { TrackResponseResult } from "../../../sdk/src/core/live-response.ts";
@@ -2849,6 +2850,101 @@ export async function sendStructuralFrameThroughSdk(
     path: reply.applied?.editPath,
     revision: String(reply.revision),
     replyBytes: response.length,
+  };
+}
+
+/**
+ * Issue #2191: a console-shaped session of `tracks` stereo tracks on one stem: an EQ and a
+ * compressor in the console's pre-insert section and a limiter in its post-insert section, every
+ * track's EQ entry ridden off its defaults, a gate, a compressor and a delay inserted on every track, and one route per track
+ * to the output. At 256 tracks its document is over the 1 MiB the boot
+ * admitted before #2191.
+ */
+function consoleLimitsBuilder(tracks: number) {
+  let builder = session({ id: "console.limits", sampleRateHz: 48_000 })
+    .source("stem", { channels: 2, bitDepth: 24, frames: 48_000, content: `blake3:${"0".repeat(64)}` })
+    .console({
+      preInsert: [
+        { slot: "eq", effectId: "miso.parametric-eq" },
+        { slot: "comp", effectId: "miso.compressor" },
+      ],
+      postInsert: [{ slot: "limiter", effectId: "miso.true-peak-limiter", linkMode: "maximum" }],
+    })
+    .output("main");
+  for (let index = 0; index < tracks; index += 1) {
+    const id = `ch${String(index).padStart(3, "0")}`;
+    builder = builder
+      .track(id, {
+        source: "stem",
+        console: [
+          {
+            slot: "eq",
+            parameters: {
+              "band-1-enabled": true, "band-1-gain": -2, "band-1-frequency": 80 + index,
+              "band-2-enabled": true, "band-2-gain": 1.5, "band-2-frequency": 2_000 + index,
+            },
+          },
+          { slot: "comp" },
+          { slot: "limiter" },
+        ],
+        inserts: [
+          effect("miso.gate-expander", {}, { slotId: "gate" }),
+          effect("miso.compressor", { threshold: -18, ratio: 3 }, { slotId: "squeeze" }),
+          effect("miso.delay", { "delay time": 40 + (index % 50) }, { slotId: "slap" }),
+        ],
+      })
+      .route({
+        id: `${id}-main`,
+        source: { kind: "track", trackId: id, tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "main" },
+      });
+  }
+  return builder;
+}
+
+/** Issue #2191: the document of [`consoleLimitsBuilder`]. */
+export function consoleLimitsDocument(tracks: number): Uint8Array {
+  return new TextEncoder().encode(consoleLimitsBuilder(tracks).toJson());
+}
+
+/**
+ * Issue #2191: the console's atomic bus add on the booted console session -- a submix, its route
+ * to the output and one muted post-fader route from every track into it -- encoded by the SDK and
+ * sent through the browser transport, as the console app sends it. About `1344 + 336 * tracks`
+ * bytes: 87 KiB at 256 tracks, over the 16 KiB frame the browser had before #2191.
+ */
+export async function consoleBusAddThroughSdk(
+  host: MisoAudioWorkletHost,
+  tracks: number,
+  revision: string,
+): Promise<{ status: string; path: string | undefined; revision: string; frameBytes: number }> {
+  let edit = transaction(consoleLimitsBuilder(tracks))
+    .upsertSubmix("bus")
+    .upsertRoute({
+      id: "bus-main",
+      source: { kind: "submix", submixId: "bus", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "main" },
+    });
+  for (let index = 0; index < tracks; index += 1) {
+    const id = `ch${String(index).padStart(3, "0")}`;
+    edit = edit.upsertRoute({
+      id: `${id}-bus`,
+      source: { kind: "track", trackId: id, tap: "post_fader" },
+      destination: { kind: "submix_input", submixId: "bus" },
+      mute: true,
+    });
+  }
+  const transport = await createBrowserControlListTransport(host);
+  const frame = encodeSessionTransaction(edit.build(), {
+    requestId: transport.requestIds.next(),
+    expectedRevision: BigInt(revision),
+  });
+  const reply = decodeControlReply(await transport.send(frame));
+  return {
+    status: reply.status,
+    path: reply.applied?.editPath,
+    revision: String(reply.revision),
+    frameBytes: frame.length,
   };
 }
 

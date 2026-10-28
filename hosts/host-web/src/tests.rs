@@ -60,7 +60,8 @@ fn boot_options(quantum: u32) -> WebBootOptions {
 /// past its buffer. A boot of a short, mono session never meets either; only a rebuild does.
 #[test]
 fn staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlong_id() {
-    let projection = project_buffers(1, 48_000, 128).expect("bridge projection");
+    let projection =
+        project_buffers(1, 48_000, 128, DEFAULT_CONTROL_FRAME_BYTES).expect("bridge projection");
     let (mut buffers, _) = allocate_buffers(projection).expect("staging");
     assert_eq!(buffers.source_id.len(), session::STABLE_ID_MAXIMUM_BYTES);
     assert_eq!(
@@ -111,16 +112,19 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
     } else {
         options.source_ring_frames
     };
+    let frame = crate::resolved_control_frame_bytes(&options).expect("a valid frame word");
     let projection = project_buffers(
         u32::try_from(document.len()).expect("bounded fixture document"),
         shape.sample_rate_hz,
         shape.quantum_frames,
+        frame,
     )
     .expect("bridge projection");
     projected_retained_bytes(
         &compiled,
         source_ring_frames,
         projection.report.bridge_retained_bytes,
+        control_frame_rows(frame).expect("frame rows"),
     )
     .expect("retained projection")
 }
@@ -132,6 +136,10 @@ fn exact_retained_report_total(resources: &WebResourceReport) -> u64 {
         .and_then(|total| total.checked_add(resources.source_total_bytes))
         .expect("independent exact retained sum")
 }
+
+/// The dense documents' length: the 1 MiB the boot admitted before issue #2191 made the budget the
+/// document's limit, kept as a representative point of the parse projection.
+const DENSE_DOCUMENT_BYTES: usize = 1 << 20;
 
 struct DenseInvalidAutomationDocument {
     bytes: Vec<u8>,
@@ -148,7 +156,7 @@ fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDoc
     let (before, after) = BASE
         .split_once(EMPTY_AUTOMATION)
         .expect("browser fixture has the automation replacement seam");
-    let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
+    let maximum = DENSE_DOCUMENT_BYTES;
     let fixed_bytes = before.len() + HEADER.len() + FOOTER.len() + after.len();
     let segment_count = (maximum - fixed_bytes + 1) / (INVALID_SEGMENT.len() + 1);
     assert!(
@@ -179,7 +187,7 @@ fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDoc
 #[test]
 fn maximum_document_dense_invalid_fixture_reaches_bounded_semantic_validation() {
     let fixture = maximum_document_with_dense_invalid_automation();
-    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    assert_eq!(fixture.bytes.len(), DENSE_DOCUMENT_BYTES);
     assert!(fixture.segment_count > 10_000);
     let source = core::str::from_utf8(&fixture.bytes).expect("fixture is UTF-8 JSON");
     assert!(
@@ -215,7 +223,6 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(size_of::<WebBootOptions>(), 64);
     assert_eq!(size_of::<WebStatus>(), 80);
     assert_eq!(size_of::<WebResourceReport>(), 224);
-    assert_eq!(MAXIMUM_DOCUMENT_BYTES, 1 << 20);
     assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 20);
     assert_eq!(DEFAULT_MAXIMUM_MEMORY_BYTES, 512 << 20);
     assert_eq!(DIAGNOSTIC_BYTES, 1 << 14);
@@ -262,11 +269,12 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebBootOptions, require_quantum_frames), 12);
     assert_eq!(offset_of!(WebBootOptions, source_ring_frames), 16);
     assert_eq!(offset_of!(WebBootOptions, maximum_memory_bytes), 24);
-    assert_eq!(offset_of!(WebBootOptions, reserved1), 32);
+    assert_eq!(offset_of!(WebBootOptions, maximum_control_frame_bytes), 32);
     assert_eq!(offset_of!(WebBootOptions, live_control_meter_blocks), 40);
     // Issue #143 D3/D6 carved the configuration's remaining two reserved words; #1590 D5 and
-    // #1689 retired them again (`reserved3`, `reserved2`), and every offset is where it was.
-    assert_eq!(offset_of!(WebBootOptions, reserved3), 48);
+    // #1689 retired them again, #2191 made offset 48 the document word, and every offset is where
+    // it was.
+    assert_eq!(offset_of!(WebBootOptions, maximum_document_bytes), 48);
     assert_eq!(offset_of!(WebBootOptions, reserved2), 56);
     // The meter header is a new fixed structure, not a change to an existing one.
     // Issue #1209 D2 appended `submix_count` and its pad: 64 bytes became 72, nothing moved.
@@ -343,11 +351,72 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     assert_eq!(miso_engine_web_v1_buffer_ptr(0, BUFFER_DIAGNOSTIC), 0);
     assert_eq!(miso_engine_web_v1_boot(3), 0, "refusal invalidates staging");
     assert_eq!(miso_engine_web_v1_boot_diagnostic_bytes(), 0);
+    // Issue #2191 gate 4: the staging refuses a length its staged options do not admit before it
+    // allocates the document, with a diagnostic that names the bytes and the limit: the budget's
+    // parse projection (`len * 20 > budget`) and, tighter, the document word.
+    let budget = 1_u64 << 20;
+    let rows = control_frame_rows(DEFAULT_CONTROL_FRAME_BYTES).expect("frame rows");
+    let derived = ((budget - rows) / PARSE_TRANSIENT_MULTIPLIER) as u32;
     assert_eq!(
-        miso_engine_web_v1_document_ptr(MAXIMUM_DOCUMENT_BYTES + 1),
-        0
+        maximum_document_bytes(&WebBootOptions {
+            maximum_memory_bytes: budget,
+            ..boot_options(128)
+        }),
+        derived
     );
-    assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_DOCUMENT);
+    for (options, admitted, result, diagnostic) in [
+        (
+            WebBootOptions {
+                maximum_memory_bytes: budget,
+                ..boot_options(128)
+            },
+            derived,
+            RESULT_REFUSED_BUDGET,
+            format!(
+                "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget},document_bytes={},control_frame_bytes={DEFAULT_CONTROL_FRAME_BYTES},control_frame_rows_bytes={rows}]\n",
+                u64::from(derived + 1) * PARSE_TRANSIENT_MULTIPLIER + rows,
+                derived + 1
+            ),
+        ),
+        (
+            WebBootOptions {
+                maximum_memory_bytes: budget,
+                maximum_document_bytes: 100,
+                ..boot_options(128)
+            },
+            100,
+            RESULT_REFUSED_DOCUMENT,
+            "web.document.maximum_bytes\t$.maximum_document_bytes[document_bytes=101,limit_bytes=100]\n"
+                .to_owned(),
+        ),
+    ] {
+        crate::ffi::test_stage_options(options);
+        assert_eq!(miso_engine_web_v1_document_ptr(admitted + 1), 0);
+        assert_eq!(miso_engine_web_v1_boot_result(), result);
+        let length = miso_engine_web_v1_boot_diagnostic_bytes() as usize;
+        assert!(crate::ffi::test_boot_diagnostic_present());
+        assert_eq!(
+            String::from_utf8_lossy(&crate::ffi::test_staged_document()[..length]),
+            diagnostic
+        );
+        // Natively the address does not fit the `u32` export; the staging is what it names.
+        let _ = miso_engine_web_v1_document_ptr(admitted);
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+        assert_eq!(
+            crate::ffi::test_document_staging(),
+            (true, admitted as usize, admitted as usize),
+            "{admitted} bytes"
+        );
+        assert!(!crate::ffi::test_boot_diagnostic_present());
+    }
+    // At the default budget a 2 MiB document stages: no compiled 1 MiB is left.
+    crate::ffi::test_stage_options(boot_options(128));
+    let _ = miso_engine_web_v1_document_ptr(2 << 20);
+    assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+    assert_eq!(
+        crate::ffi::test_document_staging(),
+        (true, 2 << 20, 2 << 20)
+    );
 
     let document = one_track_session(128);
     let handle = crate::ffi::test_boot(document.as_bytes(), boot_options(128));
@@ -358,15 +427,18 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
-/// #1697 gate 2 (#1386 gate 8, browser half): `miso_engine_web_v1_replace_document_ptr` stages a
-/// replacement document of more than 64 KiB, and one of exactly `MAXIMUM_DOCUMENT_BYTES`, and the
-/// `SESSION_REPLACE` frame that names it commits through `miso_engine_web_v1_control_command`;
-/// one byte more, or none, stages nothing. After every command the staging holds no byte, and the
-/// first command after boot frees the boot's copy.
+/// #1697 gate 2 (#1386 gate 8, browser half), issue #2191 gate 4: a 2 MiB document boots at the
+/// default budget, and `miso_engine_web_v1_replace_document_ptr` stages a replacement document of
+/// more than 64 KiB and one of 2 MiB, and the `SESSION_REPLACE` frame that names it commits
+/// through `miso_engine_web_v1_control_command`; a document over the boot's limit, or none, stages
+/// nothing. Under a 1 MiB document word a replacement of exactly 1 MiB commits and one byte more
+/// stages nothing. After every command the staging holds no byte, and the first command after boot
+/// frees the boot's copy.
 ///
-/// Test value: red if the staging's bound is off by one either way, if a refused staging leaves
-/// an earlier document for the next command, or if the command (or the boot) keeps the document's
-/// bytes after the reply.
+/// Test value: red if a compiled 1 MiB survives at the boot or the replace staging, if the
+/// document word does not reach the replace staging (or its bound is off by one), if a refused
+/// staging leaves an earlier document for the next command, or if the command (or the boot) keeps
+/// the document's bytes after the reply.
 #[test]
 fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_command() {
     use protocol::{
@@ -390,10 +462,17 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
         bytes.truncate(length);
         bytes
     };
-    let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
-    let booted = one_track_session(128);
+    let two_mib = 2 << 20;
+    let maximum = maximum_document_bytes(&boot_options(128)) as usize;
+    let mut booted = one_track_session(128);
+    let pad = |document: &mut String, size: usize| {
+        assert!(document.len() < size);
+        // Whitespace after the value pads the document to `size` without changing it.
+        document.extend(core::iter::repeat_n(' ', size - document.len()));
+    };
+    pad(&mut booted, two_mib);
     let handle = crate::ffi::test_boot(booted.as_bytes(), boot_options(128));
-    assert_ne!(handle, 0);
+    assert_ne!(handle, 0, "a 2 MiB document boots at the default budget");
     assert!(
         crate::ffi::test_document_staging().2 >= booted.len(),
         "the boot keeps its copy until the first command"
@@ -411,16 +490,10 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
     );
 
     let mut model = parse_session_json(&booted).expect("the booted document");
-    for (request, (size, db)) in [((64 << 10) + 1, -3.0), (maximum, -6.0)]
-        .into_iter()
-        .enumerate()
-    {
-        let request = request as u64 + 2;
+    let mut replace = |handle: u32, request: u64, size: usize, db: f32| {
         model.tracks[0].fader.left_db = db;
         let mut document = canonical_session_json(&model).expect("a valid document");
-        assert!(document.len() < size);
-        // Whitespace after the value pads the document to `size` without changing it.
-        document.extend(core::iter::repeat_n(' ', size - document.len()));
+        pad(&mut document, size);
         assert!(crate::ffi::test_replace_document(
             handle,
             document.as_bytes()
@@ -458,7 +531,9 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
             (false, 0, 0),
             "{size} bytes: the command frees the document"
         );
-    }
+    };
+    replace(handle, 2, (64 << 10) + 1, -3.0);
+    replace(handle, 3, two_mib, -6.0);
 
     // A staged document and a command with a wrong handle: the refusal frees it too.
     assert!(crate::ffi::test_replace_document(handle, b"{}"));
@@ -480,6 +555,25 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
             "{refused} bytes stage nothing"
         );
     }
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+
+    // A 1 MiB document word: exactly 1 MiB commits, one byte more stages nothing.
+    let word = 1_usize << 20;
+    let booted = one_track_session(128);
+    let handle = crate::ffi::test_boot(
+        booted.as_bytes(),
+        WebBootOptions {
+            maximum_document_bytes: word as u64,
+            ..boot_options(128)
+        },
+    );
+    assert_ne!(handle, 0);
+    assert!(!crate::ffi::test_replace_document(
+        handle,
+        &vec![b' '; word + 1]
+    ));
+    assert_eq!(crate::ffi::test_document_staging(), (false, 0, 0));
+    replace(handle, 1, word, -9.0);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
@@ -652,7 +746,9 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     // Keep this a parser-projection boundary above the fixed live-response staging allocation:
     // insignificant trailing whitespace raises only parser input.
     document.extend(core::iter::repeat_n(' ', 131_072));
-    let parse_projection = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
+    // #2191: the parse projection carries the default control frame's rows.
+    let rows = control_frame_rows(DEFAULT_CONTROL_FRAME_BYTES).expect("frame rows");
+    let parse_projection = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER + rows;
     let accepted = WebBootOptions {
         maximum_memory_bytes: parse_projection,
         ..boot_options(128)
@@ -660,7 +756,7 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     AudioWorkletEngineHost::boot(document.as_bytes(), accepted).expect("inclusive budget");
     let refused = WebBootOptions {
         maximum_memory_bytes: parse_projection - 1,
-        ..boot_options(128)
+        ..accepted
     };
     let failure = AudioWorkletEngineHost::boot(document.as_bytes(), refused)
         .err()
@@ -669,8 +765,9 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     assert_eq!(
         failure.diagnostic(),
         format!(
-            "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={parse_projection},budget_bytes={}]\n",
-            parse_projection - 1
+            "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={parse_projection},budget_bytes={},document_bytes={},control_frame_bytes={DEFAULT_CONTROL_FRAME_BYTES},control_frame_rows_bytes={rows}]\n",
+            parse_projection - 1,
+            document.len()
         )
         .as_bytes()
     );
@@ -689,7 +786,7 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
 #[test]
 fn maximum_document_dense_invalid_boot_is_typed_and_bounded() {
     let fixture = maximum_document_with_dense_invalid_automation();
-    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    assert_eq!(fixture.bytes.len(), DENSE_DOCUMENT_BYTES);
     let failure = AudioWorkletEngineHost::boot(&fixture.bytes, WebBootOptions::default())
         .err()
         .expect("dense invalid automation must refuse");
@@ -731,7 +828,7 @@ fn maximum_document_dense_invalid_boot_finishes_under_one_second_in_release() {
     use std::time::{Duration, Instant};
 
     let fixture = maximum_document_with_dense_invalid_automation();
-    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    assert_eq!(fixture.bytes.len(), DENSE_DOCUMENT_BYTES);
     let started = Instant::now();
     let failure = AudioWorkletEngineHost::boot(&fixture.bytes, WebBootOptions::default())
         .err()
@@ -924,6 +1021,7 @@ fn bridge_resource_rows_are_exact() {
         document.len() as u32,
         shape.sample_rate_hz,
         shape.quantum_frames,
+        DEFAULT_CONTROL_FRAME_BYTES,
     )
     .expect("bridge projection");
     let (name, options) = ("boot", boot_options(128));
@@ -1073,54 +1171,93 @@ fn bridge_resource_rows_are_exact() {
     );
 }
 
+/// The exact retained aggregate is one budget: it boots at exactly its value and is refused one
+/// byte below, at the 16 KiB frame floor and at the 128 KiB default frame alike. Issue #2191 gate
+/// 2: between the two frames the aggregate grows by exactly the page's staging plus the control
+/// plane's frame rows the boot projects before it allocates (`control_frame_rows`).
+///
+/// Test value: red if the budget charges independent caps instead of one aggregate, if the
+/// page's staging is charged at a compiled frame, or if the control plane charges a frame-scaled
+/// row the pre-allocation projection leaves out.
 #[test]
 fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
     let document = one_track_session(128);
     let source_ring_frames = 1 << 20;
-    let options = WebBootOptions {
-        source_ring_frames,
-        ..boot_options(128)
-    };
-    let baseline =
-        AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("baseline boot");
-    let ready = baseline.test_render();
-    let dense_effect_table_bytes = size_of_val(ready.shape.effect_instances.as_ref()) as u64;
-    assert_eq!(
-        ready.shape.effect_instances.len(),
-        1,
-        "one-track fixture has one effect"
-    );
-    assert!(
-        baseline.resources().bridge_retained_bytes >= dense_effect_table_bytes,
-        "the bridge rows charge the dense effect table"
-    );
-    let exact = exact_retained_report_total(baseline.resources());
-    drop(baseline);
-    AudioWorkletEngineHost::boot(
-        document.as_bytes(),
-        WebBootOptions {
-            maximum_memory_bytes: exact,
-            ..options
-        },
-    )
-    .expect("exact aggregate budget must accept");
-    let failure = AudioWorkletEngineHost::boot(
-        document.as_bytes(),
-        WebBootOptions {
-            maximum_memory_bytes: exact - 1,
-            ..options
-        },
-    )
-    .err()
-    .expect("one byte below exact aggregate must refuse");
-    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
-    assert_eq!(
-        failure.diagnostic(),
-        format!(
-            "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
-            exact - 1
+    let mut charged = Vec::new();
+    for frame in [MINIMUM_CONTROL_FRAME_BYTES, DEFAULT_CONTROL_FRAME_BYTES] {
+        let options = WebBootOptions {
+            source_ring_frames,
+            maximum_control_frame_bytes: u64::from(frame),
+            ..boot_options(128)
+        };
+        let baseline =
+            AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("baseline boot");
+        let ready = baseline.test_render();
+        let dense_effect_table_bytes = size_of_val(ready.shape.effect_instances.as_ref()) as u64;
+        assert_eq!(
+            ready.shape.effect_instances.len(),
+            1,
+            "one-track fixture has one effect"
+        );
+        assert!(
+            baseline.resources().bridge_retained_bytes >= dense_effect_table_bytes,
+            "the bridge rows charge the dense effect table"
+        );
+        let exact = exact_retained_report_total(baseline.resources());
+        let control_retained = baseline
+            .test_control()
+            .queries
+            .resources()
+            .control_retained_bytes;
+        charged.push((frame, exact, control_retained));
+        drop(baseline);
+        AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact,
+                ..options
+            },
         )
-        .as_bytes()
+        .expect("exact aggregate budget must accept");
+        let failure = AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes: exact - 1,
+                ..options
+            },
+        )
+        .err()
+        .expect("one byte below exact aggregate must refuse");
+        assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+        assert_eq!(
+            failure.diagnostic(),
+            format!(
+                "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
+                exact - 1
+            )
+            .as_bytes()
+        );
+    }
+    let [
+        (small, small_exact, small_control),
+        (large, large_exact, large_control),
+    ] = charged[..]
+    else {
+        panic!("two frames")
+    };
+    let growth = u64::from(large - small);
+    // The page's staging is the bridge's row; everything else the frame scales is the control
+    // plane's, nothing else in the session moves, and the control plane's growth is exactly the
+    // frame rows the boot projects before it allocates (`control_frame_rows`).
+    assert_eq!(
+        large_exact - small_exact,
+        growth + (large_control - small_control),
+        "the staging and the control rows carry the whole growth"
+    );
+    assert_eq!(
+        large_control - small_control,
+        control_frame_rows(large).expect("rows") - control_frame_rows(small).expect("rows"),
+        "the projected frame rows are the control plane's whole frame-scaled charge"
     );
 }
 
@@ -1164,33 +1301,39 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
     // projection and the exact row alike (the gaps did not move, the ratios rose):
     // identity 628,275 / 57,268 = 10.97, nine-track 954,987 / 86,248 = 11.07, console
     // 3,846,216 / 640,894 = 6.00 (its bound did not rise: the shared multiplier was 7).
+    // Issue #2191: at the 128 KiB default frame; the projection carries the control plane's frame
+    // rows (`control_frame_rows`), so the frame moves the projection and the exact row alike.
+    // Re-pinned by #2191, whose counter tables shrank from half a frame of IDs to 256: identity
+    // 359,883 / 758,284 = 0.475, nine-track 686,763 / 787,264 = 0.872, console 3,604,132 /
+    // 1,341,910 = 2.686, each plus about 8%.
+    let defaults = boot_options(128);
     let representatives = [
         (
             "identity-one-track",
-            11_850_u64,
+            513_u64,
             one_track_session(128),
             WebBootOptions {
                 source_ring_frames: 128,
-                ..boot_options(128)
+                ..defaults
             },
         ),
         (
             "parametric-eq-nine-track",
-            11_960_u64,
+            942_u64,
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
-                ..boot_options(128)
+                ..defaults
             },
         ),
         (
             "console-sixty-four-track",
-            6_480_u64,
+            2_901_u64,
             include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
                 live_control_meter_blocks: u64::from(DEFAULT_METER_BLOCKS),
-                ..boot_options(128)
+                ..defaults
             },
         ),
     ];
@@ -2680,16 +2823,16 @@ fn observed_compressor_insert() -> session::Effect {
         .clone()
 }
 
-/// #1565A gate 2, #1689 gate 2, #1590 gate 4: the boot words at offsets 32, 48 and 56 are
-/// reserved. A nonzero value is refused `web.options.reserved1` (the word was the command-queue
-/// size until the browser's own value commands were deleted), `web.options.reserved3` (the word
-/// was the observation-taps word until every plan bound every declared tap) or
-/// `web.options.reserved2` (the word was the master boot word until the `master` row replaced it).
+/// #1689 gate 2: the boot word at offset 56 is reserved. A nonzero value is refused
+/// `web.options.reserved2` (the word was the master boot word until the `master` row replaced
+/// it). Issue #2191 gate 3: the control frame word at offset 32 is
+/// refused `web.options.control_frame_bytes` below 16 KiB and above 16 MiB.
 ///
 /// Test value: red if a deleted word still changes behaviour (a writer that still sets it is
-/// accepted and ignored).
+/// accepted and ignored), or if a frame word outside its bounds boots (one that starves every
+/// reply, or one past the `u32` staging addresses).
 #[test]
-fn the_retired_boot_words_are_reserved() {
+fn the_retired_boot_words_are_reserved_and_the_frame_word_is_bounded() {
     const QUANTUM: u32 = 128;
     let document = include_str!("../tests/browser-v1/command-session.json");
     let refusal = |options: WebBootOptions| {
@@ -2700,17 +2843,17 @@ fn the_retired_boot_words_are_reserved() {
     for (options, code) in [
         (
             WebBootOptions {
-                reserved1: 64,
+                maximum_control_frame_bytes: u64::from(MINIMUM_CONTROL_FRAME_BYTES) - 1,
                 ..boot_options(QUANTUM)
             },
-            &b"web.options.reserved1\t$\n"[..],
+            &b"web.options.control_frame_bytes\t$\n"[..],
         ),
         (
             WebBootOptions {
-                reserved3: 4,
+                maximum_control_frame_bytes: u64::from(MAXIMUM_CONTROL_FRAME_BYTES) + 1,
                 ..boot_options(QUANTUM)
             },
-            &b"web.options.reserved3\t$\n"[..],
+            &b"web.options.control_frame_bytes\t$\n"[..],
         ),
         (
             WebBootOptions {
@@ -9682,6 +9825,205 @@ fn a_flat_fader_automation_renders_the_static_fader_bits_in_the_browser() {
             assert_eq!(
                 rendered, expected,
                 "{label}: block {block} renders the static fader's bits"
+            );
+        }
+    }
+}
+
+// Issue #2191: the control frame is a boot word. The frame-scaled control rows, the replay cache
+// and the page's staging follow it, so a bus add over a 64-track console (one route per track,
+// more than the 16 KiB the browser had compiled in) commits under a larger word.
+mod configured_frame {
+    use super::*;
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
+        ExpectedRevision, ProtocolCodec, ProtocolLimits, RequestId, SessionEdit, SessionRevision,
+        TypedCommandFrame,
+    };
+    use session::{RouteDestination, RouteSource, SendTap, StableId};
+
+    const CONSOLE: &str =
+        include_str!("../../../fixtures/session/v1/console-sixty-four-track.json");
+
+    fn id(text: &str) -> StableId {
+        StableId::parse(text).expect("a stable ID")
+    }
+
+    /// An encoder for frames larger than any boot's, so the host, not the encoder, refuses.
+    fn codec() -> ProtocolCodec {
+        ProtocolCodec::new(ProtocolLimits {
+            max_frame_bytes: 1 << 20,
+            max_tlv_count: 1 << 19,
+            max_string_bytes: 1 << 20,
+            max_nesting: 4,
+        })
+    }
+
+    fn encode(payload: CommandPayload<'_>, request: u64, expected: ExpectedRevision) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 1 << 20];
+        let length = codec()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: expected,
+                    payload,
+                },
+                &mut bytes,
+            )
+            .expect("a command frame");
+        bytes.truncate(length);
+        bytes
+    }
+
+    /// The console's atomic bus add: a submix, its route to the output and one muted post-fader
+    /// route from every track into it.
+    fn bus_add(model: &session::SessionModel) -> Vec<SessionEdit> {
+        let bus = id("bus");
+        let mut to_output = model.routes[0].clone();
+        to_output.id = id("bus-main");
+        to_output.source = RouteSource::Submix {
+            submix_id: bus.clone(),
+            tap: SendTap::PostPan,
+        };
+        let mut edits = vec![
+            SessionEdit::UpsertSubmix {
+                submix: session::Submix::unity(bus.clone(), &model.console),
+            },
+            SessionEdit::UpsertRoute { route: to_output },
+        ];
+        for track in &model.tracks {
+            let mut route = model.routes[0].clone();
+            route.id = id(&format!("{}-bus", track.id.as_str()));
+            route.source = RouteSource::Track {
+                track_id: track.id.clone(),
+                tap: SendTap::PostFader,
+            };
+            route.destination = RouteDestination::SubmixInput {
+                submix_id: bus.clone(),
+            };
+            route.mute = true;
+            edits.push(SessionEdit::UpsertRoute { route });
+        }
+        edits
+    }
+
+    fn command(host: &mut AudioWorkletEngineHost, frame: &[u8]) -> (u32, Vec<u8>) {
+        let length = u32::try_from(frame.len()).expect("a u32 frame");
+        if let Some(staging) = host.control_request_mut(length) {
+            staging[..frame.len()].copy_from_slice(frame);
+        }
+        let result = host.control_command(length);
+        (result, host.control_response().to_vec())
+    }
+
+    /// Issue #2191 gate 1: a boot reports and enforces the frame its word selects. `CAPABILITIES_GET`
+    /// names the frame and a replay cache of at least two frames; a bus add over 64 tracks (more
+    /// than 16 KiB) commits at a 32 KiB word and at the 128 KiB default, and is refused at the 16
+    /// KiB floor; a frame one byte over the boot's frame is refused with a diagnostic that names
+    /// its length and the frame.
+    ///
+    /// Test value: red if a compiled 16 KiB survives anywhere on the frame's path (the staging,
+    /// the command gate, the core's codec, the capabilities), if the replay cache stays at 64 KiB
+    /// (the core answers every large command backpressure), or if an oversized frame is refused
+    /// without naming its bytes and the limit.
+    #[test]
+    fn a_bus_add_over_sixty_four_tracks_commits_within_the_booted_frame() {
+        let model = parse_session_json(CONSOLE).expect("the console fixture");
+        assert_eq!(model.tracks.len(), 64);
+        let add = bus_add(&model);
+        for (word, frame) in [
+            (
+                u64::from(MINIMUM_CONTROL_FRAME_BYTES),
+                MINIMUM_CONTROL_FRAME_BYTES,
+            ),
+            (32 << 10, 32 << 10),
+            (0, DEFAULT_CONTROL_FRAME_BYTES),
+        ] {
+            let mut host = AudioWorkletEngineHost::boot(
+                CONSOLE.as_bytes(),
+                WebBootOptions {
+                    maximum_control_frame_bytes: word,
+                    ..WebBootOptions::explicit_defaults()
+                },
+            )
+            .unwrap_or_else(|failure| {
+                panic!("{word}: {}", String::from_utf8_lossy(failure.diagnostic()))
+            });
+            assert_eq!(host.control_frame_bytes(), frame);
+
+            let (result, reply) = command(
+                &mut host,
+                &encode(CommandPayload::CapabilitiesGet, 1, ExpectedRevision::Any),
+            );
+            assert_eq!(result, RESULT_OK, "{word}");
+            let mut fields = [0_u16; 256];
+            let DecodedTypedResponseFrame::Success {
+                payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
+                ..
+            } = codec()
+                .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+                .expect("a capabilities reply")
+            else {
+                panic!("{word}: a capabilities reply")
+            };
+            assert_eq!(capabilities.maximum_frame_bytes, u64::from(frame));
+            assert!(capabilities.replay_bytes >= 2 * u64::from(frame), "{word}");
+
+            let revision = host.committed_revision();
+            let frame_bytes = encode(
+                CommandPayload::SessionTransactionApply(&add),
+                2,
+                ExpectedRevision::Exact(SessionRevision(revision)),
+            );
+            let length = frame_bytes.len() as u32;
+            assert!(length > MINIMUM_CONTROL_FRAME_BYTES && length < 32 << 10);
+            let (result, reply) = command(&mut host, &frame_bytes);
+            if length > frame {
+                assert_eq!(result, RESULT_INVALID_ARGUMENT, "{word}");
+                assert_eq!(
+                    reply,
+                    format!(
+                        "web.control.frame_bytes\t$[frame_bytes={length},limit_bytes={frame}]\n"
+                    )
+                    .into_bytes()
+                );
+            } else {
+                assert_eq!(result, RESULT_OK, "{word}");
+                let mut fields = [0_u16; 64];
+                let decoded = ProtocolCodec::default()
+                    .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+                    .expect("a transaction response");
+                match decoded {
+                    DecodedTypedResponseFrame::Success {
+                        payload: DecodedSuccessResponsePayload::SessionTransactionApplied(_),
+                        ..
+                    } => {}
+                    DecodedTypedResponseFrame::NonOk { payload, .. } => panic!(
+                        "{word}: the bus add is refused {:?}",
+                        payload
+                            .diagnostics
+                            .iter()
+                            .map(|diagnostic| diagnostic.code.to_string())
+                            .collect::<Vec<_>>()
+                    ),
+                    DecodedTypedResponseFrame::Success { .. } => panic!("{word}: not an apply"),
+                }
+                assert_eq!(host.committed_revision(), revision + 1);
+            }
+
+            assert!(
+                host.control_request_mut(frame)
+                    .is_some_and(|staging| staging.len() == frame as usize)
+            );
+            assert!(host.control_request_mut(frame + 1).is_none());
+            assert_eq!(host.control_command(frame + 1), RESULT_INVALID_ARGUMENT);
+            assert_eq!(
+                host.control_response(),
+                format!(
+                    "web.control.frame_bytes\t$[frame_bytes={},limit_bytes={frame}]\n",
+                    frame + 1
+                )
+                .as_bytes()
             );
         }
     }

@@ -249,9 +249,11 @@ describe("the headless engine's protocol calls", () => {
     // browser host, which rejects such a frame before the core with a raw `miso.error.v1` record.
     const source = { channels: 2, bitDepth: 24, frames: 48_000, content: `blake3:${"a".repeat(64)}` };
     const base = session({ id: "frame.limit", sampleRateHz: 48_000, quantumFrames: 128 }).source("a", source).output("out");
-    const engine = await createOfflineEngine(base.toJson(), { asset });
+    // #2191: the 16 KiB frame floor keeps the growing transaction small; the limit is the boot's.
+    const engine = await createOfflineEngine(base.toJson(), { asset, maximumControlFrameBytes: 16n << 10n });
     try {
       const limit = engine.controlTransactions().maximumFrameBytes;
+      assert.equal(limit, 16 << 10, "the boot's frame word reaches the cached limit");
       const sizes = [];
       const client = new ProtocolClient({
         send: (frame, document) => {

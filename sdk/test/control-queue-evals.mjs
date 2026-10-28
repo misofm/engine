@@ -710,10 +710,10 @@ describe("a transaction stays under the host's frame ceiling (batch 7 M4)", () =
     const engine = await createOfflineEngine(sessionDocument(), { asset });
     try {
       const queue = engine.controlTransactions();
-      assert.equal(queue.maximumFrameBytes, 16384, "the web host's control frame");
+      assert.equal(queue.maximumFrameBytes, 128 << 10, "the web host's default control frame (#2191)");
       assert.ok(queue.maximumTransactionEdits > 0);
       // A submit past the frame is refused here, before the core's staging buffer could be.
-      const wide = Array.from({ length: 200 }, (_unused, at) => edit(vocal, at + 1, 0));
+      const wide = Array.from({ length: 8000 }, (_unused, at) => edit(vocal, at + 1, 0));
       assert.throws(() => queue.submit(wide), MisoUsageError);
     } finally {
       engine.dispose();

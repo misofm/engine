@@ -68,6 +68,7 @@ pub use adapter::{
 };
 pub use compile::{
     CompiledChildren, RuntimePreparer, compile_children, compile_children_with_boot_command,
+    frame_scaled_retained_bytes,
 };
 pub use control::{
     CarriedTaps, CommandError, EventError, EventLane, ObservationChange, ObservationForward,

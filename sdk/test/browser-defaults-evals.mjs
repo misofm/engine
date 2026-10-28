@@ -73,6 +73,28 @@ test("default context + host preserve exact context, URLs and mapped policy", as
   } finally { if (previous === undefined) delete globalThis.AudioContext; else globalThis.AudioContext = previous; delete globalThis.__sdkBootRequests; }
 });
 
+// Issue #2191 gate 6: the shipped host receives the policy's two limit words, and zero for an
+// absent one. Red if the host mirror drops either word (the host would boot the engine's default
+// while the scratch boot sized for the caller's).
+test("the host request carries the policy's frame and document words, zero when absent", async () => {
+  const previous = globalThis.AudioContext;
+  globalThis.AudioContext = class { constructor() { return context(); } };
+  globalThis.__sdkBootRequests = [];
+  const url = hostUrl('export async function createMisoAudioWorkletHost(request) { globalThis.__sdkBootRequests.push(request); return { async dispose() {} }; }');
+  try {
+    for (const [policy, frame, document] of [
+      [{ maximumControlFrameBytes: 32n << 10n, maximumDocumentBytes: 4n << 20n }, 32n << 10n, 4n << 20n],
+      [{}, 0n, 0n],
+    ]) {
+      const engine = await createEngine({ document: "raw", scratchBoot: async () => shape, hostModuleUrl: url, policy });
+      const { options } = globalThis.__sdkBootRequests.at(-1);
+      assert.equal(options.maximumControlFrameBytes, frame);
+      assert.equal(options.maximumDocumentBytes, document);
+      await engine.close();
+    }
+  } finally { if (previous === undefined) delete globalThis.AudioContext; else globalThis.AudioContext = previous; delete globalThis.__sdkBootRequests; }
+});
+
 for (const hop of [0, "1024", 1_024.5]) {
   test(`invalid browser spectrum H${String(hop)} refuses before any boot dependency is called`, async () => {
     let scratchCalls = 0;

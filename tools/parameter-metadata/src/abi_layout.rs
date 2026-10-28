@@ -59,9 +59,10 @@ use host_core::{LAUNCH_SAMPLE_RATES, RESPONSE_MAXIMUM_POINTS};
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_DIAGNOSTIC,
     BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
-    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES,
-    INSTANCE_RESERVATION_BYTES, MAXIMUM_DOCUMENT_BYTES, METER_HEADER_BYTES, PLAN_LATENCY_BYTES,
-    RACK_CONSOLE, RACK_INSERTS, RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH,
+    DEFAULT_CONTROL_FRAME_BYTES, DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS,
+    DIAGNOSTIC_BYTES, INSTANCE_RESERVATION_BYTES, MAXIMUM_CONTROL_FRAME_BYTES, METER_HEADER_BYTES,
+    MINIMUM_CONTROL_FRAME_BYTES, PARSE_TRANSIENT_MULTIPLIER, PLAN_LATENCY_BYTES, RACK_CONSOLE,
+    RACK_INSERTS, RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH,
     RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL,
     RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
     RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED,
@@ -120,11 +121,12 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 56] = [
+pub const EXPORTS: [&str; 58] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_command_ptr",
     "miso_engine_web_v1_boot_diagnostic_bytes",
+    "miso_engine_web_v1_boot_diagnostic_ptr",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_buffer_capacity",
@@ -132,6 +134,7 @@ pub const EXPORTS: [&str; 56] = [
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
+    "miso_engine_web_v1_control_frame_bytes",
     "miso_engine_web_v1_control_request_ptr",
     "miso_engine_web_v1_control_response_bytes",
     "miso_engine_web_v1_control_response_ptr",
@@ -214,13 +217,21 @@ fn boot_options_fields() -> [Field; 11] {
             offset_of!(WebBootOptions, maximum_memory_bytes),
             "u64",
         ),
-        ("reserved1", offset_of!(WebBootOptions, reserved1), "u64"),
+        (
+            "maximumControlFrameBytes",
+            offset_of!(WebBootOptions, maximum_control_frame_bytes),
+            "u64",
+        ),
         (
             "liveControlMeterBlocks",
             offset_of!(WebBootOptions, live_control_meter_blocks),
             "u64",
         ),
-        ("reserved3", offset_of!(WebBootOptions, reserved3), "u64"),
+        (
+            "maximumDocumentBytes",
+            offset_of!(WebBootOptions, maximum_document_bytes),
+            "u64",
+        ),
         ("reserved2", offset_of!(WebBootOptions, reserved2), "u64"),
     ]
 }
@@ -684,7 +695,13 @@ pub fn render() -> String {
                 (u32::from(RACK_CONSOLE), "console"),
                 (u32::from(RACK_NOT_APPLICABLE), "notApplicable"),
             ]),
-            maximum_document_bytes: MAXIMUM_DOCUMENT_BYTES,
+            // Issue #2191: the document's default limit is `budget / parseTransientMultiplier`.
+            parse_transient_multiplier: PARSE_TRANSIENT_MULTIPLIER,
+            // Issue #2191: the control frame a zero `maximumControlFrameBytes` selects, and the
+            // word's bounds.
+            default_control_frame_bytes: DEFAULT_CONTROL_FRAME_BYTES,
+            minimum_control_frame_bytes: MINIMUM_CONTROL_FRAME_BYTES,
+            maximum_control_frame_bytes: MAXIMUM_CONTROL_FRAME_BYTES,
             maximum_source_channels: session::SOURCE_CHANNELS_LAUNCH_MAXIMUM,
             diagnostic_bytes: DIAGNOSTIC_BYTES,
             default_meter_blocks: DEFAULT_METER_BLOCKS,
@@ -784,7 +801,10 @@ struct Constants<'a> {
     backends: Vec<NamedValue<'a>>,
     buffer_kinds: Vec<NamedValue<'a>>,
     racks: Vec<NamedValue<'a>>,
-    maximum_document_bytes: u32,
+    parse_transient_multiplier: u64,
+    default_control_frame_bytes: u32,
+    minimum_control_frame_bytes: u32,
+    maximum_control_frame_bytes: u32,
     maximum_source_channels: u32,
     diagnostic_bytes: u32,
     default_meter_blocks: u32,

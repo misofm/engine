@@ -286,17 +286,19 @@ export interface MisoWebBootOptions {
   /// A budget above the module's shared-memory maximum (the ABI layout's `memory.maximumPages`
   /// pages, 512 MiB) is refused with `web.boot.memory_maximum` (issue #1380).
   maximumMemoryBytes: bigint;
-  /// Reserved (offset 32 of the boot options): must be exactly `0n`. It was the live-command queue
-  /// size until issue #1565.
-  reserved1: bigint;
+  /// The control frame in bytes, or `0n` for the engine's default, 128 KiB (offset 32 of the boot
+  /// options, issue 2191). It bounds every control frame, response and event; the engine refuses
+  /// a nonzero value below 16 KiB or above 16 MiB with `web.options.control_frame_bytes`. The host
+  /// reports the frame the engine resolved as `MisoAudioWorkletHost.controlFrameBytes`.
+  maximumControlFrameBytes: bigint;
   /// Meter window in render blocks, or `0n` for the engine's default window with no delivery
   /// (issues 137, 1581).
   liveControlMeterBlocks: bigint;
-  /// Reserved (offset 48 of the boot options): must be exactly `0n`. It was the observation-taps
-  /// word until issue 1590 retired it: every plan binds a queue for every declared tap of every
-  /// effect, as on the C ABI, so the session always serves the `Observe` edit and
-  /// `OBSERVATION_READ`.
-  reserved3: bigint;
+  /// The longest session document in bytes, or `0n` to leave the limit to the memory budget
+  /// (offset 48 of the boot options, issue 2191). A document of `n` bytes needs `n * 20` bytes of
+  /// the budget to parse, so the default budget admits about 25 MiB; a value is a tighter cap. The
+  /// boot, a staged replacement document and `SESSION_REPLACE` refuse a longer document.
+  maximumDocumentBytes: bigint;
   /// Reserved (offset 56 of the boot options): must be exactly `0n`. It was the master boot word
   /// until issue 1689 retired it: the app designates the master with the strip's `master` monitor
   /// row (`SET_CONTROL`), as on every host, and the core holds it by strip ID. With no tap on the
@@ -563,6 +565,9 @@ export interface MisoAudioWorkletHost {
   readonly backend: MisoWebBackend;
   readonly resources: MisoWebResourceReport;
   readonly memoryBytes: number;
+  /// The control frame the engine resolved at boot, in bytes (issue 2191): the boot option, or
+  /// the engine's default for `0n`. `control` refuses a longer frame.
+  readonly controlFrameBytes: number;
   /// Where the control plane runs (issue 1332 D1).
   readonly instanceMode: MisoInstanceMode;
   submitSource(request: MisoSourceRequest): Promise<MisoAck>;
@@ -606,10 +611,10 @@ export interface MisoAudioWorkletHost {
   /// Nothing in the frame is decoded here, and the engine decodes it in the worklet's message
   /// handler. The frame is copied. One request-ID allocator must serve every frame sent through
   /// this method, because the engine's replay cache refuses a reused ID with different bytes. A
-  /// frame that is empty or over 16384 bytes rejects with `RESULT_INVALID_ARGUMENT` (1), and more
+  /// frame that is empty or over `controlFrameBytes` rejects with `RESULT_INVALID_ARGUMENT` (1), and more
   /// than 64 frames in flight with `RESULT_BACKPRESSURE` (6), before the port. `document` (issue
   /// 1697) is the document a `SESSION_REPLACE` frame names, copied and sent beside it, up to the
-  /// boot's 1 MiB document bound; an empty one rejects with `RESULT_INVALID_ARGUMENT` (1) before
+  /// boot's document limit (issue 2191); an empty one rejects with `RESULT_INVALID_ARGUMENT` (1) before
   /// the port, and one over the bound answers `RESULT_INVALID_ARGUMENT` with an empty response.
   control(frame: Uint8Array, document?: Uint8Array): Promise<MisoControlReply>;
   /// Read the compiled session's canonical source order (issues 137 D1, 207).

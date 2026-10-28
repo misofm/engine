@@ -27,7 +27,7 @@
   },
   "directOracle": {
     "schema": "miso.web.browser.direct-oracle.v1",
-    "memoryBytesCeiling": 2097152,
+    "memoryBytesCeiling": 2621440,
     "simd128": {
       "initialStatus": {
         "state": 2,
@@ -58,16 +58,16 @@
         "idStagingBytes": "127",
         "sourcePcmStagingBytes": "1024",
         "outputPcmBytes": "1024",
-        "largestBridgeAllocationBytes": "16384",
+        "largestBridgeAllocationBytes": "131072",
         "effectScalarStateBytes": "0",
         "effectScalarScratchBytes": "0",
         "graphDelayBytes": "0",
-        "largestNamedAllocationBytes": "16384",
+        "largestNamedAllocationBytes": "131072",
         "observationRetainedBytes": "0"
       },
       "resourceCeilings": {
-        "bridgeMetadataBytes": "630784",
-        "bridgeRetainedBytes": "671616",
+        "bridgeMetadataBytes": "893120",
+        "bridgeRetainedBytes": "1060096",
         "sourceTotalBytes": "4352",
         "sourceOverheadBytes": "3264",
         "builtinRetainedBytes": "6720",

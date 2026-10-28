@@ -35,6 +35,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_command_ptr",
     "miso_engine_web_v1_boot_diagnostic_bytes",
+    "miso_engine_web_v1_boot_diagnostic_ptr",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_buffer_capacity",
@@ -42,6 +43,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
+    "miso_engine_web_v1_control_frame_bytes",
     "miso_engine_web_v1_control_request_ptr",
     "miso_engine_web_v1_control_response_bytes",
     "miso_engine_web_v1_control_response_ptr",
@@ -128,7 +130,7 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "reserved1",
+          "name": "maximumControlFrameBytes",
           "offset": 32,
           "type": "u64"
         },
@@ -138,7 +140,7 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "reserved3",
+          "name": "maximumDocumentBytes",
           "offset": 48,
           "type": "u64"
         },
@@ -730,7 +732,10 @@ export const ABI_LAYOUT = deepFreeze(
         "name": "notApplicable"
       }
     ],
-    "maximumDocumentBytes": 1048576,
+    "parseTransientMultiplier": 20,
+    "defaultControlFrameBytes": 131072,
+    "minimumControlFrameBytes": 16384,
+    "maximumControlFrameBytes": 16777216,
     "maximumSourceChannels": 2,
     "diagnosticBytes": 16384,
     "defaultMeterBlocks": 12,

@@ -22,7 +22,10 @@ they are the rules here:
 * the `bootOptions` block is 64 bytes and names exactly the eleven boot words, with the two
   `require_*` words and the three `liveControl*` words present under those exact spellings, because
   the SDK's scratch/worklet equality rule (adopted ruling finding 3) is written in terms of them.
-  The word at offset 32 is `reserved1` (slice #1565A: the command-queue word is deleted);
+  The word at offset 32 is `maximumControlFrameBytes` and the word at offset 48 is
+  `maximumDocumentBytes` (issue #2191; they were the retired command-queue and observation-taps
+  words), with the control frame's default and bounds in `constants` beside the parse
+  multiplier that sets the document's default limit;
 * `resultCodes` is the eleven-value frozen ladder with no duplicate value and no duplicate name;
 * `bootResultAliases` is exactly three rows, every one of which **re-uses** a value that
   `resultCodes` already names under a *different* name -- that is what makes it an alias table
@@ -102,6 +105,7 @@ EXPORTS = [
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_command_ptr",
     "miso_engine_web_v1_boot_diagnostic_bytes",
+    "miso_engine_web_v1_boot_diagnostic_ptr",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_buffer_capacity",
@@ -109,6 +113,7 @@ EXPORTS = [
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
+    "miso_engine_web_v1_control_frame_bytes",
     "miso_engine_web_v1_control_request_ptr",
     "miso_engine_web_v1_control_response_bytes",
     "miso_engine_web_v1_control_response_ptr",
@@ -172,15 +177,15 @@ STRUCTURES = {
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
-    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
-    "liveControlMeterBlocks", "reserved3", "reserved2",
+    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "maximumControlFrameBytes",
+    "liveControlMeterBlocks", "maximumDocumentBytes", "reserved2",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
 # statement of which words it masks.
 POLICY_WORDS = [
-    "sourceRingFrames", "maximumMemoryBytes",
-    "liveControlMeterBlocks",
+    "sourceRingFrames", "maximumMemoryBytes", "maximumControlFrameBytes",
+    "liveControlMeterBlocks", "maximumDocumentBytes",
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 
@@ -343,7 +348,9 @@ def validate(document: object) -> None:
     require(isinstance(constants, dict), "constants is an object")
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
-        "maximumDocumentBytes", "maximumSourceChannels", "diagnosticBytes", "defaultMeterBlocks",
+        "parseTransientMultiplier", "defaultControlFrameBytes", "minimumControlFrameBytes",
+        "maximumControlFrameBytes", "maximumSourceChannels", "diagnosticBytes",
+        "defaultMeterBlocks",
         "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
         "racks",
     }, f"constants keys are exact: {sorted(constants)}")
@@ -372,7 +379,10 @@ def validate(document: object) -> None:
     require(len({row["name"] for row in aliases}) == 3, "alias names are distinct")
 
     for name, expected in (
-        ("maximumDocumentBytes", 1 << 20),
+        ("parseTransientMultiplier", 20),
+        ("defaultControlFrameBytes", 128 << 10),
+        ("minimumControlFrameBytes", 16 << 10),
+        ("maximumControlFrameBytes", 16 << 20),
         ("maximumSourceChannels", 2),
         ("diagnosticBytes", 1 << 14),
         ("defaultMeterBlocks", 12),

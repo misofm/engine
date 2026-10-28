@@ -14,6 +14,7 @@ const MEMORY_MAXIMUM_PAGES = 8192;
 const RENDER_PORT_TAGS = new Set(["miso.meters.v1", "miso.telemetry.v1", "miso.renderallocations.v1"]);
 const READY_FIELDS = [
   "tag", "requestId", "result", "backend", "resources", "memoryBytes", "sourceRingFrames",
+  "controlFrameBytes",
 ];
 const VALID_RESULTS = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 255]);
 
@@ -78,8 +79,8 @@ const OPTION_FIELDS = [
   "workletModuleUrl",
 ];
 const BOOT_OPTION_FIELDS = [
-  "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "reserved3", "reserved2",
+  "sourceRingFrames", "maximumMemoryBytes", "maximumControlFrameBytes", "liveControlMeterBlocks",
+  "maximumDocumentBytes", "reserved2",
 ];
 
 const SOURCE_FIELDS = [
@@ -112,8 +113,10 @@ const MAXIMUM_CONTROL_IN_FLIGHT = 64;
 // after 2 s and answers `release-timeout`, so 5 s leaves it room to dispose and answer first. A
 // browser may run the timer late (a throttled background tab), which only lengthens the wait.
 const DISPOSE_TIMEOUT_MS = 5000;
-// The engine's `maximum_control_frame_bytes` (`CONTROL_FRAME_BYTES` in the Rust host).
-const MAXIMUM_CONTROL_FRAME_BYTES = 16384;
+// Issue #2191: the smallest control frame a boot can resolve (`MINIMUM_CONTROL_FRAME_BYTES` in
+// the Rust host). The frame itself is the boot's: the ready message carries what the engine
+// resolved (`miso_engine_web_v1_control_frame_bytes`), and the host bounds every frame by it.
+const MINIMUM_CONTROL_FRAME_BYTES = 16384;
 // Issue #207: one entry of the session map's source list. The names are the `.d.ts`'s and the
 // worklet's, spelled once here so the acknowledgement validator and the type declaration cannot
 // drift apart without `scripts/check-session-map-shape.py` seeing it.
@@ -197,9 +200,9 @@ function snapshotBootOptions(value) {
   const snapshot = {
     sourceRingFrames: captured.descriptors.get("sourceRingFrames").value,
     maximumMemoryBytes: captured.descriptors.get("maximumMemoryBytes").value,
-    reserved1: captured.descriptors.get("reserved1").value,
+    maximumControlFrameBytes: captured.descriptors.get("maximumControlFrameBytes").value,
     liveControlMeterBlocks: captured.descriptors.get("liveControlMeterBlocks").value,
-    reserved3: captured.descriptors.get("reserved3").value,
+    maximumDocumentBytes: captured.descriptors.get("maximumDocumentBytes").value,
     reserved2: captured.descriptors.get("reserved2").value,
   };
   return validBootOptions(snapshot) ? snapshot : undefined;
@@ -278,11 +281,15 @@ function validBootOptions(options) {
   return hasExactFields(options, BOOT_OPTION_FIELDS)
     && validU32(options.sourceRingFrames)
     && validU64(options.maximumMemoryBytes)
-    && options.reserved1 === 0n
+    && validU64(options.maximumControlFrameBytes)
     && validU64(options.liveControlMeterBlocks)
     && options.liveControlMeterBlocks <= 0xffffffffn
-    && options.reserved3 === 0n
+    && validU64(options.maximumDocumentBytes)
     && options.reserved2 === 0n;
+}
+
+function validControlFrameBytes(value) {
+  return validU32(value) && value >= MINIMUM_CONTROL_FRAME_BYTES;
 }
 
 function validResources(resources, backend, sampleRateHz, quantumFrames) {
@@ -477,6 +484,9 @@ class MisoAudioWorkletHost {
   #inFlightControl = 0;
   #inFlightLease = new Set();
   #ringBlocks;
+  /// Issue #2191: the control frame the boot resolved; every control frame, response and event is
+  /// at most this long.
+  #controlFrameBytes;
   #onMeterFrame = null;
   #onTelemetryFrame = null;
   /// Issue #1570b D5: the listeners of the engine's protocol events, in subscription order, and the
@@ -505,6 +515,7 @@ class MisoAudioWorkletHost {
     resources,
     memoryBytes,
     ringBlocks,
+    controlFrameBytes,
     instanceMode = "single",
     worker = undefined,
     early = undefined,
@@ -514,6 +525,8 @@ class MisoAudioWorkletHost {
       backend: { value: backend, enumerable: true },
       resources: { value: Object.freeze(resources), enumerable: true },
       memoryBytes: { value: memoryBytes, enumerable: true },
+      // Issue #2191: the control frame the engine resolved at boot, in bytes.
+      controlFrameBytes: { value: controlFrameBytes, enumerable: true },
       // Issue #1332 D1: where the control plane runs, `"worker"` or `"single"`.
       instanceMode: { value: instanceMode, enumerable: true },
     });
@@ -521,6 +534,7 @@ class MisoAudioWorkletHost {
     this.#sampleRateHz = sampleRateHz;
     this.#quantumFrames = quantumFrames;
     this.#ringBlocks = ringBlocks;
+    this.#controlFrameBytes = controlFrameBytes;
     this.#renderPort = node.port;
     this.#worker = worker;
     this.#port = worker ?? node.port;
@@ -705,7 +719,7 @@ class MisoAudioWorkletHost {
           || !(message.frame instanceof Uint8Array)
           || !(message.frame.buffer instanceof ArrayBuffer)
           || message.frame.byteLength === 0
-          || message.frame.byteLength > MAXIMUM_CONTROL_FRAME_BYTES) {
+          || message.frame.byteLength > this.#controlFrameBytes) {
         this.#fail(webError(255, this.#oldestRequestId()));
         return;
       }
@@ -828,7 +842,7 @@ class MisoAudioWorkletHost {
     const validControl = pending.response !== "control" || (
       message.response instanceof Uint8Array
       && message.response.buffer instanceof ArrayBuffer
-      && message.response.byteLength <= MAXIMUM_CONTROL_FRAME_BYTES
+      && message.response.byteLength <= this.#controlFrameBytes
       && validU64(message.revision)
     );
     const validSessionMap = pending.response !== "sessionMap" || (
@@ -1248,19 +1262,19 @@ class MisoAudioWorkletHost {
   /// through this method (the SDK's transaction queue and any catalog read share it): this method
   /// never rewrites a frame, and a second allocator would collide.
   ///
-  /// The frame is copied; the caller keeps its array. A frame over the engine's
-  /// `maximum_control_frame_bytes` or one that is empty is refused locally with
+  /// The frame is copied; the caller keeps its array. A frame over the boot's control frame
+  /// (`controlFrameBytes`, issue #2191) or one that is empty is refused locally with
   /// `RESULT_INVALID_ARGUMENT`, and more than 64 frames in flight with `RESULT_BACKPRESSURE`.
   ///
   /// **The document** (issue #1697). A `SESSION_REPLACE` frame names a document by its length and
-  /// SHA-256; `document` carries those bytes beside the frame, up to the boot's 1 MiB document
-  /// bound, and the engine checks, parses and diffs them as the C ABI's
+  /// SHA-256; `document` carries those bytes beside the frame, up to the boot's document limit
+  /// (issue #2191: the budget's parse projection, or the `maximumDocumentBytes` word), and the engine checks, parses and diffs them as the C ABI's
   /// `miso_engine_v1_submit_document_command` does. It is copied too. A `document` that is not a
   /// `Uint8Array` or is empty is refused locally with `RESULT_INVALID_ARGUMENT`; one the engine's
   /// staging refuses (over the bound) answers `RESULT_INVALID_ARGUMENT` with an empty response.
   control(frame, document) {
     if (!(frame instanceof Uint8Array) || frame.byteLength === 0
-        || frame.byteLength > MAXIMUM_CONTROL_FRAME_BYTES
+        || frame.byteLength > this.#controlFrameBytes
         || (document !== undefined
           && (!(document instanceof Uint8Array) || document.byteLength === 0))) {
       return Promise.reject(webError(1));
@@ -1631,6 +1645,7 @@ export async function createMisoAudioWorkletHost(options) {
           || !Number.isSafeInteger(workerReady.memoryBytes) || workerReady.memoryBytes <= 0
           || !validU32(workerReady.sourceRingFrames) || workerReady.sourceRingFrames === 0
           || workerReady.sourceRingFrames % quantumFrames !== 0
+          || !validControlFrameBytes(workerReady.controlFrameBytes)
           || !validResources(workerReady.resources, selected.backend, sampleRateHz, quantumFrames)) {
         throw webError(255);
       }
@@ -1690,6 +1705,7 @@ export async function createMisoAudioWorkletHost(options) {
             && Number.isSafeInteger(message.memoryBytes) && message.memoryBytes > 0
             && validU32(message.sourceRingFrames) && message.sourceRingFrames > 0
             && message.sourceRingFrames % quantumFrames === 0
+            && validControlFrameBytes(message.controlFrameBytes)
             && validResources(
               message.resources,
               selected.backend,
@@ -1721,6 +1737,7 @@ export async function createMisoAudioWorkletHost(options) {
       // The per-source in-flight bound is the ring depth in quanta: the ring the engine reports it
       // resolved at boot (issue #1406b), so a zero override gives the engine's own default ring.
       ready.sourceRingFrames / quantumFrames,
+      ready.controlFrameBytes,
       instanceMode,
       booted?.worker,
       booted?.early,

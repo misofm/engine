@@ -8,8 +8,7 @@ use std::alloc::{GlobalAlloc, System};
 
 use host_core::{compile_host_model, parse_host_session};
 use host_web::{
-    AudioWorkletEngineHost, MAXIMUM_DOCUMENT_BYTES, PARSE_TRANSIENT_MULTIPLIER,
-    RESULT_REFUSED_BUDGET, WebBootOptions,
+    AudioWorkletEngineHost, PARSE_TRANSIENT_MULTIPLIER, RESULT_REFUSED_BUDGET, WebBootOptions,
 };
 use session::{
     CompileCaps, RouteSource, SendTap, StableId, canonical_session_json, parse_session_json,
@@ -184,9 +183,9 @@ fn unlimited_caps() -> CompileCaps {
     }
 }
 
-/// A dense accepted JSON shape: 192 tracks, four effect declarations per track, followed by JSON
-/// whitespace to the exact 1 MiB staging ceiling.
-fn dense_document(tracks: usize, pad_to_limit: bool) -> Vec<u8> {
+/// A dense accepted JSON shape: `tracks` tracks, four effect declarations per track, followed by
+/// JSON whitespace to `pad_to` bytes when given (1 MiB, the staging ceiling before issue #2191).
+fn dense_document(tracks: usize, pad_to: Option<usize>) -> Vec<u8> {
     let mut model = parse_session_json(include_str!(
         "../../../fixtures/session/v1/parametric-eq-nine-track.json"
     ))
@@ -226,8 +225,7 @@ fn dense_document(tracks: usize, pad_to_limit: bool) -> Vec<u8> {
     let mut document = canonical_session_json(&model)
         .expect("worst accepted shape canonicalizes")
         .into_bytes();
-    if pad_to_limit {
-        let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
+    if let Some(maximum) = pad_to {
         assert!(
             document.len() <= maximum,
             "{tracks}x4 fixture is {} bytes before padding",
@@ -246,10 +244,13 @@ fn pinned_multiplier_bounds_the_worst_accepted_parse_and_model_build_peak() {
             false,
             include_bytes!("../../../fixtures/session/v1/canonical-minimal.json").to_vec(),
         ),
-        (1, false, dense_document(1, false)),
-        (64, false, dense_document(64, false)),
-        (192, false, dense_document(192, false)),
-        (192, true, dense_document(192, true)),
+        (1, false, dense_document(1, None)),
+        (64, false, dense_document(64, None)),
+        (192, false, dense_document(192, None)),
+        (192, true, dense_document(192, Some(1 << 20))),
+        // Issue #2191 gate 5: a dense document of about 4 MiB, four times the retired 1 MiB
+        // ceiling, which the budget-derived limit now admits.
+        (1536, false, dense_document(1536, None)),
     ];
     for (tracks, pad_to_limit, document) in cases {
         let (_, peak) = measured_peak(|| {
@@ -275,7 +276,7 @@ fn pinned_multiplier_bounds_the_worst_accepted_parse_and_model_build_peak() {
         );
     }
 
-    let document = dense_document(192, true);
+    let document = dense_document(192, Some(1 << 20));
     let pinned = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
 
     let (failure, refused_peak) = measured_peak(|| {
@@ -298,5 +299,40 @@ fn pinned_multiplier_bounds_the_worst_accepted_parse_and_model_build_peak() {
     assert!(
         refused_peak < document.len(),
         "pre-parse refusal allocated {refused_peak} bytes; the parser must not have run"
+    );
+}
+
+/// Issue #2191: a 1 MiB control frame under a budget below its control-plane rows (about 4.3 MB)
+/// but far above the document's parse projection is refused before the parser or the control
+/// plane allocates anything, with a diagnostic that names the frame and its rows.
+///
+/// Test value: red if the boot's pre-allocation admission leaves out the frame-scaled rows: the
+/// boot then compiles, allocates those rows, and only the exact check refuses it, after the memory
+/// (permanently, on wasm) grew past the budget.
+#[test]
+fn a_frame_the_budget_cannot_hold_is_refused_before_anything_is_allocated() {
+    let document = include_bytes!("../../../fixtures/session/v1/canonical-minimal.json");
+    let (failure, peak) = measured_peak(|| {
+        AudioWorkletEngineHost::boot(
+            document,
+            WebBootOptions {
+                maximum_memory_bytes: 4 << 20,
+                maximum_control_frame_bytes: 1 << 20,
+                ..WebBootOptions::default()
+            },
+        )
+        .err()
+        .expect("a frame over the budget refuses")
+    });
+    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+    let diagnostic = String::from_utf8_lossy(failure.diagnostic()).into_owned();
+    assert!(
+        diagnostic.starts_with("host.budget.parse_projection\t")
+            && diagnostic.contains(",control_frame_bytes=1048576,control_frame_rows_bytes="),
+        "{diagnostic}"
+    );
+    assert!(
+        peak < document.len() + 4096,
+        "the refusal allocated {peak} bytes; nothing past the diagnostic may be allocated"
     );
 }

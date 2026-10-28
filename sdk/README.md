@@ -848,6 +848,33 @@ specified; stdout output contains only the document. It does not download or dec
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
 
+## Upgrading from 0.9.0
+
+The browser host's two compiled byte limits are boot options now (issue #2191). A session that
+grows no longer meets a fixed cap: the memory budget is the limit.
+
+- Removed: the export `MAXIMUM_DOCUMENT_BYTES` (1 MiB). There is no fixed document maximum: a
+  document of `n` bytes needs `n * 20` bytes of the memory budget to parse
+  (`ABI_LAYOUT.constants.parseTransientMultiplier`), so the default 512 MiB budget admits about
+  25 MiB. Code that read the export for a size check reads its own `maximumDocumentBytes`, or
+  lets the engine refuse.
+- Added: the boot options `maximumControlFrameBytes` and `maximumDocumentBytes` (`bigint`, in
+  `BootOptions`, `OfflineEngineOptions` and the browser `policy`, and on the shipped host's
+  `MisoWebBootOptions`, where they replace `reserved1` and `reserved3`). Absent or `0n`, the
+  control frame is 128 KiB (`constants.defaultControlFrameBytes`; 16 KiB to 16 MiB is accepted,
+  anything else is refused with `web.options.control_frame_bytes`) and the document limit is the
+  budget's. A `maximumDocumentBytes` is a tighter cap, for documents from other people.
+- Changed: the default control frame is 128 KiB, up from 16 KiB, so one transaction holds a bus
+  add over about 385 tracks. The frame is charged to the budget, about 0.6 MB of retained memory at
+  the default. `CAPABILITIES_GET` (and the transaction queue's `maximumFrameBytes`) report it.
+- Added: `host.controlFrameBytes`, the frame the engine resolved at boot; `host.control()`
+  refuses a longer frame.
+- Changed: a document refused before staging is a typed error that names its bytes and the
+  limit: `web.document.maximum_bytes` (over `maximumDocumentBytes`, `refusedDocument`) or
+  `host.budget.parse_projection` (over the budget, `refusedBudget`, which was `refusedDocument`
+  for a document over 1 MiB). An oversized control frame is refused with
+  `web.control.frame_bytes`, naming both.
+
 ## Upgrading from 0.8.1
 
 0.9.0 adds worker mode. On a cross-origin-isolated page the engine now runs in worker mode by
@@ -1031,6 +1058,8 @@ module.
   `policy`).
 - The command-queue, master-track and observation-taps boot words are retired: `reserved1`,
   `reserved2` and `reserved3`, always zero. Every plan binds every declared observation tap.
+  (Since 0.10.0 the offsets of `reserved1` and `reserved3` hold `maximumControlFrameBytes` and
+  `maximumDocumentBytes`.)
 - `liveControls.observationTaps` is refused with `MisoUsageError`, never ignored.
 
 ### Behaviour and license

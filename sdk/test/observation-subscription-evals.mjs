@@ -917,7 +917,8 @@ describe("#1589b -- the frame transport's resend and frame rules", () => {
   // limit is sent instead of refused before it leaves the SDK.
   test("a read past one reply frame is split, and a transaction past the frame is refused before it is sent", async () => {
     const tracks = Array.from({ length: 100 }, (_unused, index) => `t${index}`);
-    const engine = await createOfflineEngine(compSession(tracks), { asset });
+    // The 16 KiB frame floor (#2191), so 100 taps outgrow one reply frame.
+    const engine = await createOfflineEngine(compSession(tracks), { asset, maximumControlFrameBytes: 16n << 10n });
     const sent = transactionsOf(engine);
     try {
       const limit = engine.controlTransactions().maximumFrameBytes;

@@ -73,12 +73,11 @@ function bootOptions(sourceRingFrames, liveControlMeterBlocks = 0n) {
     // Zero is "no caller-imposed memory ceiling", the same word `tests/browser-v1` sends and the
     // same one the direct oracle writes at boot-options offset 24.
     maximumMemoryBytes: 0n,
-    // Issue #1565: offset 32 is reserved and must be zero.
-    reserved1: 0n,
+    // Issue #2191: offset 32 is the control frame word; zero is the engine's default frame.
+    maximumControlFrameBytes: 0n,
     liveControlMeterBlocks,
-    // Issue #1590 D5: offset 48 was the observation-taps word; it is reserved and must be zero.
-    // Every plan binds every declared tap.
-    reserved3: 0n,
+    // Issue #2191: offset 48 is the document word; zero leaves the limit to the budget.
+    maximumDocumentBytes: 0n,
     // Issue #1689: offset 56 was the master boot word; it is reserved and must be zero. The
     // observation row designates its master with the strip's `master` row after boot.
     reserved2: 0n,
@@ -726,6 +725,48 @@ async function runEmptyBootQualification(createHost, emptyDocument, frameFixture
       structureEpochs: [...new Set(grownFrames.map((entry) => entry.structureEpoch))],
       renderAllocations: grownAllocations,
     },
+  };
+}
+
+/// Issue #2191: the console-shaped session's tracks and the quanta rendered after its bus add.
+const CONSOLE_LIMITS_TRACKS = 256;
+const CONSOLE_LIMITS_BLOCKS = 8;
+
+/// Issue #2191: the configured limits in a real browser. A console-shaped session of 256 tracks
+/// (a document over the 1 MiB the boot admitted before #2191) boots at the default options, and
+/// the console's atomic bus add over all 256 tracks (one frame of about 87 KiB, over the 16 KiB
+/// frame the browser had) commits on the rebuild path, and the applied-revision watermark covers
+/// it once the context renders. The host reports the frame the engine resolved.
+async function runConsoleLimitsQualification(createHost) {
+  const sdk = await import("/sdk/sdk-response-client.js");
+  const document = sdk.consoleLimitsDocument(CONSOLE_LIMITS_TRACKS);
+  const context = new OfflineAudioContext(2, CONSOLE_LIMITS_BLOCKS * QUANTUM_FRAMES, SAMPLE_RATE);
+  const host = await createHost({
+    context,
+    document,
+    options: bootOptions(0),
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  });
+  host.node.connect(context.destination);
+  const booted = await host.status();
+  const reply = await sdk.consoleBusAddThroughSdk(
+    host, CONSOLE_LIMITS_TRACKS, booted.appliedRevision.toString(),
+  );
+  await context.startRendering();
+  const rendered = await host.status();
+  const renderAllocations = await renderAllocationCount(host);
+  await host.dispose();
+  return {
+    documentBytes: document.byteLength,
+    frameBytes: reply.frameBytes,
+    controlFrameBytes: host.controlFrameBytes,
+    replyStatus: reply.status,
+    commandPath: reply.path,
+    initialRevision: booted.appliedRevision.toString(),
+    committedRevision: reply.revision,
+    finalRevision: rendered.appliedRevision.toString(),
+    renderAllocations,
   };
 }
 
@@ -1826,6 +1867,7 @@ export async function runQualification() {
       structuralApply: null,
       emptyBoot: null,
       structuralReplace: null,
+      consoleLimits: null,
       observation: null,
       stall: null,
       stagingReads: null,
@@ -1915,6 +1957,14 @@ export async function runQualification() {
     if (error?.stallSignature !== undefined) failure.stallSignature = error.stallSignature;
     throw failure;
   }
+  let consoleLimits;
+  try {
+    consoleLimits = await runConsoleLimitsQualification(createMisoAudioWorkletHost);
+  } catch (error) {
+    throw new Error(`console-limits qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error,
+    })}`);
+  }
   let observation;
   try {
     observation = await runObservationQualification(
@@ -1977,6 +2027,7 @@ export async function runQualification() {
     structuralApply: structural,
     emptyBoot,
     structuralReplace,
+    consoleLimits,
     observation,
     stall,
     stagingReads,
@@ -1993,6 +2044,7 @@ export async function runQualification() {
       { workload: "structural-edit", count: structuralReplace.edit.renderAllocations },
       { workload: "structural-replace-large", count: structuralReplace.large.renderAllocations },
       { workload: "growth-while-rendering", count: structuralReplace.growth.renderAllocations },
+      { workload: "console-limits", count: consoleLimits.renderAllocations },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },

@@ -1,7 +1,7 @@
 import { constantValue } from "../core/abi.ts";
 import type { BootOptions } from "../core/abi.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
-import { MAXIMUM_DOCUMENT_BYTES, WasmBoundary } from "../core/boundary.ts";
+import { WasmBoundary } from "../core/boundary.ts";
 import type {
   ControlEvent,
   EngineCallResult,
@@ -900,4 +900,3 @@ export async function validate(
   }
 }
 
-export { MAXIMUM_DOCUMENT_BYTES };

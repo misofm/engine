@@ -36,6 +36,10 @@ import type { SourceSpec } from "../core/types.ts";
 export interface BrowserBootPolicy {
   readonly sourceRingFrames?: number;
   readonly maximumMemoryBytes?: bigint;
+  /** The control frame in bytes (issue #2191); absent selects the engine's 128 KiB default. */
+  readonly maximumControlFrameBytes?: bigint;
+  /** The longest session document in bytes (issue #2191); absent leaves it to the budget. */
+  readonly maximumDocumentBytes?: bigint;
   /**
    * The continuous-spectrum hop of the boot's taps, sent in the boot's `SPECTRUM_CONFIGURE`
    * (#1596 D2); `configureSpectrum` sets the hop of a later configuration.
@@ -86,6 +90,12 @@ function withRequiredShape(
   if (policy.sourceRingFrames !== undefined) options.sourceRingFrames = policy.sourceRingFrames;
   if (policy.maximumMemoryBytes !== undefined) {
     options.maximumMemoryBytes = policy.maximumMemoryBytes;
+  }
+  if (policy.maximumControlFrameBytes !== undefined) {
+    options.maximumControlFrameBytes = policy.maximumControlFrameBytes;
+  }
+  if (policy.maximumDocumentBytes !== undefined) {
+    options.maximumDocumentBytes = policy.maximumDocumentBytes;
   }
   // The boot's spectrum taps and the policy's hop are not boot words: the browser engine sends
   // them in its boot `SPECTRUM_CONFIGURE` (#1596 D2), which the engine adopts in place before the

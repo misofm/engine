@@ -70,8 +70,8 @@ const layout = {
   // #1380 D3: the shared memory each boot's instance imports, at the ABI layout's page counts.
   memoryPages: ABI.memory,
   offsets: Object.fromEntries(["structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
-    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
-    "liveControlMeterBlocks", "reserved3", "reserved2",
+    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "maximumControlFrameBytes",
+    "liveControlMeterBlocks", "maximumDocumentBytes", "reserved2",
   ].map((name) => [name, bootField(name)])),
   sourceRingFrames: (Math.ceil(Math.floor((RATE * stallToleranceMs) / 1000) / Q) + reserveQuanta) * Q,
   ok: constant("resultCodes", "ok"),
@@ -109,8 +109,8 @@ registerProcessor("rebuild-cost", class extends AudioWorkletProcessor {
     u32("requireSampleRateHz", L.rate); u32("requireQuantumFrames", L.quantum);
     u32("sourceRingFrames", L.sourceRingFrames); u32("reserved0", 0);
     u64("maximumMemoryBytes", 0n);
-    u64("reserved1", 0n);
-    u64("liveControlMeterBlocks", 0n); u64("reserved3", 0n);
+    u64("maximumControlFrameBytes", 0n);
+    u64("liveControlMeterBlocks", 0n); u64("maximumDocumentBytes", 0n);
     u64("reserved2", 0n);
     const doc = o.document;
     const pointer = e.miso_engine_web_v1_document_ptr(doc.byteLength);

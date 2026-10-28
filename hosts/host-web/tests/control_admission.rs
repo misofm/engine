@@ -333,11 +333,6 @@ fn the_entry_serves_queries_and_refuses_bad_frames_without_failing_the_host() {
         rig.host.control_request_mut(0).is_none(),
         "an empty frame has no staging"
     );
-    assert!(
-        rig.host.control_request_mut(16_385).is_none(),
-        "a frame over maximum_control_frame_bytes has no staging"
-    );
-    assert!(rig.host.control_request_mut(16_384).is_some());
     let verdict = rig.transaction(&[set(
         strip_row("t1", FADER_DB, ParameterChannel::Both),
         -3.0,

@@ -7,16 +7,16 @@ function bootOptions() {
   return {
     sourceRingFrames: QUANTUM,
     maximumMemoryBytes: 0n,
-    // Issue #137: zero in both live-control words is the frozen pre-live-control shape -- no
-    // control channel, no meter observers -- which is what this fixture's digest was pinned
-    // against.
-    reserved1: 0n,
+    // Issue #2191: the engine's default control frame.
+    maximumControlFrameBytes: 0n,
+    // Issue #137: zero in the live-control word is the frozen pre-live-control shape -- no meter
+    // observers -- which is what this fixture's digest was pinned against.
     liveControlMeterBlocks: 0n,
-    // Issue #1590, issue #1689: the remaining two words, both retired and required zero (the
-    // observation-taps word and the master boot word). The worklet's exact-field guard means
-    // these are not optional -- an `options` object missing them is refused with
-    // `RESULT_INVALID_ARGUMENT` before the module is instantiated.
-    reserved3: 0n,
+    // Issue #2191: the document limit is the budget's. Issue #1689: the master boot word is
+    // retired and required zero. The worklet's exact-field guard means these are not optional --
+    // an `options` object missing them is refused with `RESULT_INVALID_ARGUMENT` before the
+    // module is instantiated.
+    maximumDocumentBytes: 0n,
     reserved2: 0n,
   };
 }
