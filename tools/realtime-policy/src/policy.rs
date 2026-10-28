@@ -23,10 +23,8 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// both event lanes through it after each message, and `SessionState::dequeue_event` runs the
 /// service step and encodes the frame, so it is control work of the same kind.
 ///
-/// Issue #1290d1 adds `meter_header_ptr`: the worklet's message handler reads the header the host
-/// publishes the meter frame through, after each message, to cut the views over a replacement
-/// plan's frame in advance. It reads one address and allocates nothing; it is never inside
-/// `process()` or a render-locked window.
+/// Issue #1290d1 added `meter_header_ptr` here; #1332 S7 wraps it (the worker-mode `process()`
+/// reads the current header through it, root ruling R-S7-meters), so it left this list.
 ///
 /// Issue #1294a adds `watermark_read`: the worklet's message handler copies the applied-revision
 /// watermark into its fixed record after each service step, outside `process()` and every
@@ -47,7 +45,7 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// Issue #2116 adds `plan_latency_read`: the worklet's message handler copies the running plan's
 /// latency and tail row into its fixed record, control work as `source_seek_report` is, never
 /// inside `process()` or a render-locked window.
-const UNWRAPPED_EXPORTS: [&str; 18] = [
+const UNWRAPPED_EXPORTS: [&str; 17] = [
     "dispose",
     "render_allocation_count",
     "service",
@@ -59,7 +57,6 @@ const UNWRAPPED_EXPORTS: [&str; 18] = [
     "control_response_ptr",
     "control_response_bytes",
     "control_revision",
-    "meter_header_ptr",
     "watermark_read",
     "session_seek",
     "session_seek_at",

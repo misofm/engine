@@ -382,6 +382,10 @@ export interface MisoStatus {
   /// while every view over the older one stays valid, so `process()` never silences a quantum for
   /// it. Kept so the status shape does not change.
   readonly staleViewQuanta: number;
+  /// The meter frames the worklet skipped in `worker` mode (issue 1332 S7) because render reported
+  /// a header for which no matching set had been cut yet: possible only when a plan is adopted
+  /// within one control-Worker round trip of its commit. Always 0 in `single` mode.
+  readonly meterFramesSkipped: number;
 }
 
 /// The instance's render-locked allocator count (issue 1333 D3). Decision 15 requires zero.
@@ -524,11 +528,28 @@ export interface MisoPlanLatencyReply {
   readonly latency: MisoPlanLatency | null;
 }
 
+/// Where the engine's control plane runs (issue 1332 D1). `"worker"`: on a cross-origin-isolated
+/// page, a dedicated Worker boots and edits the session on one shared memory and the worklet only
+/// renders; the status's `blockingRebuilds` and `singleModeControlAllocations` read 0. `"single"`:
+/// one instance, whose control work runs in the worklet's message handler, never in `process()`.
+export type MisoInstanceMode = "worker" | "single";
+
+/// Typed refusal of a control Worker that raised `error` or `messageerror` before its boot reply
+/// (issue 1332 D6). The page never falls back to `"single"` mode silently.
+export interface MisoWorkerFailed {
+  readonly tag: "miso.worker-failed.v1";
+  readonly requestId: 0;
+  readonly result: 255;
+  readonly reason: "worker-failed";
+}
+
 export interface MisoAudioWorkletHost {
   readonly node: AudioWorkletNode;
   readonly backend: MisoWebBackend;
   readonly resources: MisoWebResourceReport;
   readonly memoryBytes: number;
+  /// Where the control plane runs (issue 1332 D1).
+  readonly instanceMode: MisoInstanceMode;
   submitSource(request: MisoSourceRequest): Promise<MisoAck>;
   /// Seeks source content while absolute render time remains continuous. Meter peak windows can
   /// straddle this content discontinuity; the seek does not advance the meter generation.
@@ -618,6 +639,11 @@ export interface CreateMisoAudioWorkletHostOptions {
   /// plan's and the boot counts no blocking rebuild. Absent for a boot without taps.
   bootCommand?: Uint8Array;
   workletModuleUrl: string;
+  /// Issue 1332 S7: `"single"` runs one instance on an isolated page too; `"worker"` is refused on
+  /// a page without cross-origin isolation. Absent: `"worker"` exactly when the page is isolated.
+  /// The control Worker (`miso-engine-v1-control-worker.js`) is resolved beside
+  /// `workletModuleUrl`; a Worker failure before its boot reply rejects with `MisoWorkerFailed`.
+  instanceMode?: MisoInstanceMode;
 }
 
 export function createMisoAudioWorkletHost(

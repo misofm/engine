@@ -139,6 +139,8 @@ check_builder() {
         "$output/miso-engine-v1-audio-worklet-host.js"
       cmp -s "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
         "$output/miso-engine-v1-audio-worklet-host.d.ts"
+      cmp -s "$repo_root/hosts/host-web/web/miso-engine-v1-control-worker.js" \
+        "$output/miso-engine-v1-control-worker.js"
       cmp -s <(printf 'parameter metadata fixture\n') "$output/parameter-metadata.json"
       ;;
   esac

@@ -3,6 +3,18 @@ const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_BACKPRESSURE = 6;
 const RESULT_UNSUPPORTED = 7;
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
+// Issue #1332 S7 (D2): the control Worker of `worker` mode, resolved beside the worklet module URL.
+const CONTROL_WORKER_FILE = "miso-engine-v1-control-worker.js";
+// Issue #1380 D1: the shared memory's pages, the ABI layout document's `memory.initialPages` and
+// `memory.maximumPages`. In `worker` mode this realm creates the one memory both instances share.
+const MEMORY_INITIAL_PAGES = 20;
+const MEMORY_MAXIMUM_PAGES = 8192;
+// Issue #1332 S7 (D7): in `worker` mode the page's requests go to the control Worker, except these,
+// which the worklet answers for its render half.
+const RENDER_PORT_TAGS = new Set(["miso.meters.v1", "miso.telemetry.v1", "miso.renderallocations.v1"]);
+const READY_FIELDS = [
+  "tag", "requestId", "result", "backend", "resources", "memoryBytes", "sourceRingFrames",
+];
 const VALID_RESULTS = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 255]);
 
 // Canonical minimal module: `() -> v128` implemented by `i32.const 0; i8x16.splat`.
@@ -190,7 +202,10 @@ function snapshotBootOptions(value) {
 // The optional factory fields: each is absent or an enumerable own value. `bootCommand` (#2166) is
 // one encoded SPECTRUM_CONFIGURE command frame the engine applies before it prepares the first
 // plan, so the boot's spectrum taps are that plan's and the boot counts no blocking rebuild.
-const OPTIONAL_FIELDS = ["preparedModule", "bootCommand"];
+// `instanceMode` (#1332 S7) is `"single"` to run one instance on an isolated page too (the SDK's
+// PCM feed, whose drain runs in the worklet, until the Worker drains it), or `"worker"`, which a
+// page without cross-origin isolation refuses. Absent: `"worker"` exactly when the page is isolated.
+const OPTIONAL_FIELDS = ["preparedModule", "bootCommand", "instanceMode"];
 
 function snapshotFactory(value) {
   const captured = capturePlainRecord(value, [...OPTION_FIELDS, ...OPTIONAL_FIELDS]);
@@ -211,7 +226,12 @@ function snapshotFactory(value) {
     bootCommand = snapshotDocument(optional.bootCommand);
     if (bootCommand === undefined || bootCommand.byteLength === 0) return undefined;
   }
-  return { descriptors: captured.descriptors, preparedModule: optional.preparedModule, bootCommand };
+  return {
+    descriptors: captured.descriptors,
+    preparedModule: optional.preparedModule,
+    bootCommand,
+    instanceMode: optional.instanceMode,
+  };
 }
 
 function deferred() {
@@ -329,6 +349,22 @@ function unsupportedBrowser(capability) {
   });
 }
 
+/// D6: the typed refusal of a control Worker that raised `error` or `messageerror` before its boot
+/// reply. The page never falls back to `single` mode silently.
+function workerFailed() {
+  return Object.freeze({
+    tag: "miso.worker-failed.v1",
+    requestId: 0,
+    result: 255,
+    reason: "worker-failed",
+  });
+}
+
+function isWorkerFailed(value) {
+  return value?.tag === "miso.worker-failed.v1" && value.reason === "worker-failed"
+    && hasExactFields(value, ["tag", "requestId", "result", "reason"]);
+}
+
 function isUnsupportedBrowser(value) {
   return value?.tag === "miso.unsupported.v1"
     && hasExactFields(value, ["tag", "requestId", "result", "capability"]);
@@ -352,6 +388,10 @@ function isUnsupportedBrowser(value) {
 /// a typed `RESULT_BACKPRESSURE` and its planes still owned by the caller.
 class MisoAudioWorkletHost {
   #port;
+  /// The worklet's port: the same as `#port` in `single` mode; in `worker` mode `#port` is the
+  /// control Worker and this port carries only `RENDER_PORT_TAGS`.
+  #renderPort;
+  #worker;
   #pending = new Map();
   #inFlightSources = new Map();
   #inFlightSeeks = new Map();
@@ -381,6 +421,8 @@ class MisoAudioWorkletHost {
   #lastRequestId = 0;
   #stickyError = null;
   #disposed = false;
+  /// The one dispose in flight or done: a second `dispose()` returns the first one's promise.
+  #disposePromise = null;
   #serviceTick = null;
   #numericBackend;
   #sampleRateHz;
@@ -394,23 +436,42 @@ class MisoAudioWorkletHost {
     resources,
     memoryBytes,
     ringBlocks,
+    instanceMode = "single",
+    worker = undefined,
+    early = undefined,
   ) {
     Object.defineProperties(this, {
       node: { value: node, enumerable: true },
       backend: { value: backend, enumerable: true },
       resources: { value: Object.freeze(resources), enumerable: true },
       memoryBytes: { value: memoryBytes, enumerable: true },
+      // Issue #1332 D1: where the control plane runs, `"worker"` or `"single"`.
+      instanceMode: { value: instanceMode, enumerable: true },
     });
     this.#numericBackend = numericBackend(backend);
     this.#sampleRateHz = sampleRateHz;
     this.#quantumFrames = quantumFrames;
     this.#ringBlocks = ringBlocks;
-    this.#port = node.port;
-    this.#port.onmessage = (event) => this.#receive(event.data);
-    this.#port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
+    this.#renderPort = node.port;
+    this.#worker = worker;
+    this.#port = worker ?? node.port;
+    for (const port of worker === undefined ? [node.port] : [node.port, worker]) {
+      port.onmessage = (event) => this.#receive(event.data);
+      port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
+    }
+    if (worker !== undefined) {
+      worker.onerror = (event) => {
+        event?.preventDefault?.();
+        this.#fail(webError(255, this.#oldestRequestId()));
+      };
+    }
     // A user-agent/processor crash cannot return storage already transferred out of this realm.
     this.node.onprocessorerror = () => this.#fail(webError(255, this.#oldestRequestId()));
-    this.#startServiceTick();
+    // In `worker` mode the control Worker runs its own service tick (#1332 S7).
+    if (worker === undefined) this.#startServiceTick();
+    // What the Worker posted, or how it failed, before this host took it over (#1332 S7).
+    for (const message of early?.messages ?? []) this.#receive(message);
+    if (early?.failed === true) this.#fail(webError(255, this.#oldestRequestId()));
   }
 
   // Issue #1381a D6: in `single` mode the instance's control work runs in the worklet's message
@@ -631,6 +692,7 @@ class MisoAudioWorkletHost {
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
           "quantumFrames", "blockingRebuilds", "nextAbsoluteSample", "renderedQuanta",
           "liveValuesSuperseded", "appliedRevision", "appliedSample", "appliedOutcome", "memoryBytes", "singleModeControlAllocations", "staleViewQuanta",
+          "meterFramesSkipped",
         ]
         : pending.response === "renderAllocations"
           ? ["tag", "requestId", "result", "count"]
@@ -693,6 +755,7 @@ class MisoAudioWorkletHost {
       && message.memoryBytes % 65536 === 0
       && validU32(message.singleModeControlAllocations)
       && validU32(message.staleViewQuanta)
+      && validU32(message.meterFramesSkipped)
     );
     const validRenderAllocations = pending.response !== "renderAllocations"
       || (message.result === RESULT_OK && validU32(message.count));
@@ -796,6 +859,9 @@ class MisoAudioWorkletHost {
     sourceId = undefined,
   ) {
     if (this.#disposed) return Promise.reject(webError(3));
+    // Once `dispose()` was sent, every other request is refused locally (result 3), as
+    // `status()` is: nothing sent behind the dispose can fail the host and reject the dispose.
+    if (response !== "dispose" && this.#disposePromise !== null) return Promise.reject(webError(3));
     if (this.#stickyError !== null && !allowSticky) return Promise.reject(this.#stickyError);
     if (this.#saturated(response, sourceId)) {
       return Promise.reject(webError(RESULT_BACKPRESSURE));
@@ -819,7 +885,8 @@ class MisoAudioWorkletHost {
       this.#pending.set(requestId, pending);
       this.#reserve(response, sourceId);
       try {
-        this.#port.postMessage(stamped, transfer);
+        (RENDER_PORT_TAGS.has(stamped.tag) ? this.#renderPort : this.#port)
+          .postMessage(stamped, transfer);
       } catch (error) {
         this.#release(pending);
         reject(webError(255, requestId));
@@ -1124,21 +1191,140 @@ class MisoAudioWorkletHost {
     return this.#discardedControlEvents;
   }
 
-  async dispose() {
+  /// The worker-mode dispose contract (#1332 S7, root): the promise is created once and every
+  /// later call returns it, settled or not; it resolves for a clean dispose and rejects with the
+  /// typed error otherwise, and either way the page terminates the Worker and disconnects the node,
+  /// exactly once. A failed worker-mode host is unusable, so there is no retry. In `single` mode a
+  /// failed dispose may be retried: the promise is dropped and the service tick it stopped runs
+  /// again.
+  dispose() {
+    if (this.#worker !== undefined) {
+      this.#disposePromise ??= this.#disposeWorkerMode();
+      return this.#disposePromise;
+    }
+    this.#disposePromise ??= this.#disposeSingleMode().catch((error) => {
+      this.#disposePromise = null;
+      if (!this.#disposed && this.#serviceTick === null) this.#startServiceTick();
+      throw error;
+    });
+    return this.#disposePromise;
+  }
+
+  async #disposeWorkerMode() {
+    try {
+      await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
+    } finally {
+      this.#teardown();
+    }
+  }
+
+  async #disposeSingleMode() {
     if (this.#disposed) return;
     this.#stopServiceTick();
     await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
+    this.#teardown();
+  }
+
+  /// Runs once, after the dispose reply (or, in worker mode, its failure).
+  #teardown() {
+    if (this.#disposed) return;
     this.#disposed = true;
+    this.#stopServiceTick();
+    // No request promise outlives the host: whatever is still unsettled (a reply the dispose
+    // overtook) rejects with the typed disposed error.
+    const unsettled = [...this.#pending.values()];
+    this.#pending.clear();
+    for (const pending of unsettled) pending.reject(webError(3));
+    const follow = this.#statusFollow;
+    this.#statusFollow = null;
+    this.#statusRead = null;
+    follow?.reject(webError(3));
     this.#onMeterFrame = null;
     this.#onTelemetryFrame = null;
     this.#controlEventListeners.clear();
     this.#watermarkListeners.clear();
-    this.#port.onmessage = null;
-    this.#port.onmessageerror = null;
+    for (const port of [this.#renderPort, this.#port]) {
+      port.onmessage = null;
+      port.onmessageerror = null;
+    }
     this.node.onprocessorerror = null;
-    try { this.#port.close?.(); } catch (_) { /* already closed */ }
+    try { this.#renderPort.close?.(); } catch (_) { /* already closed */ }
+    // D4.3: the Worker disposed the host (the only place that frees it) before its reply.
+    if (this.#worker !== undefined) {
+      this.#worker.onerror = null;
+      try { this.#worker.terminate(); } catch (_) { /* already gone */ }
+    }
     try { this.node.disconnect(); } catch (_) { /* never connected or already disconnected */ }
   }
+}
+
+/// Issue #1332 S7 (D2, D6): start the control Worker beside the worklet module, hand it the module
+/// and the shared memory, and wait for its boot reply. A Worker `error` or `messageerror` before
+/// the reply rejects with `worker-failed`; a refused boot rejects with the engine's result code,
+/// as the `single`-mode worklet's boot does.
+function bootControlWorker(workerUrl, boot) {
+  const channel = new MessageChannel();
+  let worker;
+  try {
+    // WORKER_SITE: the main realm's one `Worker` construction (D8).
+    worker = new Worker(workerUrl);
+  } catch (_) {
+    return Promise.reject(workerFailed());
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    // Between the boot reply and the host's construction (the worklet's adoption), the Worker
+    // may already post (its tick's watermark or events) or fail: the messages are kept in order
+    // and a failure is remembered, and the host replays both when it takes the Worker over.
+    const early = { messages: [], failed: false };
+    const finish = (operation, value) => {
+      if (settled) return;
+      settled = true;
+      if (operation === reject) {
+        worker.onmessage = null;
+        worker.onerror = null;
+        worker.onmessageerror = null;
+        try { worker.terminate(); } catch (_) { /* already gone */ }
+      } else {
+        worker.onmessage = (event) => { early.messages.push(event.data); };
+        worker.onerror = (event) => {
+          event?.preventDefault?.();
+          early.failed = true;
+        };
+        worker.onmessageerror = () => { early.failed = true; };
+      }
+      operation(value);
+    };
+    worker.onmessage = (event) => {
+      const message = event.data;
+      if (message?.tag === "miso.worker-ready.v1"
+          && hasExactFields(message, [...READY_FIELDS, "handle", "token", "reservation", "metersAttached"])
+          && message.requestId === 0 && message.result === RESULT_OK
+          && validU32(message.handle) && message.handle !== 0
+          && validU64(message.token, true) && Number(message.token >> 32n) === message.handle
+          && validU32(message.reservation) && message.reservation !== 0
+          && typeof message.metersAttached === "boolean") {
+        finish(resolve, { worker, workletPort: channel.port2, ready: message, early });
+      } else if (hasExactFields(message, ["tag", "requestId", "result"])
+          && message.tag === "miso.error.v1" && message.requestId === 0
+          && validResult(message.result)) {
+        finish(reject, Object.freeze(message));
+      } else {
+        finish(reject, webError(255));
+      }
+    };
+    worker.onerror = (event) => {
+      event?.preventDefault?.();
+      finish(reject, workerFailed());
+    };
+    worker.onmessageerror = () => finish(reject, workerFailed());
+    try {
+      worker.postMessage({ tag: "miso.worker-boot.v1", ...boot, workletPort: channel.port1 },
+        [channel.port1]);
+    } catch (_) {
+      finish(reject, workerFailed());
+    }
+  });
 }
 
 export async function createMisoAudioWorkletHost(options) {
@@ -1153,6 +1339,7 @@ export async function createMisoAudioWorkletHost(options) {
   let bootCommand;
   let simd128ModuleUrl;
   let workletModuleUrl;
+  let requestedMode;
   try {
     factorySnapshot = snapshotFactory(options);
     if (factorySnapshot === undefined) throw new Error("invalid factory");
@@ -1165,6 +1352,7 @@ export async function createMisoAudioWorkletHost(options) {
     bootCommand = factorySnapshot.bootCommand;
     simd128ModuleUrl = descriptors.get("simd128ModuleUrl").value;
     workletModuleUrl = descriptors.get("workletModuleUrl").value;
+    requestedMode = factorySnapshot.instanceMode;
     documentSnapshot = snapshotDocument(descriptors.get("document").value);
     bootOptions = snapshotBootOptions(descriptors.get("options").value);
     if ((preparedModule !== undefined && !(preparedModule instanceof WebAssembly.Module))
@@ -1174,7 +1362,11 @@ export async function createMisoAudioWorkletHost(options) {
         || documentSnapshot === undefined
         || bootOptions === undefined
         || typeof simd128ModuleUrl !== "string"
-        || typeof workletModuleUrl !== "string") throw new Error("invalid factory data");
+        || typeof workletModuleUrl !== "string"
+        || (requestedMode !== undefined && requestedMode !== "single" && requestedMode !== "worker")
+        || (requestedMode === "worker" && globalThis.crossOriginIsolated !== true)) {
+      throw new Error("invalid factory data");
+    }
   } catch (_) {
     throw webError(RESULT_INVALID_ARGUMENT);
   }
@@ -1182,6 +1374,17 @@ export async function createMisoAudioWorkletHost(options) {
   // caller as itself rather than being folded into the generic 255 rejection.
   if (!WebAssembly.validate(SIMD128_PROBE)) throw unsupportedBrowser("simd128");
   let node;
+  // Issue #1332 D1: `worker` on a cross-origin-isolated page, `single` otherwise.
+  const instanceMode = requestedMode
+    ?? (globalThis.crossOriginIsolated === true ? "worker" : "single");
+  let booted;
+  let workerReady;
+  let processorOptions = {
+    module: undefined,
+    document: documentSnapshot,
+    options: bootOptions,
+    ...(bootCommand === undefined ? {} : { bootCommand }),
+  };
   try {
     // Capture this capability only after SIMD attestation, so unsupported browsers do not touch it.
     const audioWorklet = context.audioWorklet;
@@ -1189,23 +1392,61 @@ export async function createMisoAudioWorkletHost(options) {
       backend: SHIPPING_BACKEND,
       module: preparedModule ?? await fetchModule(simd128ModuleUrl),
     };
+    processorOptions.module = selected.module;
     await audioWorklet.addModule(workletModuleUrl);
     if (context.state !== "suspended"
         || context.sampleRate !== sampleRateHz
         || (context.renderQuantumSize ?? 128) !== quantumFrames) {
       throw webError(RESULT_INVALID_ARGUMENT);
     }
+    // Issue #1332 D1: the mode is chosen once, here. An isolated page runs the control plane in a
+    // Worker on one shared memory; any other page runs one instance, in the worklet.
+    if (instanceMode === "worker") {
+      const memory = new WebAssembly.Memory({
+        initial: MEMORY_INITIAL_PAGES,
+        maximum: MEMORY_MAXIMUM_PAGES,
+        shared: true,
+      });
+      const base = globalThis.document?.baseURI ?? globalThis.location?.href;
+      const workerUrl = new URL(CONTROL_WORKER_FILE, new URL(workletModuleUrl, base));
+      booted = await bootControlWorker(workerUrl, {
+        module: selected.module,
+        memory,
+        document: documentSnapshot,
+        options: bootOptions,
+        sampleRateHz,
+        quantumFrames,
+        ...(bootCommand === undefined ? {} : { bootCommand }),
+      });
+      workerReady = booted.ready;
+      if (workerReady.backend !== selected.backend
+          || !Number.isSafeInteger(workerReady.memoryBytes) || workerReady.memoryBytes <= 0
+          || !validU32(workerReady.sourceRingFrames) || workerReady.sourceRingFrames === 0
+          || workerReady.sourceRingFrames % quantumFrames !== 0
+          || !validResources(workerReady.resources, selected.backend, sampleRateHz, quantumFrames)) {
+        throw webError(255);
+      }
+      processorOptions = {
+        instanceMode,
+        module: selected.module,
+        memory,
+        token: workerReady.token,
+        reservation: workerReady.reservation,
+        metersAttached: workerReady.metersAttached,
+      };
+    }
     node = new AudioWorkletNode(context, PROCESSOR_NAME, {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
-      processorOptions: {
-        module: selected.module,
-        document: documentSnapshot,
-        options: bootOptions,
-        ...(bootCommand === undefined ? {} : { bootCommand }),
-      },
+      processorOptions,
     });
+    // D7: the control Worker's channel port reaches the worklet on its own port (processor options
+    // cannot transfer one), before any request.
+    if (booted !== undefined) {
+      node.port.postMessage({ tag: "miso.control-port.v1", port: booted.workletPort },
+        [booted.workletPort]);
+    }
     const ready = await new Promise((resolve, reject) => {
       let settled = false;
       const finish = (operation, value) => {
@@ -1218,10 +1459,24 @@ export async function createMisoAudioWorkletHost(options) {
       };
       node.port.onmessage = (event) => {
         const message = event.data;
-        if (hasExactFields(
-          message,
-          ["tag", "requestId", "result", "backend", "resources", "memoryBytes", "sourceRingFrames"],
-        )
+        if (workerReady !== undefined) {
+          // `worker` mode: the worklet adopted the render half; the ready fields are the Worker's.
+          if (hasExactFields(message, ["tag", "requestId", "result", "backend", "instanceMode"])
+              && message.tag === "miso.ready.v1" && message.requestId === 0
+              && message.result === RESULT_OK && message.backend === selected.backend
+              && message.instanceMode === "worker") {
+            finish(resolve, { ...workerReady, resources: Object.freeze(workerReady.resources) });
+          } else if (hasExactFields(message, ["tag", "requestId", "result"])
+              && message.tag === "miso.error.v1" && message.requestId === 0
+              && validResult(message.result)) {
+            finish(reject, Object.freeze(message));
+          } else {
+            finish(reject, webError(255));
+          }
+          return;
+        }
+        if (hasExactFields(message, [...READY_FIELDS, "instanceMode"])
+            && message.instanceMode === "single"
             && message.tag === "miso.ready.v1" && message.requestId === 0
             && message.result === RESULT_OK && message.backend === selected.backend
             && Number.isSafeInteger(message.memoryBytes) && message.memoryBytes > 0
@@ -1258,10 +1513,16 @@ export async function createMisoAudioWorkletHost(options) {
       // The per-source in-flight bound is the ring depth in quanta: the ring the engine reports it
       // resolved at boot (issue #1406b), so a zero override gives the engine's own default ring.
       ready.sourceRingFrames / quantumFrames,
+      instanceMode,
+      booted?.worker,
+      booted?.early,
     );
   } catch (error) {
     cleanupNode(node);
-    if (isUnsupportedBrowser(error)) throw error;
+    if (booted !== undefined) {
+      try { booted.worker.terminate(); } catch (_) { /* already gone */ }
+    }
+    if (isUnsupportedBrowser(error) || isWorkerFailed(error)) throw error;
     if (error?.tag === "miso.error.v1" && hasExactFields(error, ["tag", "requestId", "result"])
         && error.requestId === 0 && validResult(error.result)) throw error;
     throw webError(255);

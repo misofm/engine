@@ -42,6 +42,7 @@ worklet="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js"
 "$repo_root/scripts/check-web-audioworklet.sh" --self-test-opcodes
 "$repo_root/scripts/check-web-audioworklet.sh" --self-test-module-shape
 "$repo_root/scripts/check-web-audioworklet.sh" --self-test-timers
+"$repo_root/scripts/check-web-audioworklet.sh" --self-test-capabilities
 python3 -B "$repo_root/scripts/check-web-audioworklet-callgraph.py" --self-test
 mutation_dir=$(mktemp -d "${TMPDIR:-/tmp}/miso-engine-mutation.XXXXXX")
 

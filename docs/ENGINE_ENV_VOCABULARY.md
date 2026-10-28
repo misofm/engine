@@ -136,6 +136,7 @@ Read by one subject each.
 | `MISO_ENGINE_WEB_STRIP` | AudioWorklet build: the `wasm-strip` binary. |
 | `MISO_ENGINE_WEB_WORKLET_TEST_MODULE` | Hermetic worklet test: override module path for the bootstrap-under-test (#132). |
 | `MISO_ENGINE_WEB_HOST_TEST_MODULE` | Hermetic worklet test: override module path for the main-realm host under test, so a red mutation of the host runs the same suite (#151). |
+| `MISO_ENGINE_WEB_CONTROL_WORKER_TEST_MODULE` | Hermetic worklet test: override path of the control Worker file under test, so a red mutation of it runs the same suite (#1332 S7). |
 | `MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST` | Hermetic host allocator test selector; when `1`, the existing test runs the transformed private counter at `MAX_SAFE_INTEGER - 1`, proves the final safe ID once, then proves repeatable local exhaustion with no post, wrap or reuse. |
 | `MISO_ENGINE_PRINT_HELPER_MANIFEST` | `check-effect-runtime-policy.sh`: set to `1` to print its pinned duplicated-helper manifest and exit instead of checking it. |
 | `MISO_ENGINE_EFFECT_CONTRACT_V1_H` | the C include guard `check-effect-contract.sh` asserts. Not an environment variable. |

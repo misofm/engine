@@ -239,6 +239,9 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
     "miso_engine_web_v1_instance_bind": {},
     "miso_engine_web_v1_render_diagnostic_ptr": {},
     "miso_engine_web_v1_render_diagnostic_bytes": {},
+    # Issue #1332 S7 (R-S7-meters): the worker-mode `process()` reads the current meter header's
+    # address after `render()`; a borrow and a pointer, no dynamic dispatch.
+    "miso_engine_web_v1_meter_header_ptr": {},
     "miso_engine_web_v1_meter_poll": {
         # #1332 S5: `RenderHalf::poll_meters` has a second caller (`RenderHost::poll_meters`), so
         # it is no longer inlined into the host's; the same two sites, by inlining only.

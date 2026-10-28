@@ -20,6 +20,8 @@ export const ARTIFACT_NAMES = new Set([
   "miso-engine-v1-abi-layout.json",
   // Issue #2111: the stem identities' WebAssembly SIMD BLAKE3.
   "miso-engine-v1-blake3.simd128.wasm",
+  // Issue #1332 S7: the control Worker of `worker` mode.
+  "miso-engine-v1-control-worker.js",
 ]);
 const CONTENT_TYPES = new Map([
   [".d.ts", "text/plain; charset=utf-8"],

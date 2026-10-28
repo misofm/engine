@@ -1304,10 +1304,16 @@ pub extern "C" fn miso_engine_web_v1_meter_poll(handle: u32) -> u32 {
 /// the saturating loss count. A successful poll publishes one exact track/master window; an empty
 /// or invalid poll leaves every byte of the prior header and frame untouched. Source seeks keep
 /// absolute render time continuous and therefore do not advance this meter generation.
+///
+/// #1332 S7 (root ruling R-S7-meters): in `worker` mode the worklet's `process()` calls it after
+/// every render under the meter lease, to learn which header render reports as current, so it is
+/// render-locked and held to the call-graph gate (no allocator, free or drop glue).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_header_ptr(handle: u32) -> u32 {
-    with_render(handle, 0, |_, header, _, _| {
-        pointer_u32(ptr::from_ref(header))
+    render_locked(|| {
+        with_render(handle, 0, |_, header, _, _| {
+            pointer_u32(ptr::from_ref(header))
+        })
     })
 }
 
