@@ -17,6 +17,7 @@ import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import {
   COUNTER_IDS,
+  ProtocolClient,
   decodeCapabilitiesReply,
   decodeCountersReply,
   decodeDiagnosticsReply,
@@ -33,6 +34,8 @@ import {
   encodeTransportSetRequest,
 } from "../src/core/protocol-messages.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
+import { session } from "../src/core/session.ts";
+import { transaction } from "../src/core/session-transaction.ts";
 import { moduleBytes, sessionDocument } from "./support.mjs";
 
 const FIXTURE = JSON.parse(await readFile(new URL("./fixtures/protocol-messages.json", import.meta.url), "utf8"));
@@ -236,6 +239,44 @@ describe("the headless engine's protocol calls", () => {
       const parsed = JSON.parse(document);
       assert.equal(parsed.tracks.length, 120);
       assert.equal(parsed.tracks[7].fader.left_db, -3);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("#2190: a frame over the core's frame limit is refused typed and never sent", async () => {
+    // Red if ProtocolClient sends a frame over `maximumFrameBytes`: the transport stands in for the
+    // browser host, which rejects such a frame before the core with a raw `miso.error.v1` record.
+    const source = { channels: 2, bitDepth: 24, frames: 48_000, content: `blake3:${"a".repeat(64)}` };
+    const base = session({ id: "frame.limit", sampleRateHz: 48_000, quantumFrames: 128 }).source("a", source).output("out");
+    const engine = await createOfflineEngine(base.toJson(), { asset });
+    try {
+      const limit = engine.controlTransactions().maximumFrameBytes;
+      const sizes = [];
+      const client = new ProtocolClient({
+        send: (frame, document) => {
+          sizes.push(frame.length);
+          if (frame.length > limit) throw Object.freeze({ tag: "miso.error.v1", requestId: 0, result: 1 });
+          return engine.controlFrame(frame, document);
+        },
+        requestIds: engine.controlTransactions().requestIds,
+        committedRevision: () => engine.controlRevision(),
+      });
+      let builder = transaction(base);
+      let tx;
+      for (let index = 0; tx === undefined || tx.payload.length <= limit; index += 1) {
+        builder = builder.upsertTrack(`track-${String(index).padStart(4, "0")}`, { source: "a" });
+        tx = builder.build();
+      }
+      await assert.rejects(client.applyTransaction(tx), (error) => {
+        assert.ok(error instanceof MisoControlRefusal, `${error}`);
+        assert.equal(error.status, "limit_exceeded");
+        assert.equal(error.code, "limit_exceeded");
+        assert.equal(error.diagnostics[0].detail, `frame_bytes=${48 + tx.payload.length},maximum_frame_bytes=${limit}`);
+        return true;
+      });
+      assert.ok(sizes.every((size) => size <= limit), "no frame over the limit was sent");
+      assert.equal(engine.controlRevision(), 0n, "nothing was committed");
     } finally {
       engine.dispose();
     }

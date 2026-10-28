@@ -841,10 +841,35 @@ function refusalError(refusal: ProtocolRefusal): MisoControlRefusal {
 }
 
 /**
+ * The SDK's refusal of a frame larger than the core accepts (#2190), raised before it is sent: the
+ * status the core's codec gives the same frame, `limit_exceeded`, naming the frame's bytes and the
+ * limit. `revision` is the revision the frame expected (its header's bytes 32 to 40).
+ */
+function frameTooLarge(frame: Uint8Array, maximumFrameBytes: bigint): MisoControlRefusal {
+  const expected = new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getBigUint64(32, true);
+  return new MisoControlRefusal({
+    code: "limit_exceeded",
+    status: "limit_exceeded",
+    revision: expected,
+    editIndex: undefined,
+    diagnostics: [{
+      code: "limit_exceeded",
+      detail: `frame_bytes=${frame.length},maximum_frame_bytes=${maximumFrameBytes}`,
+      operationIndex: undefined,
+    }],
+    message: `a control frame of ${frame.length} bytes is over the core's frame limit of ${maximumFrameBytes} bytes `
+      + "(limit_exceeded); it was not sent",
+  });
+}
+
+/**
  * The calls of #1571 D3 over one engine's transport. Both engines make them through this class, so
  * they send the same frames and decode the same replies. A call the core refuses rejects with
  * `MisoControlRefusal`, its `code` the core's first diagnostic code or, with none, the status name;
- * a reply that is not valid rejects with `MisoEngineError` `internal`.
+ * a reply that is not valid rejects with `MisoEngineError` `internal`. Every frame but the first
+ * `CAPABILITIES_GET` is checked against the core's `maximumFrameBytes` before it is sent, and a
+ * larger one rejects with `MisoControlRefusal` `limit_exceeded` and is not sent (#2190); the first
+ * call that needs the limit reads the capabilities once.
  */
 export class ProtocolClient {
   readonly #transport: ProtocolTransport;
@@ -861,10 +886,12 @@ export class ProtocolClient {
    * built against one session, and a conflict means the session moved under it.
    */
   async applyTransaction(transaction: SessionTransaction): Promise<EditOutcome> {
+    const limit = await this.#frameLimit();
     const expectedRevision = await this.#transport.committedRevision();
     const requestId = this.#transport.requestIds.next();
-    const reply = decodeControlReply(await this.#transport.send(
+    const reply = decodeControlReply(await this.#send(
       encodeSessionTransaction(transaction, { requestId, expectedRevision }),
+      limit,
     ));
     if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
     return editOutcome(reply);
@@ -882,6 +909,7 @@ export class ProtocolClient {
       throw new MisoUsageError("a replacement document must be non-empty bytes");
     }
     const digest = await documentSha256(document);
+    const limit = await this.#frameLimit();
     // Read after the digest, right before the send: the revision the frame expects is current.
     const expectedRevision = await this.#transport.committedRevision();
     const requestId = this.#transport.requestIds.next();
@@ -891,27 +919,51 @@ export class ProtocolClient {
       documentBytes: document.length,
       documentSha256: digest,
     });
-    const reply = decodeAppliedReply(await this.#transport.send(frame, document), MESSAGE_SESSION_REPLACE);
+    const reply = decodeAppliedReply(await this.#send(frame, limit, document), MESSAGE_SESSION_REPLACE);
     if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
     return editOutcome(reply);
   }
 
-  async #call<T>(encode: (requestId: bigint) => Uint8Array, decode: (bytes: Uint8Array) => ProtocolReply<T>): Promise<ProtocolReply<T>> {
+  /** The core's frame limit, read once with `CAPABILITIES_GET` before the first frame that needs it. */
+  async #frameLimit(): Promise<bigint> {
+    return (this.#capabilities ?? await this.capabilities()).maximumFrameBytes;
+  }
+
+  /** Send `frame` if it fits the core's frame limit; refuse it, unsent, if it does not. */
+  #send(frame: Uint8Array, limit: bigint | undefined, document?: Uint8Array): Uint8Array | PromiseLike<Uint8Array> {
+    if (limit !== undefined && BigInt(frame.length) > limit) throw frameTooLarge(frame, limit);
+    return document === undefined ? this.#transport.send(frame) : this.#transport.send(frame, document);
+  }
+
+  /**
+   * Send one call. `checked: false` is only `CAPABILITIES_GET`, the call that reads the limit: its
+   * frame is a header and no fields, smaller than any limit a core reports.
+   */
+  async #call<T>(
+    encode: (requestId: bigint) => Uint8Array,
+    decode: (bytes: Uint8Array) => ProtocolReply<T>,
+    checked = true,
+  ): Promise<ProtocolReply<T>> {
+    const limit = checked ? await this.#frameLimit() : undefined;
     const requestId = this.#transport.requestIds.next();
-    const reply = decode(await this.#transport.send(encode(requestId)));
+    const reply = decode(await this.#send(encode(requestId), limit));
     if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
     return reply;
   }
 
-  async #value<T>(encode: (requestId: bigint) => Uint8Array, decode: (bytes: Uint8Array) => ProtocolReply<T>): Promise<T> {
-    const reply = await this.#call(encode, decode);
+  async #value<T>(
+    encode: (requestId: bigint) => Uint8Array,
+    decode: (bytes: Uint8Array) => ProtocolReply<T>,
+    checked = true,
+  ): Promise<T> {
+    const reply = await this.#call(encode, decode, checked);
     if (!reply.ok) throw refusalError(reply);
     return reply.value;
   }
 
   /** The core's capabilities (`CAPABILITIES_GET`). */
   async capabilities(): Promise<EngineCapabilities> {
-    const value = await this.#value((requestId) => encodeCapabilitiesRequest({ requestId }), decodeCapabilitiesReply);
+    const value = await this.#value((requestId) => encodeCapabilitiesRequest({ requestId }), decodeCapabilitiesReply, false);
     this.#capabilities = value;
     return value;
   }
@@ -991,6 +1043,9 @@ export class ProtocolClient {
     if ("position" in request) {
       throw new MisoUsageError("the transport has no stored position (#1635): seek moves the playhead");
     }
+    // The limit first: a first call's CAPABILITIES_GET must not fall between the revision read and
+    // the send, where it would widen the `revision_conflict` window.
+    await this.#frameLimit();
     const expectedRevision = await this.#transport.committedRevision();
     return this.#value(
       (requestId) => encodeTransportSetRequest({ requestId, expectedRevision, state: request.state }),
@@ -1000,6 +1055,7 @@ export class ProtocolClient {
 
   /** Replace the endpoint's telemetry configuration (`TELEMETRY_CONFIGURE`); resolves to what the core applied. */
   async configureTelemetry(configuration: TelemetryConfiguration): Promise<TelemetryConfiguration> {
+    await this.#frameLimit();
     const expectedRevision = await this.#transport.committedRevision();
     return this.#value(
       (requestId) => encodeTelemetryConfigureRequest({ requestId, expectedRevision, configuration }),

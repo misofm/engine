@@ -197,6 +197,11 @@ export class SessionSeekProducerError extends Error {
  * `control.address.unknown`, ...), or the reply's status name (`revision_conflict`, `backpressure`,
  * ...) when the core sent no diagnostic. The SDK adds no code of its own. A refused transaction
  * changed nothing and is not retried. `revision` is the revision the core reported with the refusal.
+ *
+ * One refusal is the SDK's, made before the frame is sent (#2190): a frame larger than the core's
+ * reported `maximumFrameBytes` is refused with `status` and `code` `limit_exceeded`, the status the
+ * core's codec gives the same frame. Its one diagnostic's `detail` is
+ * `frame_bytes=<n>,maximum_frame_bytes=<m>`, and its `revision` is the revision the frame expected.
  */
 export class MisoControlRefusal extends Error {
   readonly code: string;
@@ -224,10 +229,13 @@ export class MisoControlRefusal extends Error {
     readonly revision: bigint;
     readonly editIndex: number | undefined;
     readonly diagnostics: MisoControlRefusal["diagnostics"];
+    /** The message, when the SDK refused the frame before the core saw it (#2190). */
+    readonly message?: string;
   }) {
     super(
-      `the core refused the control transaction: ${init.code}`
-        + (init.editIndex === undefined ? "" : ` at edit ${init.editIndex}`),
+      init.message
+        ?? `the core refused the control transaction: ${init.code}`
+          + (init.editIndex === undefined ? "" : ` at edit ${init.editIndex}`),
     );
     this.name = "MisoControlRefusal";
     this.code = init.code;
