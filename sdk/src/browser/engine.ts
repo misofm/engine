@@ -212,11 +212,8 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
     /** The boot's spectrum taps as one `SPECTRUM_CONFIGURE` command frame (#2166), when it has taps. */
     readonly bootCommand?: Uint8Array;
     readonly workletModuleUrl: string;
-    /**
-     * `"single"` when the PCM feed is loaded (#1332 S7: its drain runs in the worklet, so the
-     * control plane must too until the Worker drains it); absent otherwise.
-     */
-    readonly instanceMode?: "single";
+    /** `options.instanceMode` when it is given; absent otherwise (#1332 D1, #1387). */
+    readonly instanceMode?: "worker" | "single";
   }) => Promise<MisoAudioWorkletHost>;
   readonly policy?: BrowserBootPolicy;
   /**
@@ -227,6 +224,13 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
    * `PcmFeedError` (`moduleLoad`) and closes the context.
    */
   readonly pcmFeed?: boolean | { readonly moduleUrl?: string | URL };
+  /**
+   * Where the engine's control plane runs (#1332 D1). Absent: `"worker"` exactly when the page is
+   * cross-origin isolated, `"single"` otherwise, with or without `pcmFeed` (#1387: the control
+   * Worker drains the PCM feed in `"worker"` mode). `"single"` runs one instance on an isolated
+   * page too; `"worker"` is refused on a page without isolation.
+   */
+  readonly instanceMode?: "worker" | "single";
   /** How many construct-verify-close-retry rounds to allow. */
   readonly contextAttempts?: number;
 }
@@ -264,8 +268,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   readonly host: MisoAudioWorkletHost;
   /**
    * Where the engine's control plane runs (#1332 D1): `"worker"` on a cross-origin-isolated page
-   * (a dedicated Worker boots and edits the session; the worklet only renders), `"single"`
-   * otherwise and whenever `pcmFeed` is loaded.
+   * (a dedicated Worker boots and edits the session and drains the PCM feed; the worklet only
+   * renders), `"single"` otherwise or when `options.instanceMode` asks for it.
    */
   readonly instanceMode: "worker" | "single";
   /** One shared decimated meter lease for all SDK listeners. */
@@ -743,6 +747,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     || (pcmFeed.moduleUrl !== undefined && typeof pcmFeed.moduleUrl !== "string" && !(pcmFeed.moduleUrl instanceof URL)))) {
     throw new MisoUsageError("pcmFeed must be a boolean or { moduleUrl?: string | URL }");
   }
+  const instanceMode = options.instanceMode;
+  if (instanceMode !== undefined && instanceMode !== "worker" && instanceMode !== "single") {
+    throw new MisoUsageError('instanceMode must be "worker" or "single"');
+  }
   const document = documentBytes(options.document);
   // The document as booted, kept apart from the one the scratch boot and the host are handed, for
   // `withSession()` to hold a builder to.
@@ -836,7 +844,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       workletModuleUrl,
       ...(preparedModule === undefined ? {} : { preparedModule }),
       ...(bootCommand === undefined ? {} : { bootCommand }),
-      ...(pcmFeed === undefined || pcmFeed === false ? {} : { instanceMode: "single" as const }),
+      ...(instanceMode === undefined ? {} : { instanceMode }),
     });
     // D2 of #1596: an engine with taps must serve the spectrum frames, and its first plan must
     // carry them (#2166).

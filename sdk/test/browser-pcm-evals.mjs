@@ -677,6 +677,54 @@ function anchoredPrelude(source) {
   return { engine, attach, node, submissions, seeks, seekAts, process: () => engine.process([], []), setSeekAtResult: (value) => { seekAtResult = value; } };
 }
 
+test("issue 1387: in worker mode the prelude binds no ring, process() submits nothing, and the feed is refused at once", async () => {
+  // Red if the prelude binds rings in worker mode (process() would then call source_submit on a
+  // render-only instance), or if the refusal does not reach the feed, which would wait out its
+  // ready() bound instead.
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = anchoredPrelude(source);
+  run.engine.workerMode = true;
+  const replies = [];
+  run.attach.port.postMessage = (data) => replies.push(data);
+  const ring = createMsb1Ring({ sourceId: "worker", channels: 1, frameCapacity: 4, capacity: 2 });
+  const writer = new Msb1RingWriter(ring);
+  writer.engage(1n);
+  writer.reserve(4);
+  writer.commit({ generation: 1n, startFrame: 0n, frames: 4, endOfRegion: false });
+  run.attach.port.onmessage({ data: { op: "attach", rings: [ring] } });
+  run.process();
+  assert.deepEqual(run.submissions, [], "process() submits nothing in worker mode");
+  assert.equal(controls(ring)[MSB1_CONTROL.ATTACHED], 0, "the ring is not bound");
+  assert.deepEqual(replies.map((reply) => reply.op), ["attach-refused"]);
+  const refusing = { port: { onmessage: null, postMessage(data) { if (data.op === "attach") queueMicrotask(() => this.onmessage?.({ data: { op: "attach-refused" } })); } }, disconnect() {} };
+  const feed = attachEngineFeed({ context, quantumFrames: 4, sources: [{ sourceId: "worker", channels: 1 }], createNode: () => refusing });
+  await assert.rejects(feed.ready({ timeoutMs: 60_000 }), (error) => error instanceof PcmFeedError && error.operation === "attachRefused");
+  assert.equal(feed.state, "closed");
+});
+
+test("issue 1387: a feed of a worker-mode engine attaches through the host's feed port, a single-mode one through the attach node", async () => {
+  // Red if the feed ignores the engine's instanceMode in either direction.
+  const feedFor = (instanceMode) => {
+    const posted = { port: [], node: [] };
+    const host = {
+      instanceMode,
+      openFeedPort: () => ({ onmessage: null, postMessage: (data) => posted.port.push(data.op) }),
+      async status() { return { result: 0, nextAbsoluteSample: 0n }; },
+      async seekSourceAt() { return { result: 0 }; },
+      async seekReport() { return { result: 0, report: null }; },
+    };
+    linkFeedEngine(host, () => 1n);
+    const feed = attachEngineFeed({
+      engine: { host }, context, quantumFrames: 4, sources: [{ sourceId: "routed", channels: 1 }],
+      createNode: () => attachNode({ onMessage: (data) => posted.node.push(data.op) }),
+    });
+    feed.close();
+    return posted;
+  };
+  assert.deepEqual(feedFor("worker"), { port: ["attach", "detach"], node: [] });
+  assert.deepEqual(feedFor("single"), { port: [], node: ["attach", "detach"] });
+});
+
 test("the drain refuses a ring written to the old MSB1 header offset", async () => {
   // #1297b gate 3: a reader that keeps the old offsets reads the ID bytes as the anchor.
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");

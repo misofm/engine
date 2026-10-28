@@ -590,6 +590,10 @@ export interface MisoAudioWorkletHost {
   /// Read the allocator calls this instance made in the exports its processor calls on the render
   /// thread after boot (issue 1333 D3). Read it on each host before that host's `dispose()`.
   renderAllocationCount(): Promise<MisoRenderAllocations>;
+  /// @internal Issue 1387: in `worker` mode, one port to the control Worker's MSB1 feed drain,
+  /// on which the SDK's PCM feed speaks its attach protocol; `null` in `single` mode and once the
+  /// host failed or a dispose began.
+  openFeedPort(): MessagePort | null;
   /// Read the output latency and tail of the plan that renders now (issue 2116). A rebuild's
   /// successor shows from the first read after the block that adopts it. One read may be unsettled
   /// at a time; a second rejects locally with result `6`.

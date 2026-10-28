@@ -1165,6 +1165,20 @@ class MisoAudioWorkletHost {
     return this.#request({ tag: "miso.renderallocations.v1" }, [], "renderAllocations");
   }
 
+  /// Issue #1387 (S11): in `worker` mode, open one port to the control Worker's MSB1 feed drain
+  /// (the SDK's PCM feed speaks the attach protocol on it that it speaks to the worklet
+  /// prelude's attach node in `single` mode). `null` in `single` mode and once the host failed or
+  /// a dispose began.
+  openFeedPort() {
+    if (this.#worker === undefined || this.#workerGone || this.#stickyError !== null
+        || this.#disposePromise !== null || this.#disposed) {
+      return null;
+    }
+    const channel = new MessageChannel();
+    this.#worker.postMessage({ tag: "miso.feed-port.v1", port: channel.port2 }, [channel.port2]);
+    return channel.port1;
+  }
+
   /// Send one command frame to the engine's control plane and resolve with its reply (issue
   /// #1562a D1, #1332 D7). The frame is any command frame the C ABI's
   /// `miso_engine_v1_submit_command` accepts: a `SESSION_TRANSACTION_APPLY` carrying `SET_CONTROL`

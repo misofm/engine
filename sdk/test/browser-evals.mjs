@@ -437,8 +437,11 @@ describe("the browser open sequence", () => {
   test("#2100 gate 1: pcmFeed loads the feed prelude before the engine worklet, and is off by default", async () => {
     // Red if the prelude loads after the engine worklet (the worklet then registers the unwrapped
     // engine processor and no ring ever attaches), if `{ moduleUrl }` is ignored, or if a boot
-    // without `pcmFeed` loads the prelude.
-    const loads = async (pcmFeed) => {
+    // without `pcmFeed` loads the prelude. Issue 1387: red if `pcmFeed` still forces
+    // `instanceMode: "single"` on the host (the control Worker drains the feed in worker mode), or
+    // if an explicit `instanceMode` does not reach it.
+    const modes = [];
+    const loads = async (pcmFeed, instanceMode) => {
       const loaded = [];
       const engine = await createEngine({
         document: sessionDocument(),
@@ -446,6 +449,7 @@ describe("the browser open sequence", () => {
         workletModuleUrl: "/worklet",
         scratchBoot,
         ...(pcmFeed === undefined ? {} : { pcmFeed }),
+        ...(instanceMode === undefined ? {} : { instanceMode }),
         createContext: (request) => ({
           sampleRate: request.sampleRate,
           renderQuantumSize: 128,
@@ -454,8 +458,9 @@ describe("the browser open sequence", () => {
           audioWorklet: { addModule: async (url) => { loaded.push(url); } },
         }),
         // As the shipped host does: its first step on the context loads the engine worklet.
-        createHost: async ({ context, workletModuleUrl }) => {
-          await context.audioWorklet.addModule(workletModuleUrl);
+        createHost: async (request) => {
+          modes.push(request.instanceMode);
+          await request.context.audioWorklet.addModule(request.workletModuleUrl);
           return { dispose: async () => {} };
         },
       });
@@ -465,6 +470,8 @@ describe("the browser open sequence", () => {
     assert.deepEqual(await loads(true), [BUNDLED_ENGINE_ASSETS.pcmFeedWorklet.href, "/worklet"]);
     assert.deepEqual(await loads({ moduleUrl: "/feed" }), ["/feed", "/worklet"]);
     assert.deepEqual(await loads(undefined), ["/worklet"]);
+    await loads(true, "single");
+    assert.deepEqual(modes, [undefined, undefined, undefined, "single"]);
   });
 
   test("#2100 gate 2: position() is the seek's frame plus the frames rendered since", async () => {

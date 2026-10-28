@@ -540,6 +540,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
           && typeof message.port?.postMessage === "function") {
         this.controlPort = message.port;
         this.controlPort.onmessage = (event) => this.receiveControlPlane(event.data);
+        // Issue #1387 (S11): the address of this render half's status record; the Worker's PCM
+        // feed drain reads its rendered quanta there as its render clock (shared memory, no call).
+        if (this.ready && this.statusView !== undefined) {
+          this.controlPort.postMessage({ tag: "miso.render-clock.v1", status: this.statusView.byteOffset });
+        }
         return;
       }
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0);
