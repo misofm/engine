@@ -12,8 +12,8 @@ use engine::realtime::PreparedRenderPlan;
 use session::SessionModel;
 use source::{
     HostChunkError, HostChunkProvider, HostPlanarChunk, PublishedGeneration, SessionSeek,
-    SessionSeekError, SourceCommand, SourceFrame, SourceGeneration, SourceSeekError,
-    SourceSeekReport, SubmitReport, TimelineProducer,
+    SessionSeekError, SourceAdmission, SourceCommand, SourceFrame, SourceGeneration,
+    SourceSeekError, SourceSeekReport, SubmitReport, TimelineProducer,
 };
 
 use crate::PlanStateInventory;
@@ -520,6 +520,19 @@ impl SourceControlSet {
             .ok_or(SourceControlError::Vacated)?
             .seek_report()
             .map_err(|_| SourceControlError::ReportBusy)
+    }
+
+    /// The named source's ring occupancy as its producer sees it now (issue #1387), for a host
+    /// feed that sizes its submissions by it. Lock-free and allocation-free; any control thread.
+    /// An unknown ID is the core's unmatched-ID refusal; a vacant entry is
+    /// [`SourceControlError::Vacated`]. The reserved timeline ID names no ring, so it is unknown.
+    pub fn admission(&self, id: &[u8]) -> Result<SourceAdmission, SourceControlError> {
+        let index = self.source_index(id)?;
+        Ok(self.sources[index]
+            .provider
+            .as_ref()
+            .ok_or(SourceControlError::Vacated)?
+            .admission())
     }
 
     fn queue_seek(

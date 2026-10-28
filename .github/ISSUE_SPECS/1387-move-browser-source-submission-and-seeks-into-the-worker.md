@@ -302,9 +302,10 @@ warm-up 100 quanta, play 375, then suspend, ring seek to generation 2 at 240 000
    written at :343); single mode keeps the engine's default; an explicit `sourceRingFrames`
    overrides. Documented on `MisoWebBootOptions.sourceRingFrames` (both `.d.ts` mirrors). Test
    (`:4995`): red if the Worker passes the 100 ms default through.
-   - **Memory.** Measured on the shipped module (headless boot, 64 stereo stems of 480 000 frames):
-     `sourceTotalBytes` is 35 807 156 B (34.1 MiB) at 65 536 frames against 4 124 596 B at the
-     default, so about 32 MiB more, under 7 % of the 512 MiB cap. `web.boot.memory_maximum` refuses
+   - **Memory** (corrected in attempt 2, MINOR 6). Measured on the shipped module (headless boot,
+     64 stereo stems of 480 000 frames): `sourceTotalBytes` is 35 807 156 B (34.1 MiB) at 65 536
+     frames against 4 124 596 B (3.9 MiB) at the default, so +30.2 MiB; the raw ring PCM is
+     64 x 2 x 65 536 x 4 B = 32 MiB of the 34.1 MiB. Under 7 % of the 512 MiB cap. `web.boot.memory_maximum` refuses
      only a `maximumMemoryBytes` above the module's maximum pages; the ring default does not touch
      that word, so the default never hits it.
 
@@ -318,3 +319,65 @@ job (generated, deletions, types, headless 688 pass, package check), and the ful
 0 engine underrun frames in every phase on Chromium and on WebKit, the suspended seek to
 generation 2 included; render allocations 0. (WebKit headless's sink bursts are covered by the
 1.36 s ring.) This supersedes the two findings above.
+
+## Attempt 2 (verify FAIL on two MAJORs, 2026-10-28)
+
+Merged `origin/main` at `4e802d20f` (#1332 S9: the worker leg, the CI browser x leg matrix and the
+control-reply fence); one test conflict resolved by keeping both cases.
+
+**MAJOR-1: the cap reads the producer's real fill (root decision).** Attempt 1 capped a guessed
+depth (rendered quanta minus chunks), which falls below the real fill while a source holds (an
+anchored seek before its anchor) and during an anchored seek (old generation still playing).
+- **New control-side export** `miso_engine_web_v1_source_fill(handle, source_id_bytes) -> u64`
+  (`hosts/host-web/src/ffi.rs:1018`; `AudioWorkletEngineHost::source_fill`, `lib.rs:1996`;
+  `SOURCE_FILL_REFUSED` = `u64::MAX`, `lib.rs:93`): the queued chunks in the high 32 bits, the
+  chunks a submit would accept now in the low 32 bits. Chain: `SessionState::source_admission`
+  (`crates/control-plane/src/control.rs:8295`, no service step) -> `SourceControlSet::admission`
+  (`crates/host-core/src/source.rs:529`) -> `HostChunkProvider::admission` ->
+  `PcmSourceProducer::admission` (`crates/source/src/lib.rs:1232`, `SourceAdmission` :541):
+  `queued` is the data queue's length, `room` the recycled blocks the producer holds storage for
+  (zero while a failed push's block waits), from each queue's cursors with the partner's loaded
+  `Acquire`. No lock, no allocation; safe from the Worker while the worklet renders. Frozen lists
+  updated (`check-web-audioworklet.sh`, `check-abi-layout-v1.py` and its self-test fixture,
+  `abi_layout.rs` 55 -> 56, `sdk/assets/miso-engine-v1-abi-layout.json`, `sdk/src/generated/abi.ts`).
+  It is not a render-thread export (`render-thread-exports.json` unchanged).
+- **The rule** (`miso-engine-v1-control-worker.js:1069-1121`): a pass submits while
+  `room - H > 0`. A plain seek (`consumeSharedSeek(..., plain = true)`, :1193) may fill the
+  headroom: its pass and the passes after it submit up to `room`, until render dropped the stale
+  chunks and the room is back above `H`. An anchored seek does not: its old generation keeps
+  playing until the anchor, so its new chunks queue behind it within the headroom.
+- **Counters.** Underruns are the engine's own count (`cumulativeUnderrunFrames` of the source's
+  seek report, read each pass, in quanta, while a live writer feeds the ring); held frames are not
+  underruns. Drain blocks still count the quanta the render half reports, so the render-clock
+  read (`miso.render-clock.v1`) stays for that counter alone. MINOR 1: a ring waiting for its
+  seek-at counts neither (the quanta pass uncounted), as in the prelude. Depth is the producer's
+  queued count.
+- **Tests.** Native `source_fill_reads_the_producers_ring_occupancy` (`hosts/host-web/src/tests.rs:1301`):
+  red with the words swapped and with `queued` read as 0. Hermetic (`scripts/test-web-audioworklet.mjs:5038`):
+  a fake 80-chunk engine ring; H = 36 stays free; an anchored start that holds 60 blocks keeps the
+  headroom free on every pass; the plain ring seek after it fills the headroom with the new
+  generation before the next block. Red on the fill-to-capacity drain ("the drain keeps H = 36 of
+  the 80 free"), on an anchored seek allowed into the headroom ("the headroom stays free through
+  the hold (room 0)"), and on the attempt-1 Worker file (`c34212666`).
+
+**MAJOR-2: one case table for both consumers.** `sdk/test/msb1-consumer-cases.mjs` (9 cases) drives
+an adapter (attach, pass, seekAt, sessionSeek, prepareSeek, detachSource, recorded export calls and
+counters). `browser-pcm-evals.mjs` runs it over the prelude (`preludeConsumer`, :581-635) and
+`test-web-audioworklet.mjs` over the control Worker (:5129). Cases: ID, planes and stale-tag drop;
+backpressure and refusal; plain seek order, retry and refusal; #1644 stale generation; end of
+region, torn slots and bad frame counts; old-header refusal; anchored tuple (mismatched, refused,
+matching); prepare-seek (confirmed, refused, superseded, a stale snapshot, future-generation slots
+kept); detach-source (exact index, never compacted). Deleted as replaced: the prelude-only "control
+preparation never discards or applies a superseding producer generation", "actual Wasm: a ring
+seek is consumed only when the engine refuses it as already at the session seek's generation", "the
+drain refuses a ring written to the old MSB1 header offset", and the direct-ring tail of the
+anchored-start feed test. Red: Worker mutants (#1644 rule off, stale tags submitted, no torn check,
+bad frames submitted, mismatched tuple accepted, future slots discarded, detach compacts, end not
+marked, old header accepted); prelude mutants (#1644 off, stale submitted, mismatched tuple,
+detach compacts, bad frames). **Follow-up:** generate both copies from one source at build time.
+
+**MINORs.** (3) In `worker` mode an explicit `sourceRingFrames` below `(2H + 8)` quanta (5888 frames
+at 48 kHz / 128) is refused with the engine's refused-options code 2, as its other boot options
+(`:283`; hermetic: 5120 kept and 5056 refused at 64-frame quanta). (5) The prelude's pending path
+posts `attach-refused` too (`refuseIfWorkerMode`, prelude :162; test in `browser-pcm-evals`).
+(6) Memory numbers corrected above. MINOR 4 (epoch/tag read order) is #2184, not here.

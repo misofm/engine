@@ -8288,6 +8288,16 @@ where
             .seek_report(id)
             .map_err(SourceFailure::Control)
     }
+
+    /// The ring occupancy of a source of the newest committed session, as its producer sees it
+    /// (issue #1387): [`host_core::SourceControlSet::admission`] of the ring `submit` feeds. A
+    /// pure read: it runs no service step.
+    pub fn source_admission(&self, id: &[u8]) -> Result<source::SourceAdmission, SourceFailure> {
+        self.newest_providers()
+            .sources
+            .admission(id)
+            .map_err(SourceFailure::Control)
+    }
 }
 
 /// A source submission or seek that the adapter's boundary must report.

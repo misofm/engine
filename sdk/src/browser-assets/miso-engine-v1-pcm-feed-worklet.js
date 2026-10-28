@@ -156,19 +156,27 @@ const STALE_GENERATION_CODE = Uint8Array.from("source.generation.stale", (charac
 /** The one engine processor in this scope, and any rings that arrived before
  *  it existed. Both nodes are constructed by the same main thread in a fixed
  *  order, but the queue costs one field and removes the ordering assumption. */
-const registry = { engine: null, pending: null }
+const registry = { engine: null, pending: null, pendingNode: null }
 
-function deliver(rings) {
+/** Issue #1387: `worker` mode binds no ring; the attach node that brought them is told so. */
+function refuseIfWorkerMode(engine, node) {
+  if (engine?.workerMode === true && node !== null) node.port.postMessage({ op: "attach-refused" })
+}
+
+function deliver(rings, node) {
   if (registry.engine === null) {
     registry.pending = rings
+    registry.pendingNode = node
     return
   }
   registry.engine.attachSharedRings(rings)
+  refuseIfWorkerMode(registry.engine, node)
 }
 
 function withdraw(rings) {
   if (registry.engine === null) {
     registry.pending = null
+    registry.pendingNode = null
     return
   }
   registry.engine.detachSharedRings(rings)
@@ -300,8 +308,11 @@ function wrapEngineProcessor(Base) {
       registry.engine = this
       if (registry.pending !== null) {
         const pending = registry.pending
+        const node = registry.pendingNode
         registry.pending = null
+        registry.pendingNode = null
         this.attachSharedRings(pending)
+        refuseIfWorkerMode(this, node)
       }
     }
 
@@ -707,8 +718,7 @@ class MisoSabFeedAttachProcessor extends AudioWorkletProcessor {
       if (data === null || typeof data !== "object") return
       if (data.op === "attach" && Array.isArray(data.rings)) {
         this.delivered = data.rings
-        deliver(data.rings)
-        if (registry.engine?.workerMode === true) this.port.postMessage({ op: "attach-refused" })
+        deliver(data.rings, this)
       } else if (data.op === "detach") {
         withdraw(this.delivered)
         this.delivered = []

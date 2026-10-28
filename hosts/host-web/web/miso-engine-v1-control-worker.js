@@ -97,6 +97,10 @@ const TIMER_CLAMP_MS = 4;
 // Worker cannot refill, in frames. A resume renders its output buffer ahead: 13 quanta measured on
 // Chromium 151 (headroom 8 underran 5 of them, 12 and more none), so 2048 frames bounds it.
 const RENDER_BURST_FRAMES = 2048;
+// Issue #1387 (MINOR 3): the quanta an explicit worker-mode ring keeps beyond twice the headroom.
+const SOURCE_RING_MARGIN_QUANTA = 8;
+// The engine's refused-options code (`RESULT_REFUSED_OPTIONS`, the ABI-mismatch code).
+const RESULT_REFUSED_OPTIONS = 2;
 
 const BOOT_FIELDS = [
   "tag", "module", "memory", "document", "options", "sampleRateHz", "quantumFrames", "workletPort",
@@ -272,6 +276,12 @@ class ControlWorker {
     const optionsPointer = this.exports.miso_engine_web_v1_boot_options_ptr();
     if (!u32(optionsPointer) || optionsPointer === 0) return RESULT_INTERNAL;
     if (!this.writeBootOptions(optionsPointer, message.options)) return RESULT_INVALID_ARGUMENT;
+    // Root ruling (#1387 MINOR 3): an explicit ring too short to keep the drain's headroom twice
+    // over, plus a margin, is refused as the engine refuses its other boot options.
+    if (message.options.sourceRingFrames !== 0
+        && message.options.sourceRingFrames < this.minimumSourceRingFrames()) {
+      return RESULT_REFUSED_OPTIONS;
+    }
     const document = message.document;
     const documentPointer = this.exports.miso_engine_web_v1_document_ptr(document.byteLength);
     if (!u32(documentPointer) || documentPointer === 0) {
@@ -390,7 +400,7 @@ class ControlWorker {
     const sourceRingFrames = e.miso_engine_web_v1_resolved_source_ring_frames(this.handle);
     if (!u32(sourceRingFrames) || sourceRingFrames === 0
         || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
-    this.drainDepthCap = this.feedDepthCap(sourceRingFrames / this.quantumFrames);
+    this.feedHeadroom = this.feedHeadroomQuanta();
     if (e.miso_engine_web_v1_watermark_read(this.handle) === RESULT_OK) {
       const view = this.view(DataView, e.miso_engine_web_v1_watermark_ptr(this.handle), WATERMARK_BYTES);
       this.watermarkRevision = view.getBigUint64(8, true);
@@ -979,27 +989,54 @@ class ControlWorker {
       anchoredGeneration: 0n,
       anchoredFrame: 0n,
       anchoredSample: NO_ANCHOR,
-      depth: 0,
+      // The engine's cumulative underrun frames for this source at the last pass (null until
+      // read), and whether a seek's new generation may fill the headroom (2: the seek's pass, 1:
+      // until render dropped the stale chunks).
+      underrunFrames: null,
+      seekAdmit: 0,
       finished: false,
       // The render clock this ring's accounting has reached; null until the clock is known.
       renderedSeen: this.renderedQuanta(),
     };
   }
 
-  /// Issue #1387 (root ruling 1): the chunks the drain lets the engine's ring hold for one source,
-  /// `C - H` of its `C` quanta. A seek's new generation is admitted only into free slots (the
-  /// stale chunks stay in the ring until render pops the seek and drops them by tag), so the drain
-  /// keeps `H` slots free. A ring seek's pass submits up to `H` chunks at the new position at
-  /// once, and they must last until the next pass refills: `H` covers the quanta render consumes
-  /// in one Worker tick (a tick is at least `TIMER_CLAMP_MS`) plus a render burst
+  /// Issue #1387 (root ruling 1, attempt 2): the headroom `H`, in chunks, the drain keeps free in
+  /// each source's engine ring, read from the producer's real occupancy (`source_fill`). A seek's
+  /// new generation is admitted only into free slots (the stale chunks stay queued until render
+  /// pops the seek and drops them by tag), so a ring seek's pass submits up to `H` chunks at the
+  /// new position at once, and they must last until the next pass refills: `H` covers the quanta
+  /// render consumes in one Worker tick (a tick is at least `TIMER_CLAMP_MS`) plus a render burst
   /// (`RENDER_BURST_FRAMES`) plus the block whose render pops the seek. At 48 kHz and 128 frames:
-  /// 2 + 16 + 1, so `H` = 19 of the default 512. `H` is at most half the ring.
-  feedDepthCap(ringQuanta) {
+  /// 2 + 16 + 1 = 19.
+  feedHeadroomQuanta() {
     const tickMs = Math.max(TIMER_CLAMP_MS, Math.round((1000 * this.quantumFrames) / this.sampleRateHz));
     const perTick = Math.ceil((tickMs * this.sampleRateHz) / (1000 * this.quantumFrames));
-    const burst = Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames);
-    this.feedHeadroom = Math.min(perTick + burst + 1, Math.floor(ringQuanta / 2));
-    return ringQuanta - this.feedHeadroom;
+    return perTick + Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames) + 1;
+  }
+
+  /// The shortest explicit source ring `worker` mode boots (#1387 MINOR 3): twice the headroom
+  /// plus `SOURCE_RING_MARGIN_QUANTA`, in frames. At 48 kHz and 128 frames: 46 quanta, 5888
+  /// frames (123 ms).
+  minimumSourceRingFrames() {
+    return (2 * this.feedHeadroomQuanta() + SOURCE_RING_MARGIN_QUANTA) * this.quantumFrames;
+  }
+
+  /// The engine's cumulative underrun frames for the ring's source (its seek report), or null
+  /// when the read is refused or lands inside render's publication.
+  readUnderrunFrames(ring) {
+    this.stageRingId(ring);
+    if (this.exports.miso_engine_web_v1_source_seek_report(this.handle, ring.idLength) !== RESULT_OK) return null;
+    const view = this.view(DataView, this.exports.miso_engine_web_v1_source_seek_report_ptr(this.handle), SEEK_REPORT_BYTES);
+    return view.getUint32(0, true) === SEEK_REPORT_BYTES ? view.getBigUint64(32, true) : null;
+  }
+
+  /// The source's ring occupancy, `{ queued, room }` in chunks, or null when the engine refuses
+  /// the read (the drain then submits as the prelude does, and the export counts the refusal).
+  readFill(ring) {
+    this.stageRingId(ring);
+    const fill = BigInt.asUintN(64, BigInt(this.exports.miso_engine_web_v1_source_fill(this.handle, ring.idLength)));
+    if (fill === 0xffffffffffffffffn) return null;
+    return { queued: Number(fill >> 32n), room: Number(fill & 0xffffffffn) };
   }
 
   /// The low word of the render half's `renderedQuanta`, or null before the worklet named it.
@@ -1031,22 +1068,31 @@ class ControlWorker {
 
   drainSharedRing(ring, rendered) {
     const control = ring.control;
-    // The quanta render consumed since the last pass, each one chunk of this source: what the
-    // prelude counts once per block, counted here in one step.
-    if (rendered !== null) {
-      const elapsed = ring.renderedSeen === null ? 0 : (rendered - ring.renderedSeen) >>> 0;
-      ring.renderedSeen = rendered;
-      const consumed = Math.min(ring.depth, elapsed);
-      ring.depth -= consumed;
-      if (elapsed > consumed && !ring.finished && Atomics.load(control, RING.WRITER_STATE) === 1) {
-        control[RING.UNDERRUNS] += elapsed - consumed;
+    // The quanta render took since the last pass: what the prelude counts once per block.
+    const elapsed = rendered === null || ring.renderedSeen === null ? 0 : (rendered - ring.renderedSeen) >>> 0;
+    if (rendered !== null) ring.renderedSeen = rendered;
+    // As in the prelude, a ring waiting for its seek (an anchored start before `seek-at`)
+    // counts no drain block and no underrun: the quanta pass uncounted.
+    if (this.applySharedSeek(ring) !== RESULT_OK) return;
+    // The blocks that underran, from the engine's own count of missing in-region frames (its seek
+    // report), while a live writer feeds the ring: the prelude's rule, on the engine's truth. Held
+    // frames (an anchored seek waiting for its anchor) are not underruns.
+    const underrunFrames = this.readUnderrunFrames(ring);
+    if (underrunFrames !== null) {
+      if (ring.underrunFrames !== null && underrunFrames > ring.underrunFrames && !ring.finished
+          && Atomics.load(control, RING.WRITER_STATE) === 1) {
+        control[RING.UNDERRUNS] += Math.ceil(Number(underrunFrames - ring.underrunFrames) / this.quantumFrames);
       }
-      control[RING.DRAIN_BLOCKS] += elapsed;
+      ring.underrunFrames = underrunFrames;
     }
-    if (this.applySharedSeek(ring) !== RESULT_OK) {
-      control[RING.DEPTH] = ring.depth;
-      return;
-    }
+    const before = this.readFill(ring);
+    // A seek's admission ends once render dropped the stale chunks (the room is back).
+    if (before !== null && ring.seekAdmit === 1 && before.room > this.feedHeadroom) ring.seekAdmit = 0;
+    control[RING.DRAIN_BLOCKS] += elapsed;
+    // Root ruling 1: the headroom stays free, except for the chunks of a seek's new generation.
+    let allowed = before === null ? ring.capacity
+      : ring.seekAdmit !== 0 ? before.room : before.room - this.feedHeadroom;
+    let queued = before === null ? 0 : before.queued;
     const generationTag = Atomics.load(control, RING.GENERATION_TAG);
     const write = Atomics.load(control, RING.WRITE_INDEX);
     const capacityMask = ring.capacity - 1;
@@ -1072,8 +1118,7 @@ class ControlWorker {
         control[RING.ERRORS] += 1;
         continue;
       }
-      // Root ruling 1: the headroom a seek's new generation is admitted into stays free.
-      if (ring.depth >= this.drainDepthCap) break;
+      if (allowed <= 0) break;
       // Every slot plane is pre-zeroed by the writer: the full quantum is copied, as the prelude
       // copies it.
       const slotPlanes = ring.planes[slot];
@@ -1093,7 +1138,8 @@ class ControlWorker {
         // Published only after the engine accepted the PCM (the main-thread start gate).
         Atomics.store(control, RING.SUBMITTED_GENERATION_TAG, ring.headers[word + 1]);
         control[RING.SUBMITTED] += 1;
-        ring.depth += 1;
+        allowed -= 1;
+        queued += 1;
         if ((flags & SLOT_FLAG_END_OF_REGION) !== 0) {
           ring.finished = true;
           control[RING.FINISHED] = 1;
@@ -1104,7 +1150,8 @@ class ControlWorker {
       }
     }
     Atomics.store(control, RING.READ_INDEX, read);
-    control[RING.DEPTH] = ring.depth;
+    control[RING.DEPTH] = queued;
+    if (ring.seekAdmit === 2) ring.seekAdmit = 1;
   }
 
   /// The prelude's seek rule: a published plain seek is applied through `source_seek` before any
@@ -1137,17 +1184,20 @@ class ControlWorker {
       control[RING.LAST_RESULT] = result;
       return result;
     }
-    return this.consumeSharedSeek(ring, epoch);
+    return this.consumeSharedSeek(ring, epoch, true);
   }
 
-  consumeSharedSeek(ring, epoch) {
+  /// `plain`: a plain seek, whose stale chunks render drops at its next block, so its new
+  /// generation may fill the headroom; an anchored seek's old generation keeps playing until its
+  /// anchor, so its new chunks queue behind it within the headroom rule.
+  consumeSharedSeek(ring, epoch, plain = false) {
     const control = ring.control;
     ring.seenEpoch = epoch;
     control[RING.SEEKS_APPLIED] += 1;
-    ring.depth = 0;
+    // Root ruling 1: this seek's new generation may fill the headroom (see `drainSharedRing`).
+    ring.seekAdmit = plain ? 2 : 0;
     ring.finished = false;
     control[RING.FINISHED] = 0;
-    control[RING.DEPTH] = 0;
     return RESULT_OK;
   }
 
