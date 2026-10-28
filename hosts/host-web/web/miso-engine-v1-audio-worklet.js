@@ -217,8 +217,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // Issue #1562 (batch 7 CI fold): every persistent view over the module's memory is registered
     // here by `bindView`, so a growth of that memory (a control allocation, counted on the control
     // side and no fault) re-cuts them all in `rebindMemoryViews`, in a message handler and never
-    // in `process()`. `staleViewQuanta` counts the quanta `process()` silenced because it found
-    // the memory moved before a handler re-bound; the status reports it.
+    // in `process()`. Issue #1332 S3: the memory is shared, so a growth gives `memory.buffer` a new
+    // object while a view over the older one stays valid for its bytes; `process()` renders over
+    // the views it holds and never reads `memory.buffer`. `staleViewQuanta` stays in the status
+    // and is always 0 (no quantum is silenced for a growth; owner decision O5: no API break).
     this.viewSpecs = [];
     this.staleViewQuanta = 0;
     // Issue #1290d1: the meter frame travels with the plan, so the views over it do too. The
@@ -442,10 +444,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   /// Issue #1562 (batch 7 CI fold, root ruling A, #1332 D5 "growth is not a fault"): a control
-  /// call may grow the module's linear memory, which detaches every view cut before. Re-cut them
-  /// all against the live buffer. The module's addresses are stable across a growth, so each view
+  /// call may grow the module's shared linear memory, which gives `memory.buffer` a new object
+  /// over the grown length. Re-cut every view against it. The module's addresses are stable across a growth, so each view
   /// keeps its pointer and length. Runs at the end of every message-handler path that can call
-  /// into the module, and never in `process()`, which only compares the buffers and silences.
+  /// into the module, and never in `process()`, which never reads the buffer (#1332 S3): on the
+  /// shared memory a view cut before the growth stays valid, so re-cutting is for the handlers'
+  /// own reads of newly grown bytes.
   rebindMemoryViews() {
     const buffer = this.exports?.memory.buffer;
     if (buffer === undefined || buffer === this.memoryBuffer) return;
@@ -1362,13 +1366,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     const output = outputs[0];
     if (!this.ready || this.stickyResult !== RESULT_OK) {
-      this.silence(outputs);
-      return true;
-    }
-    // Memory moved and no handler has re-bound yet: the cached views are detached. Render nothing
-    // for this quantum, count it, and wait for the handler to re-bind. This never re-binds here.
-    if (this.exports.memory.buffer !== this.memoryBuffer) {
-      this.staleViewQuanta += 1;
       this.silence(outputs);
       return true;
     }

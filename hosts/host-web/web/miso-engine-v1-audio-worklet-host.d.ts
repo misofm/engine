@@ -378,9 +378,9 @@ export interface MisoStatus {
   /// engine allocates on an audio thread; the render-locked count (`renderAllocationCount()`)
   /// stays exactly zero.
   readonly singleModeControlAllocations: number;
-  /// The quanta the worklet's `process()` silenced because the module's memory had moved before a
-  /// message handler re-bound its views (a control call may grow the memory, which is no fault).
-  /// Zero while every growth is re-bound in the handler that caused it.
+  /// Always 0 (issue 1332 S3). The module's memory is shared: a growth gives it a new buffer object
+  /// while every view over the older one stays valid, so `process()` never silences a quantum for
+  /// it. Kept so the status shape does not change.
   readonly staleViewQuanta: number;
 }
 

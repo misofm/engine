@@ -2,7 +2,12 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
-process_policy_re='BigInt|new[[:space:]]|subarray|memory\.grow|WebAssembly|fetch\(|Promise|console\.|JSON\.|performance\.now|Date\.now'
+process_policy_re='BigInt|new[[:space:]]|subarray|memory\.grow|memory\.buffer|WebAssembly|fetch\(|Promise|console\.|JSON\.|performance\.now|Date\.now'
+# Issue #1332 S3: `memory\.buffer` is banned in the body. The module's memory is shared, so a growth
+# gives `memory.buffer` a new object while every view over the older one stays valid: `process()`
+# renders over the views it holds and never reads the buffer (reading it there once silenced a
+# quantum per growth).
+#
 # Issue #137 D2/D3 amend this gate deliberately.
 #
 # Before #137 the render callback posted nothing, so a blanket `postMessage` ban was exactly right.

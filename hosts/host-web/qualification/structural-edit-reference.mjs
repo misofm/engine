@@ -89,8 +89,12 @@ function digest(planes) {
 
 /// Render the reference. `frame` is the page's frame, byte for byte (its request ID and revision
 /// are the page's: the instance here is fresh at the same revision).
+///
+/// Issue #1332 S3: `sourceAfterReplace` (optional) is the source the page feeds once the replace is
+/// committed, submitted here right after it, before the block's render.
 export async function structuralEditReference({
   modulePath, documentA, documentB, source, frame, sourceRingFrames, blocks, replaceBlock,
+  sourceAfterReplace = null,
 }) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), sharedMemoryImports());
   const exports = instance.exports;
@@ -101,7 +105,12 @@ export async function structuralEditReference({
   const planes = [new Float32Array(blocks * QUANTUM), new Float32Array(blocks * QUANTUM)];
   let revision = null;
   for (let block = 0; block < blocks; block += 1) {
-    if (block === replaceBlock) revision = sendReplace(exports, handle, frame, documentB);
+    if (block === replaceBlock) {
+      revision = sendReplace(exports, handle, frame, documentB);
+      for (const after of sourceAfterReplace?.blocks ?? []) {
+        assert.equal(writeSource(exports, handle, sourceAfterReplace.sourceId, after), 0, "reference source refused");
+      }
+    }
     assert.equal(exports.miso_engine_web_v1_render(handle, QUANTUM), 0);
     const output = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_OUTPUT_PCM);
     planes[0].set(new Float32Array(exports.memory.buffer, output, QUANTUM), block * QUANTUM);

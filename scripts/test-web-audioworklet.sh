@@ -147,7 +147,8 @@ for mutation in \
   'new Array(1);' \
   'this.port.postMessage({});' \
   'BigInt(1);' \
-  'this.exports.memory.grow(1);'
+  'this.exports.memory.grow(1);' \
+  'if (this.exports.memory.buffer !== this.memoryBuffer) this.staleViewQuanta += 1;'
 do
   mutated="$mutation_dir/worklet.js"
   awk -v mutation="$mutation" '

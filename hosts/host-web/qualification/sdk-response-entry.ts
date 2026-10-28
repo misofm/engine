@@ -2948,18 +2948,24 @@ export async function observeThroughSdk(
 /**
  * One `OBSERVATION_READ` of one tap (#1590: the browser's own selected read is gone), built with
  * the SDK's frame encoder and posted as the host's `control` message with the host's one
- * request-ID allocator. Returns the call's result and the page's row count.
+ * request-ID allocator. Returns the call's result, the page's row count, and a refusal's status
+ * and diagnostic codes.
  */
 export async function readObservationThroughSdk(
   host: MisoAudioWorkletHost,
   selection: ObservationFrameSelection,
-): Promise<{ result: number; rows: number }> {
+): Promise<{ result: number; rows: number; status: string | null; diagnostics: readonly string[] }> {
   const queue = await createBrowserControlQueue(host);
   const reply = await host.control(encodeObservationRead(queue.requestIds.next(), [selection]));
   queue.noteCommit(reply.revision);
-  if (reply.result !== 0) return { result: reply.result, rows: 0 };
+  if (reply.result !== 0) return { result: reply.result, rows: 0, status: null, diagnostics: [] };
   const decoded = decodeObservationReadReply(reply.response);
-  return { result: decoded.ok ? 0 : 1, rows: decoded.ok ? decoded.value.rows.length : 0 };
+  return {
+    result: decoded.ok ? 0 : 1,
+    rows: decoded.ok ? decoded.value.rows.length : 0,
+    status: decoded.ok ? "ok" : decoded.status,
+    diagnostics: decoded.ok ? [] : decoded.diagnostics.map((row) => row.code),
+  };
 }
 
 /**
