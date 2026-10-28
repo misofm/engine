@@ -969,11 +969,18 @@ Slice S8 of the #1332 build plan, branch `codex/issue-1332-failure` from S7 (`28
   instance (`instance_bind`, the worklet) still refuses `WRONG_STATE`. The Worker reclaims a
   `miso.released.v1` that arrives after its dispose finished: adopt (into the empty slot), then
   dispose. Native test `an_orphaned_render_half_is_freed_by_the_worker_that_adopts_it_back`
-  (`hosts/host-web/tests/worker_handoff.rs`).
+  (`hosts/host-web/tests/worker_handoff.rs`). In the browser an orphaned half is freed by dropping
+  that engine's memory: each worker-mode engine has its own `WebAssembly.Memory` and Worker, and
+  the page terminates the Worker and disconnects the node at every teardown. `reclaimOrphan` is a
+  fallback that runs only in the gap between the Worker's answer and the page's terminate.
+  The two canary tests moved to `worker_handoff_canary.rs` (helpers in `tests/handoff/mod.rs`):
+  a process holds at most four reservations, never freed, so each binary now reserves two.
 - **Render failure reaches the page.** `process()` posts no fatal, so the Worker's tick sends
   `miso.render-check.v1` to the worklet at most every 50 ms; a worklet whose render failed sticky
   posts `miso.error.v1 {requestId: 0, result}` to the page once, and the worker-mode host fails
-  sticky with that typed record (single mode unchanged).
+  sticky with that typed record (single mode unchanged). Accepted (S8 verify): a render fatal
+  posted in the same window as a `dispose()` rejects the dispose with the render error instead
+  of resolving; the rejection is typed and bounded, and the memory goes with the engine.
 - **Construction failure after adoption.** The worklet sets `workerMode` before any check (so it
   takes the control port even when its options are refused); a construction that fails after the
   adoption releases the half at once (`host_release`, render-locked) and answers the Worker's
@@ -981,6 +988,8 @@ Slice S8 of the #1332 build plan, branch `codex/issue-1332-failure` from S7 (`28
   fails after the node was built, sends the Worker `miso.dispose.v1 {requestId: 1}` and waits for
   its answer (bounded, 5 s) before terminating it. With a zero token the Worker also adopts the
   boot's token, so a half the worklet never adopted comes back from the registry.
+- **Qualification server** answers `/favicon.ico` with 204, so a leg's console carries no 404 for
+  the icon the browser asks for on its own.
 - **Worker `error` after boot** fails the host and terminates the Worker; a later dispose rejects
   at once with the host's error and posts nothing.
 - **Tests, red on mutants** (`scripts/test-web-audioworklet.mjs`): page deadline removed ("no

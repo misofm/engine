@@ -15,8 +15,8 @@ use std::alloc::System;
 use std::sync::{Barrier, Mutex};
 
 use host_web::{
-    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_WRONG_STATE, RenderLockedAllocator,
-    Reservation, STATE_FAILED, STATE_READY, WebBootOptions, native_staging,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_WRONG_STATE, RenderLockedAllocator, Reservation,
+    STATE_READY, native_staging,
 };
 use protocol::{
     CommandPayload, DecodeScratch, DecodedEventPayload, DecodedSuccessResponsePayload,
@@ -24,66 +24,21 @@ use protocol::{
     ResponseGetRequest, ResponseGrid, ResponseReadyOutcome, ResponseTarget, TypedCommandFrame,
 };
 
+mod handoff;
+
+use handoff::{
+    AbortOnPanic, FED_BLOCKS, QUANTUM_FRAMES, SOURCE_ID, TLS_ALIGN, TLS_SIZE, boot, options,
+    render_blocks,
+};
+
 #[global_allocator]
 static ALLOCATOR: RenderLockedAllocator<System> = RenderLockedAllocator(System);
 
-/// A thread that panics while its partner waits on a barrier would hang the test: the guard
-/// aborts the binary instead, so a failure is a failure.
-struct AbortOnPanic;
-
-impl Drop for AbortOnPanic {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            eprintln!("a handoff thread panicked; aborting so its partner does not wait forever");
-            std::process::abort();
-        }
-    }
-}
-
 /// The tests share the handoff registry's four entries, so they take turns.
 static TURN: Mutex<()> = Mutex::new(());
-
-const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
-const SOURCE_ID: &[u8] = b"fixture-source";
-const QUANTUM_FRAMES: u32 = 128;
-/// Blocks fed before the first render: the ring the options ask for holds them all.
-const FED_BLOCKS: usize = 40;
-/// A TLS block of the size and alignment a module reports (a native test has no `__tls_size`).
-const TLS_SIZE: u32 = 256;
-const TLS_ALIGN: u32 = 16;
-
-fn options() -> WebBootOptions {
-    WebBootOptions {
-        live_control_meter_blocks: 2,
-        source_ring_frames: 64 * QUANTUM_FRAMES,
-        ..WebBootOptions::explicit_defaults()
-    }
-}
-
-/// Boot the fixture on this thread's instance and feed `FED_BLOCKS` quanta.
-fn boot() -> u32 {
-    let length = native_staging::boot(options(), FIXTURE.as_bytes()).expect("the fixture stages");
-    let handle = host_web::miso_engine_web_v1_boot(length);
-    assert_ne!(handle, 0, "the fixture boots");
-    for block in 0..FED_BLOCKS {
-        assert!(native_staging::source_id(handle, SOURCE_ID));
-        assert!(native_staging::source_pcm(
-            handle,
-            0.05 + 0.01 * block as f32
-        ));
-        let result = host_web::miso_engine_web_v1_source_submit(
-            handle,
-            SOURCE_ID.len() as u32,
-            1,
-            block as u64 * u64::from(QUANTUM_FRAMES),
-            2,
-            QUANTUM_FRAMES,
-            0,
-        );
-        assert_eq!(result, RESULT_OK, "block {block}: the feed");
-    }
-    handle
-}
+// A process holds at most four instance reservations (`handoff::RESERVATIONS`, never freed): this
+// binary's tests reserve two; a test that reserves goes in a binary with room
+// (`worker_handoff_canary.rs` holds two more).
 
 fn frame(request: u64, payload: CommandPayload<'_>) -> Vec<u8> {
     frame_at(request, ExpectedRevision::Any, payload)
@@ -229,25 +184,6 @@ fn drain_response_ready(handle: u32) -> bool {
         }
     }
     panic!("the reliable lane does not empty")
-}
-
-/// One block's output planes as bits, and the render result.
-fn render(handle: u32) -> (u32, Vec<u32>) {
-    let result = host_web::miso_engine_web_v1_render(handle, QUANTUM_FRAMES);
-    let bits = native_staging::render_output(handle)
-        .map(|(pcm, _, _)| pcm.iter().map(|sample| sample.to_bits()).collect())
-        .unwrap_or_default();
-    (result, bits)
-}
-
-/// Render `blocks` blocks, polling the meters after each as the worklet does; the bits.
-fn render_blocks(handle: u32, blocks: usize, bits: &mut Vec<Vec<u32>>) {
-    for _ in 0..blocks {
-        let (result, block) = render(handle);
-        assert_eq!(result, RESULT_OK, "block {}: the render", bits.len());
-        let _ = host_web::miso_engine_web_v1_meter_poll(handle);
-        bits.push(block);
-    }
 }
 
 /// The script on one thread: the bits a single instance renders for the same commands, the
@@ -763,124 +699,6 @@ fn an_occupied_slot_refuses_a_second_token_and_leaves_it_unconsumed() {
         );
         tokens.lock().expect("tokens")[0] = back;
         second.wait();
-    });
-}
-
-/// A stack canary overwritten while the worklet renders is caught at its release.
-///
-/// Test value: red if `host_release` hands the half back without checking the bound canary, so
-/// a stack overflow of the worklet instance after its last block goes unreported and the session
-/// keeps running.
-#[test]
-fn an_overwritten_stack_canary_fails_the_session_at_the_release() {
-    let _turn = TURN
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let step = Barrier::new(2);
-    let shared = Mutex::new((0_u32, 0_u64, None::<Reservation>));
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let _guard = AbortOnPanic;
-            step.wait();
-            let (handle, token, reservation) = *shared.lock().expect("shared");
-            let reservation = reservation.expect("reserved");
-            assert_eq!(native_staging::instance_bind(reservation.record), RESULT_OK);
-            assert_eq!(host_web::miso_engine_web_v1_host_adopt(token), RESULT_OK);
-            let mut bits = Vec::new();
-            render_blocks(handle, 1, &mut bits);
-            native_staging::overwrite_canary(&reservation);
-            let back = host_web::miso_engine_web_v1_host_release(handle);
-            assert_ne!(back, 0, "the half still goes back, failed");
-            shared.lock().expect("shared").1 = back;
-            step.wait();
-        });
-        let _guard = AbortOnPanic;
-        let handle = boot();
-        let reservation =
-            native_staging::instance_reserve(TLS_SIZE, TLS_ALIGN).expect("a reservation");
-        let token = host_web::miso_engine_web_v1_host_release(handle);
-        *shared.lock().expect("shared") = (handle, token, Some(reservation));
-        step.wait();
-        step.wait();
-        let back = shared.lock().expect("shared").1;
-        assert_eq!(host_web::miso_engine_web_v1_host_adopt(back), RESULT_OK);
-        let status = native_staging::render_status(handle).expect("status");
-        assert_eq!(
-            status.state, STATE_FAILED,
-            "the overflow failed the session"
-        );
-        assert_eq!(
-            host_web::miso_engine_web_v1_service(handle),
-            RESULT_WRONG_STATE,
-            "the control half refuses after the failure"
-        );
-        assert!(
-            String::from_utf8_lossy(&native_staging::diagnostic(handle))
-                .starts_with("web.instance.stack_canary"),
-            "the diagnostic names the canary"
-        );
-        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
-    });
-}
-
-/// A stack canary overwritten between two blocks fails the session at the next block.
-///
-/// Test value: red if the render export checks the canary only at the release, so a worklet whose
-/// stack overflowed keeps rendering over corrupted memory until its teardown.
-#[test]
-fn an_overwritten_stack_canary_fails_the_next_block() {
-    let _turn = TURN
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let step = Barrier::new(2);
-    let shared = Mutex::new((0_u32, 0_u64, None::<Reservation>));
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let _guard = AbortOnPanic;
-            step.wait();
-            let (handle, token, reservation) = *shared.lock().expect("shared");
-            let reservation = reservation.expect("reserved");
-            assert_eq!(native_staging::instance_bind(reservation.record), RESULT_OK);
-            assert_eq!(host_web::miso_engine_web_v1_host_adopt(token), RESULT_OK);
-            let mut bits = Vec::new();
-            render_blocks(handle, 2, &mut bits);
-            native_staging::overwrite_canary(&reservation);
-            assert_eq!(
-                host_web::miso_engine_web_v1_render(handle, QUANTUM_FRAMES),
-                RESULT_INTERNAL,
-                "the first block after the overflow fails"
-            );
-            let status = native_staging::render_status(handle).expect("status");
-            assert_eq!(status.state, STATE_FAILED);
-            assert_eq!(
-                status.rendered_quanta, 2,
-                "the failed block rendered nothing"
-            );
-            assert!(
-                String::from_utf8_lossy(&native_staging::render_diagnostic(handle))
-                    .starts_with("web.instance.stack_canary"),
-                "the render diagnostic names the canary"
-            );
-            let back = host_web::miso_engine_web_v1_host_release(handle);
-            assert_ne!(back, 0);
-            shared.lock().expect("shared").1 = back;
-            step.wait();
-        });
-        let _guard = AbortOnPanic;
-        let handle = boot();
-        let reservation =
-            native_staging::instance_reserve(TLS_SIZE, TLS_ALIGN).expect("a reservation");
-        let token = host_web::miso_engine_web_v1_host_release(handle);
-        *shared.lock().expect("shared") = (handle, token, Some(reservation));
-        step.wait();
-        step.wait();
-        let back = shared.lock().expect("shared").1;
-        assert_eq!(host_web::miso_engine_web_v1_host_adopt(back), RESULT_OK);
-        assert_eq!(
-            native_staging::render_status(handle).map(|status| status.state),
-            Some(STATE_FAILED)
-        );
-        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
     });
 }
 
