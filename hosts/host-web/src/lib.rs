@@ -60,10 +60,6 @@ pub use host_core::{SOURCE_STALL_TOLERANCE_MS, default_source_ring_frames};
 /// Browser host ABI version 1.0.
 pub const ABI_VERSION: u32 = 0x0001_0000;
 
-/// Maximum exact staged document length. Dense automation belongs in future content-addressed
-/// binary blobs rather than unbounded JSON.
-pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
-
 /// Conservative transient parse projection in bytes per staged document byte.
 ///
 /// Issue #338 re-measured the then-pinned `jstrict 0.14.0` JSON frontend plus typed model and compilation
@@ -86,6 +82,11 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 /// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` against the effective budget before UTF-8 decode
 /// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
 /// cannot silently outrun this projection.
+///
+/// Issue #2191: this projection is the document's only default limit. A boot (and a staged
+/// document, and a `SESSION_REPLACE`) admits up to `budget / PARSE_TRANSIENT_MULTIPLIER` bytes,
+/// 26,843,545 at the 512 MiB default; the compiled 1 MiB cap is gone, and the
+/// `maximum_document_bytes` boot word only tightens it.
 pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
 
 /// What `miso_engine_web_v1_source_fill` answers for a refused read (issue #1387): no ring holds
@@ -447,11 +448,16 @@ pub struct WebBootOptions {
     /// refused, the output meter's gate stays shut, and the strip meters still fold. `12` is ~31
     /// frames per second at 48 kHz with a 128-frame quantum.
     pub live_control_meter_blocks: u64,
-    /// Must be zero. This was the observation-taps word until #1590 D5 retired it: every plan
-    /// binds a queue for every declared tap of every effect, as on the C ABI
-    /// ([`host_core::launch_maximum_observation_taps`]). The offset keeps its place and the word
-    /// is refused when nonzero (`web.options.reserved3`).
-    pub reserved3: u64,
+    /// The longest session document in bytes, or zero for the budget's own limit (issue #2191).
+    ///
+    /// A document of `n` bytes is projected to need `n * PARSE_TRANSIENT_MULTIPLIER` bytes of
+    /// transient memory to parse, so the effective budget already admits at most
+    /// `budget / PARSE_TRANSIENT_MULTIPLIER` bytes and a zero word adds no other limit. A nonzero
+    /// word is a tighter cap for a host that wants one (documents from other people): the boot
+    /// document, `miso_engine_web_v1_document_ptr`, `miso_engine_web_v1_replace_document_ptr` and
+    /// `SESSION_REPLACE` refuse a longer document, naming its bytes and the limit. The offset was
+    /// the observation-taps word until #1590 D5 retired it.
+    pub maximum_document_bytes: u64,
     /// Must be zero. This was the master boot word (the designated master strip index plus one)
     /// until #1689 retired it: the master is the strip's `master` row, written by `SET_CONTROL`
     /// after boot, as on every host. The offset keeps its place and the word is refused when
@@ -473,7 +479,7 @@ impl WebBootOptions {
             maximum_memory_bytes: 0,
             maximum_control_frame_bytes: 0,
             live_control_meter_blocks: 0,
-            reserved3: 0,
+            maximum_document_bytes: 0,
             reserved2: 0,
         }
     }
@@ -1234,6 +1240,8 @@ pub struct AudioWorkletEngineHost {
     /// The control frame the boot resolved (issue #2191): the boot word, or on a zero word
     /// [`DEFAULT_CONTROL_FRAME_BYTES`].
     control_frame_bytes: u32,
+    /// The longest replacement document the boot admits (issue #2191, [`maximum_document_bytes`]).
+    maximum_document_bytes: u32,
     resources: WebResourceReport,
     /// The watermark `read_watermark` last copied (#1381a D5), at a stable address in the
     /// control half: all zero until the first successful read.
@@ -1292,29 +1300,12 @@ impl AudioWorkletEngineHost {
         let document_bytes = u32::try_from(document.len()).map_err(|_| {
             BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.maximum_bytes")
         })?;
-        if document_bytes > MAXIMUM_DOCUMENT_BYTES {
-            return Err(BootFailure::fixed(
-                RESULT_REFUSED_DOCUMENT,
-                "web.document.maximum_bytes",
-            ));
-        }
         let options = validate_options(options)?;
         let control_frame_bytes = resolved_control_frame_bytes(&options)
             .ok_or_else(|| BootFailure::fixed(RESULT_INTERNAL, "web.internal.options"))?;
-        let memory_budget = if options.maximum_memory_bytes == 0 {
-            DEFAULT_MAXIMUM_MEMORY_BYTES
-        } else {
-            options.maximum_memory_bytes
-        };
-        let parse_projection = u64::from(document_bytes)
-            .checked_mul(PARSE_TRANSIENT_MULTIPLIER)
-            .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
-        if parse_projection > memory_budget {
-            return Err(BootFailure::projected_budget(
-                "host.budget.parse_projection",
-                parse_projection,
-                memory_budget,
-            ));
+        let memory_budget = memory_budget(&options);
+        if let Some(refusal) = document_length_refusal(&options, document_bytes) {
+            return Err(refusal);
         }
         let document = core::str::from_utf8(document)
             .map_err(|_| BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.utf8"))?;
@@ -1411,6 +1402,7 @@ impl AudioWorkletEngineHost {
             options,
             source_ring_frames,
             control_frame_bytes,
+            maximum_document_bytes: maximum_document_bytes(&options),
             resources,
             watermark: WebPlanWatermark {
                 struct_size: WATERMARK_BYTES,
@@ -1452,6 +1444,13 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub const fn control_frame_bytes(&self) -> u32 {
         self.control_frame_bytes
+    }
+
+    /// The longest replacement document the boot admits (issue #2191): the budget's parse
+    /// projection limit, or the `maximum_document_bytes` word when that is smaller.
+    #[must_use]
+    pub const fn maximum_document_bytes(&self) -> u32 {
+        self.maximum_document_bytes
     }
 
     /// Read the immutable boot options.
@@ -3689,6 +3688,53 @@ fn allocate_buffers(
     Ok((staging, buffers))
 }
 
+/// The boot memory budget `options` select: the word, or [`DEFAULT_MAXIMUM_MEMORY_BYTES`] for
+/// zero.
+pub(crate) const fn memory_budget(options: &WebBootOptions) -> u64 {
+    if options.maximum_memory_bytes == 0 {
+        DEFAULT_MAXIMUM_MEMORY_BYTES
+    } else {
+        options.maximum_memory_bytes
+    }
+}
+
+/// The longest document `options` admit (issue #2191): `budget / PARSE_TRANSIENT_MULTIPLIER`,
+/// or the `maximum_document_bytes` word when that is smaller. The boot, both document stagings
+/// and the control plane's `SESSION_REPLACE` share it.
+pub(crate) fn maximum_document_bytes(options: &WebBootOptions) -> u32 {
+    let derived = memory_budget(options) / PARSE_TRANSIENT_MULTIPLIER;
+    let limit = match options.maximum_document_bytes {
+        0 => derived,
+        word => word.min(derived),
+    };
+    u32::try_from(limit).unwrap_or(u32::MAX)
+}
+
+/// Why a document of `document_bytes` is refused under `options` (issue #2191), or `None`: over
+/// the `maximum_document_bytes` word, `web.document.maximum_bytes` naming its bytes and the word;
+/// otherwise over the budget's parse projection, `host.budget.parse_projection` naming the
+/// projection and the budget. Either names the bytes, before a byte of the document is parsed.
+pub(crate) fn document_length_refusal(
+    options: &WebBootOptions,
+    document_bytes: u32,
+) -> Option<BootFailure> {
+    let word = options.maximum_document_bytes;
+    if word != 0 && u64::from(document_bytes) > word {
+        return Some(BootFailure {
+            result: RESULT_REFUSED_DOCUMENT,
+            diagnostic: format!(
+                "web.document.maximum_bytes\t$.maximum_document_bytes[document_bytes={document_bytes},limit_bytes={word}]\n"
+            )
+            .into_bytes(),
+        });
+    }
+    let budget = memory_budget(options);
+    let projection = u64::from(document_bytes) * PARSE_TRANSIENT_MULTIPLIER;
+    (projection > budget).then(|| {
+        BootFailure::projected_budget("host.budget.parse_projection", projection, budget)
+    })
+}
+
 /// The control frame `options` select (issue #2191): [`DEFAULT_CONTROL_FRAME_BYTES`] for a zero
 /// word, the word itself inside [`MINIMUM_CONTROL_FRAME_BYTES`]..=[`MAXIMUM_CONTROL_FRAME_BYTES`],
 /// and `None` outside it, which boot refuses `web.options.control_frame_bytes`. The boot command
@@ -3738,13 +3784,6 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
         return Err(BootFailure::fixed(
             RESULT_REFUSED_OPTIONS,
             "web.options.reserved2",
-        ));
-    }
-    // #1590 D5: the word at offset 48 was the observation-taps word, reserved the same way.
-    if options.reserved3 != 0 {
-        return Err(BootFailure::fixed(
-            RESULT_REFUSED_OPTIONS,
-            "web.options.reserved3",
         ));
     }
     // #1380 D2: the module's shared memory cannot grow past its declared maximum, so a budget
@@ -3875,10 +3914,11 @@ fn control_limits(
     caps: &HostPrepareCaps,
     memory_budget: u64,
     control_frame_bytes: u32,
+    maximum_document_bytes: u32,
 ) -> ControlLimits {
     ControlLimits {
         source_ring_frames: caps.source_ring_frames,
-        maximum_document_bytes: u64::from(MAXIMUM_DOCUMENT_BYTES),
+        maximum_document_bytes: u64::from(maximum_document_bytes),
         maximum_diagnostic_bytes: u64::from(DIAGNOSTIC_BYTES),
         maximum_tracks: caps.maximum_tracks,
         maximum_sources: caps.maximum_sources,
@@ -4858,7 +4898,12 @@ fn compile_ready(
     // status reads.
     let record = Arc::new(Mutex::new(BootRecord::default()));
     let preparer = WebRuntimePreparer::new(options).recording(Arc::clone(&record));
-    let limits = control_limits(caps, memory_budget, control_frame_bytes);
+    let limits = control_limits(
+        caps,
+        memory_budget,
+        control_frame_bytes,
+        maximum_document_bytes(&options),
+    );
     // #2166: a staged boot command (the SDK's boot spectrum taps) is applied before the first plan
     // is prepared, so the taps are that plan's and no rebuild is counted for them.
     let compiled = match boot_command {

@@ -55,7 +55,7 @@ use crate::render_lock::{control_allocation_count, render_allocation_count, rend
 // Named by the exports' result docs only.
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM,
-    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
+    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,
     RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
     RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_WRONG_STATE, RenderHost, STATE_READY,
     WebBootOptions, WebStatus,
@@ -121,7 +121,7 @@ const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
     maximum_memory_bytes: 0,
     maximum_control_frame_bytes: 0,
     live_control_meter_blocks: 0,
-    reserved3: 0,
+    maximum_document_bytes: 0,
     reserved2: 0,
 };
 
@@ -142,6 +142,19 @@ impl BootStaging {
         let length = failure.diagnostic().len().min(self.document.len());
         self.document[..length].copy_from_slice(&failure.diagnostic()[..length]);
         self.diagnostic_bytes = u32::try_from(length).unwrap_or(0);
+        self.document_valid = false;
+    }
+
+    /// Record a refusal with no staged document to write over: the staging becomes its
+    /// diagnostic, so `boot_diagnostic_ptr` reads it.
+    fn record_failure_owned(&mut self, failure: BootFailure) {
+        self.result = failure.result();
+        let mut diagnostic = Vec::new();
+        if diagnostic.try_reserve_exact(failure.diagnostic().len()).is_ok() {
+            diagnostic.extend_from_slice(failure.diagnostic());
+        }
+        self.diagnostic_bytes = u32::try_from(diagnostic.len()).unwrap_or(0);
+        *self.document = diagnostic;
         self.document_valid = false;
     }
 
@@ -511,7 +524,12 @@ pub extern "C" fn miso_engine_web_v1_boot_options_ptr() -> u32 {
     })
 }
 
-/// Stage an exact-length document before boot. Refuses lengths above the engine bound.
+/// Stage an exact-length document before boot. Refuses, before it allocates the document, a
+/// length the staged boot options do not admit (issue #2191): over the `maximumDocumentBytes`
+/// word (`RESULT_REFUSED_DOCUMENT`, `web.document.maximum_bytes`) or over the memory budget's
+/// parse projection (`RESULT_REFUSED_BUDGET`, `host.budget.parse_projection`). The refusal's
+/// diagnostic names the bytes and the limit; [`miso_engine_web_v1_boot_diagnostic_ptr`] and
+/// [`miso_engine_web_v1_boot_diagnostic_bytes`] read it. Write the boot options first.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
     let live = LIVE_HOST.with(|slot| slot.try_borrow().map_or(true, |slot| slot.is_some()));
@@ -528,10 +546,10 @@ pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
             staging.document_valid = false;
             return 0;
         }
-        if len > MAXIMUM_DOCUMENT_BYTES {
-            staging.result = RESULT_REFUSED_DOCUMENT;
-            staging.diagnostic_bytes = 0;
-            staging.document_valid = false;
+        if let Some(refusal) = crate::document_length_refusal(&staging.options, len) {
+            // The diagnostic replaces the staging, as a refused boot's does; it is short.
+            *staging.document = Vec::new();
+            staging.record_failure_owned(refusal);
             return 0;
         }
         let count = len as usize;
@@ -599,7 +617,8 @@ fn stage_boot_command(len: u32) -> *mut u8 {
 /// to the control plane and frees it after the command, whatever the command was.
 ///
 /// Returns the buffer's address, or zero, with nothing staged, for a wrong handle, a host that is
-/// not ready, a `len` that is zero or over [`MAXIMUM_DOCUMENT_BYTES`], or a failed reservation.
+/// not ready, a `len` that is zero or over the boot's document limit
+/// ([`AudioWorkletEngineHost::maximum_document_bytes`], issue #2191), or a failed reservation.
 /// Every call on the live host first frees what an earlier one staged (the boot's copy too), so a
 /// refused call leaves no document for the next command. It never touches the boot result word.
 /// Control side only: the control Worker, or in `single` mode the worklet's message handler, never
@@ -620,7 +639,10 @@ fn stage_replace_document(handle: u32, len: u32) -> *mut u8 {
             // Assignment frees the earlier bytes; the `ManuallyDrop` registers no destructor.
             *staging.document = Vec::new();
             staging.document_valid = false;
-            if host.status().state != STATE_READY || len == 0 || len > MAXIMUM_DOCUMENT_BYTES {
+            if host.status().state != STATE_READY
+                || len == 0
+                || len > host.maximum_document_bytes()
+            {
                 return ptr::null_mut();
             }
             let count = len as usize;
@@ -761,6 +783,35 @@ pub extern "C" fn miso_engine_web_v1_boot_result() -> u32 {
             .try_borrow()
             .map_or(RESULT_INTERNAL, |staging| staging.result)
     })
+}
+
+/// Return the address of the last refused boot's or document staging's diagnostic (issue
+/// #2191), or zero when there is none. Its length is
+/// [`miso_engine_web_v1_boot_diagnostic_bytes`]. A refused `document_ptr` stages no document, so
+/// this is the one place its diagnostic is read.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot_diagnostic_ptr() -> u32 {
+    pointer_u32(boot_diagnostic())
+}
+
+/// [`miso_engine_web_v1_boot_diagnostic_ptr`]'s address as a pointer (null for none), so a native
+/// test can tell a diagnostic from none.
+fn boot_diagnostic() -> *const u8 {
+    BOOT_STAGING.with(|staging| {
+        let Ok(staging) = staging.try_borrow() else {
+            return ptr::null();
+        };
+        if staging.diagnostic_bytes == 0 || staging.document_valid {
+            return ptr::null();
+        }
+        staging.document.as_ptr()
+    })
+}
+
+/// Whether [`miso_engine_web_v1_boot_diagnostic_ptr`] names a diagnostic (issue #2191).
+#[cfg(test)]
+pub(crate) fn test_boot_diagnostic_present() -> bool {
+    !boot_diagnostic().is_null()
 }
 
 /// Return the valid diagnostic prefix that replaced the refused staged document.
@@ -1947,6 +1998,12 @@ pub(crate) fn test_stage_boot_command(bytes: &[u8]) -> bool {
 #[cfg(test)]
 pub(crate) fn test_staged_boot_command_bytes() -> usize {
     BOOT_STAGING.with(|staging| staging.borrow().command.len())
+}
+
+/// Stage the boot options, as the page writes them at `miso_engine_web_v1_boot_options_ptr`.
+#[cfg(test)]
+pub(crate) fn test_stage_options(options: WebBootOptions) {
+    BOOT_STAGING.with(|staging| staging.borrow_mut().options = options);
 }
 
 #[cfg(test)]

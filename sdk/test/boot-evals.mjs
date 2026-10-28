@@ -162,7 +162,11 @@ describe("eval 3 -- refusal time and admission without staging growth", () => {
     // `document_ptr` refuses an oversize length before it allocates anything.
     //
     // Red mutation: restore input-sized staging -- the growth assertion goes red immediately.
-    const maximum = ABI_LAYOUT.constants.maximumDocumentBytes;
+    //
+    // Issue #2191: the default limit is the default budget's parse projection.
+    const maximum = Math.floor(
+      ABI_LAYOUT.constants.defaultMaximumMemoryBytes / ABI_LAYOUT.constants.parseTransientMultiplier,
+    );
     const page = 1 << 16;
     const instance = await asset.instantiate();
     const exports = instance.exports;
@@ -183,7 +187,7 @@ describe("eval 3 -- refusal time and admission without staging growth", () => {
     );
     assert.equal(
       Number(exports.miso_engine_web_v1_boot_result()),
-      ABI_LAYOUT.constants.resultCodes.find((row) => row.name === "invalidArgument").value,
+      ABI_LAYOUT.constants.resultCodes.find((row) => row.name === "refusedBudget").value,
     );
 
     // The assertion that actually catches the bug. The old `validateSession` sized staging from
@@ -206,14 +210,17 @@ describe("eval 3 -- refusal time and admission without staging growth", () => {
       );
     }
 
-    // And the same refusal through the SDK's own surface, typed.
+    // And the same refusal through the SDK's own surface, typed, naming the bytes and the
+    // budget (#2191: a refused staging's diagnostic is read at `boot_diagnostic_ptr`).
     const oversize = new Uint8Array(maximum + 1).fill(0x20);
     await assert.rejects(
       () => WasmBoundary.boot(asset, oversize),
       (error) => {
         assert.ok(error instanceof MisoEngineError);
         assert.equal(error.phase, "boot");
-        assert.equal(error.code, "refusedDocument");
+        assert.equal(error.code, "refusedBudget");
+        assert.equal(error.diagnostics[0].code, "host.budget.parse_projection");
+        assert.match(error.diagnostics[0].path, new RegExp(`projected_bytes=${(maximum + 1) * 20},`));
         return true;
       },
     );
@@ -225,16 +232,17 @@ describe("eval 3 -- refusal time and admission without staging growth", () => {
     // margin is stated rather than tuned: one second is orders of magnitude above the engine's
     // measured refusal and still catches the regression this eval exists for, which is a
     // *quadratic* or allocation-bound admission path rather than a few milliseconds of drift.
-    const maximum = ABI_LAYOUT.constants.maximumDocumentBytes;
-    // A document that is exactly at the maximum and invalid as late as possible: a real header
+    // Issue #2191: 1 MiB, the staging ceiling before the budget became the limit, as a
+    // representative length. A document that is invalid as late as possible: a real header
     // followed by padding, so the parser does real work before it refuses.
     const encoder = new TextEncoder();
     const baseline = encoder.encode(sessionDocument({ sampleRateHz: 44_056, padding: 1 })).length;
     // `padding` writes "\n# " plus that many characters, so one added character is one added byte
     // and the fixture can be sized to the maximum exactly rather than approximately.
-    const document = sessionDocument({ sampleRateHz: 44_056, padding: 1 + maximum - baseline });
+    const length = 1 << 20;
+    const document = sessionDocument({ sampleRateHz: 44_056, padding: 1 + length - baseline });
     const encoded = encoder.encode(document);
-    assert.equal(encoded.length, maximum, "the fixture is exactly the maximum admissible length");
+    assert.equal(encoded.length, length, "the fixture is exactly 1 MiB");
 
     const started = performance.now();
     const refusal = await validate(encoded, { asset });
@@ -244,7 +252,7 @@ describe("eval 3 -- refusal time and admission without staging growth", () => {
     assert.equal(refusal.diagnostics[0].code, "sample_rate.unsupported_at_launch");
     assert.ok(
       elapsed < 1_000,
-      `a maximum-length invalid document refused in ${elapsed.toFixed(1)} ms, over the 1000 ms budget`,
+      `a 1 MiB invalid document refused in ${elapsed.toFixed(1)} ms, over the 1000 ms budget`,
     );
   });
 });

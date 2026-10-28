@@ -63,7 +63,7 @@ const RESERVATION_BYTES = 16;
 const WORKER_MODE_TAGS = new Set(["miso.meters.v1", "miso.telemetry.v1", "miso.renderallocations.v1"]);
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "maximumControlFrameBytes", "liveControlMeterBlocks",
-  "reserved3", "reserved2",
+  "maximumDocumentBytes", "reserved2",
 ];
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
@@ -938,15 +938,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     const liveControlWords = [
       options.maximumControlFrameBytes, options.liveControlMeterBlocks,
-      options.reserved3, options.reserved2,
+      options.maximumDocumentBytes, options.reserved2,
     ];
     if (liveControlWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid live-control boot option");
     }
-    // Offsets 48 and 56 are reserved and must be zero (issue #1590 D5, #1689 D2): a writer that
-    // still sets a retired word is refused, never ignored. Offset 32 is the control frame word
+    // Offset 56 is reserved and must be zero (issue #1689 D2): a writer that still sets a retired
+    // word is refused, never ignored. Offsets 32 and 48 are the control frame and document words
     // (issue #2191), which the engine bounds.
-    if (options.reserved3 !== 0n || options.reserved2 !== 0n) {
+    if (options.reserved2 !== 0n) {
       throw new RangeError("Invalid reserved boot option");
     }
     const view = new DataView(this.exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);

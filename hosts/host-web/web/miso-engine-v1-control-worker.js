@@ -103,7 +103,7 @@ const BOOT_FIELDS = [
 ];
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "maximumControlFrameBytes", "liveControlMeterBlocks",
-  "reserved3", "reserved2",
+  "maximumDocumentBytes", "reserved2",
 ];
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
@@ -329,12 +329,13 @@ class ControlWorker {
 
   writeBootOptions(pointer, options) {
     const words = [
-      options.maximumControlFrameBytes, options.liveControlMeterBlocks, options.reserved3, options.reserved2,
+      options.maximumControlFrameBytes, options.liveControlMeterBlocks, options.maximumDocumentBytes,
+      options.reserved2,
     ];
     if (!u32(options.sourceRingFrames) || !bounded64(options.maximumMemoryBytes, 0n)
         || options.maximumMemoryBytes > 0xffffffffn
         || words.some((value) => !bounded64(value, 0n) || value > 0xffffffffn)
-        || options.reserved3 !== 0n || options.reserved2 !== 0n) {
+        || options.reserved2 !== 0n) {
       return false;
     }
     const view = this.view(DataView, pointer, BOOT_OPTIONS_BYTES);

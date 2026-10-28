@@ -128,7 +128,7 @@ const SOURCE_RING_FRAMES = (() => {
 // sixty-four-track console documents. Each timed boot is on a fresh instance of the shipped module
 // (its linear memory grows inside the clock, as a first boot in the worklet does), with the
 // browser's boot options: no meters, master or spectrum (and the retired command-queue and
-// observation-taps words, `reserved3` zero, and the engine's default control frame). Only the boot export is inside the clock; the dispose that follows is
+// words zero, and the engine's default control frame and document limit). Only the boot export is inside the clock; the dispose that follows is
 // timed on its own and stated beside it, and after every timed boot the session is fed and must
 // render an audible block, outside the clock.
 //
@@ -287,12 +287,11 @@ function rebuildInstance(wasmModule) {
   u32("sourceRingFrames", SOURCE_RING_FRAMES);
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
-  // The browser's boot: the retired observation-taps and master words are `reserved3` and
-  // `reserved2` and must be zero, the control frame is the engine's default (#2191), and no meter
-  // word is set.
+  // The browser's boot: the retired master word `reserved2` must be zero, the control frame and
+  // the document limit are the engine's defaults (#2191), and no meter word is set.
   u64("maximumControlFrameBytes", 0n);
   u64("liveControlMeterBlocks", 0n);
-  u64("reserved3", 0n);
+  u64("maximumDocumentBytes", 0n);
   u64("reserved2", 0n);
   return e;
 }
@@ -872,10 +871,10 @@ function boot(document = mixingDocument) {
   u64("maximumMemoryBytes", 0n);
   // No meters or master, as the native row prepares its plan (`control: true`, nothing else);
   // the control plane and every declared observation tap are always attached (#1590 D5), and
-  // `reserved3`/`reserved2` must be zero; the control frame is the engine's default (#2191).
+  // `reserved2` must be zero; the control frame and document limit are the defaults (#2191).
   u64("maximumControlFrameBytes", 0n);
   u64("liveControlMeterBlocks", 0n);
-  u64("reserved3", 0n);
+  u64("maximumDocumentBytes", 0n);
   u64("reserved2", 0n);
   const pointer = e.miso_engine_web_v1_document_ptr(documentBytes.byteLength);
   new Uint8Array(e.memory.buffer, pointer, documentBytes.byteLength).set(documentBytes);

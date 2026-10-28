@@ -70,12 +70,12 @@ const limits = Object.freeze({
   sourceRingFrames: 256,
   maximumMemoryBytes: 0n,
   // Issue #137 D1/D2: the live-control meter word. `maximumControlFrameBytes` (offset 32, issue
-  // #2191) is the engine's default frame at zero; `reserved3` (offset 48, the observation-taps
-  // word until issue #1590) and `reserved2` (offset 56, the master boot word until issue #1689)
-  // must be zero; the live-control tests below override the meter word.
+  // #2191) is the engine's default frame at zero, `maximumDocumentBytes` (offset 48, issue #2191)
+  // leaves the document limit to the budget at zero, and `reserved2` (offset 56, the master boot
+  // word until issue #1689) must be zero; the live-control tests below override the meter word.
   maximumControlFrameBytes: 0n,
   liveControlMeterBlocks: 2n,
-  reserved3: 0n,
+  maximumDocumentBytes: 0n,
   reserved2: 0n,
 });
 
@@ -566,8 +566,8 @@ async function testMainRealm() {
         ["u64 type", plainOptions({ maximumMemoryBytes: 0 })],
         ["u64 bound", plainOptions({ maximumMemoryBytes: 0x1_0000_0000_0000_0000n })],
         ["control frame type", plainOptions({ maximumControlFrameBytes: 0 })],
-        // Issue #1590 gate 4: the retired observation-taps word is refused.
-        ["reserved3 nonzero", plainOptions({ reserved3: 4n })],
+        // Issue #2191: the document word is a bigint.
+        ["document word type", plainOptions({ maximumDocumentBytes: 0 })],
         // Issue #1689 gate 2: the retired master word is refused at both ends of its range.
         ["reserved2 one", plainOptions({ reserved2: 1n })],
         ["reserved2 all ones", plainOptions({ reserved2: 0xffff_ffff_ffff_ffffn })],
@@ -739,7 +739,7 @@ async function testMainRealm() {
           maximumMemoryBytes: 0n,
           maximumControlFrameBytes: 0n,
           liveControlMeterBlocks: 7n,
-          reserved3: 0n,
+          maximumDocumentBytes: 0n,
           reserved2: 0n,
         };
         const expectedOptions = { ...options };
@@ -772,7 +772,7 @@ async function testMainRealm() {
           await addGate.started;
           options.sourceRingFrames = 128;
           options.liveControlMeterBlocks = 99n;
-          factory.options = { ...options, reserved3: 4n };
+          factory.options = { ...options, maximumDocumentBytes: 4n };
           factory.context = replacementContext;
           factory.preparedModule = replacementModule;
           factory.simd128ModuleUrl = "mutated-simd.wasm";
@@ -784,7 +784,7 @@ async function testMainRealm() {
           context.renderQuantumSize = 128;
           options.sourceRingFrames = 256;
           options.liveControlMeterBlocks = 101n;
-          factory.options = { ...options, reserved3: 8n };
+          factory.options = { ...options, maximumDocumentBytes: 8n };
           readyPause.release();
           hostValue = await boot;
           const node = FakeNode.latest;
@@ -3170,25 +3170,25 @@ async function testQualificationBoot({
       label === "renderCorpusSegment" || label === "typedUnsupportedAttestation");
     assert(plain.every(({ options }) => options.options.maximumControlFrameBytes === 0n
       && options.options.liveControlMeterBlocks === 0n
-      && options.options.reserved3 === 0n
+      && options.options.maximumDocumentBytes === 0n
       && options.options.reserved2 === 0n),
     "qualification boot contract: plain option variant changed");
     const liveControlOptions = observed
       .find(({ label }) => label === "runLiveControlQualification").options.options;
     assert.equal(liveControlOptions.maximumControlFrameBytes, 0n);
     assert.equal(liveControlOptions.liveControlMeterBlocks, 2n);
-    assert.equal(liveControlOptions.reserved3, 0n);
+    assert.equal(liveControlOptions.maximumDocumentBytes, 0n);
     assert.equal(liveControlOptions.reserved2, 0n);
     const observationOptions = observed.find(({ label }) => label === "runObservationRun").options.options;
     assert.equal(observationOptions.maximumControlFrameBytes, 0n);
     assert.equal(observationOptions.liveControlMeterBlocks, 2n);
-    assert.equal(observationOptions.reserved3, 0n);
+    assert.equal(observationOptions.maximumDocumentBytes, 0n);
     assert.equal(observationOptions.reserved2, 0n);
     // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields.
     const stagingReadOptions = observed.find(({ label }) => label === "runStagingReadRun").options.options;
     assert.equal(stagingReadOptions.maximumControlFrameBytes, 0n);
     assert.equal(stagingReadOptions.liveControlMeterBlocks, 2n);
-    assert.equal(stagingReadOptions.reserved3, 0n);
+    assert.equal(stagingReadOptions.maximumDocumentBytes, 0n);
     assert.equal(stagingReadOptions.reserved2, 0n);
 
     const diagnosis = await bounded(hooks.diagnoseReady(documentBytes), "diagnoseReady");

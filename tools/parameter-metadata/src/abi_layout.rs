@@ -60,7 +60,7 @@ use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_DIAGNOSTIC,
     BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
     DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES,
-    INSTANCE_RESERVATION_BYTES, MAXIMUM_DOCUMENT_BYTES, METER_HEADER_BYTES, PLAN_LATENCY_BYTES,
+    INSTANCE_RESERVATION_BYTES, METER_HEADER_BYTES, PARSE_TRANSIENT_MULTIPLIER, PLAN_LATENCY_BYTES,
     RACK_CONSOLE, RACK_INSERTS, RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH,
     RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL,
     RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
@@ -120,11 +120,12 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 57] = [
+pub const EXPORTS: [&str; 58] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_command_ptr",
     "miso_engine_web_v1_boot_diagnostic_bytes",
+    "miso_engine_web_v1_boot_diagnostic_ptr",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_buffer_capacity",
@@ -225,7 +226,11 @@ fn boot_options_fields() -> [Field; 11] {
             offset_of!(WebBootOptions, live_control_meter_blocks),
             "u64",
         ),
-        ("reserved3", offset_of!(WebBootOptions, reserved3), "u64"),
+        (
+            "maximumDocumentBytes",
+            offset_of!(WebBootOptions, maximum_document_bytes),
+            "u64",
+        ),
         ("reserved2", offset_of!(WebBootOptions, reserved2), "u64"),
     ]
 }
@@ -689,7 +694,8 @@ pub fn render() -> String {
                 (u32::from(RACK_CONSOLE), "console"),
                 (u32::from(RACK_NOT_APPLICABLE), "notApplicable"),
             ]),
-            maximum_document_bytes: MAXIMUM_DOCUMENT_BYTES,
+            // Issue #2191: the document's default limit is `budget / parseTransientMultiplier`.
+            parse_transient_multiplier: PARSE_TRANSIENT_MULTIPLIER,
             maximum_source_channels: session::SOURCE_CHANNELS_LAUNCH_MAXIMUM,
             diagnostic_bytes: DIAGNOSTIC_BYTES,
             default_meter_blocks: DEFAULT_METER_BLOCKS,
@@ -789,7 +795,7 @@ struct Constants<'a> {
     backends: Vec<NamedValue<'a>>,
     buffer_kinds: Vec<NamedValue<'a>>,
     racks: Vec<NamedValue<'a>>,
-    maximum_document_bytes: u32,
+    parse_transient_multiplier: u64,
     maximum_source_channels: u32,
     diagnostic_bytes: u32,
     default_meter_blocks: u32,

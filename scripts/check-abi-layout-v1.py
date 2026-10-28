@@ -103,6 +103,7 @@ EXPORTS = [
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_command_ptr",
     "miso_engine_web_v1_boot_diagnostic_bytes",
+    "miso_engine_web_v1_boot_diagnostic_ptr",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_buffer_capacity",
@@ -175,7 +176,7 @@ STRUCTURES = {
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
     "sourceRingFrames", "reserved0", "maximumMemoryBytes", "maximumControlFrameBytes",
-    "liveControlMeterBlocks", "reserved3", "reserved2",
+    "liveControlMeterBlocks", "maximumDocumentBytes", "reserved2",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
@@ -345,7 +346,8 @@ def validate(document: object) -> None:
     require(isinstance(constants, dict), "constants is an object")
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
-        "maximumDocumentBytes", "maximumSourceChannels", "diagnosticBytes", "defaultMeterBlocks",
+        "parseTransientMultiplier", "maximumSourceChannels", "diagnosticBytes",
+        "defaultMeterBlocks",
         "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
         "racks",
     }, f"constants keys are exact: {sorted(constants)}")
@@ -374,7 +376,7 @@ def validate(document: object) -> None:
     require(len({row["name"] for row in aliases}) == 3, "alias names are distinct")
 
     for name, expected in (
-        ("maximumDocumentBytes", 1 << 20),
+        ("parseTransientMultiplier", 20),
         ("maximumSourceChannels", 2),
         ("diagnosticBytes", 1 << 14),
         ("defaultMeterBlocks", 12),

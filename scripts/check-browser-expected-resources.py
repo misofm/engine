@@ -397,7 +397,8 @@ def check_limits_vocabulary(worklet: str, fixture: str) -> None:
     """The fixture's boot `options` object and the worklet's guard are one vocabulary.
 
     The same staleness class as the resource rows, on the other half of the fixture, and it had
-    already bitten: issue #143 carved the observation-taps word (now `reserved3`, issue #1590)
+    already bitten: issue #143 carved the observation-taps word (retired by issue #1590; offset 48 is
+    `maximumDocumentBytes` since issue #2191)
     and the master word (now `reserved2`, issue #1689) out of the configuration's last two reserved words and added
     both to the old guard, and the fixture's policy object was never extended. The field list is
     checked with `exactFields`, so the browser leg refused the fixture at boot with
@@ -601,7 +602,7 @@ def self_test() -> int:
     def add_worklet_limit(name: str):
         def apply(pair: tuple) -> tuple:
             actual, expected, worklet, fixture = pair
-            anchor = '"reserved3", "reserved2",'
+            anchor = '"maximumDocumentBytes", "reserved2",'
             require(anchor in worklet, "self-test mutation matched nothing")
             return actual, expected, worklet.replace(
                 anchor, f'{anchor} "{name}",', 1
@@ -729,8 +730,8 @@ def self_test() -> int:
         ("the oracle prints a different schema", with_schema("miso.web.browser.v1"), None),
         # The boot-options vocabulary, and the exact #143 regression this fixture shipped with.
         (
-            "the fixture's bootOptions() drops the #1590 reserved3 word (the #143 regression)",
-            drop_fixture_limit("reserved3"),
+            "the fixture's bootOptions() drops the #2191 document word (the #143 regression class)",
+            drop_fixture_limit("maximumDocumentBytes"),
             None,
         ),
         (

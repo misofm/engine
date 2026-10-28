@@ -71,7 +71,7 @@ const layout = {
   memoryPages: ABI.memory,
   offsets: Object.fromEntries(["structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
     "sourceRingFrames", "reserved0", "maximumMemoryBytes", "maximumControlFrameBytes",
-    "liveControlMeterBlocks", "reserved3", "reserved2",
+    "liveControlMeterBlocks", "maximumDocumentBytes", "reserved2",
   ].map((name) => [name, bootField(name)])),
   sourceRingFrames: (Math.ceil(Math.floor((RATE * stallToleranceMs) / 1000) / Q) + reserveQuanta) * Q,
   ok: constant("resultCodes", "ok"),
@@ -110,7 +110,7 @@ registerProcessor("rebuild-cost", class extends AudioWorkletProcessor {
     u32("sourceRingFrames", L.sourceRingFrames); u32("reserved0", 0);
     u64("maximumMemoryBytes", 0n);
     u64("maximumControlFrameBytes", 0n);
-    u64("liveControlMeterBlocks", 0n); u64("reserved3", 0n);
+    u64("liveControlMeterBlocks", 0n); u64("maximumDocumentBytes", 0n);
     u64("reserved2", 0n);
     const doc = o.document;
     const pointer = e.miso_engine_web_v1_document_ptr(doc.byteLength);

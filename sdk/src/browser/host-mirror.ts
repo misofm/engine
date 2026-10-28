@@ -52,7 +52,7 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
     maximumMemoryBytes: options.maximumMemoryBytes ?? 0n,
     maximumControlFrameBytes: 0n,
     liveControlMeterBlocks: word("liveControls.meterBlocks", liveControls?.meterBlocks),
-    reserved3: 0n,
+    maximumDocumentBytes: 0n,
     reserved2: 0n,
   };
 }

@@ -76,9 +76,8 @@ function bootOptions(sourceRingFrames, liveControlMeterBlocks = 0n) {
     // Issue #2191: offset 32 is the control frame word; zero is the engine's default frame.
     maximumControlFrameBytes: 0n,
     liveControlMeterBlocks,
-    // Issue #1590 D5: offset 48 was the observation-taps word; it is reserved and must be zero.
-    // Every plan binds every declared tap.
-    reserved3: 0n,
+    // Issue #2191: offset 48 is the document word; zero leaves the limit to the budget.
+    maximumDocumentBytes: 0n,
     // Issue #1689: offset 56 was the master boot word; it is reserved and must be zero. The
     // observation row designates its master with the strip's `master` row after boot.
     reserved2: 0n,

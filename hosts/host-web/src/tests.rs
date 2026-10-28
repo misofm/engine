@@ -135,6 +135,10 @@ fn exact_retained_report_total(resources: &WebResourceReport) -> u64 {
         .expect("independent exact retained sum")
 }
 
+/// The dense documents' length: the 1 MiB the boot admitted before issue #2191 made the budget the
+/// document's limit, kept as a representative point of the parse projection.
+const DENSE_DOCUMENT_BYTES: usize = 1 << 20;
+
 struct DenseInvalidAutomationDocument {
     bytes: Vec<u8>,
     segment_count: usize,
@@ -150,7 +154,7 @@ fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDoc
     let (before, after) = BASE
         .split_once(EMPTY_AUTOMATION)
         .expect("browser fixture has the automation replacement seam");
-    let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
+    let maximum = DENSE_DOCUMENT_BYTES;
     let fixed_bytes = before.len() + HEADER.len() + FOOTER.len() + after.len();
     let segment_count = (maximum - fixed_bytes + 1) / (INVALID_SEGMENT.len() + 1);
     assert!(
@@ -181,7 +185,7 @@ fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDoc
 #[test]
 fn maximum_document_dense_invalid_fixture_reaches_bounded_semantic_validation() {
     let fixture = maximum_document_with_dense_invalid_automation();
-    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    assert_eq!(fixture.bytes.len(), DENSE_DOCUMENT_BYTES);
     assert!(fixture.segment_count > 10_000);
     let source = core::str::from_utf8(&fixture.bytes).expect("fixture is UTF-8 JSON");
     assert!(
@@ -217,7 +221,6 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(size_of::<WebBootOptions>(), 64);
     assert_eq!(size_of::<WebStatus>(), 80);
     assert_eq!(size_of::<WebResourceReport>(), 224);
-    assert_eq!(MAXIMUM_DOCUMENT_BYTES, 1 << 20);
     assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 20);
     assert_eq!(DEFAULT_MAXIMUM_MEMORY_BYTES, 512 << 20);
     assert_eq!(DIAGNOSTIC_BYTES, 1 << 14);
@@ -267,8 +270,9 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebBootOptions, maximum_control_frame_bytes), 32);
     assert_eq!(offset_of!(WebBootOptions, live_control_meter_blocks), 40);
     // Issue #143 D3/D6 carved the configuration's remaining two reserved words; #1590 D5 and
-    // #1689 retired them again (`reserved3`, `reserved2`), and every offset is where it was.
-    assert_eq!(offset_of!(WebBootOptions, reserved3), 48);
+    // #1689 retired them again, #2191 made offset 48 the document word, and every offset is where
+    // it was.
+    assert_eq!(offset_of!(WebBootOptions, maximum_document_bytes), 48);
     assert_eq!(offset_of!(WebBootOptions, reserved2), 56);
     // The meter header is a new fixed structure, not a change to an existing one.
     // Issue #1209 D2 appended `submix_count` and its pad: 64 bytes became 72, nothing moved.
@@ -345,11 +349,60 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     assert_eq!(miso_engine_web_v1_buffer_ptr(0, BUFFER_DIAGNOSTIC), 0);
     assert_eq!(miso_engine_web_v1_boot(3), 0, "refusal invalidates staging");
     assert_eq!(miso_engine_web_v1_boot_diagnostic_bytes(), 0);
-    assert_eq!(
-        miso_engine_web_v1_document_ptr(MAXIMUM_DOCUMENT_BYTES + 1),
-        0
-    );
-    assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_DOCUMENT);
+    // Issue #2191 gate 4: the staging refuses a length its staged options do not admit before it
+    // allocates the document, with a diagnostic that names the bytes and the limit: the budget's
+    // parse projection (`len * 20 > budget`) and, tighter, the document word.
+    let budget = 1_u64 << 20;
+    let derived = (budget / PARSE_TRANSIENT_MULTIPLIER) as u32;
+    for (options, admitted, result, diagnostic) in [
+        (
+            WebBootOptions {
+                maximum_memory_bytes: budget,
+                ..boot_options(128)
+            },
+            derived,
+            RESULT_REFUSED_BUDGET,
+            format!(
+                "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget}]\n",
+                u64::from(derived + 1) * PARSE_TRANSIENT_MULTIPLIER
+            ),
+        ),
+        (
+            WebBootOptions {
+                maximum_memory_bytes: budget,
+                maximum_document_bytes: 100,
+                ..boot_options(128)
+            },
+            100,
+            RESULT_REFUSED_DOCUMENT,
+            "web.document.maximum_bytes\t$.maximum_document_bytes[document_bytes=101,limit_bytes=100]\n"
+                .to_owned(),
+        ),
+    ] {
+        crate::ffi::test_stage_options(options);
+        assert_eq!(miso_engine_web_v1_document_ptr(admitted + 1), 0);
+        assert_eq!(miso_engine_web_v1_boot_result(), result);
+        let length = miso_engine_web_v1_boot_diagnostic_bytes() as usize;
+        assert!(crate::ffi::test_boot_diagnostic_present());
+        assert_eq!(
+            String::from_utf8_lossy(&crate::ffi::test_staged_document()[..length]),
+            diagnostic
+        );
+        // Natively the address does not fit the `u32` export; the staging is what it names.
+        let _ = miso_engine_web_v1_document_ptr(admitted);
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+        assert_eq!(
+            crate::ffi::test_document_staging(),
+            (true, admitted as usize, admitted as usize),
+            "{admitted} bytes"
+        );
+        assert!(!crate::ffi::test_boot_diagnostic_present());
+    }
+    // At the default budget a 2 MiB document stages: no compiled 1 MiB is left.
+    crate::ffi::test_stage_options(boot_options(128));
+    let _ = miso_engine_web_v1_document_ptr(2 << 20);
+    assert_eq!(miso_engine_web_v1_boot_result(), RESULT_OK);
+    assert_eq!(crate::ffi::test_document_staging(), (true, 2 << 20, 2 << 20));
 
     let document = one_track_session(128);
     let handle = crate::ffi::test_boot(document.as_bytes(), boot_options(128));
@@ -360,15 +413,18 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
-/// #1697 gate 2 (#1386 gate 8, browser half): `miso_engine_web_v1_replace_document_ptr` stages a
-/// replacement document of more than 64 KiB, and one of exactly `MAXIMUM_DOCUMENT_BYTES`, and the
-/// `SESSION_REPLACE` frame that names it commits through `miso_engine_web_v1_control_command`;
-/// one byte more, or none, stages nothing. After every command the staging holds no byte, and the
-/// first command after boot frees the boot's copy.
+/// #1697 gate 2 (#1386 gate 8, browser half), issue #2191 gate 4: a 2 MiB document boots at the
+/// default budget, and `miso_engine_web_v1_replace_document_ptr` stages a replacement document of
+/// more than 64 KiB and one of 2 MiB, and the `SESSION_REPLACE` frame that names it commits
+/// through `miso_engine_web_v1_control_command`; a document over the boot's limit, or none, stages
+/// nothing. Under a 1 MiB document word a replacement of exactly 1 MiB commits and one byte more
+/// stages nothing. After every command the staging holds no byte, and the first command after boot
+/// frees the boot's copy.
 ///
-/// Test value: red if the staging's bound is off by one either way, if a refused staging leaves
-/// an earlier document for the next command, or if the command (or the boot) keeps the document's
-/// bytes after the reply.
+/// Test value: red if a compiled 1 MiB survives at the boot or the replace staging, if the
+/// document word does not reach the replace staging (or its bound is off by one), if a refused
+/// staging leaves an earlier document for the next command, or if the command (or the boot) keeps
+/// the document's bytes after the reply.
 #[test]
 fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_command() {
     use protocol::{
@@ -392,10 +448,17 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
         bytes.truncate(length);
         bytes
     };
-    let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
-    let booted = one_track_session(128);
+    let two_mib = 2 << 20;
+    let maximum = maximum_document_bytes(&boot_options(128)) as usize;
+    let mut booted = one_track_session(128);
+    let pad = |document: &mut String, size: usize| {
+        assert!(document.len() < size);
+        // Whitespace after the value pads the document to `size` without changing it.
+        document.extend(core::iter::repeat_n(' ', size - document.len()));
+    };
+    pad(&mut booted, two_mib);
     let handle = crate::ffi::test_boot(booted.as_bytes(), boot_options(128));
-    assert_ne!(handle, 0);
+    assert_ne!(handle, 0, "a 2 MiB document boots at the default budget");
     assert!(
         crate::ffi::test_document_staging().2 >= booted.len(),
         "the boot keeps its copy until the first command"
@@ -413,16 +476,10 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
     );
 
     let mut model = parse_session_json(&booted).expect("the booted document");
-    for (request, (size, db)) in [((64 << 10) + 1, -3.0), (maximum, -6.0)]
-        .into_iter()
-        .enumerate()
-    {
-        let request = request as u64 + 2;
+    let mut replace = |handle: u32, request: u64, size: usize, db: f32| {
         model.tracks[0].fader.left_db = db;
         let mut document = canonical_session_json(&model).expect("a valid document");
-        assert!(document.len() < size);
-        // Whitespace after the value pads the document to `size` without changing it.
-        document.extend(core::iter::repeat_n(' ', size - document.len()));
+        pad(&mut document, size);
         assert!(crate::ffi::test_replace_document(
             handle,
             document.as_bytes()
@@ -460,7 +517,9 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
             (false, 0, 0),
             "{size} bytes: the command frees the document"
         );
-    }
+    };
+    replace(handle, 2, (64 << 10) + 1, -3.0);
+    replace(handle, 3, two_mib, -6.0);
 
     // A staged document and a command with a wrong handle: the refusal frees it too.
     assert!(crate::ffi::test_replace_document(handle, b"{}"));
@@ -482,6 +541,22 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
             "{refused} bytes stage nothing"
         );
     }
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+
+    // A 1 MiB document word: exactly 1 MiB commits, one byte more stages nothing.
+    let word = 1_usize << 20;
+    let booted = one_track_session(128);
+    let handle = crate::ffi::test_boot(
+        booted.as_bytes(),
+        WebBootOptions {
+            maximum_document_bytes: word as u64,
+            ..boot_options(128)
+        },
+    );
+    assert_ne!(handle, 0);
+    assert!(!crate::ffi::test_replace_document(handle, &vec![b' '; word + 1]));
+    assert_eq!(crate::ffi::test_document_staging(), (false, 0, 0));
+    replace(handle, 1, word, -9.0);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
@@ -693,7 +768,7 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
 #[test]
 fn maximum_document_dense_invalid_boot_is_typed_and_bounded() {
     let fixture = maximum_document_with_dense_invalid_automation();
-    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    assert_eq!(fixture.bytes.len(), DENSE_DOCUMENT_BYTES);
     let failure = AudioWorkletEngineHost::boot(&fixture.bytes, WebBootOptions::default())
         .err()
         .expect("dense invalid automation must refuse");
@@ -735,7 +810,7 @@ fn maximum_document_dense_invalid_boot_finishes_under_one_second_in_release() {
     use std::time::{Duration, Instant};
 
     let fixture = maximum_document_with_dense_invalid_automation();
-    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    assert_eq!(fixture.bytes.len(), DENSE_DOCUMENT_BYTES);
     let started = Instant::now();
     let failure = AudioWorkletEngineHost::boot(&fixture.bytes, WebBootOptions::default())
         .err()
@@ -2731,10 +2806,9 @@ fn observed_compressor_insert() -> session::Effect {
         .clone()
 }
 
-/// #1689 gate 2, #1590 gate 4: the boot words at offsets 48 and 56 are reserved. A nonzero value
-/// is refused `web.options.reserved3` (the word was the observation-taps word until every plan
-/// bound every declared tap) or `web.options.reserved2` (the word was the master boot word until
-/// the `master` row replaced it). Issue #2191 gate 3: the control frame word at offset 32 is
+/// #1689 gate 2: the boot word at offset 56 is reserved. A nonzero value is refused
+/// `web.options.reserved2` (the word was the master boot word until the `master` row replaced
+/// it). Issue #2191 gate 3: the control frame word at offset 32 is
 /// refused `web.options.control_frame_bytes` below 16 KiB and above 16 MiB.
 ///
 /// Test value: red if a deleted word still changes behaviour (a writer that still sets it is
@@ -2763,13 +2837,6 @@ fn the_retired_boot_words_are_reserved_and_the_frame_word_is_bounded() {
                 ..boot_options(QUANTUM)
             },
             &b"web.options.control_frame_bytes\t$\n"[..],
-        ),
-        (
-            WebBootOptions {
-                reserved3: 4,
-                ..boot_options(QUANTUM)
-            },
-            &b"web.options.reserved3\t$\n"[..],
         ),
         (
             WebBootOptions {

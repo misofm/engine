@@ -224,9 +224,10 @@ fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
     assert_eq!(field_offset(&document, "bootOptions", "reserved2"), 56);
     assert_eq!(field_offset(&document, "status", "sampleRateHz"), 20);
     assert_eq!(field_offset(&document, "status", "quantumFrames"), 24);
+    assert_eq!(field_offset(&document, "bootOptions", "maximumDocumentBytes"), 48);
     assert_eq!(
-        scalar(&document, "constants", "maximumDocumentBytes"),
-        u64::from(host_web::MAXIMUM_DOCUMENT_BYTES)
+        scalar(&document, "constants", "parseTransientMultiplier"),
+        host_web::PARSE_TRANSIENT_MULTIPLIER
     );
     assert_eq!(
         scalar(&document, "constants", "defaultMaximumMemoryBytes"),

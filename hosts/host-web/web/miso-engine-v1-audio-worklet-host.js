@@ -80,7 +80,7 @@ const OPTION_FIELDS = [
 ];
 const BOOT_OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "maximumControlFrameBytes", "liveControlMeterBlocks",
-  "reserved3", "reserved2",
+  "maximumDocumentBytes", "reserved2",
 ];
 
 const SOURCE_FIELDS = [
@@ -202,7 +202,7 @@ function snapshotBootOptions(value) {
     maximumMemoryBytes: captured.descriptors.get("maximumMemoryBytes").value,
     maximumControlFrameBytes: captured.descriptors.get("maximumControlFrameBytes").value,
     liveControlMeterBlocks: captured.descriptors.get("liveControlMeterBlocks").value,
-    reserved3: captured.descriptors.get("reserved3").value,
+    maximumDocumentBytes: captured.descriptors.get("maximumDocumentBytes").value,
     reserved2: captured.descriptors.get("reserved2").value,
   };
   return validBootOptions(snapshot) ? snapshot : undefined;
@@ -284,7 +284,7 @@ function validBootOptions(options) {
     && validU64(options.maximumControlFrameBytes)
     && validU64(options.liveControlMeterBlocks)
     && options.liveControlMeterBlocks <= 0xffffffffn
-    && options.reserved3 === 0n
+    && validU64(options.maximumDocumentBytes)
     && options.reserved2 === 0n;
 }
 
@@ -1267,8 +1267,8 @@ class MisoAudioWorkletHost {
   /// `RESULT_INVALID_ARGUMENT`, and more than 64 frames in flight with `RESULT_BACKPRESSURE`.
   ///
   /// **The document** (issue #1697). A `SESSION_REPLACE` frame names a document by its length and
-  /// SHA-256; `document` carries those bytes beside the frame, up to the boot's 1 MiB document
-  /// bound, and the engine checks, parses and diffs them as the C ABI's
+  /// SHA-256; `document` carries those bytes beside the frame, up to the boot's document limit
+  /// (issue #2191: the budget's parse projection, or the `maximumDocumentBytes` word), and the engine checks, parses and diffs them as the C ABI's
   /// `miso_engine_v1_submit_document_command` does. It is copied too. A `document` that is not a
   /// `Uint8Array` or is empty is refused locally with `RESULT_INVALID_ARGUMENT`; one the engine's
   /// staging refuses (over the bound) answers `RESULT_INVALID_ARGUMENT` with an empty response.
