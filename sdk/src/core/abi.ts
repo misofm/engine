@@ -158,7 +158,9 @@ export interface BootOptions {
 export const POLICY_WORDS = Object.freeze([
   "sourceRingFrames",
   "maximumMemoryBytes",
+  "maximumControlFrameBytes",
   "liveControlMeterBlocks",
+  "maximumDocumentBytes",
 ] as const);
 
 /** The two words whose values are defined by the boot's role rather than shared. */

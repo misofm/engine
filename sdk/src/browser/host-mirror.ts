@@ -50,9 +50,9 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   return {
     sourceRingFrames: nonNegative("sourceRingFrames", options.sourceRingFrames ?? 0),
     maximumMemoryBytes: options.maximumMemoryBytes ?? 0n,
-    maximumControlFrameBytes: 0n,
+    maximumControlFrameBytes: options.maximumControlFrameBytes ?? 0n,
     liveControlMeterBlocks: word("liveControls.meterBlocks", liveControls?.meterBlocks),
-    maximumDocumentBytes: 0n,
+    maximumDocumentBytes: options.maximumDocumentBytes ?? 0n,
     reserved2: 0n,
   };
 }

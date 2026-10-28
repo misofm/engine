@@ -43,6 +43,8 @@ import { effectEntry, moduleBytes, sessionDocument } from "./support.mjs";
 const POLICY = Object.freeze({
   sourceRingFrames: 512,
   maximumMemoryBytes: 64n << 20n,
+  maximumControlFrameBytes: 32n << 10n,
+  maximumDocumentBytes: 4n << 20n,
   liveControls: Object.freeze({
     meterBlocks: 6,
   }),
@@ -142,7 +144,10 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
     const expected = {
       sourceRingFrames: 512,
       maximumMemoryBytes: 64n << 20n,
+      // Issue #2191 gate 6: the two limit words reach both boots at their layout offsets.
+      maximumControlFrameBytes: 32n << 10n,
       liveControlMeterBlocks: 6n,
+      maximumDocumentBytes: 4n << 20n,
     };
     assert.deepEqual(
       [...POLICY_WORDS].sort(),

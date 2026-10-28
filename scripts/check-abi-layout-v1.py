@@ -184,8 +184,8 @@ BOOT_OPTION_FIELDS = [
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
 # statement of which words it masks.
 POLICY_WORDS = [
-    "sourceRingFrames", "maximumMemoryBytes",
-    "liveControlMeterBlocks",
+    "sourceRingFrames", "maximumMemoryBytes", "maximumControlFrameBytes",
+    "liveControlMeterBlocks", "maximumDocumentBytes",
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 
