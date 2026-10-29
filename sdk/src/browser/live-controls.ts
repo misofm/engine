@@ -27,10 +27,19 @@ export function hostRecordFailure(error: unknown): unknown {
   return new MisoEngineError(message, { phase: "lifecycle", code, result });
 }
 
-/** Post one command frame to the host's `control` message; a call that failed throws. */
+/**
+ * Post one command frame to the host's `control` message; a call that failed throws. A frame the
+ * host refuses before the core rejects as {@link hostRecordFailure} maps it (#2193), so a live-control
+ * submit and a control-list read never hand the app the host's raw record.
+ */
 function hostControlSend(host: MisoAudioWorkletHost): (frame: Uint8Array) => Promise<Uint8Array> {
   return async (frame) => {
-    const reply = await host.control(frame);
+    let reply: Awaited<ReturnType<MisoAudioWorkletHost["control"]>>;
+    try {
+      reply = await host.control(frame);
+    } catch (error) {
+      throw hostRecordFailure(error);
+    }
     if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
     return reply.response;
   };

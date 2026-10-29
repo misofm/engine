@@ -1276,6 +1276,37 @@ describe("browser session edits", () => {
     }
   });
 
+  test("#2193: a host's raw miso.error.v1 rejection of a live-control frame is a MisoEngineError", async () => {
+    // Red if the live queue's send passes the host's local refusal record (not an Error) to the app:
+    // a writer then throws the record instead of retrying the host's in-flight backpressure, and a
+    // submit rejects with the record.
+    const { engine, host } = await boot(base());
+    const forward = host.control;
+    let refusal;
+    host.control = async (frame, replacement) => {
+      const once = refusal;
+      refusal = undefined;
+      if (once !== undefined) throw Object.freeze({ tag: "miso.error.v1", requestId: 0, result: once });
+      return forward.call(host, frame, replacement);
+    };
+    try {
+      const controls = await engine.liveControls();
+      const writer = controls.writer();
+      writer.stage(controls.edit.track("t1").faderDb(-3).edits[0]);
+      // More than 64 frames in flight: the host's `RESULT_BACKPRESSURE`, which drains.
+      refusal = 6;
+      const refused = await writer.flush();
+      assert.deepEqual([refused.refused, refused.reason, refused.pending], [true, "backpressure", 1]);
+      assert.equal((await writer.flush()).admitted, 1, "the retry lands");
+      // An over-limit frame: `RESULT_INVALID_ARGUMENT`, which never succeeds on resend.
+      refusal = 1;
+      await assert.rejects(controls.submit(controls.edit.track("t1").faderDb(-4)), (error) =>
+        error instanceof MisoEngineError && error.code === "invalidArgument" && error.result === 1);
+    } finally {
+      await engine.close();
+    }
+  });
+
   test("#2190: a host's raw miso.error.v1 rejection of a protocol frame is a MisoEngineError", async () => {
     // Red if the transport passes the host's local refusal record (not an Error) through to the app.
     const { engine, host } = await boot(base());

@@ -630,7 +630,11 @@ Parameter keys and units come from the catalog. `inputFilters({ hpfHz, lpfHz })`
 builtin cutoffs in one transaction; zero disables a filter. `controls.writer()` returns a
 `LiveControlWriter` that stages edits by address, coalesces latest values and flushes bounded
 batches through the queue, for gesture loops; the core's `backpressure` status is flow control and
-never an error. The root entry's `parameter()` helper provides exact decimal/lattice edits for
+never an error. In the browser, a live-control frame the host refuses before the core rejects with
+`MisoEngineError` that carries the host's result, never with the host's raw `miso.error.v1` record
+(issue #2193). The writer retries only `backpressure` (more than 64 frames in flight), which drains.
+Any other host result (`invalidArgument` for a frame over the limit, `wrongState` or `internal` for
+a host that failed) never succeeds on resend: the writer drops the batch and throws. The root entry's `parameter()` helper provides exact decimal/lattice edits for
 agent-facing controls.
 
 Observation subscriptions (`engine.subscribeObservations(...)`) send the core's `Observe` edit

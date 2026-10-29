@@ -102,9 +102,10 @@ type Attempt =
 
 /**
  * Whether a failed submit leaves its edits worth sending again. A full queue (the core's control
- * queue or the plan's in-flight limit) drains. Anything else the core or the queue answered with
- * is about the edits themselves and never succeeds on resend. An error that is not one of the
- * SDK's (a lost port) says nothing about them.
+ * queue, the plan's in-flight limit, or the browser host's 64 frames in flight, which the host's
+ * send maps to a `MisoEngineError` with code `backpressure`, #2193) drains. Anything else the core,
+ * the queue or the host answered with is about the edits themselves or a failed host and never
+ * succeeds on resend. An error that is not one of the SDK's (a lost port) says nothing about them.
  */
 function isFlowControl(error: unknown): boolean {
   if (error instanceof MisoControlRefusal) return error.status === "backpressure";
