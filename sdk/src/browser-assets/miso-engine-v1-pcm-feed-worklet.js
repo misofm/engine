@@ -635,7 +635,9 @@ function wrapEngineProcessor(Base) {
      * generation has a runway published -- `seekDeferralBlocks` chunks (at most a ring), or a
      * chunk that ends its region -- the drain frees every slot of an older generation (counted as
      * STALE), asks no seek and submits nothing, and the old generation plays on from the engine's
-     * ring. The first pass that finds the runway applies the seek, then drains from its first
+     * ring. A seek at the generation of the last accepted session seek (the transport seek) is
+     * never deferred: that session seek already dropped the old chunks, so waiting would only add
+     * silence (`sessionMovedSharedSeek`, attempt 3). The first pass that finds the runway applies the seek, then drains from its first
      * chunk; a slot of a newer generation stops the scan. A seek applied at its first chunk alone
      * left a gap whenever the writer's next chunks came a writer tick later (attempt 2). A newer
      * seek published meanwhile replaces the deferred one (the skipped generation never reaches the
@@ -649,6 +651,9 @@ function wrapEngineProcessor(Base) {
     deferSharedSeek(ring) {
       if (ring.seekEpoch === ring.seenEpoch || ring.seekAnchor !== NO_ANCHOR) return false
       if (ring.deferredBlocks >= this.seekDeferralBlocks) return false
+      // #2185 attempt 3: a session seek at this generation (the transport seek) already moved the
+      // source and dropped its old chunks, so there is no old audio to play on: apply at once.
+      if (this.sessionMovedSharedSeek(ring)) return false
       const control = ring.control
       const write = ring.seekWrite
       // #2185 attempt 2: the runway the new generation must have published before the seek
@@ -686,6 +691,13 @@ function wrapEngineProcessor(Base) {
       if (current >= runway || ended) return false
       ring.deferredBlocks += 1
       return true
+    }
+
+    /** #2185 attempt 3: whether the ring's published seek is at the generation of the last
+     *  session seek the engine accepted (#1644's rule), so the engine holds no old audio of it. */
+    sessionMovedSharedSeek(ring) {
+      return this.lastSessionSeekGeneration !== undefined &&
+        BigInt.asUintN(64, ring.publishedGeneration) === this.lastSessionSeekGeneration
     }
 
     /** Shared by render and the between-block control handler; never consumes PCM. The defaults

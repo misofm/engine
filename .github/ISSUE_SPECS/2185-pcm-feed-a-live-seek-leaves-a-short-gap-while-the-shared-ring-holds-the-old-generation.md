@@ -172,3 +172,21 @@ Split the claim. Do not tune the threshold, and do not change the seek semantics
 closes #2184 and delivers #2185's single mode, with the Chromium single live-seek phase gated at 0
 frames. #2185 stays open for worker mode: its residual (above) waits for root's choice among the
 three options, together with #2205. Until then, the Chromium worker phase is reported only.
+
+## Attempt 3 (2026-10-29, verify of 5aeb11375: FAIL)
+
+- **Major 1: the runway rule added silence to the transport seek.** `engine.seek(frame,
+  { producers })` (the console's seek) sends a session seek at g first, so render moves every
+  source to g and drops its old chunks. Each producer's plain ring seek at g was then deferred until
+  `min(B, ring)` chunks of g existed or B passed, and every block of that wait was new silence. At
+  88.2 and 96 kHz the runway (35 and 38 chunks) is more than one 4096-frame pump window (32 chunks),
+  so every transport seek waited for the second Blob read or the bound. Fix, in both consumers: a
+  ring seek at the generation of the last session seek the engine accepted (#1644's
+  `lastSessionSeekGeneration`) is never deferred; it applies at once and drains, as before #2185.
+  The other paths where the engine holds no old audio of the source take no deferral already: a
+  prepared or suspended seek (`prepare-seek`) applies directly, and an anchored seek is never
+  deferred. New row "#2185: after a session seek at g, a ring seek at g with one chunk published
+  submits it in the first pass". Red on 5aeb11375 on both adapters ("the first pass submits it").
+- **Minor 2:** `sdk/README.md` now says that a live plain seek does not cut to silence only in
+  single mode, and that worker mode is the open residual. It also says that the transport seek's
+  ring seeks apply at once (#2205 still owns that path's gap).

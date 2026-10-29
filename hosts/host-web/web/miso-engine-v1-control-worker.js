@@ -1270,6 +1270,10 @@ class ControlWorker {
     if (ring.seekEpoch === ring.seenEpoch || ring.seekAnchor !== NO_ANCHOR) return false;
     if (ring.deferring) ring.deferredQuanta += elapsed;
     if (ring.deferredQuanta >= this.seekDeferralQuanta) return false;
+    // #2185 attempt 3: after a session seek at this generation (the transport seek) the engine
+    // holds no old audio of the source, so a deferral would only add silence: apply at once.
+    if (this.lastSessionSeekGeneration !== undefined
+        && BigInt.asUintN(64, ring.publishedGeneration) === this.lastSessionSeekGeneration) return false;
     const control = ring.control;
     const write = ring.seekWrite;
     // #2185 attempt 2: the new generation's runway, as the prelude's: the bound, at most a ring.

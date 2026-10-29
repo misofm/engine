@@ -244,6 +244,27 @@ export const MSB1_CONSUMER_CASES = [
     },
   },
   {
+    // #2185 attempt 3: red on a drain that defers a ring seek the engine has nothing old to play
+    // through: the transport seek (`engine.seek`) sends a session seek at g first, render drops the
+    // old chunks, and each producer's ring seek at g then waits out the runway or the bound, in
+    // silence.
+    name: "#2185: after a session seek at g, a ring seek at g with one chunk published submits it in the first pass",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      for (let chunk = 0; chunk < 3; chunk += 1) fed.write(1n, BigInt(chunk * Q));
+      await consumer.pass();
+      await consumer.sessionSeek(2n);
+      consumer.seekResult = 1; // #1644: the engine refuses the source's seek at g as stale
+      consumer.seekStale = true;
+      fed.writer.seek(2n, 40n);
+      fed.write(2n, 40n);
+      await consumer.pass();
+      assert.deepEqual(starts(consumer).filter(([generation]) => generation === 2n), [[2n, 40n]], "the first pass submits it");
+      assert.deepEqual([count(fed.shared, "SEEKS_APPLIED"), count(fed.shared, "REFUSED")], [1, 0]);
+    },
+  },
+  {
     name: "#1644: a seek refused as stale at the session seek's generation is the seek applied; any other refusal is counted",
     async run(consumer) {
       const moved = ring("moved");

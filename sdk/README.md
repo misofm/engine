@@ -353,15 +353,21 @@ epoch that changed while it read, reads the seek again later. A writer of its ow
 the same way.
 
 A plain ring seek (`Msb1RingWriter.seek(generation, frame)`) while audio plays does not cut to
-silence. The drain frees the ring's chunks of the old generation at once, so the writer can write
-the new one, and the old position plays on from the engine's ring until the new generation has 50
-ms of audio published (at most a ring, or up to a chunk that ends its region). Then the seek
-applies, a single cut. If that runway is not published within 50 ms of rendered audio (in
-`worker` mode, at most half the engine ring), the seek applies anyway and the source plays
-silence, counted as underruns, until its PCM arrives. Publish the new position in one burst, as
-the pump does. The engine reports the block
-where the seek applied in the source's seek report. A suspended seek with `feed.prepareSeek()` applies at once, as before. The transport seek,
-`engine.seek(frame, { producers })`, is a session seek and does not take this path (#2205).
+silence in `single` mode. In `worker` mode it can still lose one quantum (128 frames) at the
+block where the seek lands, about once in 50 seeks (#2185 stays open for it). The drain frees the
+ring's chunks of the old generation at once, so the writer can write the new one, and the old
+position plays on from the engine's ring until the new generation has 50 ms of audio published
+(at most a ring, or up to a chunk that ends its region). Then the seek applies, a single cut. If
+that runway is not published within 50 ms of rendered audio (in `worker` mode, at most half the
+engine ring), the seek applies anyway and the source plays silence, counted as underruns, until
+its PCM arrives. Publish the new position in one burst, as the pump does. The engine reports the
+block where the seek applied in the source's seek report. A suspended seek with
+`feed.prepareSeek()` applies at once, as before.
+
+The transport seek, `engine.seek(frame, { producers })`, sends a session seek first: render then
+moves every source to the new generation and drops its old chunks. Each producer's ring seek at
+that generation applies at once and does not wait for a runway, because no old audio is left to
+play. The transport seek can therefore still go silent until the producers publish (#2205).
 
 Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
 is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.
