@@ -16,6 +16,8 @@
 //   submitResult, seekResult, seekAtResult   the fake exports' results (settable)
 //   seekStale                 when true a refused `source_seek` writes `source.generation.stale`
 //   onSeek                    a hook `source_seek` calls with (generation, frame) before it answers
+//   onSnapshot                a hook a drain pass calls right after it read the seek publication
+//                             (`readSharedSeek`), before it reads any slot (#2185 attempt 2)
 //   onApply                   a hook called when prepare-seek applies a captured seek, before the
 //                             apply reads anything (the race window between check and apply)
 //   submissions               [{ id, generation, start, channels, frames, end, pcm }]
@@ -188,6 +190,44 @@ export const MSB1_CONSUMER_CASES = [
       await drain(consumer, 2);
       assert.deepEqual(consumer.seeks.at(-1), [3n, 80n], "the bound applies the seek");
       assert.deepEqual([count(fed.shared, "SEEKS_APPLIED"), count(fed.shared, "REFUSED")], [2, 0]);
+    },
+  },
+  {
+    // #2185 attempt 2: red on a pass that reads the write index or classifies slots outside its
+    // seek snapshot: it frees the newer seek's first chunk as stale (in the drain and in a
+    // deferral), and the engine then refuses that generation's later chunks as non-contiguous.
+    name: "#2185: a newer seek and its chunk published after a pass's snapshot survive to be submitted after their seek",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      const once = (publish) => {
+        consumer.onSnapshot = () => {
+          consumer.onSnapshot = null;
+          publish();
+        };
+      };
+      const after = (generation) => starts(consumer).filter(([g]) => g >= generation);
+      // The drain: the pass applies g2 and drains its chunk; g3 lands after its snapshot.
+      fed.write(1n, 0n);
+      fed.writer.seek(2n, 40n);
+      fed.write(2n, 40n);
+      once(() => { fed.writer.seek(3n, 80n); fed.write(3n, 80n); });
+      await consumer.pass();
+      fed.write(3n, 84n);
+      await drain(consumer);
+      assert.deepEqual(consumer.seeks, [[2n, 40n], [3n, 80n]]);
+      assert.deepEqual(after(2n), [[2n, 40n], [3n, 80n], [3n, 84n]], "the newer seek's first chunk survives the drain");
+      // A deferral: g4 waits for its chunk; g5 and its chunk land after a deferring pass's snapshot.
+      fed.writer.seek(4n, 120n);
+      await consumer.pass();
+      once(() => { fed.writer.seek(5n, 160n); fed.write(5n, 160n); });
+      await consumer.pass();
+      fed.write(5n, 164n);
+      await drain(consumer);
+      assert.deepEqual(consumer.seeks.at(-1), [5n, 160n]);
+      assert.ok(consumer.seeks.every(([g]) => g !== 4n), "the replaced seek never reaches the engine");
+      assert.deepEqual(after(5n), [[5n, 160n], [5n, 164n]], "the newer seek's first chunk survives a deferral");
+      assert.equal(count(fed.shared, "REFUSED"), 0);
     },
   },
   {

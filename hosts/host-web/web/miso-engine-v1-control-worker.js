@@ -993,8 +993,11 @@ class ControlWorker {
       seekEpoch: 0,
       seekTag: 0,
       seekGeneration: 0n,
+      seekGenerationHigh: 0,
+      seekGenerationLow: 0,
       seekFrame: 0n,
       seekAnchor: NO_ANCHOR,
+      seekWrite: 0,
       // #2185: whether the ring's live plain seek is deferred, and the quanta rendered since.
       deferring: false,
       deferredQuanta: 0,
@@ -1120,8 +1123,7 @@ class ControlWorker {
     let allowed = before === null ? ring.capacity
       : ring.seekAdmit ? before.room : before.room - this.feedHeadroom;
     let queued = before === null ? 0 : before.queued;
-    const generationTag = ring.seekTag;
-    const write = Atomics.load(control, RING.WRITE_INDEX);
+    const write = ring.seekWrite;
     const capacityMask = ring.capacity - 1;
     const staging = this.view(Float32Array, this.sourcePcmPointer, this.maximumSourceChannels * this.quantumFrames);
     let read = control[RING.READ_INDEX];
@@ -1133,11 +1135,14 @@ class ControlWorker {
         control[RING.TORN] += 1;
         break;
       }
-      if (ring.headers[word + 1] !== generationTag) {
+      const age = this.sharedSlotAge(ring, word);
+      if (age < 0) {
         read = (read + 1) & SAB_WRAP_MASK;
         control[RING.STALE] += 1;
         continue;
       }
+      // A newer seek's chunk: never freed or submitted here; the next pass reads its seek.
+      if (age > 0) break;
       const frames = ring.headers[word + 2];
       const flags = ring.headers[word + 3];
       if (frames <= 0 || frames > this.quantumFrames) {
@@ -1219,22 +1224,45 @@ class ControlWorker {
     const control = ring.control;
     const epoch = Atomics.load(control, RING.SEEK_EPOCH);
     if ((epoch & 1) !== 0) return false;
+    // #2185 attempt 2: the write index inside the window, and no `i64` load for a cached epoch.
     const tag = Atomics.load(control, RING.GENERATION_TAG);
+    const write = Atomics.load(control, RING.WRITE_INDEX);
+    if (epoch === ring.seekEpoch) {
+      if (Atomics.load(control, RING.SEEK_EPOCH) !== epoch) return false;
+      ring.seekTag = tag;
+      ring.seekWrite = write;
+      return true;
+    }
     const generation = Atomics.load(ring.controlI64, 0);
     const frame = Atomics.load(ring.controlI64, 1);
     const anchor = Atomics.load(ring.controlI64, 2);
     if (Atomics.load(control, RING.SEEK_EPOCH) !== epoch) return false;
     ring.seekEpoch = epoch;
     ring.seekTag = tag;
+    ring.seekWrite = write;
     ring.seekGeneration = generation;
+    ring.seekGenerationHigh = Number(BigInt.asUintN(32, generation >> 32n));
+    ring.seekGenerationLow = Number(BigInt.asUintN(32, generation));
     ring.seekFrame = frame;
     ring.seekAnchor = anchor;
     return true;
   }
 
-  /// The prelude's `deferSharedSeek` (#2185): while no slot of a live plain seek's new tag is
-  /// published, free every slot of another tag, ask no seek and submit nothing; the first slot of
-  /// the new tag, or `seekDeferralQuanta` rendered quanta (counted from the pass after the first
+  /// The prelude's `sharedSlotAge` (#2185 attempt 2): -1 for a slot below the snapshot's seek
+  /// generation (stale), 0 equal (current), 1 above it (a newer seek's: neither freed nor
+  /// submitted); before any seek (epoch 0) the engaged tag decides, as before.
+  sharedSlotAge(ring, word) {
+    if (ring.seekEpoch === 0) return ring.headers[word + 1] === ring.seekTag ? 0 : -1;
+    const high = ring.headers[word + 5] >>> 0;
+    if (high !== ring.seekGenerationHigh) return high < ring.seekGenerationHigh ? -1 : 1;
+    const low = ring.headers[word + 4] >>> 0;
+    if (low !== ring.seekGenerationLow) return low < ring.seekGenerationLow ? -1 : 1;
+    return 0;
+  }
+
+  /// The prelude's `deferSharedSeek` (#2185): while no slot of a live plain seek's generation is
+  /// published, free every slot of an older one, ask no seek and submit nothing (a newer one stops
+  /// the scan); the first slot of the seek's generation, or `seekDeferralQuanta` rendered quanta (counted from the pass after the first
   /// deferral, `elapsed` being the quanta rendered since the last pass), applies it. A newer seek
   /// replaces the deferred one and inherits its count; an anchored seek is never deferred.
   deferSharedSeek(ring, elapsed) {
@@ -1242,7 +1270,7 @@ class ControlWorker {
     if (ring.deferring) ring.deferredQuanta += elapsed;
     if (ring.deferredQuanta >= this.seekDeferralQuanta) return false;
     const control = ring.control;
-    const write = Atomics.load(control, RING.WRITE_INDEX);
+    const write = ring.seekWrite;
     let read = control[RING.READ_INDEX];
     let published = false;
     for (let remaining = ring.capacity; read !== write && remaining > 0; remaining -= 1) {
@@ -1251,10 +1279,12 @@ class ControlWorker {
         control[RING.TORN] += 1;
         break;
       }
-      if (ring.headers[word + 1] === ring.seekTag) {
+      const age = this.sharedSlotAge(ring, word);
+      if (age === 0) {
         published = true;
         break;
       }
+      if (age > 0) break;
       read = (read + 1) & SAB_WRAP_MASK;
       control[RING.STALE] += 1;
     }

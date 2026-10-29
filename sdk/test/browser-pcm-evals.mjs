@@ -654,7 +654,7 @@ function anchoredPrelude(source) {
 function preludeConsumer(source) {
   const { sandbox, registrations } = preludeHarness(source);
   const adapter = {
-    submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null,
+    submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null, onSnapshot: null,
   };
   const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
   class Engine {
@@ -686,6 +686,12 @@ function preludeConsumer(source) {
   }
   sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
   const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
+  const snapshot = engine.readSharedSeek.bind(engine);
+  engine.readSharedSeek = (ring) => {
+    const read = snapshot(ring);
+    adapter.onSnapshot?.();
+    return read;
+  };
   const apply = engine.applySharedSeek.bind(engine);
   engine.applySharedSeek = (ring, ...identity) => {
     if (identity.length !== 0) adapter.onApply?.();
@@ -1106,13 +1112,23 @@ test("detachSource withdraws one ring: the drain never reads it after it resolve
   assert.throws(() => attachEngineFeed({ context, sources: [{ sourceId: "twice", channels: 1 }, { sourceId: "twice", channels: 2 }], quantumFrames: 4, createNode: () => attachNode() }), /unique: twice/);
 });
 
-test("the pump's writer publishes a plain seek in the SDK's ring layout", async () => {
+test("the pump's writer publishes a plain seek in the SDK's ring layout, and both writers store it under an odd epoch", async (t) => {
   // #1297b hazard: a pump that keeps the old two-word seek leaves an earlier anchor in the ring,
-  // and the drain then waits for a handler seek that never comes.
+  // and the drain then waits for a handler seek that never comes. #2184: a writer that stores the
+  // tuple or the tag while the epoch is even lets a reader take a torn seek for a whole one.
   const { Msb1RingWriter: PumpWriter } = await import("../../hosts/host-web/web/stem-store/pcm-pump.js");
   const ring = createMsb1Ring({ sourceId: "stem", channels: 1, frameCapacity: 4, capacity: 2 });
+  const control = controls(ring);
+  const store = Atomics.store;
+  const parities = [];
+  t.mock.method(Atomics, "store", (array, index, value) => {
+    if (array.buffer === ring) parities.push(Atomics.load(control, MSB1_CONTROL.SEEK_EPOCH) & 1);
+    return store(array, index, value);
+  });
   new Msb1RingWriter(ring).seek(2n, 0n, 4_096n);
   new PumpWriter(ring).seek(3n, 8n);
+  t.mock.restoreAll();
+  assert.deepEqual(parities, [1, 1, 1, 1, 1, 1, 1, 1], "the generation, frame, anchor and tag of each seek are stored at an odd epoch");
   assert.deepEqual([...new BigInt64Array(ring, MSB1_CONTROL_I64_OFFSET, 3)], [3n, 8n, -1n]);
   assert.equal(new TextDecoder().decode(new Uint8Array(ring, MSB1_ID_OFFSET, 4)), "stem");
 });

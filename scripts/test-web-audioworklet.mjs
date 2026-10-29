@@ -5122,7 +5122,6 @@ async function testControlWorker() {
       // the pass after the writer publishes applies it.
       seek(3n, 9600n);
       tick.callback();
-      assert.equal(engine.seek, null, "no seek before its generation's first chunk");
       fill();
       tick.callback();
       assert.equal(engine.seek, 3n);
@@ -5173,7 +5172,7 @@ async function testControlWorker() {
       const port = { onmessage: null, postMessage: (data) => replies.push(structuredClone(data)), close() {} };
       send({ tag: "miso.feed-port.v1", port });
       fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
-      const adapter = { submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null };
+      const adapter = { submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null, onSnapshot: null };
       const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
       const memory = () => fake.memory.buffer;
       // The fake engine ring: render takes one chunk a block, drops a seek's stale chunks at the
@@ -5209,6 +5208,12 @@ async function testControlWorker() {
         return adapter.submitResult;
       };
       const worker = globalThis.__controlWorker;
+      const snapshot = worker.readSharedSeek.bind(worker);
+      worker.readSharedSeek = (ring) => {
+        const read = snapshot(ring);
+        adapter.onSnapshot?.();
+        return read;
+      };
       const apply = worker.applySharedSeek.bind(worker);
       worker.applySharedSeek = (ring, ...identity) => {
         if (identity.length !== 0) adapter.onApply?.();
