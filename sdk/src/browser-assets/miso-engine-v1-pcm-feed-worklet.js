@@ -122,7 +122,10 @@ const CONTROL_SUBMITTED_GENERATION_TAG = 27
 
 // Issue #1297b D2 (MSB1 V1, amended in place): three i64 at 112 -- the seek's generation, frame
 // and anchor sample (at 128; -1 is a plain seek) -- the ID at 144 and the slot headers at 272. A
-// ring with any other header offset (the old 256) is refused at attach.
+// ring with any other header offset (the old 256) is refused at attach. Issue #2184 (amended in
+// place): SEEK_EPOCH is a parity seqlock over that tuple and GENERATION_TAG. The writer makes it
+// odd, stores the tuple and the tag, and makes it even again, so one seek steps it by 2; a reader
+// uses the tag and the tuple only when it read the same even epoch before and after them.
 const CONTROL_BYTES = 144
 const CONTROL_I64_OFFSET = 112
 const CONTROL_I64_SEEK_GENERATION = 0
@@ -275,6 +278,13 @@ function bindRing(shared, quantumFrames, maximumChannels) {
     frameCapacity,
     /** The seek epoch this ring has already applied. */
     seenEpoch: Atomics.load(control, CONTROL_SEEK_EPOCH),
+    /** Issue #2184: the last whole seek publication `readSharedSeek` read -- its even epoch, the
+     *  tag and the tuple -- kept here so the drain allocates nothing. */
+    seekEpoch: 0,
+    seekTag: 0,
+    seekGeneration: 0n,
+    seekFrame: 0n,
+    seekAnchor: NO_ANCHOR,
     /** Issue #1297b: the anchored seek `(generation, frame, anchor)` the engine's message handler
      *  applied for this ring's source (`source_seek_at` answered OK), not yet consumed by the
      *  drain; `anchoredSample` -1 is none. Written only by the handler, between blocks. */
@@ -431,9 +441,12 @@ function wrapEngineProcessor(Base) {
       if (ring.idTargetBuffer !== this.memoryBuffer) return
       if (ring.idTarget.length !== ring.idLength) return
 
+      // Issue #2184: a pass reads the seek publication whole or not at all. A publication in
+      // flight skips the pass, as a backpressured seek does; the next block reads it whole.
+      if (!this.readSharedSeek(ring)) return
       if (this.applySharedSeek(ring) !== RESULT_OK) return
 
-      const generationTag = Atomics.load(control, CONTROL_GENERATION_TAG)
+      const generationTag = ring.seekTag
       const write = Atomics.load(control, CONTROL_WRITE_INDEX)
       const capacityMask = ring.capacity - 1
       const staging = this.sourcePcm
@@ -530,13 +543,37 @@ function wrapEngineProcessor(Base) {
       control[CONTROL_DEPTH] = ring.depth
     }
 
-    /** Shared by render and the between-block control handler; never consumes PCM. */
-    applySharedSeek(ring, epoch = Atomics.load(ring.control, CONTROL_SEEK_EPOCH), generation, frame) {
+    /**
+     * Issue #2184: read the ring's seek publication through its seqlock into the ring's fields.
+     * False when the epoch is odd (a publication in flight) or moved during the reads: then the
+     * tag and the tuple may belong to two publications, and nothing of them is used. JS atomics
+     * are sequentially consistent, so an even epoch read unchanged around the reads proves that
+     * every store of the last complete publication is visible and none of a later one is.
+     */
+    readSharedSeek(ring) {
+      const control = ring.control
+      const epoch = Atomics.load(control, CONTROL_SEEK_EPOCH)
+      if ((epoch & 1) !== 0) return false
+      const tag = Atomics.load(control, CONTROL_GENERATION_TAG)
+      const generation = Atomics.load(ring.controlI64, CONTROL_I64_SEEK_GENERATION)
+      const frame = Atomics.load(ring.controlI64, CONTROL_I64_SEEK_FRAME)
+      const anchor = Atomics.load(ring.controlI64, CONTROL_I64_SEEK_ANCHOR)
+      if (Atomics.load(control, CONTROL_SEEK_EPOCH) !== epoch) return false
+      ring.seekEpoch = epoch
+      ring.seekTag = tag
+      ring.seekGeneration = generation
+      ring.seekFrame = frame
+      ring.seekAnchor = anchor
+      return true
+    }
+
+    /** Shared by render and the between-block control handler; never consumes PCM. The defaults
+     *  are the publication `readSharedSeek` read last; the caller reads it first. */
+    applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.seekGeneration, frame = ring.seekFrame, anchor = ring.seekAnchor) {
       const control = ring.control
       if (epoch !== ring.seenEpoch) {
-        const requested = generation ?? ring.controlI64[CONTROL_I64_SEEK_GENERATION]
-        const requestedFrame = frame ?? ring.controlI64[CONTROL_I64_SEEK_FRAME]
-        const anchor = ring.controlI64[CONTROL_I64_SEEK_ANCHOR]
+        const requested = generation
+        const requestedFrame = frame
         if (anchor !== NO_ANCHOR) {
           // Issue #1297 amendment (review M4): an anchored seek is applied by the engine's message
           // handler (`source_seek_at` runs the service step), never here. Until the handler
@@ -660,7 +697,9 @@ function wrapEngineProcessor(Base) {
       if (!this.ready || this.disposed || this.stickyResult !== RESULT_OK || !Array.isArray(seeks) || seeks.length !== delivered.length) return { kind: "refused", result: RESULT_WRONG_STATE }
       const rings = delivered.map((shared) => this.sabRings.find((ring) => ring.shared === shared))
       if (rings.some((ring) => !ring || ring.idTargetBuffer !== this.memoryBuffer || ring.idTarget.length !== ring.idLength)) return { kind: "refused", result: RESULT_WRONG_STATE }
-      const matches = (ring, seek) => seek && seek.epoch !== 0 && Atomics.load(ring.control, CONTROL_SEEK_EPOCH) === seek.epoch && Atomics.load(ring.controlI64, CONTROL_I64_SEEK_GENERATION) === seek.generation && Atomics.load(ring.controlI64, CONTROL_I64_SEEK_FRAME) === seek.frame
+      // #2184: the live publication is read whole (`readSharedSeek`), so its anchor, which the
+      // apply reads from the ring, is the matched seek's own.
+      const matches = (ring, seek) => seek && seek.epoch !== 0 && this.readSharedSeek(ring) && ring.seekEpoch === seek.epoch && ring.seekGeneration === seek.generation && ring.seekFrame === seek.frame
       if (!rings.every((ring, index) => matches(ring, seeks[index]))) return { kind: "superseded" }
       for (let index = 0; index < rings.length; index += 1) {
         const ring = rings[index]

@@ -73,6 +73,8 @@ const RING = {
   ERRORS: 26, SUBMITTED_GENERATION_TAG: 27,
 };
 const RING_CONTROL_BYTES = 144;
+// The seek's generation, frame and anchor (i64 at 112, 120, 128). Issue #2184: SEEK_EPOCH is a
+// parity seqlock over them and GENERATION_TAG -- odd while a seek is published, 2 steps a seek.
 const RING_I64_OFFSET = 112;
 const RING_ID_OFFSET = 144;
 const RING_HEADER_OFFSET = 272;
@@ -983,6 +985,12 @@ class ControlWorker {
       capacity,
       channels,
       seenEpoch: Atomics.load(control, RING.SEEK_EPOCH),
+      // #2184: the last whole seek publication `readSharedSeek` read.
+      seekEpoch: 0,
+      seekTag: 0,
+      seekGeneration: 0n,
+      seekFrame: 0n,
+      seekAnchor: NO_ANCHOR,
       anchoredGeneration: 0n,
       anchoredFrame: 0n,
       anchoredSample: NO_ANCHOR,
@@ -1074,7 +1082,8 @@ class ControlWorker {
     if (rendered !== null) ring.renderedSeen = rendered;
     // As in the prelude, a ring waiting for its seek (an anchored start before `seek-at`)
     // counts no drain block and no underrun: the quanta pass uncounted.
-    if (this.applySharedSeek(ring) !== RESULT_OK) {
+    // #2184: a pass reads the seek publication whole or not at all; one in flight waits a tick.
+    if (!this.readSharedSeek(ring) || this.applySharedSeek(ring) !== RESULT_OK) {
       ring.pendingElapsed = 0;
       return;
     }
@@ -1086,7 +1095,7 @@ class ControlWorker {
     let allowed = before === null ? ring.capacity
       : ring.seekAdmit ? before.room : before.room - this.feedHeadroom;
     let queued = before === null ? 0 : before.queued;
-    const generationTag = Atomics.load(control, RING.GENERATION_TAG);
+    const generationTag = ring.seekTag;
     const write = Atomics.load(control, RING.WRITE_INDEX);
     const capacityMask = ring.capacity - 1;
     const staging = this.view(Float32Array, this.sourcePcmPointer, this.maximumSourceChannels * this.quantumFrames);
@@ -1179,14 +1188,34 @@ class ControlWorker {
   }
 
 
+  /// The prelude's `readSharedSeek` (#2184): the seek publication through its seqlock into the
+  /// ring's fields, or false when the epoch is odd or moved during the reads.
+  readSharedSeek(ring) {
+    const control = ring.control;
+    const epoch = Atomics.load(control, RING.SEEK_EPOCH);
+    if ((epoch & 1) !== 0) return false;
+    const tag = Atomics.load(control, RING.GENERATION_TAG);
+    const generation = Atomics.load(ring.controlI64, 0);
+    const frame = Atomics.load(ring.controlI64, 1);
+    const anchor = Atomics.load(ring.controlI64, 2);
+    if (Atomics.load(control, RING.SEEK_EPOCH) !== epoch) return false;
+    ring.seekEpoch = epoch;
+    ring.seekTag = tag;
+    ring.seekGeneration = generation;
+    ring.seekFrame = frame;
+    ring.seekAnchor = anchor;
+    return true;
+  }
+
   /// The prelude's seek rule: a published plain seek is applied through `source_seek` before any
-  /// slot is read; an anchored one only once `source_seek_at` answered OK for the same tuple.
-  applySharedSeek(ring, epoch = Atomics.load(ring.control, RING.SEEK_EPOCH), generation, frame) {
+  /// slot is read; an anchored one only once `source_seek_at` answered OK for the same tuple. The
+  /// defaults are the publication `readSharedSeek` read last.
+  applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.seekGeneration, frame = ring.seekFrame,
+    anchor = ring.seekAnchor) {
     const control = ring.control;
     if (epoch === ring.seenEpoch) return RESULT_OK;
-    const requested = generation ?? ring.controlI64[0];
-    const requestedFrame = frame ?? ring.controlI64[1];
-    const anchor = ring.controlI64[2];
+    const requested = generation;
+    const requestedFrame = frame;
     if (anchor !== NO_ANCHOR) {
       if (ring.anchoredSample !== anchor || ring.anchoredGeneration !== requested
           || ring.anchoredFrame !== requestedFrame) {
@@ -1256,10 +1285,10 @@ class ControlWorker {
     }
     const rings = delivered.map((shared) => this.rings.find((ring) => ring.shared === shared));
     if (rings.some((ring) => ring === undefined)) return { kind: "refused", result: RESULT_WRONG_STATE };
-    const matches = (ring, seek) => seek && seek.epoch !== 0
-      && Atomics.load(ring.control, RING.SEEK_EPOCH) === seek.epoch
-      && Atomics.load(ring.controlI64, 0) === seek.generation
-      && Atomics.load(ring.controlI64, 1) === seek.frame;
+    // #2184: the live publication is read whole, so the anchor the apply reads is the seek's own.
+    const matches = (ring, seek) => seek && seek.epoch !== 0 && this.readSharedSeek(ring)
+      && ring.seekEpoch === seek.epoch && ring.seekGeneration === seek.generation
+      && ring.seekFrame === seek.frame;
     if (!rings.every((ring, index) => matches(ring, seeks[index]))) return { kind: "superseded" };
     for (let index = 0; index < rings.length; index += 1) {
       const ring = rings[index];

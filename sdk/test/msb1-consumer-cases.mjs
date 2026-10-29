@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 import {
   MSB1_CONTROL,
   MSB1_CONTROL_BYTES,
+  MSB1_CONTROL_I64_OFFSET,
   MSB1_HEADER_OFFSET,
   MSB1_SLOT_HEADER_BYTES,
   createMsb1Ring,
@@ -42,6 +43,8 @@ const Q = 4;
 export const STALE_GENERATION_CODE = "source.generation.stale";
 const controls = (ring) => new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4);
 const count = (ring, word) => controls(ring)[MSB1_CONTROL[word]];
+/** The ring's published seek epoch: what an SDK snapshot of it reads (#2184: 2 steps a seek). */
+const epochOf = (ring) => Atomics.load(controls(ring), MSB1_CONTROL.SEEK_EPOCH);
 function ring(sourceId, channels = 1, capacity = 8) {
   const shared = createMsb1Ring({ sourceId, channels, frameCapacity: Q, capacity });
   const writer = new Msb1RingWriter(shared);
@@ -126,6 +129,35 @@ export const MSB1_CONSUMER_CASES = [
       assert.ok(count(fed.shared, "REFUSED") >= 1);
       assert.deepEqual([count(fed.shared, "LAST_RESULT"), count(fed.shared, "SEEKS_APPLIED")], [1, 1]);
       assert.equal(consumer.submissions.length, 1, "a refused seek reads no slot");
+    },
+  },
+  {
+    // #2184: the writer publishes the tuple and the tag between two epoch steps (odd = in flight).
+    // The g2 chunk stands for the writer's next chunk, which a pass that straddles the publication
+    // sees beside the new tag. Red on a reader that uses the tag or the tuple outside the seqlock:
+    // the old read order asks this seek at the odd epoch, or (old epoch, new tag) submits g2
+    // before its seek, which the engine refuses as stale.
+    name: "#2184: a seek publication in flight reads no slot and asks no seek; complete, the seek precedes its chunk",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      const c = controls(fed.shared);
+      const wide = new BigInt64Array(fed.shared, MSB1_CONTROL_I64_OFFSET, 3);
+      Atomics.add(c, MSB1_CONTROL.SEEK_EPOCH, 1);
+      Atomics.store(wide, 0, 2n);
+      Atomics.store(wide, 1, 40n);
+      Atomics.store(wide, 2, -1n);
+      Atomics.store(c, MSB1_CONTROL.GENERATION_TAG, 2);
+      fed.write(2n, 40n);
+      await consumer.pass();
+      assert.deepEqual([consumer.seeks, consumer.submissions, fed.writer.occupancy], [[], [], 2],
+        "a publication in flight asks no seek and reads no slot");
+      Atomics.add(c, MSB1_CONTROL.SEEK_EPOCH, 1);
+      await drain(consumer);
+      assert.deepEqual(consumer.seeks[0], [2n, 40n]);
+      assert.deepEqual(starts(consumer), [[2n, 40n]], "the seek precedes its chunk");
+      assert.deepEqual([count(fed.shared, "SEEKS_APPLIED"), count(fed.shared, "STALE"), count(fed.shared, "REFUSED")], [1, 1, 0]);
     },
   },
   {
@@ -219,20 +251,21 @@ export const MSB1_CONSUMER_CASES = [
       const fed = ring("fed");
       await consumer.attach([fed.shared]);
       fed.writer.seek(2n, 12n);
+      const captured = epochOf(fed.shared);
       let advanced = false;
       consumer.onApply = () => {
         if (advanced) return;
         advanced = true;
         fed.writer.seek(3n, 16n);
       };
-      let reply = await consumer.prepareSeek([{ epoch: 1, generation: 2n, frame: 12n }]);
+      let reply = await consumer.prepareSeek([{ epoch: captured, generation: 2n, frame: 12n }]);
       assert.equal(reply.kind, "superseded");
       // The Worker drains after each message, so it may apply the newer seek at once; either way
       // the preparation applied the captured tuple and no seek mixes the two.
       assert.deepEqual(consumer.seeks[0], [2n, 12n], "the captured tuple, never mixed live epoch/generation words");
       assert.ok(consumer.seeks.every(([g, f]) => (g === 2n && f === 12n) || (g === 3n && f === 16n)));
       consumer.onApply = null;
-      reply = await consumer.prepareSeek([{ epoch: 2, generation: 3n, frame: 16n }]);
+      reply = await consumer.prepareSeek([{ epoch: epochOf(fed.shared), generation: 3n, frame: 16n }]);
       assert.equal(reply.kind, "confirmed");
       assert.deepEqual(consumer.seeks, [[2n, 12n], [3n, 16n]]);
       assert.equal(count(fed.shared, "DRAIN_BLOCKS"), 0, "preparation renders and counts no block");
@@ -283,7 +316,7 @@ export const MSB1_CONSUMER_CASES = [
       for (let chunk = 0; chunk < 3; chunk += 1) fed.write(1n, BigInt(chunk * Q));
       fed.writer.seek(2n, 12n);
       fed.write(2n, 12n);
-      let reply = await consumer.prepareSeek([{ epoch: 1, generation: 2n, frame: 12n }]);
+      let reply = await consumer.prepareSeek([{ epoch: epochOf(fed.shared), generation: 2n, frame: 12n }]);
       assert.equal(reply.kind, "confirmed");
       assert.deepEqual(consumer.seeks.at(-1), [2n, 12n]);
       assert.equal(count(fed.shared, "STALE"), 3, "the old generation's slots are freed");
@@ -291,26 +324,27 @@ export const MSB1_CONSUMER_CASES = [
       // Refused: the seek's own refusal is the reply's result.
       fed.writer.seek(3n, 16n);
       consumer.seekResult = 1;
-      reply = await consumer.prepareSeek([{ epoch: 2, generation: 3n, frame: 16n }]);
+      reply = await consumer.prepareSeek([{ epoch: epochOf(fed.shared), generation: 3n, frame: 16n }]);
       assert.deepEqual([reply.kind, reply.result], ["refused", 1]);
       consumer.seekResult = 0;
       // Superseded while it runs: the producer seeks again (with PCM at the newer generation)
       // from inside source_seek; the newer chunk is never discarded.
       fed.writer.seek(4n, 20n);
+      const passed = epochOf(fed.shared);
       consumer.onSeek = (generation) => {
         if (generation !== 4n) return;
         fed.writer.seek(5n, 24n);
         fed.write(5n, 24n);
       };
-      reply = await consumer.prepareSeek([{ epoch: 3, generation: 4n, frame: 20n }]);
+      reply = await consumer.prepareSeek([{ epoch: passed, generation: 4n, frame: 20n }]);
       assert.equal(reply.kind, "superseded");
       consumer.onSeek = null;
-      reply = await consumer.prepareSeek([{ epoch: 4, generation: 5n, frame: 24n }]);
+      reply = await consumer.prepareSeek([{ epoch: epochOf(fed.shared), generation: 5n, frame: 24n }]);
       assert.equal(reply.kind, "confirmed");
       assert.equal(fed.writer.occupancy, 1, "the superseding generation's chunk survives both");
       // A stale snapshot (an epoch the ring has moved past) is superseded before any seek.
       const asked = consumer.seeks.length;
-      reply = await consumer.prepareSeek([{ epoch: 3, generation: 4n, frame: 20n }]);
+      reply = await consumer.prepareSeek([{ epoch: passed, generation: 4n, frame: 20n }]);
       assert.equal(reply.kind, "superseded");
       assert.equal(consumer.seeks.length, asked);
       consumer.submitResult = 0;

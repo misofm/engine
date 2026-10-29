@@ -177,11 +177,11 @@ test("MSB1 layout and writer preserve frozen bytes, headers, counters and reuse"
     writer.seek(nextGeneration, 14n);
     assert.deepEqual([...new BigInt64Array(ring, 112, 3)], [nextGeneration, 14n, -1n]);
     assert.equal(c[MSB1_CONTROL.GENERATION_TAG], 8);
-    assert.equal(c[MSB1_CONTROL.SEEK_EPOCH], 1);
+    assert.equal(c[MSB1_CONTROL.SEEK_EPOCH], 2, "a seek steps the parity epoch by 2 (#2184)");
     writer.seek(nextGeneration + 1n, 15n, 4_096n);
     assert.deepEqual([...new BigInt64Array(ring, 112, 3)], [nextGeneration + 1n, 15n, 4_096n]);
     assert.deepEqual([...new Uint8Array(ring, MSB1_ID_OFFSET, sourceId.length)], [...new TextEncoder().encode(sourceId)], "the anchor leaves the ID");
-    assert.equal(c[MSB1_CONTROL.SEEK_EPOCH], 2);
+    assert.equal(c[MSB1_CONTROL.SEEK_EPOCH], 4);
     writer.release();
     assert.equal(c[MSB1_CONTROL.WRITER_STATE], 0);
   }

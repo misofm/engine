@@ -346,7 +346,11 @@ plays:
 
 The MSB1 ring keeps version 1 with an anchor word: the control block is 144 bytes (the anchor
 `i64` at 128, `-1` for a plain seek), the ID is at 144 and the slot headers at 272. The drain
-refuses a ring with another header offset.
+refuses a ring with another header offset. The seek epoch (word 11) is a parity seqlock over the
+seek's generation, frame, anchor and the generation tag: `Msb1RingWriter.seek` makes it odd,
+writes them, and makes it even again, so one seek adds 2. A reader that sees an odd epoch, or an
+epoch that changed while it read, reads the seek again later. A writer of its own must publish
+the same way.
 
 Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
 is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.

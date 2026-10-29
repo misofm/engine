@@ -614,7 +614,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       const timeoutMs = settings.timeoutMs ?? 2_000;
       if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new MisoUsageError("prepareSeek timeoutMs must be finite and positive");
       const seeks = rings.map(seekSnapshot);
-      if (seeks.some((seek) => seek.epoch === 0 || seek.generation === 0n) || !sameSeeks(rings, seeks)) throw new PcmFeedError("prepareSuperseded", "PCM seek is unpublished or changing");
+      if (seeks.some((seek) => seek.epoch === 0 || changing(seek) || seek.generation === 0n) || !sameSeeks(rings, seeks)) throw new PcmFeedError("prepareSuperseded", "PCM seek is unpublished or changing");
       if (rings.length === 0) return;
       await new Promise<void>((resolve, reject) => {
         const id = ++requestId;
@@ -744,6 +744,8 @@ function pendingStart(link: FeedLink, alignTo: string, reported: bigint, refuse:
   let ring: SharedArrayBuffer | undefined;
   for (const feed of link.feeds) ring ??= feed.ring(alignTo);
   const snapshot = ring === undefined ? undefined : seekSnapshot(ring);
+  // A seek the reference's ring is publishing right now is one it has not rendered.
+  if (snapshot !== undefined && changing(snapshot)) throw refuse("a seek it has not rendered yet is pending", "feed.align.held");
   const published = snapshot === undefined || snapshot.epoch === 0 ? 0n : snapshot.generation;
   const pending = start !== undefined && start.seek.generation > reported ? start.seek : undefined;
   if (published > (pending?.generation ?? reported)) throw refuse("a seek it has not rendered yet is pending", "feed.align.held");
@@ -772,12 +774,18 @@ function refusedStart(sourceId: string, result: number): MisoEngineError {
   });
 }
 
+/** A ring's published seek. `epoch` is odd when the tuple was read while a publication was in
+ *  flight (#2184: the epoch is a parity seqlock), and the tuple is then not one seek's. */
 interface SeekSnapshot { readonly epoch: number; readonly generation: bigint; readonly frame: bigint }
 function seekSnapshot(ring: SharedArrayBuffer): SeekSnapshot {
   const control = new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4);
   const wide = new BigInt64Array(ring, MSB1_CONTROL_I64_OFFSET, 3);
-  return { epoch: Atomics.load(control, MSB1_CONTROL.SEEK_EPOCH), generation: Atomics.load(wide, 0), frame: Atomics.load(wide, 1) };
+  const epoch = Atomics.load(control, MSB1_CONTROL.SEEK_EPOCH);
+  const generation = Atomics.load(wide, 0), frame = Atomics.load(wide, 1);
+  const after = Atomics.load(control, MSB1_CONTROL.SEEK_EPOCH);
+  return { epoch: after === epoch ? epoch : after | 1, generation, frame };
 }
+function changing(seek: SeekSnapshot): boolean { return (seek.epoch & 1) !== 0; }
 function equalSeeks(actual: readonly SeekSnapshot[], expected: readonly SeekSnapshot[]): boolean {
   return actual.length === expected.length && actual.every((seek, index) => seek?.epoch === expected[index]!.epoch && seek.generation === expected[index]!.generation && seek.frame === expected[index]!.frame);
 }
