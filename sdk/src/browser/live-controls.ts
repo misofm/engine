@@ -14,7 +14,7 @@ import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
  * `wrongState` (a disposed or failed host) and `internal` are the host failing, not a refusal of the
  * frame, and the message says so.
  */
-export function hostRecordFailure(error: unknown): unknown {
+function hostRecordFailure(error: unknown): unknown {
   if (typeof error !== "object" || error === null) return error;
   const { tag, result } = error as { readonly tag?: unknown; readonly result?: unknown };
   if (tag !== "miso.error.v1" || typeof result !== "number" || !Number.isSafeInteger(result) || result < 0) {
@@ -43,7 +43,7 @@ export function hostRecordFailure(error: unknown): unknown {
  * which a local refusal has settled, and a `status()` still unsettled then is a host that has not
  * failed: the refusal stays `backpressure` and the call returns at once, as before the question.
  */
-async function hostControlFailure(host: MisoAudioWorkletHost, error: unknown): Promise<unknown> {
+async function hostControlFailure(host: Pick<MisoAudioWorkletHost, "status">, error: unknown): Promise<unknown> {
   const mapped = hostRecordFailure(error);
   if (!(mapped instanceof MisoEngineError) || mapped.code !== "backpressure") return mapped;
   if (typeof (host as { readonly status?: unknown }).status !== "function") return mapped;
@@ -65,18 +65,39 @@ async function hostControlFailure(host: MisoAudioWorkletHost, error: unknown): P
 }
 
 /**
- * Post one command frame to the host's `control` message; a call that failed throws. A frame the
- * host refuses before the core rejects as {@link hostControlFailure} maps it (#2193), so a
- * live-control submit and a control-list read never hand the app the host's raw record.
+ * The browser engine's one send to the host's `control` message (#2201): every frame the SDK posts
+ * (a live-control submit, a control-list read, a revision probe, a protocol call, a spectrum,
+ * loudness, observation or track-response frame) goes through it. A frame the host refuses before
+ * the core (its raw `miso.error.v1` record, which is not an `Error`) rejects as {@link
+ * hostControlFailure} maps it, the sticky result-6 rule of #2193 included, so the browser engine
+ * never hands the app the host's raw record. A reply the core answered resolves as the host gave
+ * it; each caller reads its result.
  */
+export function hostControl(
+  host: MisoAudioWorkletHost,
+  frame: Uint8Array,
+  document?: Uint8Array,
+): Promise<Awaited<ReturnType<MisoAudioWorkletHost["control"]>>> {
+  return hostCall(host, () => document === undefined ? host.control(frame) : host.control(frame, document));
+}
+
+/**
+ * Any other host call whose rejection can reach the app (#2201 attempt 2): `status()` (the engine's
+ * and the PCM feed's), `sessionMap()` and `dispose()` reject with the host's raw record too (a failed host's sticky one,
+ * or a local refusal), and it is mapped as {@link hostControl} maps a frame's.
+ */
+export async function hostCall<T>(host: Pick<MisoAudioWorkletHost, "status">, call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    throw await hostControlFailure(host, error);
+  }
+}
+
+/** Post one command frame through {@link hostControl}; a call the core failed throws. */
 function hostControlSend(host: MisoAudioWorkletHost): (frame: Uint8Array) => Promise<Uint8Array> {
   return async (frame) => {
-    let reply: Awaited<ReturnType<MisoAudioWorkletHost["control"]>>;
-    try {
-      reply = await host.control(frame);
-    } catch (error) {
-      throw await hostControlFailure(host, error);
-    }
+    const reply = await hostControl(host, frame);
     if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
     return reply.response;
   };
@@ -201,12 +222,7 @@ export function createBrowserControlQueue(
 async function openBrowserControlQueue(host: MisoAudioWorkletHost): Promise<ControlTransactionQueue> {
   const requestIds = new ControlRequestIds();
   const probe = async () => {
-    let reply: Awaited<ReturnType<MisoAudioWorkletHost["control"]>>;
-    try {
-      reply = await host.control(encodeRevisionProbe(requestIds.next()));
-    } catch (error) {
-      throw hostRecordFailure(error);
-    }
+    const reply = await hostControl(host, encodeRevisionProbe(requestIds.next()));
     if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
     return reply;
   };
@@ -231,7 +247,7 @@ export async function createBrowserLiveControls(
   session?: SessionLike,
   booted?: Uint8Array,
 ): Promise<EngineLiveControls> {
-  const remoteMap = await host.sessionMap();
+  const remoteMap = await hostCall(host, () => host.sessionMap());
   const queue = await createBrowserControlQueue(host);
   // The strip order is the core's control list (#1564 D5), not the worklet's index exports: the
   // map keeps the worklet's sources and meter lease, and takes the tracks and submixes from the

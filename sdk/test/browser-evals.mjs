@@ -36,6 +36,7 @@ import {
   workletBootOptions,
 } from "../src/browser/index.ts";
 import { toWebBootOptions } from "../src/browser/host-mirror.ts";
+import { MSB1_CONTROL, MSB1_CONTROL_BYTES } from "../src/browser/pcm-ring.ts";
 import { onEndpointIds } from "./control-support.mjs";
 import { effectEntry, moduleBytes, sessionDocument } from "./support.mjs";
 
@@ -972,7 +973,12 @@ describe("browser session edits", () => {
     asset = await MisoEngineAsset.load(bytes);
   });
 
-  async function boot(document) {
+  /**
+   * `options.refuse(frame)`, when it returns a result, makes the host reject that frame before the
+   * core with its raw `miso.error.v1` record, as the shipped host refuses a frame locally;
+   * `options.engine` adds `createEngine` options.
+   */
+  async function boot(document, options = {}) {
     const core = await WasmBoundary.boot(asset, new TextEncoder().encode(document.toJson()));
     const posts = new Set();
     const sent = [];
@@ -992,6 +998,8 @@ describe("browser session edits", () => {
         return { tag: "miso.sessionmap.v1", requestId: (next += 1), result: 0, sources: map.sources, metersAttached: map.metersAttached };
       },
       async control(frame, replacement) {
+        const refused = options.refuse?.(frame);
+        if (refused !== undefined) throw Object.freeze({ tag: "miso.error.v1", requestId: 0, result: refused });
         sent.push({ frame: frame.slice(), document: replacement?.slice() });
         let result = 0;
         let response;
@@ -1041,6 +1049,7 @@ describe("browser session edits", () => {
         audioWorklet: { addModule: async () => {} },
       }),
       createHost: async () => host,
+      ...options.engine,
     });
     return { engine, host, sent, tick, post };
   }
@@ -1322,8 +1331,8 @@ describe("browser session edits", () => {
 
   test("#2193: a host's raw miso.error.v1 rejection of a live-control frame is a MisoEngineError", async () => {
     // Red if the live queue's send passes the host's local refusal record (not an Error) to the app:
-    // a writer then throws the record instead of retrying the host's in-flight backpressure, and a
-    // submit rejects with the record. Red too if a failed host's sticky result 6 is raised as
+    // a writer then throws the record instead of retrying the host's in-flight backpressure (a
+    // submit's mapping is #2201's test). Red too if a failed host's sticky result 6 is raised as
     // `backpressure` (the writer then retries a dead host on every flush and never throws), or if
     // the refusal waits for a status() reply (a flush then hangs on a host that stopped answering).
     const { engine, host } = await boot(base());
@@ -1349,10 +1358,6 @@ describe("browser session edits", () => {
       const refused = await writer.flush();
       assert.deepEqual([refused.refused, refused.reason, refused.pending], [true, "backpressure", 1]);
       assert.equal((await writer.flush()).admitted, 1, "the retry lands");
-      // An over-limit frame: `RESULT_INVALID_ARGUMENT`, which never succeeds on resend.
-      refusal = 1;
-      await assert.rejects(controls.submit(controls.edit.track("t1").faderDb(-4)), (error) =>
-        error instanceof MisoEngineError && error.code === "invalidArgument" && error.result === 1);
       // A host that failed with sticky result 6 (a refused control-event dequeue) is not drained.
       sticky = Object.freeze({ tag: "miso.error.v1", requestId: 7, result: 6 });
       writer.stage(controls.edit.track("t1").faderDb(-5).edits[0]);
@@ -1364,24 +1369,103 @@ describe("browser session edits", () => {
     }
   });
 
-  test("#2190: a host's raw miso.error.v1 rejection of a protocol frame is a MisoEngineError", async () => {
-    // Red if the transport passes the host's local refusal record (not an Error) through to the app.
-    const { engine, host } = await boot(base());
-    const forward = host.control;
-    let refuse = false;
-    host.control = async (frame, replacement) => {
-      if (refuse) throw Object.freeze({ tag: "miso.error.v1", requestId: 0, result: 1 });
-      return forward.call(host, frame, replacement);
+  test("#2201: no browser send hands the app the host's raw miso.error.v1 record", async () => {
+    // Red if any host call of the browser engine passes the host's raw record (not an Error) to the
+    // app instead of the one mapped path's MisoEngineError: a frame the host refuses locally (a
+    // protocol call, a live-control submit, the spectrum, observation, loudness and
+    // track-response frames, a new queue's revision probe, the boot's capability probe), the
+    // status() of the observation render wait, and the status(), sessionMap() and dispose() of a
+    // failed host (the PCM feed's status() included), which reject with its sticky record. Each row
+    // fails at its own call.
+    const message = (frame) => frame[16] | (frame[17] << 8);
+    const passes = new Set([0x0001, 0x000c, 0x000d]);
+    const record = (result) => Object.freeze({ tag: "miso.error.v1", requestId: 7, result });
+    const pending = () => new Promise(() => {});
+    let refuse;
+    let status;
+    const document = session({ id: "browser.sends", sampleRateHz: 48_000, quantumFrames: QUANTUM })
+      .source("a", SOURCE)
+      .track("t1", { source: "a", inserts: [effect("miso.compressor", {}, { slotId: "comp" })] })
+      .output("out")
+      .route({ id: "t1.main", source: { kind: "track", trackId: "t1", tap: "post_pan" }, destination: { kind: "output_input", outputId: "out" } });
+    const { engine, host } = await boot(document, { refuse: (frame) => refuse?.(frame) });
+    // A healthy host answers status() behind its frames; here never (the response watch polls it).
+    host.status = () => (status ?? pending)();
+    const mapped = (error) => error instanceof MisoEngineError && error.code === "invalidArgument" && error.result === 1;
+    const failed = (error) => error instanceof MisoEngineError && error.code === "wrongState" && error.result === 6;
+    const typed = (error) => error instanceof MisoEngineError;
+    // An `Observe` the host refuses locally with result 6 (frames in flight) is retried after a
+    // render, so the render wait's status() reads are reached; `wait` decides what they answer.
+    const observeRefused = (wait) => {
+      let refusedAt;
+      refuse = (frame) => {
+        if (message(frame) !== 0x0003) return undefined;
+        refusedAt ??= Date.now();
+        return 6;
+      };
+      status = () => wait(refusedAt);
+      return engine.subscribeObservations({
+        selections: [{ trackId: "t1", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
+        windowBlocks: 1,
+      });
     };
     try {
-      // The queue's probes and the capabilities read go through; the next frame, COUNTERS_GET, the
-      // host refuses locally.
+      const controls = await engine.liveControls();
       await engine.capabilities();
-      refuse = true;
-      await assert.rejects(engine.counters(), (error) =>
-        error instanceof MisoEngineError && error.code === "invalidArgument" && error.result === 1);
+      const everyFrame = (frame) => passes.has(message(frame)) ? undefined : 1;
+      const calls = [
+        ["protocol", mapped, () => engine.counters()],
+        ["liveControls", mapped, () => controls.submit(controls.edit.track("t1").faderDb(-3))],
+        ["spectrum", mapped, () => engine.configureSpectrum({ target: { kind: "output", outputId: "out" }, channels: "both" })],
+        ["observation", mapped, () => engine.readObservations([{ trackId: "t1", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }])],
+        ["loudness", mapped, () => engine.subscribeLoudness()],
+        ["trackResponse", mapped, () => engine.queryTrackResponse({ trackId: "t1", grid: { kind: "logarithmic", points: 64, minimumHz: 20, maximumHz: 20_000 }, channels: "both" })],
+      ];
+      for (const [name, check, call] of calls) {
+        refuse = everyFrame;
+        await assert.rejects(call(), check, `${name} passed the host's raw record`);
+      }
+      // The render position read before the send fails; the question after the refusal waits.
+      await assert.rejects(observeRefused((refusedAt) => refusedAt === undefined ? Promise.reject(record(6)) : pending()),
+        typed, "the observation render mark passed the host's raw record");
+      // The send's question (at once) waits; the wait's later poll fails.
+      await assert.rejects(observeRefused((refusedAt) => refusedAt === undefined
+        ? Promise.resolve({ renderedQuanta: 0n })
+        : Date.now() - refusedAt < 2 ? pending() : Promise.reject(record(6))),
+      typed, "the observation render wait passed the host's raw record");
     } finally {
+      refuse = undefined;
+      status = undefined;
       await engine.close();
     }
+    // A failed host: status(), sessionMap() and dispose() reject with its sticky record.
+    const lost = await boot(document);
+    lost.host.status = () => Promise.reject(record(6));
+    lost.host.sessionMap = () => Promise.reject(record(6));
+    lost.host.dispose = () => Promise.reject(record(6));
+    await assert.rejects(lost.engine.liveControls(), failed, "liveControls() on a failed host passed the host's raw record");
+    await assert.rejects(lost.engine.position(), failed, "position() on a failed host passed the host's raw record");
+    // The PCM feed's anchored start reads the host's status() once.
+    const feed = attachEngineFeed({
+      engine: lost.engine, context: { audioWorklet: { addModule: async () => {} } }, quantumFrames: QUANTUM,
+      sources: [{ sourceId: "a", channels: 2, start: { frameAt: () => 0n, prime() {} } }],
+      createNode: () => ({ port: { postMessage() {} }, disconnect() {} }),
+    });
+    // The feed worklet confirms the attach in the ring's control block.
+    Atomics.store(new Int32Array(feed.rings[0], 0, MSB1_CONTROL_BYTES / 4), MSB1_CONTROL.ATTACHED, 1);
+    await assert.rejects(feed.ready(), failed, "the feed's anchored start on a failed host passed the host's raw record");
+    feed.close();
+    await assert.rejects(lost.engine.close(), failed, "close() on a failed host passed the host's raw record");
+    // A new queue's revision probe: the first CAPABILITIES_GET of the host.
+    await assert.rejects((async () => {
+      const fresh = await boot(document, { refuse: (frame) => message(frame) === 0x0001 ? 1 : undefined });
+      try { await fresh.engine.counters(); } finally { await fresh.engine.close(); }
+    })(), mapped, "the queue's revision probe passed the host's raw record");
+    // The boot's capability probe: the second CAPABILITIES_GET (the first is the queue's own).
+    let probes = 0;
+    await assert.rejects(boot(document, {
+      refuse: (frame) => message(frame) === 0x0001 && (probes += 1) === 2 ? 1 : undefined,
+      engine: { spectrum: { target: { kind: "output", outputId: "out" }, channels: "both" } },
+    }), mapped, "the boot's capability probe passed the host's raw record");
   });
 });
