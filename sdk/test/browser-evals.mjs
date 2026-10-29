@@ -1323,15 +1323,23 @@ describe("browser session edits", () => {
   test("#2193: a host's raw miso.error.v1 rejection of a live-control frame is a MisoEngineError", async () => {
     // Red if the live queue's send passes the host's local refusal record (not an Error) to the app:
     // a writer then throws the record instead of retrying the host's in-flight backpressure, and a
-    // submit rejects with the record.
+    // submit rejects with the record. Red too if a failed host's sticky result 6 is raised as
+    // `backpressure`: the writer then retries a dead host on every flush and never throws.
     const { engine, host } = await boot(base());
     const forward = host.control;
     let refusal;
+    let sticky;
     host.control = async (frame, replacement) => {
+      if (sticky !== undefined) throw sticky;
       const once = refusal;
       refusal = undefined;
       if (once !== undefined) throw Object.freeze({ tag: "miso.error.v1", requestId: 0, result: once });
       return forward.call(host, frame, replacement);
+    };
+    // The shipped host's status(): a failed host rejects it with its sticky record.
+    host.status = async () => {
+      if (sticky !== undefined) throw sticky;
+      return { tag: "miso.status.v1", requestId: 0, result: 0 };
     };
     try {
       const controls = await engine.liveControls();
@@ -1346,6 +1354,12 @@ describe("browser session edits", () => {
       refusal = 1;
       await assert.rejects(controls.submit(controls.edit.track("t1").faderDb(-4)), (error) =>
         error instanceof MisoEngineError && error.code === "invalidArgument" && error.result === 1);
+      // A host that failed with sticky result 6 (a refused control-event dequeue) is not drained.
+      sticky = Object.freeze({ tag: "miso.error.v1", requestId: 7, result: 6 });
+      writer.stage(controls.edit.track("t1").faderDb(-5).edits[0]);
+      await assert.rejects(writer.flush(), (error) =>
+        error instanceof MisoEngineError && error.code === "wrongState" && error.result === 6);
+      assert.equal(writer.pending, 0, "a failed host's batch is dropped");
     } finally {
       await engine.close();
     }

@@ -23,6 +23,14 @@ send did not.
   Every other mapped code is terminal: the writer drops the batch and throws, because a frame over
   the limit or a failed host never succeeds on resend. An error that is not a host record passes
   unchanged, so its handling is today's (left staged and thrown).
+- D3 (attempt 2, verify of `d41af1727`, MINOR): a host that failed rejects every later call with
+  its sticky record, and that record can carry result 6 (the worklet makes a refused
+  `control_event` dequeue sticky with its result). It has the same shape as the local in-flight
+  refusal. So on a mapped `backpressure` the send asks `host.status()`: a failed host rejects it at
+  once with its sticky record, and the SDK then raises `MisoEngineError` code `wrongState` (result
+  6), which the writer drops and throws; a healthy host answers, and the refusal stays
+  `backpressure`. No module or protocol change. A host without `status()` (outside the shipped
+  declaration) keeps the plain mapping. The other unmapped sends are #2201.
 
 ## Gate (one test per claim)
 
@@ -35,6 +43,10 @@ refusal with result 1 rejects `submit()` with `MisoEngineError` code `invalidArg
 
 - Red with the mapping removed: the writer's flush throws `{ tag: 'miso.error.v1', requestId: 0,
   result: 6 }`.
-- Green: the SDK headless evals (704 of 704) on the artifact built from this tree.
+- Attempt 2: red with the `status()` question removed (`Missing expected rejection.`: the flush
+  resolves refused for backpressure against the failed host).
+- Attempt 2 green: the SDK headless evals (705 of 705) and the Chromium browser qualification,
+  both legs, with the SDK rows.
+- Attempt 1 green: the SDK headless evals (704 of 704) on the artifact built from this tree.
 - README: the writer paragraph of "Change a mix and read the core's answer" states the mapping
   and the retry decision.

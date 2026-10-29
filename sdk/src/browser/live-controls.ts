@@ -28,9 +28,35 @@ export function hostRecordFailure(error: unknown): unknown {
 }
 
 /**
+ * A `control()` rejection as the SDK raises it (#2193). It is {@link hostRecordFailure}'s mapping,
+ * with one question asked of the host for `backpressure`: the host refuses a frame with
+ * `RESULT_BACKPRESSURE` (6) while 64 frames are in flight, which drains, but a host that failed
+ * rejects every later call with its sticky record, and that record can carry result 6 too (a
+ * control-event dequeue the engine refused). The two records are the same shape, so the SDK asks
+ * `status()`: a failed host rejects it at once with its sticky record, a healthy one answers. A
+ * failed host's `backpressure` is raised as `wrongState`, which the writer never retries, so a
+ * writer cannot retry a dead host forever. A host without `status()` is outside the shipped
+ * declaration; its record keeps the plain mapping.
+ */
+async function hostControlFailure(host: MisoAudioWorkletHost, error: unknown): Promise<unknown> {
+  const mapped = hostRecordFailure(error);
+  if (!(mapped instanceof MisoEngineError) || mapped.code !== "backpressure") return mapped;
+  if (typeof (host as { readonly status?: unknown }).status !== "function") return mapped;
+  try {
+    await host.status();
+  } catch {
+    return new MisoEngineError(
+      "the browser host failed a control call (its sticky result is 6, backpressure)",
+      { phase: "lifecycle", code: "wrongState", result: mapped.result },
+    );
+  }
+  return mapped;
+}
+
+/**
  * Post one command frame to the host's `control` message; a call that failed throws. A frame the
- * host refuses before the core rejects as {@link hostRecordFailure} maps it (#2193), so a live-control
- * submit and a control-list read never hand the app the host's raw record.
+ * host refuses before the core rejects as {@link hostControlFailure} maps it (#2193), so a
+ * live-control submit and a control-list read never hand the app the host's raw record.
  */
 function hostControlSend(host: MisoAudioWorkletHost): (frame: Uint8Array) => Promise<Uint8Array> {
   return async (frame) => {
@@ -38,7 +64,7 @@ function hostControlSend(host: MisoAudioWorkletHost): (frame: Uint8Array) => Pro
     try {
       reply = await host.control(frame);
     } catch (error) {
-      throw hostRecordFailure(error);
+      throw await hostControlFailure(host, error);
     }
     if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
     return reply.response;
