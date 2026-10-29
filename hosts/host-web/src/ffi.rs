@@ -620,7 +620,9 @@ fn stage_boot_command(len: u32) -> *mut u8 {
 ///
 /// Returns the buffer's address, or zero, with nothing staged, for a wrong handle, a host that is
 /// not ready, a `len` that is zero or over the boot's document limit
-/// ([`AudioWorkletEngineHost::maximum_document_bytes`], issue #2191), or a failed reservation.
+/// ([`AudioWorkletEngineHost::maximum_document_bytes`], issue #2191), a document whose parse
+/// transient the budget cannot hold beside the live session (`host.budget.parse_projection`,
+/// written to the diagnostic buffer, issue #2194), or a failed reservation.
 /// Every call on the live host first frees what an earlier one staged (the boot's copy too), so a
 /// refused call leaves no document for the next command. It never touches the boot result word.
 /// Control side only: the control Worker, or in `single` mode the worklet's message handler, never
@@ -633,7 +635,7 @@ pub extern "C" fn miso_engine_web_v1_replace_document_ptr(handle: u32, len: u32)
 /// [`miso_engine_web_v1_replace_document_ptr`]'s staging, with the address as a pointer (null for
 /// a refusal), so a native test can tell a staged document from a refusal.
 fn stage_replace_document(handle: u32, len: u32) -> *mut u8 {
-    with_host(handle, ptr::null_mut(), |host| {
+    with_host_mut(handle, ptr::null_mut(), |host| {
         BOOT_STAGING.with(|staging| {
             let Ok(mut staging) = staging.try_borrow_mut() else {
                 return ptr::null_mut();
@@ -643,6 +645,12 @@ fn stage_replace_document(handle: u32, len: u32) -> *mut u8 {
             staging.document_valid = false;
             if host.status().state != STATE_READY || len == 0 || len > host.maximum_document_bytes()
             {
+                return ptr::null_mut();
+            }
+            // Issue #2194: the parse transient beside what the live session retains, before the
+            // staging allocates; the refusal's diagnostic names both.
+            if let Some(diagnostic) = host.replace_parse_refusal(len) {
+                host.write_control_diagnostic(&diagnostic);
                 return ptr::null_mut();
             }
             let count = len as usize;
@@ -2104,6 +2112,12 @@ pub(crate) fn test_seek_report_addresses(handle: u32) -> (usize, usize) {
 #[cfg(test)]
 pub(crate) fn test_control_response(handle: u32) -> Vec<u8> {
     with_host(handle, Vec::new(), |host| host.control_response().to_vec())
+}
+
+/// The live host's diagnostic buffer, as `BUFFER_DIAGNOSTIC` names it (issue #2194).
+#[cfg(test)]
+pub(crate) fn test_diagnostic(handle: u32) -> Vec<u8> {
+    with_host(handle, Vec::new(), |host| host.diagnostic().to_vec())
 }
 
 #[cfg(test)]

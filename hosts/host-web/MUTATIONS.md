@@ -305,7 +305,7 @@ gate also runs its own copied-fixture mutation suite, so those self-tests never 
 | `session_validation_owns_the_launch_rate_set` (F3) | make `is_launch_sample_rate` accept every rate | `44,099` compiles where the exact launch-tier pin requires `sample_rate.unsupported_at_launch` |
 | `ring_zero_derives_from_the_document_and_matches_the_explicit_value` (capi) | bypass the zero-ring derivation before shared preparation | zero refuses `resource.limit_exceeded` instead of matching the explicit derived ring |
 | `exact_retained_total_is_checked_as_one_budget_not_independent_caps` | omit `graph_session_plus_plan_bytes` from the independent retained aggregate | one byte below the true aggregate boots; the fixture fails `one byte below exact aggregate must refuse` |
-| `representative_retained_projection_tracks_the_post_prepare_exact_aggregate` | omit the compiled-model row from the retained projector | the 64-track representative reports gap `2,889,216` above the documented `1,396,479` bound, so an underbound projector cannot silently stale |
+| `representative_retained_projection_tracks_the_post_prepare_exact_aggregate` | omit the compiled-model row from the retained projector | the 64-track representative reports gap `2,889,216` above the documented `1,396,479` bound, so an underbound projector cannot silently stale (dated: the bounds were re-pinned by #2191 and #2194) |
 | `retained_projection_budget_diagnostic_names_projected_bytes` | spell the early diagnostic's `projected_bytes` field as `exact_bytes` | the byte-for-byte diagnostic assertion rejects the mislabeled measured value |
 | `exact_retained_total_is_checked_as_one_budget_not_independent_caps` | spell the post-prepare veto's `exact_bytes` field as `projected_bytes` | the byte-for-byte diagnostic assertion rejects the mislabeled measured value |
 | `check-web-audioworklet.sh` frozen export set | delete `miso_engine_web_v1_boot_result` from the expected list | the artifact reports it as an unexpected wasm export and the exact diff is printed |
@@ -622,3 +622,14 @@ of decision 15's heavy gates" (#1605) with the loaded acceptance (gate 8).
 
 Owner ruling 2026-10-25: the browser qualification runs Chromium and WebKit only. The Firefox rows
 above are dated evidence of runs made before that ruling; no later run repeats them.
+
+## Issue #2194 — effect state admitted before allocation (2026-10-29)
+
+Each row was run once against the implementation with the mutation applied, then restored.
+
+| Gate | Mutation | Red result |
+| --- | --- | --- |
+| `boot_transient_budget::effect_state_the_budget_cannot_hold_is_refused_before_preparation` (gate C) | drop the effect row from `projected_retained_bytes` (the tree at the slice-1 commit) | the boot prepares every delay before the exact aggregate refuses it: `the refusal peaked at 400289233 bytes, over the 6940780-byte parse transient` |
+| `tests::a_replace_parse_is_projected_beside_the_live_session` (gate G) | skip `replace_parse_refusal` in `stage_replace_document` | the derived document limit stages beside the live session: `the boot limit's document beside the live session` |
+| `tests::retained_projection_budget_diagnostic_names_projected_bytes` | drop `effect_state_bytes=` from the retained-projection diagnostic | the byte-for-byte diagnostic assertion fails |
+| `check-web-boot-budget.mjs` effect-state leg (gate D) | none run: the wasm leg is red only on the tree before #2194 (host-core's effect cap alone already refuses this document at the default budget), and a base module build was not repeated | not recorded |

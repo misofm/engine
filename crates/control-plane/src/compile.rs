@@ -1389,6 +1389,76 @@ pub(crate) fn validate_replacement_peak(
     }
 }
 
+/// The replacement admission before preparation (issue #2194): may a candidate whose effect
+/// bytes are `effects` be prepared beside every plan and model the control plane holds?
+///
+/// The candidate is not prepared yet, so its rows are its compiled model's (in `compiled_models`)
+/// and its effect projection's, which bounds what preparing its instances allocates; its graph,
+/// builtin and source rows are not known before preparation (#2199) and count zero here. Each
+/// held term is [`replacement_peak_fits`]'s: the held plans' graph rows plus every model plus the
+/// candidate's projected effect bytes, with the held plans' source totals (a carried ring counted
+/// once), against [`ControlLimits::maximum_replacement_peak_bytes`]
+/// (`control.resource.replacement_peak`); the held effect state and scratch plus the candidate's
+/// against their caps (`effect.resource.limit`). Every term is at most its post-preparation
+/// counterpart, which [`validate_replacement_peak`] still checks exactly after preparation, so
+/// this refuses nothing that admission would admit except by the projection's ceiling margin.
+///
+/// Nothing is prepared or committed on a refusal.
+pub(crate) fn validate_prospective_projection(
+    held: &[LiveEpochResources],
+    effects: host_core::EffectStateProjection,
+    compiled_models: CompiledModelAdmission,
+    limits: ControlLimits,
+) -> Result<(), CompileFailure> {
+    let arithmetic = || failure(ResourceFault::Arithmetic);
+    let peak = held_peak_bytes(held, compiled_models.retained_bytes)?
+        .checked_add(effects.retained_bytes().ok_or_else(arithmetic)?)
+        .ok_or_else(arithmetic)?;
+    if peak > limits.maximum_replacement_peak_bytes {
+        return Err(diagnostic("control.resource.replacement_peak"));
+    }
+    let sum = |field: fn(&PlanResources) -> u64, candidate: u64| {
+        held.iter()
+            .try_fold(candidate, |total, epoch| {
+                total.checked_add(field(&epoch.report))
+            })
+            .ok_or_else(arithmetic)
+    };
+    if sum(|row| row.effect_scalar_state_bytes, effects.state_bytes)?
+        > limits.maximum_effect_state_bytes
+        || sum(|row| row.effect_scalar_scratch_bytes, effects.scratch_bytes)?
+            > limits.maximum_effect_scratch_bytes
+    {
+        return Err(diagnostic("effect.resource.limit"));
+    }
+    Ok(())
+}
+
+/// The replacement peak's held terms (#1290a D3, issue #2194): every held plan's graph row, the
+/// models' `models_retained_bytes`, and every held plan's source total, a carried ring counted
+/// once, in the oldest held plan that holds it ([`replacement_peak_fits`]'s rule).
+pub(crate) fn held_peak_bytes(
+    held: &[LiveEpochResources],
+    models_retained_bytes: u64,
+) -> Result<u64, CompileFailure> {
+    held.iter()
+        .enumerate()
+        .try_fold(models_retained_bytes, |total, (index, epoch)| {
+            let sources = if index == 0 {
+                Some(epoch.report.source_total_bytes)
+            } else {
+                epoch
+                    .report
+                    .source_total_bytes
+                    .checked_sub(epoch.carried.total)
+            };
+            total
+                .checked_add(epoch.report.graph_session_plus_plan_bytes)?
+                .checked_add(sources?)
+        })
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))
+}
+
 /// Which peaks the replacement admission checks (#1398 D4, #1403 D2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AdmissionPeak {

@@ -31,7 +31,7 @@ assert.deepEqual(
 );
 const compiledModule = await WebAssembly.compile(await readFile(process.argv[2]));
 
-function stage(instance, maximumMemoryBytes, admitted = true) {
+function stage(instance, maximumMemoryBytes, admitted = true, bytes = document) {
   const exports = instance.exports;
   assert.equal(exports.miso_engine_web_v1_abi_version(), ABI_VERSION);
   const optionsPointer = exports.miso_engine_web_v1_boot_options_ptr();
@@ -41,10 +41,10 @@ function stage(instance, maximumMemoryBytes, admitted = true) {
   options.setUint32(4, ABI_VERSION, true);
   options.setBigUint64(24, maximumMemoryBytes, true);
   const before = exports.memory.buffer.byteLength;
-  const pointer = exports.miso_engine_web_v1_document_ptr(document.byteLength);
+  const pointer = exports.miso_engine_web_v1_document_ptr(bytes.byteLength);
   if (!admitted) return { exports, pointer, before };
   assert.notEqual(pointer, 0);
-  new Uint8Array(exports.memory.buffer, pointer, document.byteLength).set(document);
+  new Uint8Array(exports.memory.buffer, pointer, bytes.byteLength).set(bytes);
   return { exports, pointer };
 }
 
@@ -63,6 +63,7 @@ function stagingRefusal(exports) {
 // control plane's rows for the default control frame. The engine names both in its refusal, and
 // the pin below is that projection: `20 * document + rows(frame)`, plus one page.
 let pin;
+let frameRows;
 {
   const instance = await WebAssembly.instantiate(compiledModule, sharedMemoryImports());
   const { exports, pointer } = stage(instance, 1n, false);
@@ -77,6 +78,7 @@ let pin;
   assert.ok(rows > 2n * frame, `the frame's rows (${rows}) hold its scratch and replay cache`);
   assert.equal(projected, documentBytes * PARSE_TRANSIENT_MULTIPLIER + rows);
   pin = projected;
+  frameRows = rows;
 }
 
 {
@@ -119,6 +121,34 @@ let pin;
     exports.memory.buffer.byteLength <= before + WASM_PAGE_BYTES,
     "typed pre-parse refusal grew wasm memory by more than one page",
   );
+}
+
+// Issue #2194 gate D: 512 tracks with four delays each declare about 1.5 GB of effect state in
+// about 1.4 MB of JSON. At the default budget the boot refuses it from its retained projection,
+// before the control plane prepares one delay, so the linear memory grows by no more than the
+// document's parse projection plus one page.
+{
+  const effectDocument = execFileSync(
+    "cargo",
+    ["run", "--locked", "-q", "-p", "host-web", "--example", "effect_state_document"],
+    { cwd: new URL("../", import.meta.url), maxBuffer: 4 << 20 },
+  );
+  const instance = await WebAssembly.instantiate(compiledModule, sharedMemoryImports());
+  const initialBytes = instance.exports.memory.buffer.byteLength;
+  const { exports } = stage(instance, 0n, true, effectDocument);
+  assert.equal(exports.miso_engine_web_v1_boot(effectDocument.byteLength), 0);
+  const diagnostic = stagingRefusal(exports);
+  const effect = /^host\.budget\.retained_projection\t\$\.maximum_memory_bytes\[projected_bytes=\d+,budget_bytes=\d+,effect_state_bytes=(\d+)\]\n$/
+    .exec(diagnostic);
+  assert.ok(effect && BigInt(effect[1]) > 512n << 20n, diagnostic);
+  const bound = BigInt(effectDocument.byteLength) * PARSE_TRANSIENT_MULTIPLIER + frameRows
+    + BigInt(WASM_PAGE_BYTES);
+  const growth = exports.memory.buffer.byteLength - initialBytes;
+  assert.ok(
+    BigInt(growth) <= bound,
+    `effect-state refusal grew wasm memory by ${growth}, over ${bound}`,
+  );
+  console.log(`web boot budget: effect-state refusal growth ${growth} of bound ${bound}`);
 }
 
 console.log("web boot budget high-water gate passed; mismatches: 0");

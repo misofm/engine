@@ -91,7 +91,7 @@ fn staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlo
     );
 }
 
-fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
+fn retained_projection(document: &[u8], options: WebBootOptions) -> crate::RetainedProjection {
     let model = parse_host_session(core::str::from_utf8(document).expect("UTF-8 session"))
         .expect("accepted host session");
     let compiled = compile_host_model(
@@ -574,6 +574,57 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
     ));
     assert_eq!(crate::ffi::test_document_staging(), (false, 0, 0));
     replace(handle, 1, word, -9.0);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+}
+
+/// Issue #2194 gate G: a replacement document's parse transient is projected beside what the live
+/// session retains. At the boot's derived document limit (which leaves the budget less the frame
+/// rows for the parse) the staging refuses, before it allocates the document, with a diagnostic
+/// naming the live session's retained bytes; the longest document the remainder holds stages, and
+/// one byte more does not.
+///
+/// Test value: red when the replace staging checks the length against the boot's limit only: the
+/// limit's document then stages, and its parse grows the memory past the budget beside the live
+/// session before the replacement admission refuses it.
+#[test]
+fn a_replace_parse_is_projected_beside_the_live_session() {
+    let options = boot_options(128);
+    let budget = DEFAULT_MAXIMUM_MEMORY_BYTES;
+    let booted = one_track_session(128);
+    let handle = crate::ffi::test_boot(booted.as_bytes(), options);
+    assert_ne!(handle, 0);
+    let limit = maximum_document_bytes(&options) as usize;
+    let document = vec![b' '; limit];
+    let (staged, allocations, _) = crate::ffi::allocation_counter::measured(|| {
+        crate::ffi::test_replace_document(handle, &document)
+    });
+    assert!(!staged, "the boot limit's document beside the live session");
+    assert_eq!(crate::ffi::test_document_staging(), (false, 0, 0));
+    assert!(
+        allocations <= 1,
+        "the refusal allocated {allocations} times; only its diagnostic may"
+    );
+    let diagnostic = String::from_utf8(crate::ffi::test_diagnostic(handle)).expect("UTF-8");
+    let live: u64 = diagnostic
+        .strip_prefix("host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes=")
+        .and_then(|rest| {
+            rest.strip_suffix("]\n")?.split_once(&format!(
+                ",budget_bytes={budget},document_bytes={limit},live_retained_bytes="
+            ))
+        })
+        .and_then(|(projected, live)| {
+            let live: u64 = live.parse().ok()?;
+            (projected.parse::<u64>().ok()? == limit as u64 * PARSE_TRANSIENT_MULTIPLIER + live)
+                .then_some(live)
+        })
+        .unwrap_or_else(|| panic!("{diagnostic}"));
+    let fits = usize::try_from((budget - live) / PARSE_TRANSIENT_MULTIPLIER).expect("small");
+    assert!(crate::ffi::test_replace_document(handle, &document[..fits]));
+    assert!(!crate::ffi::test_replace_document(
+        handle,
+        &document[..=fits]
+    ));
+    assert_eq!(crate::ffi::test_document_staging(), (false, 0, 0));
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
@@ -1269,7 +1320,7 @@ fn retained_projection_budget_diagnostic_names_projected_bytes() {
         ..boot_options(128)
     };
     let projection = retained_projection(document.as_bytes(), options);
-    let budget = projection - 1;
+    let budget = projection.total - 1;
     let failure = AudioWorkletEngineHost::boot(
         document.as_bytes(),
         WebBootOptions {
@@ -1283,7 +1334,8 @@ fn retained_projection_budget_diagnostic_names_projected_bytes() {
     assert_eq!(
         failure.diagnostic(),
         format!(
-            "host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes={projection},budget_bytes={budget}]\n"
+            "host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget},effect_state_bytes={}]\n",
+            projection.total, projection.effect_state_bytes
         )
         .as_bytes()
     );
@@ -1306,11 +1358,15 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
     // Re-pinned by #2191, whose counter tables shrank from half a frame of IDs to 256: identity
     // 359,883 / 758,284 = 0.475, nine-track 686,763 / 787,264 = 0.872, console 3,604,132 /
     // 1,341,910 = 2.686, each plus about 8%.
+    // Re-pinned by #2194 (root ruling R5), whose projection carries the effect row (declared
+    // state and scratch, inline and undeclared heap bytes): identity 355,867 / 762,308 = 0.467,
+    // nine-track 650,619 / 823,416 = 0.790, console 3,073,188 / 1,872,862 = 1.641, each plus
+    // about 8%.
     let defaults = boot_options(128);
     let representatives = [
         (
             "identity-one-track",
-            513_u64,
+            504_u64,
             one_track_session(128),
             WebBootOptions {
                 source_ring_frames: 128,
@@ -1319,7 +1375,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "parametric-eq-nine-track",
-            942_u64,
+            853_u64,
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1328,7 +1384,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "console-sixty-four-track",
-            2_901_u64,
+            1_772_u64,
             include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1339,7 +1395,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
     ];
 
     for (name, bound_permille, document, options) in representatives {
-        let projection = retained_projection(document.as_bytes(), options);
+        let projection = retained_projection(document.as_bytes(), options).total;
         let host =
             AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
                 panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))

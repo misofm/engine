@@ -997,6 +997,11 @@ struct ControlHalf {
     /// The result code of the last control call this half ran (#1332 S4). The single instance
     /// also publishes it in the status word, unchanged.
     last_result: u32,
+    /// The bytes the bridge retains for the session's lifetime outside the control plane's held
+    /// plans and models (issue #2194): the boot report's bridge rows less the boot model, which
+    /// the control plane holds and counts itself. A replacement's parse projection adds them to
+    /// [`SessionState::held_retained_bytes`].
+    bridge_fixed_bytes: u64,
 }
 
 impl ControlHalf {
@@ -1366,9 +1371,8 @@ impl AudioWorkletEngineHost {
             projection.report.bridge_retained_bytes,
             frame_rows,
         )?;
-        if retained_projection > memory_budget {
-            return Err(BootFailure::projected_budget(
-                "host.budget.retained_projection",
+        if retained_projection.total > memory_budget {
+            return Err(BootFailure::retained_projection(
                 retained_projection,
                 memory_budget,
             ));
@@ -1460,6 +1464,45 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub const fn maximum_document_bytes(&self) -> u32 {
         self.maximum_document_bytes
+    }
+
+    /// Why a replacement document of `document_bytes` cannot be parsed beside the live session
+    /// (issue #2194), or `None`: its parse transient
+    /// (`document_bytes * PARSE_TRANSIENT_MULTIPLIER`, root ruling R2) plus what the live session
+    /// retains (the bridge's fixed rows and every plan and model the control plane holds) over the
+    /// budget is `host.budget.parse_projection`, naming the projection, the budget, the document
+    /// and the live session's retained bytes. Control side only, before the staging allocates.
+    pub(crate) fn replace_parse_refusal(&self, document_bytes: u32) -> Option<Vec<u8>> {
+        let control = self.control.as_ref()?;
+        let budget = memory_budget(&self.options);
+        let arithmetic = || b"host.budget.arithmetic\t$\n".to_vec();
+        let Some(live_retained) = control
+            .control
+            .held_retained_bytes()
+            .ok()
+            .and_then(|held| held.checked_add(control.bridge_fixed_bytes))
+        else {
+            return Some(arithmetic());
+        };
+        let Some(projection) =
+            (u64::from(document_bytes) * PARSE_TRANSIENT_MULTIPLIER).checked_add(live_retained)
+        else {
+            return Some(arithmetic());
+        };
+        (projection > budget).then(|| {
+            format!(
+                "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={projection},budget_bytes={budget},document_bytes={document_bytes},live_retained_bytes={live_retained}]\n"
+            )
+            .into_bytes()
+        })
+    }
+
+    /// Write `diagnostic` to the control half's diagnostic buffer, which
+    /// [`Self::diagnostic`] reads; nothing without a control half.
+    pub(crate) fn write_control_diagnostic(&mut self, diagnostic: &[u8]) {
+        if let Some(control) = self.control.as_mut() {
+            control.staging.write_diagnostic(diagnostic);
+        }
     }
 
     /// Read the immutable boot options.
@@ -3547,11 +3590,14 @@ impl BootFailure {
         }
     }
 
-    fn projected_budget(code: &str, projected: u64, budget: u64) -> Self {
+    /// `host.budget.retained_projection`, naming the projection, the budget and its effect row
+    /// (issue #2194).
+    fn retained_projection(projection: RetainedProjection, budget: u64) -> Self {
         Self {
             result: RESULT_REFUSED_BUDGET,
             diagnostic: format!(
-                "{code}\t$.maximum_memory_bytes[projected_bytes={projected},budget_bytes={budget}]\n"
+                "host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget},effect_state_bytes={}]\n",
+                projection.total, projection.effect_state_bytes
             )
             .into_bytes(),
         }
@@ -3850,19 +3896,32 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
     Ok(options)
 }
 
+/// The boot's retained projection ([`projected_retained_bytes`]): the total and its effect row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RetainedProjection {
+    /// Every projected row.
+    pub(crate) total: u64,
+    /// The effect row (issue #2194): every instance's declared state and scratch, prepared inline
+    /// bytes and undeclared heap ([`host_core::EffectStateProjection::retained_bytes`]).
+    pub(crate) effect_state_bytes: u64,
+}
+
 /// Project all retained declaration/runtime bytes whose allocation shape is known after compile.
 ///
 /// The compiled-model row is the session estimator's post-canonical exact row. The runtime row is
 /// re-derived from the ring boot actually chose rather than the soon-to-be-removed document limits
-/// word. Bridge storage is the exact layout projection above. Preparation's graph/effect/builtin
-/// subcompilers receive this same total budget and retain their existing checked pre-allocation
-/// estimators, so no structural count ceiling is introduced here.
+/// word. Bridge storage is the exact layout projection above. The effect row (issue #2194) is the
+/// effect state the session's instances would allocate, projected from their descriptors, so a
+/// session whose effects the budget cannot hold is refused before one is prepared. Preparation's
+/// graph and builtin subcompilers receive this same total budget and retain their existing
+/// checked pre-allocation estimators (their rows before allocation are #2199), so no structural
+/// count ceiling is introduced here.
 fn projected_retained_bytes(
     compiled: &CompiledSession,
     source_ring_frames: u32,
     bridge_retained_bytes: u64,
     control_frame_rows: u64,
-) -> Result<u64, BootFailure> {
+) -> Result<RetainedProjection, BootFailure> {
     let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
     let source_ring_bytes = compiled
         .normalized_model()
@@ -3876,17 +3935,31 @@ fn projected_retained_bytes(
         })
         .ok_or_else(arithmetic)?;
     let estimate = compiled.resource_estimate();
-    [
+    // A refusal here is a resource or platform fault (an overflow, or no launch registry), which
+    // boot reports as a budget refusal, as `boot_refusal` does.
+    let effect_state_bytes = host_core::project_effects(compiled)
+        .map_err(|failure| BootFailure {
+            result: RESULT_REFUSED_BUDGET,
+            diagnostic: failure.as_bytes().to_vec(),
+        })?
+        .retained_bytes()
+        .ok_or_else(arithmetic)?;
+    let total = [
         bridge_retained_bytes,
         estimate.compiled_model_bytes,
         estimate.queue_bytes,
         source_ring_bytes,
         // #2191: the control plane's frame-scaled rows, which the exact check charges again.
         control_frame_rows,
+        effect_state_bytes,
     ]
     .into_iter()
     .try_fold(0_u64, |total, row| {
         total.checked_add(row).ok_or_else(arithmetic)
+    })?;
+    Ok(RetainedProjection {
+        total,
+        effect_state_bytes,
     })
 }
 
@@ -5176,6 +5249,10 @@ fn compile_ready(
         .bridge_retained_bytes
         .checked_add(shared_bytes)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let bridge_fixed_bytes = report
+        .bridge_retained_bytes
+        .checked_sub(engine.session_model_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let control = ControlHalf {
         control,
         #[cfg(feature = "test-support")]
@@ -5191,6 +5268,7 @@ fn compile_ready(
         lifecycle: Arc::clone(&lifecycle),
         staging: ControlStaging::empty(),
         last_result: RESULT_OK,
+        bridge_fixed_bytes,
     };
     let ready = RenderReady {
         shape,
