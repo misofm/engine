@@ -14,6 +14,7 @@ import { readControlStripOrderSync } from "./control-list.ts";
 import type { ControlStripOrder } from "./control-list.ts";
 import { ControlRequestIds } from "./control-queue.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
+import type { MisoDiagnostic } from "./errors.ts";
 import { TrackResponseRequester } from "./live-response.ts";
 import { watermarkSnapshot } from "./session-edit.ts";
 import type { WatermarkSnapshot } from "./session-edit.ts";
@@ -1161,6 +1162,18 @@ export class WasmBoundary {
       : Number(this.#exports.miso_engine_web_v1_replace_document_ptr(handle, document.length));
     const memory = this.#exports.memory;
     if (pointer === 0 || pointer + document.length > memory.buffer.byteLength) {
+      // Issue #2194: a document whose parse the budget cannot hold beside the live session is
+      // refused with the host's diagnostic as the control response, where a refused control
+      // call leaves its own; every other refusal leaves the response empty.
+      const diagnostics = this.#controlResponseDiagnostics(handle);
+      if (diagnostics[0]?.code === "host.budget.parse_projection") {
+        throw new MisoEngineError("the engine refused this replacement document's parse beside the live session", {
+          phase: "lifecycle",
+          code: "refusedBudget",
+          result: constantValue("resultCodes", "refusedBudget"),
+          diagnostics,
+        });
+      }
       throw new MisoEngineError("the engine staged no buffer for this replacement document", {
         phase: "lifecycle",
         code: "bufferTooSmall",
@@ -1169,6 +1182,19 @@ export class WasmBoundary {
       });
     }
     new Uint8Array(memory.buffer, pointer, document.length).set(document);
+  }
+
+  /** The diagnostics the control response holds now, or none. */
+  #controlResponseDiagnostics(handle: number): readonly MisoDiagnostic[] {
+    const responsePointer = optionalExport(this.#exports, "miso_engine_web_v1_control_response_ptr");
+    const responseBytes = optionalExport(this.#exports, "miso_engine_web_v1_control_response_bytes");
+    if (responsePointer === undefined || responseBytes === undefined) return [];
+    const pointer = Number(responsePointer(handle));
+    const length = Number(responseBytes(handle));
+    const memory = this.#exports.memory;
+    if (pointer === 0 || length === 0 || pointer + length > memory.buffer.byteLength) return [];
+    // `.slice()`: a decoder is not required to read a view of a `SharedArrayBuffer` (#1380).
+    return parseDiagnostics(new TextDecoder().decode(new Uint8Array(memory.buffer, pointer, length).slice()));
   }
 
   /**

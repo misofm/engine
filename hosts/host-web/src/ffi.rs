@@ -622,9 +622,11 @@ fn stage_boot_command(len: u32) -> *mut u8 {
 /// not ready, a `len` that is zero or over the boot's document limit
 /// ([`AudioWorkletEngineHost::maximum_document_bytes`], issue #2191), a document whose parse
 /// transient the budget cannot hold beside the live session (`host.budget.parse_projection`,
-/// written to the diagnostic buffer, issue #2194), or a failed reservation.
-/// Every call on the live host first frees what an earlier one staged (the boot's copy too), so a
-/// refused call leaves no document for the next command. It never touches the boot result word.
+/// issue #2194, or `web.internal.retained`), or a failed reservation. Every call on the live host
+/// first clears the control response; the parse-projection refusal writes its diagnostic there
+/// ([`miso_engine_web_v1_control_response_ptr`]), as a refused control call does, and every other
+/// refusal leaves it empty. Every call also frees what an earlier one staged (the boot's copy
+/// too), so a refused call leaves no document for the next command. It never touches the boot result word.
 /// Control side only: the control Worker, or in `single` mode the worklet's message handler, never
 /// `process()`; the bytes are a counted control allocation.
 #[unsafe(no_mangle)]
@@ -643,14 +645,15 @@ fn stage_replace_document(handle: u32, len: u32) -> *mut u8 {
             // Assignment frees the earlier bytes; the `ManuallyDrop` registers no destructor.
             *staging.document = Vec::new();
             staging.document_valid = false;
+            host.clear_control_response();
             if host.status().state != STATE_READY || len == 0 || len > host.maximum_document_bytes()
             {
                 return ptr::null_mut();
             }
             // Issue #2194: the parse transient beside what the live session retains, before the
-            // staging allocates; the refusal's diagnostic names both.
+            // staging allocates; the refusal's diagnostic names both and is the control response.
             if let Some(diagnostic) = host.replace_parse_refusal(len) {
-                host.write_control_diagnostic(&diagnostic);
+                host.refuse_replace_document(&diagnostic);
                 return ptr::null_mut();
             }
             let count = len as usize;

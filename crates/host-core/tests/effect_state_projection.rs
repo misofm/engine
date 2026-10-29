@@ -2,7 +2,7 @@
 //! before it allocates that state.
 //!
 //! A delay instance retains about 768 KB at 48 kHz while its document entry is under 230 bytes,
-//! so 512 tracks with four delays each (about 700 KB of JSON) declare about 1.5 GB of effect state.
+//! so 512 tracks with four delays each (about 1.4 MB of JSON) declare about 1.5 GB of effect state.
 //! Before #2194 the effect compiler prepared every instance and host-core compared the sum with
 //! the cap afterwards: the refusal came after the thread's heap peaked at that 1.5 GB.
 

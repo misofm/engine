@@ -1399,9 +1399,13 @@ pub(crate) fn validate_replacement_peak(
 /// candidate's projected effect bytes, with the held plans' source totals (a carried ring counted
 /// once), against [`ControlLimits::maximum_replacement_peak_bytes`]
 /// (`control.resource.replacement_peak`); the held effect state and scratch plus the candidate's
-/// against their caps (`effect.resource.limit`). Every term is at most its post-preparation
-/// counterpart, which [`validate_replacement_peak`] still checks exactly after preparation, so
-/// this refuses nothing that admission would admit except by the projection's ceiling margin.
+/// against their caps (`effect.resource.limit`). [`validate_replacement_peak`] still checks the
+/// exact rows after preparation. The projection charges every instance's processor, also for a
+/// banking effect, whose bank the exact admission charges in place of its members: the graph
+/// compiler holds every per-instance processor alive while it binds the banks, so the transient
+/// really holds them. This pre-check can therefore be stricter than the exact admission for
+/// banking effects, deliberately; for the other rows it refuses nothing the exact admission
+/// would admit except by the projection's ceiling margin.
 ///
 /// Nothing is prepared or committed on a refusal.
 pub(crate) fn validate_prospective_projection(

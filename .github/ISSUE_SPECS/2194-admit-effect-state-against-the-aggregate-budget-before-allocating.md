@@ -60,7 +60,10 @@ staging checks the document length only, not the live session's retained memory.
    session's retained bytes (the bridge's fixed rows and the control plane's held rows) against the
    budget before it allocates the staging. A refusal returns zero and writes
    `host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes=,budget_bytes=,document_bytes=,live_retained_bytes=]`
-   to the diagnostic buffer.
+   to the diagnostic buffer and names it as the control response, which every staging call first
+   clears; an internal fault reading the held rows is `web.internal.retained`. The SDK raises
+   `refusedBudget` with that diagnostic, and its old `bufferTooSmall` (`sdk.document.bytes`) when
+   the response holds none.
 
 ## Non-goals
 
@@ -155,6 +158,41 @@ Corrections to the mapping:
 3. `prepare_caps` keeps every subsystem cap at the whole budget. A cap derived from the boot
    session's other rows would mis-bound a replacement of another shape (non-goal).
 4. The replace staging refusal returns zero as before and writes its diagnostic to the live host's
-   diagnostic buffer; it does not change `last_result`, which the page reads as the last control
-   command's result.
+   diagnostic buffer, named as the control response (verify follow-up 2 below); it does not change
+   `last_result`, which the page reads as the last control command's result.
 5. The 512 x 4 document built from the nine-track fixture is 1,385,759 bytes, not about 700 KB.
+
+## Verify follow-ups (attempt 1 PASS, MINOR findings folded)
+
+1. The control plane's prospective admission (`validate_prospective_projection`) charges every
+   instance's processor, also for a banking effect, where the exact post-preparation admission
+   charges the bank in place of its members (11 to 94 % of the per-instance projection). This is
+   deliberate: the graph compiler holds every per-instance processor alive while it binds the
+   banks, so the transient really holds them, and the pre-check can be stricter than the exact
+   admission for banking effects. Its doc comment now says so.
+2. The SDK reads the replace refusal: `replace_document_ptr` names its diagnostic as the control
+   response (cleared on every staging call), and `WasmBoundary`'s staging raises `refusedBudget`
+   with `host.budget.parse_projection`; with no diagnostic it keeps `bufferTooSmall`
+   (`sdk.document.bytes`). Gate: `sdk/test/headless-apply-evals.mjs`, `#2194: a replace whose
+   parse cannot fit beside the live session is refusedBudget`, red with the mapping removed
+   (`expected 'refusedBudget', actual 'bufferTooSmall'`). No existing SDK test covered the old
+   error, so none is deleted.
+3. `replace_parse_refusal` maps an `Internal` fault from `held_retained_bytes` to
+   `web.internal.retained`; arithmetic overflow stays `host.budget.arithmetic`.
+4. The three `delay_document` copies (host-core's gate A, control-plane's gate F, host-web's
+   `effect_state_document` example) stay: no shared test-support home reaches all three without a
+   new edge. `session` has no test-support feature, and host-core's own `test-support` is its
+   library's feature, which its integration test would need a self dev-dependency or a feature
+   gate to reach.
+
+Recorded residuals (no code in this issue):
+
+- (a) `bridge_fixed_bytes` (host-web, captured at boot) is shaped by the boot plan, so after a
+  replace the live retained term of the replace parse projection under-counts grown control rows
+  and over-counts the freed boot document staging. Gate G cannot tell. This is the control-row
+  residual of #2199.
+- (b) The test-only warm path (`host_core::warm_lead` -> `compile_for_arrivals`,
+  `crates/host-core/src/prepare.rs`) prepares a second copy of the session's effects that is
+  checked only per category. Both hosts pass `warm: None`, so production cannot reach it.
+- (c) The graph compiler's transient holds the per-instance processors and the bound banks
+  together, up to about twice the projection for banking effects: the graph rows of #2199.

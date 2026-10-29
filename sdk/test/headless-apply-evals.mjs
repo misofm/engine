@@ -237,6 +237,39 @@ describe("headless session edits", () => {
     }
   });
 
+  test("#2194: a replace whose parse cannot fit beside the live session is refusedBudget", async () => {
+    // Red if the SDK reports the staging refusal as its own `bufferTooSmall` instead of reading the
+    // host's `host.budget.parse_projection` diagnostic. The boot's document limit leaves the budget
+    // less the control frame's rows for the parse, so a document at that limit cannot be parsed
+    // beside the live session's retained bytes. The limit is read from a fresh instance's refusal.
+    const probe = (await asset.instantiate()).exports;
+    assert.equal(probe.miso_engine_web_v1_document_ptr(0xffff_ffff), 0);
+    const refusal = new TextDecoder().decode(new Uint8Array(
+      probe.memory.buffer,
+      Number(probe.miso_engine_web_v1_boot_diagnostic_ptr()),
+      Number(probe.miso_engine_web_v1_boot_diagnostic_bytes()),
+    ).slice());
+    const field = (name) => Number(new RegExp(`${name}=(\\d+)`).exec(refusal)?.[1]);
+    // The parse transient's multiplier, from the same refusal's projection of its own length.
+    const rows = field("control_frame_rows_bytes");
+    const multiplier = (field("projected_bytes") - rows) / field("document_bytes");
+    const limit = Math.floor((field("budget_bytes") - rows) / multiplier);
+    assert.ok(limit > 0, refusal);
+    const engine = await boot(base());
+    try {
+      await assert.rejects(engine.replaceSession(new Uint8Array(limit).fill(0x20)), (error) => {
+        assert.ok(error instanceof MisoEngineError);
+        assert.equal(error.code, "refusedBudget");
+        assert.equal(error.diagnostics[0]?.code, "host.budget.parse_projection");
+        assert.match(error.diagnostics[0].path, new RegExp(`document_bytes=${limit},live_retained_bytes=`));
+        return true;
+      });
+      assert.equal(engine.revision, 0n);
+    } finally {
+      engine.dispose();
+    }
+  });
+
   test("gate 5: loadSession rejects a pending applied and restarts the revision", async () => {
     // Red if a reboot leaves applied() pending forever or keeps the old revision.
     const engine = await boot(base());

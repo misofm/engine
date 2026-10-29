@@ -7616,7 +7616,7 @@ where
     }
 
     /// The bytes the plans and compiled models the control plane holds retain now (issue #2194):
-    /// the replacement peak's held terms ([`held_peak_bytes`]), every held plan's graph and
+    /// the replacement peak's held terms (`held_peak_bytes`), every held plan's graph and
     /// allocated source rows and every held model. A host adds its own fixed rows to project what
     /// a replacement's parse may grow beside the live session.
     ///

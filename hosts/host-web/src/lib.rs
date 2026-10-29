@@ -1471,17 +1471,21 @@ impl AudioWorkletEngineHost {
     /// (`document_bytes * PARSE_TRANSIENT_MULTIPLIER`, root ruling R2) plus what the live session
     /// retains (the bridge's fixed rows and every plan and model the control plane holds) over the
     /// budget is `host.budget.parse_projection`, naming the projection, the budget, the document
-    /// and the live session's retained bytes. Control side only, before the staging allocates.
+    /// and the live session's retained bytes; an internal fault reading the retained bytes is
+    /// `web.internal.retained`. Control side only, before the staging allocates.
     pub(crate) fn replace_parse_refusal(&self, document_bytes: u32) -> Option<Vec<u8>> {
         let control = self.control.as_ref()?;
         let budget = memory_budget(&self.options);
         let arithmetic = || b"host.budget.arithmetic\t$\n".to_vec();
-        let Some(live_retained) = control
-            .control
-            .held_retained_bytes()
-            .ok()
-            .and_then(|held| held.checked_add(control.bridge_fixed_bytes))
-        else {
+        let held = match control.control.held_retained_bytes() {
+            Ok(held) => held,
+            // A poisoned report lock or a missing model row is a platform fault, not a sum.
+            Err(control_plane::CommandError::Internal) => {
+                return Some(b"web.internal.retained\t$\n".to_vec());
+            }
+            Err(_) => return Some(arithmetic()),
+        };
+        let Some(live_retained) = held.checked_add(control.bridge_fixed_bytes) else {
             return Some(arithmetic());
         };
         let Some(projection) =
@@ -1497,11 +1501,19 @@ impl AudioWorkletEngineHost {
         })
     }
 
-    /// Write `diagnostic` to the control half's diagnostic buffer, which
-    /// [`Self::diagnostic`] reads; nothing without a control half.
-    pub(crate) fn write_control_diagnostic(&mut self, diagnostic: &[u8]) {
+    /// Clear the control response before a replacement document is staged (issue #2194), so a
+    /// staging refused without a diagnostic leaves none for the page to misread.
+    pub(crate) fn clear_control_response(&mut self) {
+        self.control_response = ControlResponse::None;
+    }
+
+    /// Refuse a replacement document's staging (issue #2194): `diagnostic` into the control half's
+    /// diagnostic buffer, which [`Self::diagnostic`] reads, and as the control response, where the
+    /// page reads a refused control call's diagnostic; nothing without a control half.
+    pub(crate) fn refuse_replace_document(&mut self, diagnostic: &[u8]) {
         if let Some(control) = self.control.as_mut() {
             control.staging.write_diagnostic(diagnostic);
+            self.control_response = ControlResponse::Diagnostic;
         }
     }
 
