@@ -2261,6 +2261,7 @@ fn source_ring_config(
         quantum_frames: compiled.quantum(),
         frame_capacity: u64::from(caps.source_ring_frames),
         initial_generation: SourceGeneration(1),
+        seek_runway_blocks: 0,
     }
 }
 

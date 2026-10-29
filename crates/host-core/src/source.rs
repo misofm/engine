@@ -1086,6 +1086,7 @@ mod tests {
                 quantum_frames: QuantumFrames(Q),
                 frame_capacity: 16,
                 initial_generation: SourceGeneration(1),
+                seek_runway_blocks: 0,
             };
             let mut builder = ControlSourceBuilder::with_capacity(9, 2).expect("builder");
             let mut consumers = Vec::new();

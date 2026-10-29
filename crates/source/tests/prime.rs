@@ -25,6 +25,7 @@ fn ring() -> (HostChunkProvider, PcmSourceConsumer) {
         quantum_frames: QuantumFrames(Q),
         frame_capacity: RING_BLOCKS * QUANTUM,
         initial_generation: SourceGeneration(1),
+        seek_runway_blocks: 0,
     })
     .expect("ring");
     (producer.into_host_chunk_provider(RATE), consumer)
@@ -256,6 +257,7 @@ fn the_prime_flag_is_shared_between_the_handle_and_the_consumer() {
         quantum_frames: QuantumFrames(Q),
         frame_capacity: 4 * QUANTUM,
         initial_generation: SourceGeneration(1),
+        seek_runway_blocks: 0,
     })
     .expect("ring");
     assert!(!consumer.prime_required());
@@ -297,6 +299,50 @@ fn readiness_and_sixteen_primes_allocate_nothing() {
     assert!(ready);
     assert_eq!(copied, LEAD * Q);
     assert_eq!((delta.allocations, delta.deallocations), (0, 0));
+}
+
+/// #2205 gate 5: blocks that hold a live plain seek for its runway, and the block that lands it,
+/// allocate and free nothing on the render thread.
+///
+/// Test value: red when the readiness check, the hold or the landing allocates or frees.
+#[test]
+fn a_held_live_seek_and_its_landing_allocate_nothing() {
+    assert_installed();
+    let (producer, mut consumer, _) = PcmSourceRing::prepare(PcmSourceRingConfig {
+        channel_count: 2,
+        quantum_frames: QuantumFrames(Q),
+        frame_capacity: RING_BLOCKS * QUANTUM,
+        initial_generation: SourceGeneration(1),
+        seek_runway_blocks: 2,
+    })
+    .expect("ring");
+    let mut host = producer.into_host_chunk_provider(RATE);
+    for block in 0..4 {
+        submit(&mut host, 1, block * QUANTUM, Q, false);
+    }
+    // Warm-up: one ordinary block.
+    let _ = consumer.begin_block_at(0);
+    host.try_seek(SourceCommand::Seek {
+        generation: SourceGeneration(2),
+        frame: SourceFrame(SEEK_FRAME),
+    })
+    .expect("seek");
+    let mut reports = Vec::with_capacity(3);
+    let mut generations = [0_u64; 3];
+    let mut delta = (0, 0);
+    for (index, block) in (1..4_u64).enumerate() {
+        let mark = current_thread_counters();
+        let report = consumer.begin_block_at(block * QUANTUM);
+        let moved = current_thread_delta_since(mark);
+        delta.0 += moved.allocations;
+        delta.1 += moved.deallocations;
+        generations[index] = report.active_generation.0;
+        reports.push(report.underrun_frames);
+        submit(&mut host, 2, SEEK_FRAME + index as u64 * QUANTUM, Q, false);
+    }
+    assert_eq!(generations, [1, 1, 2], "held twice, then landed");
+    assert_eq!(reports, [0, 0, 0]);
+    assert_eq!(delta, (0, 0));
 }
 
 /// #1320 D3: a prime reads on the caller's source-read clock, as `begin_block_at` does, even when

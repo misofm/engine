@@ -764,6 +764,7 @@ fn a_prime_advances_the_timeline_as_it_advances_a_source() {
             quantum_frames: quantum,
             frame_capacity: 8 * Q,
             initial_generation: SourceGeneration(1),
+            seek_runway_blocks: 0,
         },
         SourceFrame(0),
         word.clone(),

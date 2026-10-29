@@ -376,6 +376,7 @@ fn schedule(seed: u64, reach: &mut Reach) {
         quantum_frames: QuantumFrames(quantum),
         frame_capacity: capacity as u64 * u64::from(quantum),
         initial_generation: SourceGeneration(generation),
+        seek_runway_blocks: 0,
     };
     let (producer, mut consumer, _) = PcmSourceRing::prepare(config).expect("a legal ring");
     let mut host = producer.into_host_chunk_provider(RATE);
