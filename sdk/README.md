@@ -486,10 +486,14 @@ committed `apply` or `replaceSession` on the `rebuild` path resolves, the engine
 strip order again, and every `EngineLiveControls` from this engine, also one the app already holds,
 checks strips and names effects against that order: `edit.strip("<new bus>")` is accepted, and
 `edit.strip("<removed bus>")` throws `MisoUsageError`. An edit staged before the rebuild keeps the
-address it was built for, and the core refuses it if that strip or effect is gone. The session the
-live controls were made from no longer describes the engine once the strips moved, so a console
-slot or insert addressed by index (`effect()`, `insert(<index>)`) then throws, and IDs resolve
-from the control list alone. A strip change that another page commits on the same host is seen
+address it was built for, and the core refuses it if that strip or effect is gone. A console slot
+or insert addressed by index (`effect()`, `insert(<index>)`) resolves against the session the live
+controls were made from only while the core's list still shows that strip as the session declares
+it: the same tracks and submixes, and the same console slots and inserts on that strip, in the
+same order. A rebuild that changes the inserts of one strip leaves index addressing on the other
+strips as it was. On the changed strip, and on every strip once the strips moved, an index throws
+`MisoUsageError` and IDs resolve from the control list alone, so an index never addresses an insert
+that the rebuild moved. A strip change that another page commits on the same host is seen
 when the page next reads the strip order. If that read fails after a commit, the call still
 resolves (the edit is committed), and the next read catches up.
 

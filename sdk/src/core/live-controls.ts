@@ -11,7 +11,7 @@ import {
 import type { StripEdits } from "../generated/control-builders.ts";
 import type { EffectId, EffectParameterName } from "../generated/catalog.ts";
 import type { SessionMap } from "./boundary.ts";
-import { stripEffectOf } from "./control-list.ts";
+import { stripEffectOf, stripSections, stripSectionsKnown } from "./control-list.ts";
 import type { ControlStripOrder } from "./control-list.ts";
 import { validateControlEdit } from "./control-frame.ts";
 import type { ControlFrameEdit, ControlWireAddress } from "./control-frame.ts";
@@ -359,20 +359,40 @@ export class LiveControlEdits {
     const order = orderNow(this.#order);
     const listed = order === undefined ? undefined : stripEffectOf(order, owner.id, section);
     if (listed !== undefined) return listed;
-    const layout = this.#currentLayout();
+    const layout = this.#layoutFor(owner.id);
     return layout === undefined ? undefined : this.#instanceOf(layout, owner.id, section)?.effectId;
   }
 
   /**
-   * The session's layout while the core's structure is the one it was checked against. A rebuild
-   * that moved the strips moves the structure epoch, and the session no longer describes the engine:
-   * names then resolve from the core's control list alone, as `withSession()` does for a session
-   * whose strips moved.
+   * The session's layout for one strip, while it still describes that strip (#2189). The newest
+   * list must still have the session's strips (the rule `withSession()` and the headless engine
+   * apply), and that strip's console slots and inserts, in the same order with the same effects.
+   * A rebuild can change one strip's inserts and leave the others (and so does a session the SDK
+   * built that is not the committed one): that strip then gets no layout, an index on it refuses and
+   * its IDs resolve from the core's control list alone, so an index never addresses an insert the
+   * list has moved, while the strips it did not touch keep theirs. An order whose sections this SDK
+   * did not read is held to the epoch the layout was checked against instead.
    */
-  #currentLayout(): LiveControlLayout | undefined {
-    if (this.#layout === undefined) return undefined;
-    const epoch = orderNow(this.#order)?.structureEpoch;
-    return epoch === this.#layoutEpoch ? this.#layout : undefined;
+  #layoutFor(stripId: string): LiveControlLayout | undefined {
+    const layout = this.#layout;
+    if (layout === undefined) return undefined;
+    const order = orderNow(this.#order);
+    if (order === undefined) return layout;
+    if (!stripSectionsKnown(order)) return order.structureEpoch === this.#layoutEpoch ? layout : undefined;
+    if (!sameIds(layout.tracks.keys(), order.tracks) || !sameIds(layout.submixes.keys(), order.submixes)) {
+      return undefined;
+    }
+    const instances = layout.tracks.get(stripId) ?? layout.submixes.get(stripId);
+    if (instances === undefined) return undefined;
+    // Each rack in its own order: the list puts a strip's sections in signal order (the pre-insert
+    // slots, the inserts, the post-insert slots), and the layout keeps the slots in one row.
+    const sections = stripSections(order).filter((section) => section.stripId === stripId);
+    const same = (rack: LiveControlRack, rows: readonly LayoutRow[]): boolean => {
+      const listed = sections.filter((section) => section.rack === rack);
+      return listed.length === rows.length && rows.every((row, index) =>
+        listed[index]!.sectionId === row.id && listed[index]!.effect === row.effectId);
+    };
+    return same("console", instances.console) && same("inserts", instances.inserts) ? layout : undefined;
   }
 
   /** The strips the core runs now: the transport's order when it has one, else the map's. */
@@ -398,7 +418,7 @@ export class LiveControlEdits {
   track(trackId: string): TrackEdits {
     return new TrackEdits(
       id(trackId, "a track ID"),
-      this.#currentLayout(),
+      this.#layoutFor(trackId),
       this.#context,
     );
   }
@@ -410,7 +430,7 @@ export class LiveControlEdits {
   submix(submixId: string): SubmixEdits {
     return new SubmixEdits(
       id(submixId, "a submix ID"),
-      this.#currentLayout(),
+      this.#layoutFor(submixId),
       this.#context,
     );
   }

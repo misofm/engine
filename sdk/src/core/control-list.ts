@@ -887,6 +887,11 @@ export function stripSections(order: ControlStripOrder): readonly {
   return orderSections.get(order) ?? [];
 }
 
+/** @internal Whether this module read `order`'s sections, so {@link stripSections} is its whole list. */
+export function stripSectionsKnown(order: ControlStripOrder): boolean {
+  return orderSections.has(order);
+}
+
 /** The strip order of an already read list: its track and submix owner headers, in list order. */
 export function stripOrderOf(list: ControlList): ControlStripOrder {
   const tracks: string[] = [];

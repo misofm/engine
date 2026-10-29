@@ -25,18 +25,29 @@ refused and an edit for a removed bus was not refused early.
 - D3: before a committed `apply` or `replaceSession` on the `rebuild` path resolves, the browser
   engine reads the strip order again. The call is committed, so a failed read does not reject it;
   the next read catches up.
-- D4: once the structure epoch moved from the one the session layout was checked against, the
-  layout is dropped: index addressing refuses and IDs resolve from the control list alone, as
-  `withSession()` already does for a session whose strips moved.
+- D4 (attempt 2, replacing attempt 1's epoch rule): the session layout serves a strip only while
+  the newest list has the session's strips (the rule of `withSession()` and the headless engine)
+  and that strip's console slots and inserts, each rack in the same order with the same effects
+  (`stripSections`). A strip the rebuild changed gets no layout: an index on it refuses and its IDs
+  resolve from the control list, so an index never addresses a moved insert; the other strips keep
+  index addressing. An order whose sections the SDK did not read is held to the layout's epoch.
+  The structure epoch also moves on a control-descriptor change (an automation upsert, an insert
+  on another strip), so attempt 1's rule (drop the layout on any epoch move) broke index
+  addressing on untouched strips (verify of `d41af1727`, MAJOR).
 - D5: the headless engine already returns new live controls, with a fresh order, on each
   `liveControls()` call; its held objects are not changed by this issue.
 
-## Gate (one test per claim)
+## Gates (one test per claim)
 
 `sdk/test/browser-evals.mjs`, `#2189: live controls an app holds follow a rebuild that adds or
 removes a submix`: live controls taken before an apply that adds `bus` accept
 `edit.strip("bus")` after it (and the core admits a fader edit on it once the plan is adopted), and
 refuse it after an apply that removes it.
+
+`sdk/test/browser-evals.mjs`, `#2189: a rebuild that moves no strip keeps index addressing on the
+strips it left` (attempt 2): after a rebuild that puts a compressor before t1's EQ, both the held
+and a fresh live controls resolve `t2.insert(0, "miso.parametric-eq")`, refuse
+`t1.insert(0, ...)` (index 0 would name `insert-1`, now second) and resolve `t1.insert("glue")`.
 
 ## Evidence (2026-10-29, base `0f97cc7ef`)
 
@@ -44,5 +55,14 @@ refuse it after an apply that removes it.
   session has no track or submix 'bus'; expected one of t1, t2, t3, t4`.
 - Red with the post-rebuild order read removed (D3): the same message.
 - Green: the SDK headless evals (704 of 704) on the artifact built from this tree.
+- Attempt 2, the second gate: red with attempt 1's epoch rule (`insert(0): this engine was not
+  booted from a session the SDK built, ...` on t2) and red with the layout always kept (`Missing
+  expected exception (MisoUsageError)` on t1). A first attempt-2 cut compared the console and
+  insert sections in one row and failed four headless console evals: the list puts a strip's
+  sections in signal order (pre-insert slots, inserts, post-insert slots), so each rack is compared
+  on its own.
+- Attempt 2 green: the SDK headless evals (705 of 705); `check-sdk-types.sh`,
+  `check-sdk-generated.sh`, `check-sdk-deletions.py`, `sdk-package.sh check`,
+  `check-workspace-policy.sh`; the Chromium browser qualification, both legs, with the SDK rows.
 - README: "Edit a playing session" states the behaviour; the control-list section says that a
   headless caller calls `liveControls()` again after a rebuild.

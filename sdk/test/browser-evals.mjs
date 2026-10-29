@@ -1298,6 +1298,28 @@ describe("browser session edits", () => {
     }
   });
 
+  test("#2189: a rebuild that moves no strip keeps index addressing on the strips it left", async () => {
+    // Red if any rebuild drops the session's layout for every strip (an insert on t1 then breaks
+    // `insert(0)` on t2), or if a strip whose inserts the rebuild reordered still resolves an index
+    // against the booted chain (index 0 would address `insert-1`, which is now second).
+    const { engine } = await boot(base());
+    try {
+      const held = await engine.liveControls();
+      const reordered = transaction(base()).upsertTrack("t1", {
+        source: "a",
+        inserts: [effect("miso.compressor", { ratio: 2 }, { slotId: "glue" }), effect("miso.parametric-eq", {}, { slotId: "insert-1" })],
+      });
+      assert.equal((await engine.apply(reordered.build())).path, "rebuild");
+      for (const controls of [held, await engine.liveControls()]) {
+        assert.doesNotThrow(() => controls.edit.track("t2").insert(0, "miso.parametric-eq").bypass(true));
+        assert.throws(() => controls.edit.track("t1").insert(0, "miso.parametric-eq"), MisoUsageError);
+        assert.doesNotThrow(() => controls.edit.track("t1").insert("glue", "miso.compressor").bypass(true));
+      }
+    } finally {
+      await engine.close();
+    }
+  });
+
   test("#2193: a host's raw miso.error.v1 rejection of a live-control frame is a MisoEngineError", async () => {
     // Red if the live queue's send passes the host's local refusal record (not an Error) to the app:
     // a writer then throws the record instead of retrying the host's in-flight backpressure, and a
