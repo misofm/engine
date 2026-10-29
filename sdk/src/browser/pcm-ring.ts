@@ -4,7 +4,11 @@ export const MSB1_VERSION = 1;
 export const MSB1_WRAP = 1 << 30;
 /** Issue #1297b D2 (V1 amended in place): 28 `i32` words, then three `i64` at 112 -- the seek's
  * generation, its frame and its anchor sample (at 128, `-1` for a plain seek), eight reserved zero
- * bytes, the ID at 144 and the slot headers at 272. A reader refuses a ring whose header offset is not 272. */
+ * bytes, the ID at 144 and the slot headers at 272. A reader refuses a ring whose header offset is not 272.
+ * Issue #2184 (V1 amended in place): `SEEK_EPOCH` is a parity seqlock over the seek tuple and
+ * `GENERATION_TAG`. Odd means a publication is in flight; each seek steps it by 2. A reader loads
+ * the epoch, skips the pass when it is odd, loads the tag and the tuple, and uses them only when
+ * the epoch it loads again is the same. 0 still means no seek was ever published. */
 export const MSB1_CONTROL_BYTES = 144;
 export const MSB1_CONTROL_I64_OFFSET = 112;
 export const MSB1_ANCHOR_OFFSET = 128;
@@ -36,11 +40,14 @@ export class Msb1RingWriter {
  reserve(frames:number):readonly Float32Array[]|null{if(!positive(frames)||frames>this.frameCapacity)throw new RangeError("PCM chunk does not fit MSB1"); if(this.occupancy>=this.capacity){Atomics.add(this.#v.control,MSB1_CONTROL.OVERFLOW,1);return null} const i=Atomics.load(this.#v.control,MSB1_CONTROL.WRITE_INDEX);this.#reserved=i;const p=this.#v.planes[i&(this.capacity-1)]!;for(const x of p)x.fill(0);return p}
  commit(chunk:{readonly generation:bigint;readonly startFrame:bigint;readonly frames:number;readonly endOfRegion:boolean}){if(this.#reserved<0)throw new Error("MSB1 commit without reservation");const i=this.#reserved;this.#reserved=-1;const s=i&(this.capacity-1),w=s*8,w64=s*4;this.#v.headers[w+SLOT.SEQUENCE]=i;this.#v.headers[w+SLOT.GENERATION_TAG]=Number(BigInt.asIntN(32,chunk.generation));this.#v.headers[w+SLOT.FRAMES]=chunk.frames;this.#v.headers[w+SLOT.FLAGS]=chunk.endOfRegion?1:0;this.#v.headersI64[w64+SLOT_I64.GENERATION]=chunk.generation;this.#v.headersI64[w64+SLOT_I64.START_FRAME]=chunk.startFrame;Atomics.add(this.#v.control,MSB1_CONTROL.WROTE,1);Atomics.store(this.#v.control,MSB1_CONTROL.WRITE_INDEX,(i+1)&(MSB1_WRAP-1))}
  /** Publish a seek: the generation, the frame and the anchor sample (`MSB1_NO_ANCHOR`: a plain
-  * seek), then the tag and the epoch. Apps publish plain seeks. `anchorSample` belongs to the
+  * seek) and the tag, between two steps of the epoch (#2184): the first makes it odd (a
+  * publication in flight), the second even again, so one seek steps the epoch by 2 and a reader
+  * that sees the same even epoch before and after its reads read one whole publication. Apps
+  * publish plain seeks. `anchorSample` belongs to the
   * SDK's anchored start (`FeedSource.start`, #1297b): the engine's message handler applies such a
   * seek from the `miso.seek-at.v1` the SDK sends with it, never the drain, so an anchored seek
   * published without that message stalls the ring (the drain reads none of its chunks). */
- seek(generation:bigint,frame:bigint,anchorSample:bigint=MSB1_NO_ANCHOR){this.#v.controlI64[0]=generation;this.#v.controlI64[1]=frame;this.#v.controlI64[2]=anchorSample;Atomics.store(this.#v.control,MSB1_CONTROL.GENERATION_TAG,Number(BigInt.asIntN(32,generation)));Atomics.add(this.#v.control,MSB1_CONTROL.SEEK_EPOCH,1)}
+ seek(generation:bigint,frame:bigint,anchorSample:bigint=MSB1_NO_ANCHOR){const c=this.#v.control,w=this.#v.controlI64;Atomics.add(c,MSB1_CONTROL.SEEK_EPOCH,1);Atomics.store(w,0,generation);Atomics.store(w,1,frame);Atomics.store(w,2,anchorSample);Atomics.store(c,MSB1_CONTROL.GENERATION_TAG,Number(BigInt.asIntN(32,generation)));Atomics.add(c,MSB1_CONTROL.SEEK_EPOCH,1)}
  release(){Atomics.store(this.#v.control,MSB1_CONTROL.WRITER_STATE,0)}
 }
 function bind(shared:SharedArrayBuffer){if(!(shared instanceof SharedArrayBuffer))throw new TypeError("MSB1 requires SharedArrayBuffer");if(shared.byteLength<MSB1_HEADER_OFFSET)throw new TypeError("Shared buffer is not MSB1");const control=new Int32Array(shared,0,MSB1_CONTROL_BYTES/4);if(Atomics.load(control,0)!==MSB1_MAGIC||control[1]!==1||control[5]!==MSB1_HEADER_OFFSET)throw new TypeError("Shared buffer is not MSB1");const capacity=control[2]!,channels=control[3]!,frameCapacity=control[4]!,headerOffset=control[5]!,pcmOffset=control[6]!;if(!power(capacity)||!positive(channels)||!positive(frameCapacity))throw new TypeError("MSB1 header is invalid");const headers=new Int32Array(shared,headerOffset,capacity*8),planes=Array.from({length:capacity},(_,s)=>Array.from({length:channels},(_,ch)=>new Float32Array(shared,pcmOffset+(s*channels+ch)*frameCapacity*4,frameCapacity)));return {control,controlI64:new BigInt64Array(shared,MSB1_CONTROL_I64_OFFSET,3),headers,headersI64:new BigInt64Array(shared,headerOffset,capacity*4),planes,capacity,channels,frameCapacity}}
@@ -93,6 +100,9 @@ export class Msb1RingObserver {
       // Bound attempts, including stale/torn candidates, rather than only successful callbacks.
       for (let attempt = 0; attempt < budget && this.#view === view; attempt++) {
         const epoch = Atomics.load(c, MSB1_CONTROL.SEEK_EPOCH);
+        // #2184: an odd epoch is a seek publication in flight; its tag and tuple are not whole yet.
+        // The re-check below compares the epoch again after every read of the pass.
+        if ((epoch & 1) !== 0) break;
         const tag = Atomics.load(c, MSB1_CONTROL.GENERATION_TAG);
         const read = Atomics.load(c, MSB1_CONTROL.READ_INDEX);
         const write = Atomics.load(c, MSB1_CONTROL.WRITE_INDEX);

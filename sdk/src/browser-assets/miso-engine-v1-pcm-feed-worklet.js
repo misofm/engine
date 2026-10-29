@@ -122,7 +122,10 @@ const CONTROL_SUBMITTED_GENERATION_TAG = 27
 
 // Issue #1297b D2 (MSB1 V1, amended in place): three i64 at 112 -- the seek's generation, frame
 // and anchor sample (at 128; -1 is a plain seek) -- the ID at 144 and the slot headers at 272. A
-// ring with any other header offset (the old 256) is refused at attach.
+// ring with any other header offset (the old 256) is refused at attach. Issue #2184 (amended in
+// place): SEEK_EPOCH is a parity seqlock over that tuple and GENERATION_TAG. The writer makes it
+// odd, stores the tuple and the tag, and makes it even again, so one seek steps it by 2; a reader
+// uses the tag and the tuple only when it read the same even epoch before and after them.
 const CONTROL_BYTES = 144
 const CONTROL_I64_OFFSET = 112
 const CONTROL_I64_SEEK_GENERATION = 0
@@ -142,7 +145,14 @@ const SLOT_FLAGS = 3
 // address the same 32 bytes.
 const SLOT_I64_GENERATION = 2
 const SLOT_I64_START_FRAME = 3
+// The same generation as two little-endian `i32` words: its low and its high half.
+const SLOT_GENERATION_LOW = 4
+const SLOT_GENERATION_HIGH = 5
 const FLAG_END_OF_REGION = 1
+
+// Issue #2185 (root ruling 2): the longest a live plain seek waits for its first new-generation
+// chunk, in milliseconds of rendered audio; past it the seek applies as it did before #2185.
+const SEEK_DEFERRAL_MS = 50
 
 const RESULT_OK = 0
 const RESULT_INVALID_ARGUMENT = 1
@@ -275,6 +285,19 @@ function bindRing(shared, quantumFrames, maximumChannels) {
     frameCapacity,
     /** The seek epoch this ring has already applied. */
     seenEpoch: Atomics.load(control, CONTROL_SEEK_EPOCH),
+    /** Issue #2184: the last whole seek publication `readSharedSeek` read -- its even epoch, the
+     *  tag, the tuple, the seek generation's two unsigned 32-bit halves and the write index read
+     *  inside the same window -- kept here so the drain allocates nothing. */
+    seekEpoch: 0,
+    seekTag: 0,
+    publishedGeneration: 0n,
+    publishedGenerationHigh: 0,
+    publishedGenerationLow: 0,
+    seekFrame: 0n,
+    seekAnchor: NO_ANCHOR,
+    seekWrite: 0,
+    /** Issue #2185: the blocks rendered since the ring's live plain seek was first deferred, or 0. */
+    deferredBlocks: 0,
     /** Issue #1297b: the anchored seek `(generation, frame, anchor)` the engine's message handler
      *  applied for this ring's source (`source_seek_at` answered OK), not yet consumed by the
      *  drain; `anchoredSample` -1 is none. Written only by the handler, between blocks. */
@@ -333,6 +356,11 @@ function wrapEngineProcessor(Base) {
       // engine's host instead.
       if (!Array.isArray(rings) || this.workerMode === true) return
       this.rebindMemoryViews()
+      // Issue #2185: the deferral bound in blocks, computed here, off the render path.
+      const rate = this.sampleRateHz ?? globalThis.sampleRate
+      const blocks = Math.ceil((SEEK_DEFERRAL_MS * rate) / (1000 * this.quantumFrames))
+      // A scope with no rate defers nothing: every seek applies as before #2185.
+      this.seekDeferralBlocks = Number.isSafeInteger(blocks) && blocks > 0 ? blocks : 0
       const bound = []
       const incoming = []
       for (let index = 0; index < rings.length; index += 1) {
@@ -431,10 +459,17 @@ function wrapEngineProcessor(Base) {
       if (ring.idTargetBuffer !== this.memoryBuffer) return
       if (ring.idTarget.length !== ring.idLength) return
 
+      // Issue #2184: a pass reads the seek publication whole or not at all. A publication in
+      // flight skips the pass, as a backpressured seek does; the next block reads it whole.
+      if (!this.readSharedSeek(ring)) return
+      if (this.deferSharedSeek(ring)) {
+        // The old generation keeps playing from the engine's ring meanwhile.
+        this.countSharedBlock(ring)
+        return
+      }
       if (this.applySharedSeek(ring) !== RESULT_OK) return
 
-      const generationTag = Atomics.load(control, CONTROL_GENERATION_TAG)
-      const write = Atomics.load(control, CONTROL_WRITE_INDEX)
+      const write = ring.seekWrite
       const capacityMask = ring.capacity - 1
       const staging = this.sourcePcm
       const quantumFrames = this.quantumFrames
@@ -453,11 +488,14 @@ function wrapEngineProcessor(Base) {
           control[CONTROL_TORN] += 1
           break
         }
-        if (ring.headers[word + SLOT_GENERATION_TAG] !== generationTag) {
+        const age = this.sharedSlotAge(ring, word)
+        if (age < 0) {
           read = (read + 1) & SAB_WRAP_MASK
           control[CONTROL_STALE] += 1
           continue
         }
+        // A newer seek's chunk: never freed or submitted here; the next pass reads its seek.
+        if (age > 0) break
         const frames = ring.headers[word + SLOT_FRAMES]
         const flags = ring.headers[word + SLOT_FLAGS]
         if (frames <= 0 || frames > ring.frameCapacity) {
@@ -514,6 +552,12 @@ function wrapEngineProcessor(Base) {
       }
 
       Atomics.store(control, CONTROL_READ_INDEX, read)
+      this.countSharedBlock(ring)
+    }
+
+    /** The block about to render, counted for one ring. */
+    countSharedBlock(ring) {
+      const control = ring.control
       control[CONTROL_DRAIN_BLOCKS] += 1
       // The block about to be rendered consumes one quantum of this source.
       // Reaching zero with a live feeder and audio still to come is exactly
@@ -530,13 +574,139 @@ function wrapEngineProcessor(Base) {
       control[CONTROL_DEPTH] = ring.depth
     }
 
-    /** Shared by render and the between-block control handler; never consumes PCM. */
-    applySharedSeek(ring, epoch = Atomics.load(ring.control, CONTROL_SEEK_EPOCH), generation, frame) {
+    /**
+     * Issue #2184: read the ring's seek publication through its seqlock into the ring's fields.
+     * False when the epoch is odd (a publication in flight) or moved during the reads: then the
+     * tag and the tuple may belong to two publications, and nothing of them is used. JS atomics
+     * are sequentially consistent, so an even epoch read unchanged around the reads proves that
+     * every store of the last complete publication is visible and none of a later one is.
+     */
+    readSharedSeek(ring) {
+      const control = ring.control
+      const epoch = Atomics.load(control, CONTROL_SEEK_EPOCH)
+      if ((epoch & 1) !== 0) return false
+      // #2185 attempt 2: the write index is read inside the window too, so every slot below it
+      // was published under this snapshot's seek or an earlier one, never a later one.
+      const tag = Atomics.load(control, CONTROL_GENERATION_TAG)
+      const write = Atomics.load(control, CONTROL_WRITE_INDEX)
+      if (epoch === ring.seekEpoch) {
+        // The cached tuple is this epoch's: no `i64` load, so an idle block creates no BigInt.
+        if (Atomics.load(control, CONTROL_SEEK_EPOCH) !== epoch) return false
+        ring.seekTag = tag
+        ring.seekWrite = write
+        return true
+      }
+      const generation = Atomics.load(ring.controlI64, CONTROL_I64_SEEK_GENERATION)
+      const frame = Atomics.load(ring.controlI64, CONTROL_I64_SEEK_FRAME)
+      const anchor = Atomics.load(ring.controlI64, CONTROL_I64_SEEK_ANCHOR)
+      if (Atomics.load(control, CONTROL_SEEK_EPOCH) !== epoch) return false
+      ring.seekEpoch = epoch
+      ring.seekTag = tag
+      ring.seekWrite = write
+      ring.publishedGeneration = generation
+      ring.publishedGenerationHigh = Number(BigInt.asUintN(32, generation >> 32n))
+      ring.publishedGenerationLow = Number(BigInt.asUintN(32, generation))
+      ring.seekFrame = frame
+      ring.seekAnchor = anchor
+      return true
+    }
+
+    /**
+     * #2185 attempt 2: a slot's generation against the snapshot's seek, as `releaseStaleSharedSlots`
+     * states it: below it (-1) the slot is stale and freed; equal (0) it is current; above it (1)
+     * it belongs to a newer seek and is neither freed nor submitted. The u64 is compared as its
+     * two unsigned 32-bit halves, read as `i32` words, so no BigInt is made. Before any seek was
+     * published (epoch 0) the writer's engaged tag is the only reference, as before.
+     */
+    sharedSlotAge(ring, word) {
+      if (ring.seekEpoch === 0) return ring.headers[word + SLOT_GENERATION_TAG] === ring.seekTag ? 0 : -1
+      const high = ring.headers[word + SLOT_GENERATION_HIGH] >>> 0
+      if (high !== ring.publishedGenerationHigh) return high < ring.publishedGenerationHigh ? -1 : 1
+      const low = ring.headers[word + SLOT_GENERATION_LOW] >>> 0
+      if (low !== ring.publishedGenerationLow) return low < ring.publishedGenerationLow ? -1 : 1
+      return 0
+    }
+
+    /**
+     * Issue #2185: whether this block defers the ring's published live plain seek. The writer
+     * seeks while the shared ring is full of the old generation, and it can publish the new one
+     * only into slots the drain frees; applied at once, the seek makes render drop the old chunks
+     * the engine holds before any new chunk exists, which is a gap. So, until the seek's
+     * generation has a runway published -- `seekDeferralBlocks` chunks (at most a ring), or a
+     * chunk that ends its region -- the drain frees every slot of an older generation (counted as
+     * STALE), asks no seek and submits nothing, and the old generation plays on from the engine's
+     * ring. A seek at the generation of the last accepted session seek (the transport seek) is
+     * never deferred: that session seek already dropped the old chunks, so waiting would only add
+     * silence (`sessionMovedSharedSeek`, attempt 3). The first pass that finds the runway applies the seek, then drains from its first
+     * chunk; a slot of a newer generation stops the scan. A seek applied at its first chunk alone
+     * left a gap whenever the writer's next chunks came a writer tick later (attempt 2). A newer
+     * seek published meanwhile replaces the deferred one (the skipped generation never reaches the
+     * engine) and inherits its count. A writer that publishes nothing for `seekDeferralBlocks`
+     * (50 ms of rendered audio) gets the seek applied as before #2185. An anchored seek is never
+     * deferred: the engine holds its old generation until the anchor. Root decision (#2185): up to
+     * 50 ms of old-position audio is the smaller artefact than a silence insert, which is two cuts
+     * and a hole; the deferral is one cut, at most 50 ms late. The prelude does not know the
+     * engine ring's size, so this bound is not capped at half of it as the Worker's is.
+     */
+    deferSharedSeek(ring) {
+      if (ring.seekEpoch === ring.seenEpoch || ring.seekAnchor !== NO_ANCHOR) return false
+      if (ring.deferredBlocks >= this.seekDeferralBlocks) return false
+      // #2185 attempt 3: a session seek at this generation (the transport seek) already moved the
+      // source and dropped its old chunks, so there is no old audio to play on: apply at once.
+      if (this.sessionMovedSharedSeek(ring)) return false
+      const control = ring.control
+      const write = ring.seekWrite
+      // #2185 attempt 2: the runway the new generation must have published before the seek
+      // applies -- as much audio as the bound would have played of the old one, at most a ring.
+      const runway = Math.min(this.seekDeferralBlocks, ring.capacity)
+      let read = control[CONTROL_READ_INDEX]
+      let current = 0
+      let ended = false
+      for (let index = read, remaining = ring.capacity; index !== write && remaining > 0; remaining -= 1) {
+        const word = (index & (ring.capacity - 1)) * (SLOT_HEADER_BYTES / 4)
+        if (ring.headers[word + SLOT_SEQUENCE] !== index) {
+          control[CONTROL_TORN] += 1
+          break
+        }
+        const age = this.sharedSlotAge(ring, word)
+        // A newer seek's chunk stays; the next pass defers or applies that seek instead.
+        if (age > 0) break
+        if (age < 0) {
+          // Only the older chunks ahead of the seek's first one are freed.
+          if (current !== 0) break
+          index = (index + 1) & SAB_WRAP_MASK
+          read = index
+          control[CONTROL_STALE] += 1
+          continue
+        }
+        current += 1
+        if ((ring.headers[word + SLOT_FLAGS] & FLAG_END_OF_REGION) !== 0) {
+          ended = true
+          break
+        }
+        if (current >= runway) break
+        index = (index + 1) & SAB_WRAP_MASK
+      }
+      Atomics.store(control, CONTROL_READ_INDEX, read)
+      if (current >= runway || ended) return false
+      ring.deferredBlocks += 1
+      return true
+    }
+
+    /** #2185 attempt 3: whether the ring's published seek is at the generation of the last
+     *  session seek the engine accepted (#1644's rule), so the engine holds no old audio of it. */
+    sessionMovedSharedSeek(ring) {
+      return this.lastSessionSeekGeneration !== undefined &&
+        BigInt.asUintN(64, ring.publishedGeneration) === this.lastSessionSeekGeneration
+    }
+
+    /** Shared by render and the between-block control handler; never consumes PCM. The defaults
+     *  are the publication `readSharedSeek` read last; the caller reads it first. */
+    applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.publishedGeneration, frame = ring.seekFrame, anchor = ring.seekAnchor) {
       const control = ring.control
       if (epoch !== ring.seenEpoch) {
-        const requested = generation ?? ring.controlI64[CONTROL_I64_SEEK_GENERATION]
-        const requestedFrame = frame ?? ring.controlI64[CONTROL_I64_SEEK_FRAME]
-        const anchor = ring.controlI64[CONTROL_I64_SEEK_ANCHOR]
+        const requested = generation
+        const requestedFrame = frame
         if (anchor !== NO_ANCHOR) {
           // Issue #1297 amendment (review M4): an anchored seek is applied by the engine's message
           // handler (`source_seek_at` runs the service step), never here. Until the handler
@@ -601,6 +771,7 @@ function wrapEngineProcessor(Base) {
     consumeSharedSeek(ring, epoch) {
       const control = ring.control
       ring.seenEpoch = epoch
+      ring.deferredBlocks = 0
       control[CONTROL_SEEKS_APPLIED] += 1
       ring.depth = 0
       ring.finished = false
@@ -660,7 +831,9 @@ function wrapEngineProcessor(Base) {
       if (!this.ready || this.disposed || this.stickyResult !== RESULT_OK || !Array.isArray(seeks) || seeks.length !== delivered.length) return { kind: "refused", result: RESULT_WRONG_STATE }
       const rings = delivered.map((shared) => this.sabRings.find((ring) => ring.shared === shared))
       if (rings.some((ring) => !ring || ring.idTargetBuffer !== this.memoryBuffer || ring.idTarget.length !== ring.idLength)) return { kind: "refused", result: RESULT_WRONG_STATE }
-      const matches = (ring, seek) => seek && seek.epoch !== 0 && Atomics.load(ring.control, CONTROL_SEEK_EPOCH) === seek.epoch && Atomics.load(ring.controlI64, CONTROL_I64_SEEK_GENERATION) === seek.generation && Atomics.load(ring.controlI64, CONTROL_I64_SEEK_FRAME) === seek.frame
+      // #2184: the live publication is read whole (`readSharedSeek`), so its anchor, which the
+      // apply reads from the ring, is the matched seek's own.
+      const matches = (ring, seek) => seek && seek.epoch !== 0 && this.readSharedSeek(ring) && ring.seekEpoch === seek.epoch && ring.publishedGeneration === seek.generation && ring.seekFrame === seek.frame
       if (!rings.every((ring, index) => matches(ring, seeks[index]))) return { kind: "superseded" }
       for (let index = 0; index < rings.length; index += 1) {
         const ring = rings[index]

@@ -147,7 +147,8 @@ The PCM pump is a dedicated module Worker. MSB1 ring descriptors cross the
 Worker port after construction; they are never processor options. The Worker
 reads bounded Blob slices, de-interleaves interleaved int16/int24 little-endian
 PCM, converts by exact powers of two (`2^15`, `2^23`), and writes the unchanged
-MSB1 layout. The pump module contains no network API and its runtime eval runs
+MSB1 layout (its seek epoch is the parity seqlock of #2184: odd while a seek is
+written, 2 steps per seek). The pump module contains no network API and its runtime eval runs
 with a throwing network tripwire.
 
 ### Cadence: `selfDriving` (issue #278, opt-in)

@@ -150,10 +150,13 @@ export class Msb1RingWriter {
     )
   }
 
+  /** Issue #2184: the tuple and the tag are published between two steps of the epoch (a
+   *  parity seqlock): odd while they are written, even again after, so one seek steps it by 2. */
   seek(generation, frame) {
-    this.#controlI64[0] = generation
-    this.#controlI64[1] = frame
-    this.#controlI64[2] = NO_ANCHOR
+    Atomics.add(this.#control, CONTROL.SEEK_EPOCH, 1)
+    Atomics.store(this.#controlI64, 0, generation)
+    Atomics.store(this.#controlI64, 1, frame)
+    Atomics.store(this.#controlI64, 2, NO_ANCHOR)
     Atomics.store(
       this.#control,
       CONTROL.GENERATION_TAG,

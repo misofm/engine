@@ -5012,14 +5012,17 @@ async function testControlWorker() {
       // A seek in `worker` mode: the drain seeks the source before it reads a slot, drops the
       // chunks of the old generation and resumes at the new one. Red if the drain submits a stale
       // chunk, or reads a slot before the seek.
+      // #2185: a live plain seek applies once its runway (here the 4-slot ring) is published.
       write(1n, 256n, 1);
       writer.seek(2n, 4800n);
-      write(2n, 4800n, 0.75);
+      for (const frame of [4800n, 4864n, 4928n]) write(2n, frame, 0.75);
       const submitted = fake.calls.source.length;
       tick.callback();
+      write(2n, 4992n, 0.75);
+      tick.callback();
       assert.deepEqual(fake.calls.seek.at(-1), [1, 5, 2n, 4800n], "the ring's seek reaches source_seek");
-      assert.deepEqual(fake.calls.source.slice(submitted), [[1, 5, 2n, 4800n, 2, 64, 0]],
-        "only the new generation's chunk is submitted");
+      assert.deepEqual(fake.calls.source.slice(submitted).map((call) => call[3]), [4800n, 4864n, 4928n, 4992n],
+        "only the new generation's chunks are submitted");
       assert.deepEqual([control[MSB1_CONTROL.STALE], control[MSB1_CONTROL.SEEKS_APPLIED]], [1, 1]);
       // An anchored seek waits for this Worker's own `source_seek_at`, and is then consumed with no
       // `source_seek` (#1297b). Red if the Worker does not record the applied tuple: the ring stalls.
@@ -5031,7 +5034,7 @@ async function testControlWorker() {
       rendered(6n);
       tick.callback();
       assert.equal(control[MSB1_CONTROL.DRAIN_BLOCKS], drained, "the quanta of the wait pass uncounted");
-      assert.equal(fake.calls.source.length, submitted + 1, "nothing of the anchored ring is read before the handler");
+      assert.equal(fake.calls.source.length, submitted + 4, "nothing of the anchored ring is read before the handler");
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: 6400n });
       assert.deepEqual(fake.calls.source.at(-1), [1, 5, 3n, 0n, 2, 64, 0], "the drain after the message resumes it");
       assert.equal(fake.calls.seek.length, seeks, "with no second seek of the source");
@@ -5093,10 +5096,10 @@ async function testControlWorker() {
           feed.next += 64n;
         }
       };
-      const seek = (generation, frame) => {
+      const seek = (generation, frame, anchorSample) => {
         feed.generation = generation;
         feed.next = frame;
-        writer.seek(generation, frame);
+        writer.seek(generation, frame, anchorSample);
       };
       port.onmessage({ data: structuredClone({ op: "attach", rings: [ring] }) });
       return { send, tick, engine, room, render, fill, seek, writer };
@@ -5106,8 +5109,9 @@ async function testControlWorker() {
       fill();
       tick.callback();
       assert.equal(engine.queued.length, 44, "the drain keeps H = 36 of the 80 free");
-      // An anchored start that holds 60 blocks: render takes nothing meanwhile.
-      seek(2n, 0n);
+      // An anchored start that holds 60 blocks: render takes nothing meanwhile. #2185: the ring
+      // publishes the anchored seek the message names (a plain one would now wait for its chunk).
+      seek(2n, 0n, 640n);
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n, sourceFrame: 0n, anchorSample: 640n });
       engine.hold = 60;
       for (let pass = 0; pass < 40; pass += 1) {
@@ -5116,11 +5120,14 @@ async function testControlWorker() {
         tick.callback();
         assert.ok(room() >= 36, `pass ${pass}: the headroom stays free through the hold (room ${room()})`);
       }
-      // A plain ring seek now: its new generation is admitted before the next block.
+      // A plain ring seek now: its new generation is admitted before the next block. #2185: the
+      // pass that finds none of its chunks frees the old generation's slots and defers the seek;
+      // the pass after the writer publishes applies it.
       seek(3n, 9600n);
-      tick.callback(); // the seek, and the old generation's slots freed from the shared ring
+      tick.callback();
       fill();
       tick.callback();
+      assert.equal(engine.seek, 3n);
       assert.equal(engine.queued.filter((value) => value === 3n).length, 36,
         "the plain seek's new generation fills the headroom before the next block renders");
       render(1);
@@ -5162,13 +5169,15 @@ async function testControlWorker() {
     // Issue #1387 (MAJOR-2): the shared MSB1 consumer case table over this Worker, at 4-frame
     // quanta (`sdk/test/msb1-consumer-cases.mjs`; the prelude runs it in browser-pcm-evals).
     for (const { name, run } of MSB1_CONSUMER_CASES) {
-      const { send, fromWorklet } = await boot({}, 4);
+      // #2185: an 8-quantum engine ring caps the deferral bound and runway at 4 quanta, the
+      // prelude adapter's too.
+      const { send, fromWorklet } = await boot({}, 4, (engine) => { engine.calls.ringQuanta = 8; });
       const tick = intervals.at(-1);
       const replies = [];
       const port = { onmessage: null, postMessage: (data) => replies.push(structuredClone(data)), close() {} };
       send({ tag: "miso.feed-port.v1", port });
       fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
-      const adapter = { submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null };
+      const adapter = { submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null, onSnapshot: null };
       const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
       const memory = () => fake.memory.buffer;
       // The fake engine ring: render takes one chunk a block, drops a seek's stale chunks at the
@@ -5204,6 +5213,12 @@ async function testControlWorker() {
         return adapter.submitResult;
       };
       const worker = globalThis.__controlWorker;
+      const snapshot = worker.readSharedSeek.bind(worker);
+      worker.readSharedSeek = (ring) => {
+        const read = snapshot(ring);
+        adapter.onSnapshot?.();
+        return read;
+      };
       const apply = worker.applySharedSeek.bind(worker);
       worker.applySharedSeek = (ring, ...identity) => {
         if (identity.length !== 0) adapter.onApply?.();
@@ -5227,6 +5242,7 @@ async function testControlWorker() {
         port.onmessage({ data: structuredClone(data) });
         return replies.pop();
       };
+      Object.defineProperty(adapter, "seekBound", { get: () => worker.seekDeferralQuanta });
       Object.assign(adapter, {
         attach: async (rings) => { feed({ op: "attach", rings }); },
         // One pass: the drain, then one rendered block, then the drain that accounts it (the
