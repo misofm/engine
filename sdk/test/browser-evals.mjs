@@ -1324,7 +1324,8 @@ describe("browser session edits", () => {
     // Red if the live queue's send passes the host's local refusal record (not an Error) to the app:
     // a writer then throws the record instead of retrying the host's in-flight backpressure, and a
     // submit rejects with the record. Red too if a failed host's sticky result 6 is raised as
-    // `backpressure`: the writer then retries a dead host on every flush and never throws.
+    // `backpressure` (the writer then retries a dead host on every flush and never throws), or if
+    // the refusal waits for a status() reply (a flush then hangs on a host that stopped answering).
     const { engine, host } = await boot(base());
     const forward = host.control;
     let refusal;
@@ -1336,11 +1337,9 @@ describe("browser session edits", () => {
       if (once !== undefined) throw Object.freeze({ tag: "miso.error.v1", requestId: 0, result: once });
       return forward.call(host, frame, replacement);
     };
-    // The shipped host's status(): a failed host rejects it with its sticky record.
-    host.status = async () => {
-      if (sticky !== undefined) throw sticky;
-      return { tag: "miso.status.v1", requestId: 0, result: 0 };
-    };
+    // The shipped host's status(): a failed host rejects it at once with its sticky record; a
+    // healthy one answers behind the frames in flight, here never, so the refusal must not wait.
+    host.status = () => sticky !== undefined ? Promise.reject(sticky) : new Promise(() => {});
     try {
       const controls = await engine.liveControls();
       const writer = controls.writer();

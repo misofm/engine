@@ -31,13 +31,22 @@ send did not.
   6), which the writer drops and throws; a healthy host answers, and the refusal stays
   `backpressure`. No module or protocol change. A host without `status()` (outside the shipped
   declaration) keeps the plain mapping. The other unmapped sends are #2201.
+- D4 (attempt 2 PASS, folded MINOR): the question waits for no reply. `status()` shares the port
+  with the control frames and is answered behind them, so awaiting it made a flush wait until the
+  frames drained, and forever on a host that stopped answering. A failed host refuses `status()`
+  locally, before it posts anything, so the SDK waits one task turn (`setTimeout(0)`), by which a
+  local refusal has settled; no tuning number is needed. A `status()` still unsettled then means a
+  host that has not failed, and the refusal stays `backpressure` at once, as before attempt 2.
 
 ## Gate (one test per claim)
 
 `sdk/test/browser-evals.mjs`, `#2193: a host's raw miso.error.v1 rejection of a live-control frame
 is a MisoEngineError`: a host that refuses one `SET_CONTROL` frame with result 6 leaves the
 writer's flush refused for backpressure with the edit pending, and the next flush admits it; a
-refusal with result 1 rejects `submit()` with `MisoEngineError` code `invalidArgument`.
+refusal with result 1 rejects `submit()` with `MisoEngineError` code `invalidArgument`; a host
+failed with a sticky result-6 record, whose `status()` rejects, makes the writer's flush throw
+`wrongState` and drops the batch (attempt 2). The healthy double's `status()` never settles, so the
+backpressure case also holds that the refusal does not wait for a reply (folded MINOR).
 
 ## Evidence (2026-10-29, base `0f97cc7ef`)
 
@@ -45,6 +54,8 @@ refusal with result 1 rejects `submit()` with `MisoEngineError` code `invalidArg
   result: 6 }`.
 - Attempt 2: red with the `status()` question removed (`Missing expected rejection.`: the flush
   resolves refused for backpressure against the failed host).
+- Folded MINOR: red with the probe awaiting `status()` (`Promise resolution is still pending but
+  the event loop has already resolved`: the flush never settles).
 - Attempt 2 green: the SDK headless evals (705 of 705) and the Chromium browser qualification,
   both legs, with the SDK rows.
 - Attempt 1 green: the SDK headless evals (704 of 704) on the artifact built from this tree.

@@ -64,5 +64,11 @@ and a fresh live controls resolve `t2.insert(0, "miso.parametric-eq")`, refuse
 - Attempt 2 green: the SDK headless evals (705 of 705); `check-sdk-types.sh`,
   `check-sdk-generated.sh`, `check-sdk-deletions.py`, `sdk-package.sh check`,
   `check-workspace-policy.sh`; the Chromium browser qualification, both legs, with the SDK rows.
+- Recorded residual (attempt 2 verify, MINOR, no code): the live controls read the newest order
+  the page holds, so they are stale in two windows: between a rebuild's commit and the order read
+  before `apply` or `replaceSession` resolves, and after a strip change committed on another page
+  until this page next reads the order. An edit built in either window is held by the core (an
+  unknown strip is refused `control.address.unknown`, a changed effect `control.effect.changed`).
+  The README documents both.
 - README: "Edit a playing session" states the behaviour; the control-list section says that a
   headless caller calls `liveControls()` again after a rebuild.

@@ -33,18 +33,29 @@ export function hostRecordFailure(error: unknown): unknown {
  * `RESULT_BACKPRESSURE` (6) while 64 frames are in flight, which drains, but a host that failed
  * rejects every later call with its sticky record, and that record can carry result 6 too (a
  * control-event dequeue the engine refused). The two records are the same shape, so the SDK asks
- * `status()`: a failed host rejects it at once with its sticky record, a healthy one answers. A
+ * `status()`: a failed host refuses it locally, before it posts anything, with its sticky record. A
  * failed host's `backpressure` is raised as `wrongState`, which the writer never retries, so a
  * writer cannot retry a dead host forever. A host without `status()` is outside the shipped
  * declaration; its record keeps the plain mapping.
+ *
+ * The question waits for no reply. A healthy host answers `status()` behind the frames in flight,
+ * on the same port, and one that stopped answering never does; so the SDK waits one task turn, by
+ * which a local refusal has settled, and a `status()` still unsettled then is a host that has not
+ * failed: the refusal stays `backpressure` and the call returns at once, as before the question.
  */
 async function hostControlFailure(host: MisoAudioWorkletHost, error: unknown): Promise<unknown> {
   const mapped = hostRecordFailure(error);
   if (!(mapped instanceof MisoEngineError) || mapped.code !== "backpressure") return mapped;
   if (typeof (host as { readonly status?: unknown }).status !== "function") return mapped;
+  let failed = false;
+  // Its reply, if one comes, is not wanted, and a late rejection is not left unhandled.
   try {
-    await host.status();
+    host.status().then(() => undefined, () => { failed = true; });
   } catch {
+    failed = true;
+  }
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  if (failed) {
     return new MisoEngineError(
       "the browser host failed a control call (its sticky result is 6, backpressure)",
       { phase: "lifecycle", code: "wrongState", result: mapped.result },

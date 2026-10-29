@@ -650,7 +650,9 @@ never an error. In the browser, a live-control frame the host refuses before the
 `MisoEngineError` that carries the host's result, never with the host's raw `miso.error.v1` record
 (issue #2193). The writer retries only `backpressure` (more than 64 frames in flight), which drains.
 A host that failed answers with its sticky record, which can also carry result 6; the SDK asks the
-host's `status()`, which a failed host rejects, and raises that failure as `wrongState`.
+host's `status()`, which a failed host refuses at once, and raises that failure as `wrongState`.
+It does not wait for a reply: a refusal stays `backpressure` and returns at once from a host that
+has not failed, also from one that stopped answering.
 Any other host result (`invalidArgument` for a frame over the limit, `wrongState` or `internal` for
 a host that failed) never succeeds on resend: the writer drops the batch and throws. The root entry's `parameter()` helper provides exact decimal/lattice edits for
 agent-facing controls.
