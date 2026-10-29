@@ -1,9 +1,9 @@
 {
   "schema": "miso.web.qualification.matrix.v1",
-  "candidateCommit": "3bf0793e5e8af52af0fc5104c282439ba9037c88",
-  "wasmSha256": "b32a5429f80510e0957b9f6120d7ea0f0e9ad3f8e0fc4d38bb898b0b16553553",
+  "candidateCommit": "56be629ec5936b9eeec787456719df32f375d06e",
+  "wasmSha256": "11f93b33672b04b2009fdb15d19e455b673a29a8eaaee189c0b8c462e6b47b57",
   "blake3Qualification": {
-    "candidateCommit": "3bf0793e5e8af52af0fc5104c282439ba9037c88",
+    "candidateCommit": "56be629ec5936b9eeec787456719df32f375d06e",
     "sha256": "ee373d2f549b0d33bdd0324a8833698158274f516e01a7b0c4018347991a18b1",
     "browsers": [
       {

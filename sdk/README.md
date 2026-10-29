@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.9.0
+npm install @misofm/engine@0.10.0
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -220,11 +220,11 @@ committed session to make one transaction. Each call resolves with `{ revision, 
   committed, and the revision stays the same.
 
 A transaction frame larger than the core's frame limit (`capabilities().maximumFrameBytes`,
-16,384 bytes today) is not sent. It rejects with `MisoControlRefusal`, `status` and `code`
-`limit_exceeded`, and its message and its diagnostic's `detail`
-(`frame_bytes=<n>,maximum_frame_bytes=<m>`) give the frame's size and the limit. Nothing is
+128 KiB by default, set at boot with `maximumControlFrameBytes`) is not sent. It rejects with
+`MisoControlRefusal`, `status` and `code` `limit_exceeded`, and its message and its diagnostic's
+`detail` (`frame_bytes=<n>,maximum_frame_bytes=<m>`) give the frame's size and the limit. Nothing is
 committed. Split the edits into smaller transactions, each one built on the session the last one
-committed. Issue #2191 makes the limit a boot setting.
+committed.
 
 A refusal rejects, and nothing is committed. `engine.revision` is the committed revision.
 `engine.applied(revision)` resolves with the watermark `{ revision, sample, outcome }` when that
@@ -454,13 +454,13 @@ compares it with the committed session to make one transaction. Each call resolv
   committed, and the revision stays the same.
 
 A transaction frame larger than the core's frame limit (`capabilities().maximumFrameBytes`,
-16,384 bytes today) is not sent. It rejects with `MisoControlRefusal`, `status` and `code`
-`limit_exceeded`, and its message and its diagnostic's `detail`
-(`frame_bytes=<n>,maximum_frame_bytes=<m>`) give the frame's size and the limit. Nothing is
+128 KiB by default, set at boot with `maximumControlFrameBytes`) is not sent. It rejects with
+`MisoControlRefusal`, `status` and `code` `limit_exceeded`, and its message and its diagnostic's
+`detail` (`frame_bytes=<n>,maximum_frame_bytes=<m>`) give the frame's size and the limit. Nothing is
 committed. Split the edits into smaller transactions, each one built on the session the last one
-committed, for example one bus and its routes at a time. Issue #2191 makes the limit a boot
-setting. A refusal that the browser host makes before the frame reaches the core rejects with
-`MisoEngineError`, never with the host's raw record.
+committed, for example one bus and its routes at a time. A refusal that the browser host makes
+before the frame reaches the core rejects with `MisoEngineError`, never with the host's raw
+record.
 
 A refusal rejects, and nothing is committed. The SDK does not send a refused edit again: if
 another commit came first, the core refuses the edit with `revision_conflict`, and you build the
@@ -821,7 +821,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.9.0 release record](https://github.com/misofm/engine/issues/2187) contains the accepted artifact
+[0.10.0 release record](https://github.com/misofm/engine/issues/2196) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -874,6 +874,12 @@ grows no longer meets a fixed cap: the memory budget is the limit.
   `host.budget.parse_projection` (over the budget, `refusedBudget`, which was `refusedDocument`
   for a document over 1 MiB). An oversized control frame is refused with
   `web.control.frame_bytes`, naming both.
+- Changed: a transaction frame larger than `capabilities().maximumFrameBytes` is not sent
+  (issue #2190). It rejects with `MisoControlRefusal`, `status` and `code` `limit_exceeded`, and
+  its diagnostic's `detail` is `frame_bytes=<n>,maximum_frame_bytes=<m>`; nothing is committed.
+  In 0.9.0 the browser rejected it with the host's raw `miso.error.v1` record, and the headless
+  engine with `MisoEngineError` `bufferTooSmall`. A refusal that the browser host makes before a
+  frame reaches the core is now a `MisoEngineError`, never the raw record.
 
 ## Upgrading from 0.8.1
 
