@@ -70,3 +70,49 @@ wire validation, the provider's `window`, the generated SDK protocol tables and 
 codec gate for each side. A full-list reader (`controls()`, `controlState()`) does not change.
 Expected effect at 64 tracks: about 6 pages of 1,409 header rows instead of 57 pages of 14,588
 rows.
+
+## Decision (root ruling, 2026-10-29)
+
+Approved as proposed: optional field 6 `headers_only` (BOOL) on `control_list_request`, an in-place
+V1 amendment. The field is written only as `true`; a present `false` is `INVALID_FIELD` (one
+spelling per value). With it, the core serves only the owner and section headers of the window,
+with the list's own handles, order, epoch and cursor rules; `limit` counts header rows, and `eof`
+says no header row of the window follows. A `CONTROL_STATE_GET` with it covers the same header
+rows, so its page has no record. Without it, the request and the reply are byte-identical to
+before: `COMPLETE_SCHEMA_HASH` (`de7d7cf504ca191a`) is unchanged, and no fixture or generated SDK
+surface changed. The C ABI serves it through the existing `CONTROL_LIST_GET` frame (no new symbol).
+The SDK codec (`encodeControlListRequest`, optional `headersOnly`) sends it, and
+`stripOrderSteps` uses it, so `stripOrderOf` reads the same header rows as before. Full-list
+readers (`controls()`, `controlState()`) do not change. #2189's guarantees stand: the #2189 and
+#2193 SDK evals stay green. No render path changed.
+
+## Gates and evidence (attempt 1)
+
+- Protocol gate, `crates/host-core/src/control_provider.rs`,
+  `a_headers_only_request_round_trips_and_pages_exactly_the_lists_header_rows`: the request
+  encodes and decodes through `ProtocolCodec` to itself, and the provider's headers-only pages, at
+  limit 4 with no owner and at limit 2 with an owner filter, hold exactly the full list's header
+  rows, with their handles and order, in `ceil(headers / limit)` pages. Red on three reverts: the
+  provider ignores the field (control rows appear), the encoder drops it (`Truncated`), the decoder
+  ignores it (the round-trip assertion).
+- SDK codec gate, `sdk/test/strip-order-evals.mjs` (#2206 describe): `readControlStripOrder`
+  against the shipped core gets no control row on any page, the header rows equal the full list's,
+  and the order and sections equal `stripOrderOf(full list)`. Red on three reverts:
+  `stripOrderSteps` without `headersOnly`, the encoder not sending field 6, and field 6 sent with
+  the wrong wire type (the core refuses).
+- Apply-to-resolve times (descriptive, the attempt-1 probe; four bus adds per row; "before" is the
+  2cabe4121 SDK on the e65c1595 module, "after" this branch's SDK on its module; held controls
+  followed every apply in both):
+
+  | tracks | before | after | before, 3 ms per frame | after, 3 ms per frame | frames before / after | reply per apply before / after |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 32 | 107-137 ms | 26-41 ms | 236-258 ms | 44-62 ms | 35-36 / 6-7 | 3.8-4.0 MB / 124-128 KiB |
+  | 64 | 198-210 ms | 40-43 ms | 419-436 ms | 71-77 ms | 63-64 / 9-10 | 7.0-7.2 MB / 235-239 KiB |
+
+- Checks: `cargo fmt --all --check`; clippy `-D warnings --all-targets --all-features` on
+  protocol, host-core, control-plane, host-web, capi, conformance and audit; their tests with
+  `--all-features` (1,387 passed, 0 failed); `check-workspace-policy.sh`; `realtime_policy` (291
+  marked regions in 46 files); `build-web-audioworklet.sh` (AudioWorklet module `bbdfd0cd...`, a
+  later release re-pins it); `check-sdk-headless.sh` (706 passed); `check-sdk-types.sh`;
+  `check-sdk-generated.sh`; `check-sdk-deletions.py`; `sdk-package.sh check`; Chromium
+  qualification with `--sdk-root --check-matrix`, single and worker legs, both passed.
