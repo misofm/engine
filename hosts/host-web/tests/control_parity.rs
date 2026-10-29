@@ -1545,6 +1545,7 @@ fn dump(
                 after_handle: after,
                 limit: 256,
                 owner: None,
+                headers_only: false,
             };
             let bytes = send(
                 if state {
@@ -1607,6 +1608,7 @@ fn listed_masters(
             after_handle: after,
             limit: 256,
             owner: None,
+            headers_only: false,
         };
         let bytes = send(
             CommandPayload::ControlListGet(&request),
@@ -5627,6 +5629,7 @@ fn t2_fader_rows(
             after_handle: after,
             limit: 256,
             owner: None,
+            headers_only: false,
         };
         let bytes = send(
             CommandPayload::ControlListGet(&request),
@@ -5669,6 +5672,7 @@ fn list_refusal(
         after_handle: 0,
         limit: 1,
         owner: None,
+        headers_only: false,
     };
     let bytes = send(
         CommandPayload::ControlListGet(&request),

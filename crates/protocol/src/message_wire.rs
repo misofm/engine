@@ -610,6 +610,11 @@ pub struct ControlListRequest {
     pub limit: u16,
     /// Restrict the page to one owner's rows.
     pub owner: Option<ControlOwnerFilter>,
+    /// Serve only the header rows (owner and section headers) of the window, with their list
+    /// handles and in list order (#2206): field 6, written only when `true`. The cursor, the
+    /// limit, the owner filter and the `control.list.stale` rule are the full list's; `limit`
+    /// counts header rows, and `eof` says no header row of the window follows the page.
+    pub headers_only: bool,
 }
 
 /// The owner a request restricts its page to.
@@ -3476,6 +3481,10 @@ pub(crate) fn write_control_request(
             control_list_request::OWNER_ID,
             usize::from(value.owner.as_ref().is_some_and(|owner| owner.id.is_some())),
         ),
+        (
+            control_list_request::HEADERS_ONLY,
+            usize::from(value.headers_only),
+        ),
     ])?;
     sink.check_field_count(count)?;
     write_spec!(
@@ -3499,6 +3508,9 @@ pub(crate) fn write_control_request(
             write_spec!(sink, control_list_request::OWNER_ID, id.as_bytes())?;
         }
     }
+    if value.headers_only {
+        write_spec!(sink, control_list_request::HEADERS_ONLY, &[1])?;
+    }
     Ok(())
 }
 
@@ -3513,6 +3525,16 @@ fn decode_control_request(
     let id = optional_spec!(message, control_list_request::OWNER_ID)?
         .map(|id| read_string(codec, id).map(str::to_owned))
         .transpose()?;
+    // The flag is written only when set, so a present `false` is a second spelling of absence and
+    // is refused.
+    let headers_only = match optional_spec!(message, control_list_request::HEADERS_ONLY)?
+        .map(read_bool)
+        .transpose()?
+    {
+        None => false,
+        Some(true) => true,
+        Some(false) => return Err(DecodeError::InvalidField),
+    };
     let value = ControlListRequest {
         structure_epoch: read_u64(one_spec!(message, control_list_request::STRUCTURE_EPOCH)?)?,
         after_handle: read_u32(one_spec!(message, control_list_request::AFTER_HANDLE)?)?,
@@ -3523,6 +3545,7 @@ fn decode_control_request(
             (None, None) => None,
             (None, Some(_)) => return Err(DecodeError::InvalidField),
         },
+        headers_only,
     };
     if !control_request_is_valid(codec.limits(), &value) {
         return Err(DecodeError::InvalidField);

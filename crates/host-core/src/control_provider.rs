@@ -608,7 +608,9 @@ impl SessionControlProvider {
     }
 
     /// The entries of one page as the index range `start..end` of the catalog, and whether the
-    /// list ends with it. Entries are contiguous per owner, so an owner filter is one run.
+    /// list ends with it. Entries are contiguous per owner, so an owner filter is one run. The
+    /// page holds the rows of the range that the request serves ([`serves`]): every row, or with
+    /// `headers_only` the header rows alone (#2206), and `limit` counts those rows.
     fn window(
         &self,
         request: &ControlListRequest,
@@ -621,24 +623,34 @@ impl SessionControlProvider {
         let from = usize::try_from(request.after_handle)
             .unwrap_or(usize::MAX)
             .min(rows.len());
-        let limit = usize::from(request.limit);
-        let Some(filter) = &request.owner else {
-            let end = from.saturating_add(limit).min(rows.len());
-            return Ok((from, end, end == rows.len()));
+        let owner = match &request.owner {
+            None => None,
+            Some(filter) => match self.catalog.owner_index(filter) {
+                Some(owner) => Some(owner),
+                None => return Ok((rows.len(), rows.len(), true)),
+            },
         };
-        let Some(owner) = self.catalog.owner_index(filter) else {
-            return Ok((rows.len(), rows.len(), true));
-        };
-        let owned = |record: &RowRecord| self.catalog.owner_of(record) == owner;
+        let owned =
+            |record: &RowRecord| owner.is_none_or(|owner| self.catalog.owner_of(record) == owner);
         let start = rows[from..]
             .iter()
             .position(owned)
             .map_or(rows.len(), |offset| from + offset);
-        let mut end = start;
-        while end < rows.len() && end - start < limit && owned(&rows[end]) {
-            end += 1;
+        let limit = usize::from(request.limit);
+        let (mut next, mut end, mut served) = (start, start, 0);
+        // The owner's run, or the rest of the list, up to the row after the page's last served row;
+        // the scan stops at a served row past the limit, so the list ends exactly when the run does.
+        while next < rows.len() && owned(&rows[next]) {
+            if serves(request, &rows[next]) {
+                if served == limit {
+                    return Ok((start, end, false));
+                }
+                served += 1;
+                end = next + 1;
+            }
+            next += 1;
         }
-        Ok((start, end, end == rows.len() || !owned(&rows[end])))
+        Ok((start, end, true))
     }
 
     /// Record the two queue-owned telemetry counters exposed by the provider boundary.
@@ -1371,7 +1383,9 @@ impl ControlProvider for SessionControlProvider {
             .try_reserve_exact(end - start)
             .map_err(|_| ParameterProviderError::Unavailable)?;
         for index in start..end {
-            entries.push(self.catalog.entry(index));
+            if serves(request, &self.catalog.rows[index]) {
+                entries.push(self.catalog.entry(index));
+            }
         }
         Ok(ControlListPage {
             revision: self.revision,
@@ -1392,7 +1406,8 @@ impl ControlProvider for SessionControlProvider {
             .try_reserve_exact(end - start)
             .map_err(|_| ParameterProviderError::Unavailable)?;
         for index in start..end {
-            if self.catalog.rows[index].kind == RowKind::Control {
+            // A headers-only page covers header rows alone, which have no record.
+            if self.catalog.rows[index].kind == RowKind::Control && !request.headers_only {
                 records.push(ControlStateRecord {
                     handle: handle_of(index),
                     value: self.catalog.values[index],
@@ -2666,6 +2681,12 @@ fn handle_of(index: usize) -> u32 {
     u32::try_from(index + 1).expect("the catalog holds at most u32::MAX entries")
 }
 
+/// Whether a page of `request` holds `record`: every row, or with `headers_only` (#2206) the owner
+/// and section headers alone.
+fn serves(request: &ControlListRequest, record: &RowRecord) -> bool {
+    !request.headers_only || record.kind != RowKind::Control
+}
+
 /// A page's `last_handle`: its last entry's, or the request's cursor when it holds none.
 fn page_cursor(request: &ControlListRequest, start: usize, end: usize) -> u32 {
     if end > start {
@@ -3728,6 +3749,7 @@ mod tests {
                 after_handle,
                 limit,
                 owner,
+                headers_only: false,
             })
             .expect("a page")
     }
@@ -4038,6 +4060,68 @@ mod tests {
     }
 
     #[test]
+    fn a_headers_only_request_round_trips_and_pages_exactly_the_lists_header_rows() {
+        let model = nine_track();
+        let (mut provider, _clock) = provider_of(&model);
+        let whole = whole_list(&mut provider, 256);
+        let codec = protocol::ProtocolCodec::default();
+        let headers_of = |owner: Option<&str>| {
+            whole
+                .iter()
+                .filter(|entry| !matches!(entry.body, ControlBody::Control(_)))
+                .filter(|entry| {
+                    owner.is_none_or(|id| entry.address.owner_id.as_deref() == Some(id))
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for (owner, limit) in [(None, 4), (Some("eq3"), 2)] {
+            let expected = headers_of(owner);
+            let (mut listed, mut pages, mut epoch, mut after_handle) = (Vec::new(), 0, 0, 0);
+            loop {
+                let request = ControlListRequest {
+                    structure_epoch: epoch,
+                    after_handle,
+                    limit,
+                    owner: owner.map(|id| protocol::ControlOwnerFilter {
+                        kind: ControlOwnerKind::Strip,
+                        id: Some(id.to_owned()),
+                    }),
+                    headers_only: true,
+                };
+                let mut bytes = vec![
+                    0;
+                    codec
+                        .encoded_control_list_request_len(&request)
+                        .expect("len")
+                ];
+                codec
+                    .encode_control_list_request(&request, &mut bytes)
+                    .expect("encode");
+                let decoded = codec
+                    .decode_control_list_request(&bytes, request.owner.as_ref().map_or(4, |_| 6))
+                    .expect("decode");
+                assert_eq!(decoded, request, "the field round-trips");
+                let next = provider.control_list(&decoded).expect("a page");
+                pages += 1;
+                epoch = next.structure_epoch;
+                after_handle = next.last_handle;
+                listed.extend(next.entries);
+                if next.eof {
+                    break;
+                }
+            }
+            assert!(expected.len() > usize::from(limit) && expected.len() < whole.len());
+            assert_eq!(listed, expected, "the header rows, their handles and order");
+            assert_eq!(
+                pages,
+                expected.len().div_ceil(usize::from(limit)),
+                "no trailing page"
+            );
+        }
+    }
+
+    #[test]
     fn pages_are_the_same_list_at_any_limit_and_an_owner_filter_keeps_global_handles() {
         let model = nine_track();
         let (mut provider, _clock) = provider_of(&model);
@@ -4104,6 +4188,7 @@ mod tests {
                 after_handle: 0,
                 limit: 256,
                 owner: None,
+                headers_only: false,
             })
             .expect("state");
         assert_eq!(state.last_handle, 256);
@@ -4126,6 +4211,7 @@ mod tests {
                     after_handle: 0,
                     limit: 1,
                     owner: None,
+                    headers_only: false,
                 })
                 .err(),
             Some(ParameterProviderError::Stale)
@@ -4232,6 +4318,7 @@ mod tests {
                     after_handle: 0,
                     limit: 1,
                     owner: None,
+                    headers_only: false,
                 })
                 .err(),
             Some(ParameterProviderError::Stale)

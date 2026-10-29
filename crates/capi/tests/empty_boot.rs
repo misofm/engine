@@ -202,6 +202,7 @@ impl Endpoint {
                 after_handle: after,
                 limit: 256,
                 owner: None,
+                headers_only: false,
             };
             let bytes = self.send(
                 CommandPayload::ControlListGet(&request),

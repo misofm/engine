@@ -475,7 +475,7 @@ IO-4 replaces the C ABI's conformance-only `MockProvider` with the opt-in
 response preview (`RESPONSE_GET`, capability flag bit 14; decision 17, C13) from the core's `prepare_response_query`: its
 catalog is `host_core::ControlCatalog`, built from the compiled session's `controls::list` with an
 owner header before each owner's rows and a section header before each section's, each entry at its
-handle (from 1, in list order) and its committed value beside it. The catalog holds owners, sections and the distinct control descriptors once each in three shared tables (descriptors compared by bits) and one 16-byte record per entry, and a page builds its wire entries from them (#1599). The list therefore covers every
+handle (from 1, in list order) and its committed value beside it. A request with `headers_only` (#2206) rides the same `CONTROL_LIST_GET` frame, with no new symbol, and its pages hold the owner and section headers alone. The catalog holds owners, sections and the distinct control descriptors once each in three shared tables (descriptors compared by bits) and one 16-byte record per entry, and a page builds its wire entries from them (#1599). The list therefore covers every
 control of the session (strips, builtins, console slots, inserts, routes, VCAs and the session's
 own rows), and can never disagree with what `controls` validates. Every commit publishes the
 catalog of the committed model. A rebuild builds the whole catalog in preparation. A live commit

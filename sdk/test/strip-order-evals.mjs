@@ -15,6 +15,12 @@ import { createBrowserStripOrder } from "../src/browser/live-controls.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
 import { decodeControlReply, encodeControlTransaction } from "../src/core/control-frame.ts";
+import {
+  decodeControlListPage,
+  readControlStripOrder,
+  stripOrderOf,
+  stripSections,
+} from "../src/core/control-list.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { scriptedControl } from "./control-support.mjs";
 import { moduleBytes, ramp } from "./support.mjs";
@@ -143,5 +149,36 @@ describe("#1564C D5 -- the strip order follows the structure epoch", () => {
     const second = await read();
     assert.deepEqual([...second.submixes], ["bus", "aux"]);
     assert.equal(second.structureEpoch, 2n);
+  });
+});
+
+describe("#2206 -- the strip order reads the list's header rows alone", () => {
+  test("every page the core serves the read holds no control row, and the order is the full list's", async () => {
+    const engine = await createOfflineEngine(FIXTURE.session, { asset, ...OPTIONS });
+    try {
+      const full = await engine.controls({ pageLimit: 3 });
+      const pages = [];
+      const recording = {
+        requestIds: engine.controlTransactions().requestIds,
+        send: (frame) => {
+          const reply = engine.controlFrame(frame);
+          pages.push(decodeControlListPage(reply));
+          return reply;
+        },
+      };
+      const order = await readControlStripOrder(recording);
+      assert.ok(pages.length > 1, "a probe, then the header pages");
+      for (const reply of pages) {
+        assert.equal(reply.ok, true, "the core accepts the SDK's headers-only request");
+        assert.equal(reply.page.controls.length, 0, "a headers-only page carries no control row");
+      }
+      assert.deepEqual(pages.slice(1).flatMap((reply) => reply.page.headers), full.headers,
+        "the header rows of the full list, with their handles, in order");
+      const expected = stripOrderOf(full);
+      assert.deepEqual([order.tracks, order.submixes, order.effects], [expected.tracks, expected.submixes, expected.effects]);
+      assert.deepEqual(stripSections(order), stripSections(expected));
+    } finally {
+      engine.dispose();
+    }
   });
 });

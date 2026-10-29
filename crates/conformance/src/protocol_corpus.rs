@@ -1021,6 +1021,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             kind: ControlOwnerKind::Strip,
             id: Some("vocal".to_owned()),
         }),
+        headers_only: false,
     };
     let response_request = ResponseGetRequest {
         target: ResponseTarget::Configuration(ResponseConfiguration::Effect {

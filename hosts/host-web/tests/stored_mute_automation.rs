@@ -523,6 +523,7 @@ fn listed<L: Leg>(leg: &mut L, owner: &str, control: u32) -> Vec<Row> {
             after_handle: after,
             limit: 256,
             owner: None,
+            headers_only: false,
         };
         let bytes = leg.command(
             CommandPayload::ControlListGet(&request),

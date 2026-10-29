@@ -807,6 +807,7 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
             after_handle: 0,
             limit: 256,
             owner: None,
+            headers_only: false,
         }),
     );
 

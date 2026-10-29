@@ -4497,6 +4497,7 @@ fn a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not() {
         after_handle: 0,
         limit: 1,
         owner: None,
+        headers_only: false,
     };
     let request = rig.next_request();
     assert_eq!(

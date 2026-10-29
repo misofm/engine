@@ -548,6 +548,7 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
         after_handle: 0,
         limit: 8,
         owner: None,
+        headers_only: false,
     };
     let telemetry = TelemetryConfiguration {
         meters: vec![crate::MeterEntry {
@@ -4192,6 +4193,7 @@ fn control_request(
         after_handle,
         limit,
         owner,
+        headers_only: false,
     }
 }
 

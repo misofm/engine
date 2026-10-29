@@ -869,6 +869,7 @@ impl MockProvider {
                 && request.owner.as_ref().is_none_or(|owner| {
                     entry.address.owner_kind == owner.kind && entry.address.owner_id == owner.id
                 })
+                && !(request.headers_only && matches!(entry.body, ControlBody::Control(_)))
         });
         let entries = rows
             .by_ref()
