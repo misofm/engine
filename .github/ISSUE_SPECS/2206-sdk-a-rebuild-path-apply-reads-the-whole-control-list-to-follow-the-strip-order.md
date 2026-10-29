@@ -140,3 +140,18 @@ readers (`controls()`, `controlState()`) do not change. #2189's guarantees stand
   policy; `check-conformance-boundaries.sh`; `cargo run -p conformance`;
   `check-protocol-wasm-parity.sh` and its `--self-test`; `build-web-audioworklet.sh` (module
   `f613f286...`); `check-sdk-headless.sh` (706 passed); the strip-order eval.
+
+## Rebase onto main dd386abf0 (after #2208)
+
+Attempt 2 passed review. The branch carries only the #2206 commits on top of main, and two review
+MINORs are folded: the re-pin is recorded beside `COMPLETE_SCHEMA_HASH`, and the `MockProvider` doc
+says it ignores `headers_only`. On the rebased tree every gate is green again:
+- fmt, clippy and the touched crates' tests (1,387 passed);
+- `cargo run -p conformance` and the wasm parity check;
+- the workspace and realtime policies;
+- the AudioWorklet module build (`f613f286...`);
+- the SDK gates: headless (710 passed), types, generated, deletions and package;
+- the strip-order eval;
+- the Chromium qualification with `--sdk-root --check-matrix`, both legs.
+
+The probe at 32 / 64 tracks gives 26-42 / 40-43 ms, and 45-62 / 72-78 ms at 3 ms per frame.
