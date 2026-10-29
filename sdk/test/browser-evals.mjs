@@ -1369,41 +1369,86 @@ describe("browser session edits", () => {
   });
 
   test("#2201: no browser send hands the app the host's raw miso.error.v1 record", async () => {
-    // Red if any of the browser engine's host sends (a protocol call, a live-control submit, the
-    // spectrum, observation, loudness and track-response frames, the boot's capability probe)
-    // passes the host's local refusal record (not an Error) to the app instead of the one mapped
-    // path's MisoEngineError. The host refuses every frame but the control-list reads and the
-    // capability probes, so each call fails at its own send.
+    // Red if any host call of the browser engine passes the host's raw record (not an Error) to the
+    // app instead of the one mapped path's MisoEngineError: a frame the host refuses locally (a
+    // protocol call, a live-control submit, the spectrum, observation, loudness and
+    // track-response frames, a new queue's revision probe, the boot's capability probe), the
+    // status() of the observation render wait, and the status(), sessionMap() and dispose() of a
+    // failed host, which reject with its sticky record. Each row fails at its own call.
     const message = (frame) => frame[16] | (frame[17] << 8);
     const passes = new Set([0x0001, 0x000c, 0x000d]);
-    let refusing = false;
+    const record = (result) => Object.freeze({ tag: "miso.error.v1", requestId: 7, result });
+    const pending = () => new Promise(() => {});
+    let refuse;
+    let status;
     const document = session({ id: "browser.sends", sampleRateHz: 48_000, quantumFrames: QUANTUM })
       .source("a", SOURCE)
       .track("t1", { source: "a", inserts: [effect("miso.compressor", {}, { slotId: "comp" })] })
       .output("out")
       .route({ id: "t1.main", source: { kind: "track", trackId: "t1", tap: "post_pan" }, destination: { kind: "output_input", outputId: "out" } });
-    const { engine, host } = await boot(document, { refuse: (frame) => refusing && !passes.has(message(frame)) ? 1 : undefined });
+    const { engine, host } = await boot(document, { refuse: (frame) => refuse?.(frame) });
     // A healthy host answers status() behind its frames; here never (the response watch polls it).
-    host.status = () => new Promise(() => {});
+    host.status = () => (status ?? pending)();
     const mapped = (error) => error instanceof MisoEngineError && error.code === "invalidArgument" && error.result === 1;
+    const failed = (error) => error instanceof MisoEngineError && error.code === "wrongState" && error.result === 6;
+    const typed = (error) => error instanceof MisoEngineError;
+    // An `Observe` the host refuses locally with result 6 (frames in flight) is retried after a
+    // render, so the render wait's status() reads are reached; `wait` decides what they answer.
+    const observeRefused = (wait) => {
+      let refusedAt;
+      refuse = (frame) => {
+        if (message(frame) !== 0x0003) return undefined;
+        refusedAt ??= Date.now();
+        return 6;
+      };
+      status = () => wait(refusedAt);
+      return engine.subscribeObservations({
+        selections: [{ trackId: "t1", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
+        windowBlocks: 1,
+      });
+    };
     try {
       const controls = await engine.liveControls();
       await engine.capabilities();
-      refusing = true;
-      const calls = {
-        protocol: () => engine.counters(),
-        liveControls: () => controls.submit(controls.edit.track("t1").faderDb(-3)),
-        spectrum: () => engine.configureSpectrum({ target: { kind: "output", outputId: "out" }, channels: "both" }),
-        observation: () => engine.readObservations([{ trackId: "t1", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }]),
-        loudness: () => engine.subscribeLoudness(),
-        trackResponse: () => engine.queryTrackResponse({ trackId: "t1", grid: { kind: "logarithmic", points: 64, minimumHz: 20, maximumHz: 20_000 }, channels: "both" }),
-      };
-      for (const [name, call] of Object.entries(calls)) {
-        await assert.rejects(call(), mapped, `${name} passed the host's raw record`);
+      const everyFrame = (frame) => passes.has(message(frame)) ? undefined : 1;
+      const calls = [
+        ["protocol", mapped, () => engine.counters()],
+        ["liveControls", mapped, () => controls.submit(controls.edit.track("t1").faderDb(-3))],
+        ["spectrum", mapped, () => engine.configureSpectrum({ target: { kind: "output", outputId: "out" }, channels: "both" })],
+        ["observation", mapped, () => engine.readObservations([{ trackId: "t1", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }])],
+        ["loudness", mapped, () => engine.subscribeLoudness()],
+        ["trackResponse", mapped, () => engine.queryTrackResponse({ trackId: "t1", grid: { kind: "logarithmic", points: 64, minimumHz: 20, maximumHz: 20_000 }, channels: "both" })],
+      ];
+      for (const [name, check, call] of calls) {
+        refuse = everyFrame;
+        await assert.rejects(call(), check, `${name} passed the host's raw record`);
       }
+      // The render position read before the send fails; the question after the refusal waits.
+      await assert.rejects(observeRefused((refusedAt) => refusedAt === undefined ? Promise.reject(record(6)) : pending()),
+        typed, "the observation render mark passed the host's raw record");
+      // The send's question (at once) waits; the wait's later poll fails.
+      await assert.rejects(observeRefused((refusedAt) => refusedAt === undefined
+        ? Promise.resolve({ renderedQuanta: 0n })
+        : Date.now() - refusedAt < 2 ? pending() : Promise.reject(record(6))),
+      typed, "the observation render wait passed the host's raw record");
     } finally {
+      refuse = undefined;
+      status = undefined;
       await engine.close();
     }
+    // A failed host: status(), sessionMap() and dispose() reject with its sticky record.
+    const lost = await boot(document);
+    lost.host.status = () => Promise.reject(record(6));
+    lost.host.sessionMap = () => Promise.reject(record(6));
+    lost.host.dispose = () => Promise.reject(record(6));
+    await assert.rejects(lost.engine.liveControls(), failed, "liveControls() on a failed host passed the host's raw record");
+    await assert.rejects(lost.engine.position(), failed, "position() on a failed host passed the host's raw record");
+    await assert.rejects(lost.engine.close(), failed, "close() on a failed host passed the host's raw record");
+    // A new queue's revision probe: the first CAPABILITIES_GET of the host.
+    await assert.rejects((async () => {
+      const fresh = await boot(document, { refuse: (frame) => message(frame) === 0x0001 ? 1 : undefined });
+      try { await fresh.engine.counters(); } finally { await fresh.engine.close(); }
+    })(), mapped, "the queue's revision probe passed the host's raw record");
     // The boot's capability probe: the second CAPABILITIES_GET (the first is the queue's own).
     let probes = 0;
     await assert.rejects(boot(document, {

@@ -73,13 +73,22 @@ async function hostControlFailure(host: MisoAudioWorkletHost, error: unknown): P
  * never hands the app the host's raw record. A reply the core answered resolves as the host gave
  * it; each caller reads its result.
  */
-export async function hostControl(
+export function hostControl(
   host: MisoAudioWorkletHost,
   frame: Uint8Array,
   document?: Uint8Array,
 ): Promise<Awaited<ReturnType<MisoAudioWorkletHost["control"]>>> {
+  return hostCall(host, () => document === undefined ? host.control(frame) : host.control(frame, document));
+}
+
+/**
+ * Any other host call whose rejection can reach the app (#2201 attempt 2): `status()`,
+ * `sessionMap()` and `dispose()` reject with the host's raw record too (a failed host's sticky one,
+ * or a local refusal), and it is mapped as {@link hostControl} maps a frame's.
+ */
+export async function hostCall<T>(host: MisoAudioWorkletHost, call: () => Promise<T>): Promise<T> {
   try {
-    return await (document === undefined ? host.control(frame) : host.control(frame, document));
+    return await call();
   } catch (error) {
     throw await hostControlFailure(host, error);
   }
@@ -238,7 +247,7 @@ export async function createBrowserLiveControls(
   session?: SessionLike,
   booted?: Uint8Array,
 ): Promise<EngineLiveControls> {
-  const remoteMap = await host.sessionMap();
+  const remoteMap = await hostCall(host, () => host.sessionMap());
   const queue = await createBrowserControlQueue(host);
   // The strip order is the core's control list (#1564 D5), not the worklet's index exports: the
   // map keeps the worklet's sources and meter lease, and takes the tracks and submixes from the

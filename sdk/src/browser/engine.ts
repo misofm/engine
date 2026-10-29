@@ -29,7 +29,7 @@ import type { EngineLiveControls } from "../core/live-controls.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
-import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders, hostControl } from "./live-controls.ts";
+import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders, hostCall, hostControl } from "./live-controls.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
 import { ProtocolClient, decodeCapabilitiesReply, decodeProtocolEvent } from "../core/protocol-messages.ts";
@@ -1011,7 +1011,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         // The status first, then the report: a block that renders between them can only make the
         // report newer than the status. A generation that began at the status's next block is the
         // one that block plays; one that began later cannot be placed, so the reads are made again.
-        const { nextAbsoluteSample } = await host.status();
+        const { nextAbsoluteSample } = await hostCall(host, () => host.status());
         const report = await readTimelineReport();
         if (report === undefined) break;
         if (nextAbsoluteSample < report.firstSample) continue;
@@ -1314,7 +1314,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         // typed refusal, so a context that does not render never holds the caller.
         renderWait: {
           boundMs: options.requestDeadlineMs ?? 5_000,
-          mark: async () => (await host.status()).renderedQuanta,
+          mark: async () => (await hostCall(host, () => host.status())).renderedQuanta,
           next: (timeoutMs, since) => new Promise<boolean>((resolve, reject) => {
             let settled = false;
             let poll: ReturnType<typeof setTimeout> | undefined;
@@ -1331,7 +1331,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
                 await new Promise<void>((tick) => { poll = setTimeout(tick, 4); });
                 if (settled) return;
                 if (closed) return finish(false);
-                const current = await host.status();
+                const current = await hostCall(host, () => host.status());
                 if (current.renderedQuanta > since) return finish(true);
               }
             })().catch((error: unknown) => finish(false, error));
@@ -1744,7 +1744,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             if (!failed) { failed = true; failure = error; }
           };
           try {
-            await boundedCloseStep("worklet host dispose", "hostDisposeTimeout", async () => { await host.dispose(); });
+            await boundedCloseStep("worklet host dispose", "hostDisposeTimeout", () => hostCall(host, () => host.dispose()));
           } catch (error) {
             fail(error);
           }

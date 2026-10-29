@@ -845,10 +845,11 @@ edits, `createResponsePreview()` evaluates an explicit configuration without a l
 live-session timestamp.
 
 In the browser, every frame the engine posts to its host (a spectrum, observation, loudness or
-track-response frame, a protocol call, a live-control submit or the boot's capability probe) goes
-through one path (issue #2201). A frame that the host refuses before the core rejects with
+track-response frame, a protocol call, a live-control submit or a capability probe) and its
+`status()`, `sessionMap()` and `dispose()` calls go through one path (issue #2201). When the
+host refuses a call before the core sees it, or has failed, the call rejects with
 `MisoEngineError` that carries the host's result, never with the host's raw `miso.error.v1`
-record; a failed host's sticky result 6 is `wrongState`, as for the live controls. Each call keeps
+record. A failed host's sticky result 6 is `wrongState`, as for the live controls. Each call keeps
 its retry rule, which reads the error's code: an observation refused for `backpressure` waits for
 a render and is sent again, and every other refusal is thrown.
 
