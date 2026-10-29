@@ -83,7 +83,7 @@ devtools session that loads the twin instead of the shipped module prints the na
 
 Nothing re-pins the pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`),
 `results.json` or `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` between releases. They describe
-the last release, 0.10.0 (#2196): the pin is `npm-publish.yml`'s `EXPECTED_WORKLET_SHA256`, and
+the last release, 0.10.1 (#2203): the pin is `npm-publish.yml`'s `EXPECTED_WORKLET_SHA256`, and
 `results.json` is that module's two-browser record, one row per browser and leg (`single` and
 `worker`).
 
