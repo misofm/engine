@@ -1380,7 +1380,7 @@ impl ControlProvider for SessionControlProvider {
         let (start, end, eof) = self.window(request)?;
         let mut entries = Vec::new();
         entries
-            .try_reserve_exact(end - start)
+            .try_reserve_exact(served_bound(request, start, end))
             .map_err(|_| ParameterProviderError::Unavailable)?;
         for index in start..end {
             if serves(request, &self.catalog.rows[index]) {
@@ -1403,7 +1403,7 @@ impl ControlProvider for SessionControlProvider {
         let (start, end, eof) = self.window(request)?;
         let mut records = Vec::new();
         records
-            .try_reserve_exact(end - start)
+            .try_reserve_exact(if request.headers_only { 0 } else { end - start })
             .map_err(|_| ParameterProviderError::Unavailable)?;
         for index in start..end {
             // A headers-only page covers header rows alone, which have no record.
@@ -2685,6 +2685,17 @@ fn handle_of(index: usize) -> u32 {
 /// and section headers alone.
 fn serves(request: &ControlListRequest, record: &RowRecord) -> bool {
     !request.headers_only || record.kind != RowKind::Control
+}
+
+/// The most rows a page of `request` over `start..end` holds: the span, or with `headers_only` at
+/// most `limit`, since the span also covers the control rows between the headers.
+fn served_bound(request: &ControlListRequest, start: usize, end: usize) -> usize {
+    let span = end - start;
+    if request.headers_only {
+        span.min(usize::from(request.limit))
+    } else {
+        span
+    }
 }
 
 /// A page's `last_handle`: its last entry's, or the request's cursor when it holds none.
@@ -4103,6 +4114,12 @@ mod tests {
                     .expect("decode");
                 assert_eq!(decoded, request, "the field round-trips");
                 let next = provider.control_list(&decoded).expect("a page");
+                let state = provider.control_state(&decoded).expect("a state page");
+                assert_eq!(
+                    (state.last_handle, state.eof, state.records.len()),
+                    (next.last_handle, next.eof, 0),
+                    "a headers-only state page covers the header rows, which have no record"
+                );
                 pages += 1;
                 epoch = next.structure_epoch;
                 after_handle = next.last_handle;
@@ -4119,6 +4136,32 @@ mod tests {
                 "no trailing page"
             );
         }
+        // The flag is written only as `true`: a present `false` is a second
+        // spelling of absence and is refused.
+        let request = ControlListRequest {
+            structure_epoch: 0,
+            after_handle: 0,
+            limit: 1,
+            owner: None,
+            headers_only: true,
+        };
+        let mut bytes = vec![
+            0;
+            codec
+                .encoded_control_list_request_len(&request)
+                .expect("len")
+        ];
+        codec
+            .encode_control_list_request(&request, &mut bytes)
+            .expect("encode");
+        // The flag is the last field, its value byte padded to eight.
+        let flag = bytes.len() - 8;
+        assert_eq!(bytes[flag], 1);
+        bytes[flag] = 0;
+        assert_eq!(
+            codec.decode_control_list_request(&bytes, 4),
+            Err(protocol::DecodeError::InvalidField)
+        );
     }
 
     #[test]

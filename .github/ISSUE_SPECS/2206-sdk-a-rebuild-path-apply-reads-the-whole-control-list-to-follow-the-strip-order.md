@@ -79,8 +79,8 @@ spelling per value). With it, the core serves only the owner and section headers
 with the list's own handles, order, epoch and cursor rules; `limit` counts header rows, and `eof`
 says no header row of the window follows. A `CONTROL_STATE_GET` with it covers the same header
 rows, so its page has no record. Without it, the request and the reply are byte-identical to
-before: `COMPLETE_SCHEMA_HASH` (`de7d7cf504ca191a`) is unchanged, and no fixture or generated SDK
-surface changed. The C ABI serves it through the existing `CONTROL_LIST_GET` frame (no new symbol).
+before; no fixture or generated SDK surface changed. Attempt 2 adds a corpus frame value for the
+field and re-pins `COMPLETE_SCHEMA_HASH` (below). The C ABI serves it through the existing `CONTROL_LIST_GET` frame (no new symbol).
 The SDK codec (`encodeControlListRequest`, optional `headersOnly`) sends it, and
 `stripOrderSteps` uses it, so `stripOrderOf` reads the same header rows as before. Full-list
 readers (`controls()`, `controlState()`) do not change. #2189's guarantees stand: the #2189 and
@@ -116,3 +116,27 @@ readers (`controls()`, `controlState()`) do not change. #2189's guarantees stand
   later release re-pins it); `check-sdk-headless.sh` (706 passed); `check-sdk-types.sh`;
   `check-sdk-generated.sh`; `check-sdk-deletions.py`; `sdk-package.sh check`; Chromium
   qualification with `--sdk-root --check-matrix`, single and worker legs, both passed.
+
+## Attempt 2 (verify of 3f97c105f: FAIL on two MAJORs, both folded)
+
+- MAJOR 1 and MAJOR 2: the protocol gate now also asserts that a headers-only
+  `CONTROL_STATE_GET` page has no record (with the list page's `last_handle` and `eof`), and that
+  decoding field 6 = `0` is `INVALID_FIELD`. Red on each mutation: decoder `Some(false) => false`
+  (`Ok(.. headers_only: false)` against `Err(InvalidField)`); state path without
+  `&& !request.headers_only` (28 records against 0).
+- MINORs: the unexercised `MockProvider` branch is removed (the mock ignores the field). A
+  headers-only list page reserves at most `limit` entries and a headers-only state page reserves
+  none; the full path's reservation is unchanged. The registry says field 6 is non-mandatory (a
+  peer that does not know it skips it and serves the full list), and that unlike
+  `include-window` a present `false` is refused.
+- Re-pin: the corpus's shared control request carries `headers_only: true`, so
+  `command.control_list_get` and `command.control_state_get` move; `COMPLETE_SCHEMA_HASH`
+  `de7d7cf504ca191a` -> `f05688f0cd7e6f28`, 61 frames, the 59 other frames byte-equal. Updated
+  with it: `crates/conformance/src/protocol_corpus.rs`, the two self-test search strings in
+  `scripts/check-protocol-wasm-parity.sh`, `docs/CONTROL_PROTOCOL_CONFORMANCE.md` and
+  `fuzz/corpus/complete-schema-manifest.md`. No fuzz seed carries a control list frame, so none
+  moved; there is no other wasm golden.
+- Checks: fmt; clippy and tests of the touched crates (1,387 passed); workspace policy; realtime
+  policy; `check-conformance-boundaries.sh`; `cargo run -p conformance`;
+  `check-protocol-wasm-parity.sh` and its `--self-test`; `build-web-audioworklet.sh` (module
+  `f613f286...`); `check-sdk-headless.sh` (706 passed); the strip-order eval.
