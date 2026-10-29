@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.10.1
+npm install @misofm/engine@0.10.2
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -879,7 +879,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.10.1 release record](https://github.com/misofm/engine/issues/2203) contains the accepted artifact
+[0.10.2 release record](https://github.com/misofm/engine/issues/2210) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -905,6 +905,28 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.10.1
+
+0.10.2 removes no export. One rejection changes its type (see the first item).
+
+- Changed: in the browser, every host call goes through one mapped path (issue #2201; see
+  "Observe the rendered mix"), so the browser engine rejects only with `MisoEngineError` or the
+  SDK's typed refusals. A boot that the default host refuses rejects `createEngine()` with
+  `MisoEngineError`, phase `boot`, with the host's raw `miso.error.v1` record as its `cause`. In
+  0.10.1 it rejected with the raw record. A failed host's sticky result 6 is `wrongState` on every
+  path. `MisoEngineErrorInit` gains an optional `cause`.
+- Added: `ControlListRequest` gains an optional `headersOnly`, which `encodeControlListRequest`
+  sends as `control_list_request` field 6, `headers_only` (issue #2206, an in-place V1 amendment).
+  A page then holds only the owner and section headers of its window. A rebuild-path `apply`
+  follows the strip order with it, so a bus add's `apply` at 64 tracks takes about 40 ms instead of
+  about 200 ms. A request without it is byte-identical to before.
+- Changed: the MSB1 ring's seek epoch (word 11) is a parity seqlock (issue #2184; see "Play in the
+  browser"). `Msb1RingWriter.seek` makes it odd, writes the seek, and makes it even again, so one
+  seek adds 2, not 1. A writer of its own must publish the same way.
+- Changed: in `single` mode, a plain ring seek while audio plays waits up to 50 ms of rendered
+  audio for the new generation's chunks, instead of cutting to silence (issue #2185). In `worker`
+  mode it can still lose one quantum at the seek (#2185 stays open for it).
 
 ## Upgrading from 0.10.0
 
