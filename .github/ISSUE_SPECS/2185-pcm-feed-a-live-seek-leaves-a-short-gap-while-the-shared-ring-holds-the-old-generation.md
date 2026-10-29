@@ -135,8 +135,8 @@ old generation applies no seek before a new-generation chunk is published (or th
     live plain seek as an anchored seek (`source_seek_at`) at a sample a few quanta ahead: the
     engine keeps the old generation playing until the anchor, so the chunks land first. This is JS
     only, but it changes the seek's semantics and latency (#2205 makes the same choice for the
-    transport path); (3) an engine primitive (Rust). The Chromium worker gate stays at 0 frames
-    and is red about once in 47 seeks (a 5-seek run is red about one time in 10).
+    transport path); (3) an engine primitive (Rust). At 0 frames it would be red about once in 47
+    seeks; the root ruling below splits the claim instead.
 - **Minor 4:** the Worker headroom rig no longer repeats the row's "no seek before its
   generation's first chunk" assertion (its anchored-seek repair stays). The Worker's own seek
   smoke publishes a runway (its 4-slot ring) and now checks four submitted chunks.
@@ -144,3 +144,31 @@ old generation applies no seek before a new-generation chunk is published (or th
   the Worker fake's engine ring at 8 quanta), so a case can publish a runway (`publish`) inside
   its 8-slot rings. Rows that seek and expect the seek to apply in one pass now publish a runway.
   Rows that drain over several passes let the bound apply the seek.
+
+## Status after attempt 2: single mode met, worker mode open
+
+- **Met: single mode.** A live plain ring seek during playback underruns 0 frames on Chromium in
+  single mode: 0 misses in 190 seeks (38 runs). The qualification's Chromium single live-seek
+  phase is a gate at 0 frames.
+- **Not met: worker mode.** Chromium worker mode misses 128 frames in 4 of 190 seeks. The
+  qualification's Chromium worker live-seek phase is reported only, and its output names it as
+  the open #2185 worker residual. The 0-frame claim is not declared met for worker mode.
+- **Cause (worker mode).** The control Worker applies the plain `source_seek` from its own thread
+  while render runs. Render can pop that seek between the Worker's `source_seek` call and its first
+  `source_submit` in the same pass. That block then renders the new generation with no chunk, and
+  one quantum is lost. The order cannot change, because the engine refuses a chunk of the new
+  generation before its seek. Single mode has no such window, because it runs on one thread.
+- **Options, for root to decide together with #2205 (none is picked here):**
+  1. Read the report and the fill before the seek. This narrows the window, so a miss is rarer,
+     but it does not remove it.
+  2. The Worker applies a live plain seek as an anchored seek (`source_seek_at`) a few quanta
+     ahead. The engine keeps the old generation playing until the anchor. This is JS only, but it
+     changes the seek's semantics and latency.
+  3. An engine primitive that applies a seek and its first chunk together (a Rust change).
+
+## Decision (attempt 2, root ruling 2026-10-29)
+
+Split the claim. Do not tune the threshold, and do not change the seek semantics. The batch PR
+closes #2184 and delivers #2185's single mode, with the Chromium single live-seek phase gated at 0
+frames. #2185 stays open for worker mode: its residual (above) waits for root's choice among the
+three options, together with #2205. Until then, the Chromium worker phase is reported only.

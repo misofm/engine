@@ -35,9 +35,10 @@ export async function qualifySuspendedPcmFeed(browserName, engine, origin) {
 }
 
 /**
- * #2185: the live plain seek phase, in one instance mode on a fresh isolated page. Chromium gates
- * every seek at 0 underrun frames; WebKit's headless sink renders in bursts (#1387), so its rows
- * are reported, not gated.
+ * #2185: the live plain seek phase, in one instance mode on a fresh isolated page. Chromium single
+ * mode gates every seek at 0 underrun frames. Chromium worker mode is reported only: it is the open
+ * #2185 worker residual. WebKit's headless sink renders in bursts (#1387), so its rows are reported,
+ * not gated.
  */
 async function qualifyLiveSeek(browser, browserName, origin, mode) {
   const page = await browser.newPage();
@@ -58,8 +59,13 @@ async function qualifyLiveSeek(browser, browserName, origin, mode) {
       }),
     ]).finally(() => clearTimeout(deadline));
     if (errors.length > 0) throw new Error(errors.join("; "));
-    const gated = browserName === "chromium";
-    process.stdout.write(`${browserName}: pcm-feed-live-seek ${mode}${gated ? "" : " (reported, not gated)"}: ${JSON.stringify(result)}\n`);
+    // Root ruling (#2185 attempt 2): Chromium single mode is gated at 0 frames. Worker mode is the
+    // open #2185 residual (render can pop the Worker's `source_seek` before its first submit), so
+    // it is reported, never declared met.
+    const gated = browserName === "chromium" && mode === "single";
+    const label = gated ? "" : mode === "worker"
+      ? " (reported, not gated: open #2185 worker residual)" : " (reported, not gated)";
+    process.stdout.write(`${browserName}: pcm-feed-live-seek ${mode}${label}: ${JSON.stringify(result)}\n`);
     const missing = result.seeks.filter((row) => row.underrunFrames !== "0");
     if (result.seeksApplied !== result.seeks.length || result.refused !== 0
         || result.renderAllocations.result !== 0 || result.renderAllocations.count !== 0
