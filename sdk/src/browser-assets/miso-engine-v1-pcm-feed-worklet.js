@@ -147,6 +147,10 @@ const SLOT_I64_GENERATION = 2
 const SLOT_I64_START_FRAME = 3
 const FLAG_END_OF_REGION = 1
 
+// Issue #2185 (root ruling 2): the longest a live plain seek waits for its first new-generation
+// chunk, in milliseconds of rendered audio; past it the seek applies as it did before #2185.
+const SEEK_DEFERRAL_MS = 50
+
 const RESULT_OK = 0
 const RESULT_INVALID_ARGUMENT = 1
 const RESULT_BACKPRESSURE = 6
@@ -285,6 +289,8 @@ function bindRing(shared, quantumFrames, maximumChannels) {
     seekGeneration: 0n,
     seekFrame: 0n,
     seekAnchor: NO_ANCHOR,
+    /** Issue #2185: the blocks rendered since the ring's live plain seek was first deferred, or 0. */
+    deferredBlocks: 0,
     /** Issue #1297b: the anchored seek `(generation, frame, anchor)` the engine's message handler
      *  applied for this ring's source (`source_seek_at` answered OK), not yet consumed by the
      *  drain; `anchoredSample` -1 is none. Written only by the handler, between blocks. */
@@ -343,6 +349,11 @@ function wrapEngineProcessor(Base) {
       // engine's host instead.
       if (!Array.isArray(rings) || this.workerMode === true) return
       this.rebindMemoryViews()
+      // Issue #2185: the deferral bound in blocks, computed here, off the render path.
+      const rate = this.sampleRateHz ?? globalThis.sampleRate
+      const blocks = Math.ceil((SEEK_DEFERRAL_MS * rate) / (1000 * this.quantumFrames))
+      // A scope with no rate defers nothing: every seek applies as before #2185.
+      this.seekDeferralBlocks = Number.isSafeInteger(blocks) && blocks > 0 ? blocks : 0
       const bound = []
       const incoming = []
       for (let index = 0; index < rings.length; index += 1) {
@@ -444,6 +455,11 @@ function wrapEngineProcessor(Base) {
       // Issue #2184: a pass reads the seek publication whole or not at all. A publication in
       // flight skips the pass, as a backpressured seek does; the next block reads it whole.
       if (!this.readSharedSeek(ring)) return
+      if (this.deferSharedSeek(ring)) {
+        // The old generation keeps playing from the engine's ring meanwhile.
+        this.countSharedBlock(ring)
+        return
+      }
       if (this.applySharedSeek(ring) !== RESULT_OK) return
 
       const generationTag = ring.seekTag
@@ -527,6 +543,12 @@ function wrapEngineProcessor(Base) {
       }
 
       Atomics.store(control, CONTROL_READ_INDEX, read)
+      this.countSharedBlock(ring)
+    }
+
+    /** The block about to render, counted for one ring. */
+    countSharedBlock(ring) {
+      const control = ring.control
       control[CONTROL_DRAIN_BLOCKS] += 1
       // The block about to be rendered consumes one quantum of this source.
       // Reaching zero with a live feeder and audio still to come is exactly
@@ -564,6 +586,48 @@ function wrapEngineProcessor(Base) {
       ring.seekGeneration = generation
       ring.seekFrame = frame
       ring.seekAnchor = anchor
+      return true
+    }
+
+    /**
+     * Issue #2185: whether this block defers the ring's published live plain seek. The writer
+     * seeks while the shared ring is full of the old generation, and it can publish the new one
+     * only into slots the drain frees; applied at once, the seek makes render drop the old chunks
+     * the engine holds before any new chunk exists, which is a gap. So, while no slot of the new
+     * tag is published, the drain frees every slot of another tag (counted as STALE), asks no
+     * seek and submits nothing, and the old generation plays on from the engine's ring. The first
+     * pass that finds a slot of the new tag applies the seek, then drains from that slot. A newer
+     * seek published meanwhile replaces the deferred one (the skipped generation never reaches the
+     * engine) and inherits its count. A writer that publishes nothing for `seekDeferralBlocks`
+     * (50 ms of rendered audio) gets the seek applied as before #2185. An anchored seek is never
+     * deferred: the engine holds its old generation until the anchor. Root decision (#2185): up to
+     * 50 ms of old-position audio is the smaller artefact than a silence insert, which is two cuts
+     * and a hole; the deferral is one cut, at most 50 ms late. The prelude does not know the
+     * engine ring's size, so this bound is not capped at half of it as the Worker's is.
+     */
+    deferSharedSeek(ring) {
+      if (ring.seekEpoch === ring.seenEpoch || ring.seekAnchor !== NO_ANCHOR) return false
+      if (ring.deferredBlocks >= this.seekDeferralBlocks) return false
+      const control = ring.control
+      const write = Atomics.load(control, CONTROL_WRITE_INDEX)
+      let read = control[CONTROL_READ_INDEX]
+      let published = false
+      for (let remaining = ring.capacity; read !== write && remaining > 0; remaining -= 1) {
+        const word = (read & (ring.capacity - 1)) * (SLOT_HEADER_BYTES / 4)
+        if (ring.headers[word + SLOT_SEQUENCE] !== read) {
+          control[CONTROL_TORN] += 1
+          break
+        }
+        if (ring.headers[word + SLOT_GENERATION_TAG] === ring.seekTag) {
+          published = true
+          break
+        }
+        read = (read + 1) & SAB_WRAP_MASK
+        control[CONTROL_STALE] += 1
+      }
+      Atomics.store(control, CONTROL_READ_INDEX, read)
+      if (published) return false
+      ring.deferredBlocks += 1
       return true
     }
 
@@ -638,6 +702,7 @@ function wrapEngineProcessor(Base) {
     consumeSharedSeek(ring, epoch) {
       const control = ring.control
       ring.seenEpoch = epoch
+      ring.deferredBlocks = 0
       control[CONTROL_SEEKS_APPLIED] += 1
       ring.depth = 0
       ring.finished = false

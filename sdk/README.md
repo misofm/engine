@@ -352,6 +352,15 @@ writes them, and makes it even again, so one seek adds 2. A reader that sees an 
 epoch that changed while it read, reads the seek again later. A writer of its own must publish
 the same way.
 
+A plain ring seek (`Msb1RingWriter.seek(generation, frame)`) while audio plays does not cut to
+silence. The drain frees the ring's chunks of the old generation at once, so the writer can write
+the new one, and the old position plays on from the engine's ring until the first chunk of the new
+generation arrives. Then the seek applies, a single cut. If no such chunk arrives within 50 ms of
+rendered audio (in `worker` mode, at most half the engine ring), the seek applies anyway and the
+source plays silence, counted as underruns, until its PCM arrives. The engine reports the block
+where the seek applied in the source's seek report. A suspended seek with `feed.prepareSeek()` applies at once, as before. The transport seek,
+`engine.seek(frame, { producers })`, is a session seek and does not take this path (#2205).
+
 Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
 is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.
 The device/context must accept the session rate and quantum (normally 128 frames); mismatches are

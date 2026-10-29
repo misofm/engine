@@ -5093,10 +5093,10 @@ async function testControlWorker() {
           feed.next += 64n;
         }
       };
-      const seek = (generation, frame) => {
+      const seek = (generation, frame, anchorSample) => {
         feed.generation = generation;
         feed.next = frame;
-        writer.seek(generation, frame);
+        writer.seek(generation, frame, anchorSample);
       };
       port.onmessage({ data: structuredClone({ op: "attach", rings: [ring] }) });
       return { send, tick, engine, room, render, fill, seek, writer };
@@ -5106,8 +5106,9 @@ async function testControlWorker() {
       fill();
       tick.callback();
       assert.equal(engine.queued.length, 44, "the drain keeps H = 36 of the 80 free");
-      // An anchored start that holds 60 blocks: render takes nothing meanwhile.
-      seek(2n, 0n);
+      // An anchored start that holds 60 blocks: render takes nothing meanwhile. #2185: the ring
+      // publishes the anchored seek the message names (a plain one would now wait for its chunk).
+      seek(2n, 0n, 640n);
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n, sourceFrame: 0n, anchorSample: 640n });
       engine.hold = 60;
       for (let pass = 0; pass < 40; pass += 1) {
@@ -5116,11 +5117,15 @@ async function testControlWorker() {
         tick.callback();
         assert.ok(room() >= 36, `pass ${pass}: the headroom stays free through the hold (room ${room()})`);
       }
-      // A plain ring seek now: its new generation is admitted before the next block.
+      // A plain ring seek now: its new generation is admitted before the next block. #2185: the
+      // pass that finds none of its chunks frees the old generation's slots and defers the seek;
+      // the pass after the writer publishes applies it.
       seek(3n, 9600n);
-      tick.callback(); // the seek, and the old generation's slots freed from the shared ring
+      tick.callback();
+      assert.equal(engine.seek, null, "no seek before its generation's first chunk");
       fill();
       tick.callback();
+      assert.equal(engine.seek, 3n);
       assert.equal(engine.queued.filter((value) => value === 3n).length, 36,
         "the plain seek's new generation fills the headroom before the next block renders");
       render(1);
@@ -5227,6 +5232,7 @@ async function testControlWorker() {
         port.onmessage({ data: structuredClone(data) });
         return replies.pop();
       };
+      Object.defineProperty(adapter, "seekBound", { get: () => worker.seekDeferralQuanta });
       Object.assign(adapter, {
         attach: async (rings) => { feed({ op: "attach", rings }); },
         // One pass: the drain, then one rendered block, then the drain that accounts it (the

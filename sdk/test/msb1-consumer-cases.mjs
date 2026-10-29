@@ -20,6 +20,7 @@
 //                             apply reads anything (the race window between check and apply)
 //   submissions               [{ id, generation, start, channels, frames, end, pcm }]
 //   seeks                     [[generation, frame]] of every `source_seek` call
+//   seekBound                 the consumer's live seek deferral bound in quanta (#2185)
 // The prelude submits at most two chunks a pass and the Worker as many as the engine takes, so a
 // case passes until the ring is drained (`drain`) wherever counts matter.
 
@@ -161,6 +162,35 @@ export const MSB1_CONSUMER_CASES = [
     },
   },
   {
+    // #2185: red on a drain that applies a live plain seek in the pass that frees the stale slots:
+    // render then drops the old chunks the engine holds before the writer could publish any new
+    // one, a gap; and red on a deferral with no bound.
+    name: "#2185: a live plain seek over a full ring of the old generation frees its slots and waits for its first chunk; the bound applies it",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      consumer.submitResult = 6; // the engine's ring is full of the old generation
+      for (let chunk = 0; chunk < 8; chunk += 1) fed.write(1n, BigInt(chunk * Q));
+      await consumer.pass();
+      assert.equal(fed.writer.occupancy, 8, "the shared ring is full");
+      fed.writer.seek(2n, 40n);
+      await consumer.pass();
+      assert.deepEqual([consumer.seeks, count(fed.shared, "STALE"), fed.writer.occupancy], [[], 8, 0],
+        "the stale slots are freed and no seek is asked before a chunk of its generation");
+      fed.write(2n, 40n);
+      consumer.submitResult = 0;
+      await consumer.pass();
+      assert.deepEqual(consumer.seeks, [[2n, 40n]], "the first new chunk applies the seek");
+      assert.deepEqual(starts(consumer).filter(([generation]) => generation === 2n), [[2n, 40n]], "then drains it");
+      fed.writer.seek(3n, 80n); // a writer that publishes nothing
+      for (let pass = 1; pass < consumer.seekBound; pass += 1) await consumer.pass();
+      assert.equal(consumer.seeks.length, 1, "no seek within the bound");
+      await drain(consumer, 2);
+      assert.deepEqual(consumer.seeks.at(-1), [3n, 80n], "the bound applies the seek");
+      assert.deepEqual([count(fed.shared, "SEEKS_APPLIED"), count(fed.shared, "REFUSED")], [2, 0]);
+    },
+  },
+  {
     name: "#1644: a seek refused as stale at the session seek's generation is the seek applied; any other refusal is counted",
     async run(consumer) {
       const moved = ring("moved");
@@ -182,6 +212,7 @@ export const MSB1_CONSUMER_CASES = [
       // At the session generation but another refusal than the stale one: a refusal too.
       consumer.seekStale = false;
       other.writer.seek(2n, 0n);
+      other.write(2n, 0n);
       await consumer.pass();
       assert.equal(count(other.shared, "SEEKS_APPLIED"), 0);
       assert.ok(count(other.shared, "REFUSED") >= 1, "another refusal at the session generation is counted");
@@ -196,6 +227,7 @@ export const MSB1_CONSUMER_CASES = [
       await drain(consumer);
       assert.equal(count(fed.shared, "FINISHED"), 1);
       fed.writer.seek(2n, 0n);
+      fed.write(2n, 0n);
       await consumer.pass();
       assert.equal(count(fed.shared, "FINISHED"), 0, "a seek starts the region again");
       // Bad frame counts: 0 and a quantum plus one, both skipped and counted.
