@@ -1276,6 +1276,94 @@ describe("browser session edits", () => {
     }
   });
 
+  test("#2189: live controls an app holds follow a rebuild that adds or removes a submix", async () => {
+    // Red if the live controls check strips against the set they were made with: `strip()` then
+    // refuses the bus an apply added, and accepts it after an apply removed it.
+    const { engine, tick } = await boot(base());
+    try {
+      const held = await engine.liveControls();
+      assert.throws(() => held.edit.strip("bus"), MisoUsageError);
+      const added = await engine.apply(transaction(base()).upsertSubmix("bus").build());
+      assert.equal(added.path, "rebuild");
+      tick();
+      await engine.applied(added.revision);
+      assert.equal((await held.submit(held.edit.strip("bus").faderDb(-6))).ok, true);
+      const asked = await engine.liveControls();
+      assert.doesNotThrow(() => asked.edit.strip("bus"));
+      const removed = await engine.apply(transaction(base().submix("bus")).removeSubmix("bus").build());
+      assert.equal(removed.path, "rebuild");
+      assert.throws(() => held.edit.strip("bus"), MisoUsageError);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("#2189: a rebuild that moves no strip keeps index addressing on the strips it left", async () => {
+    // Red if any rebuild drops the session's layout for every strip (an insert on t1 then breaks
+    // `insert(0)` on t2), or if a strip whose inserts the rebuild reordered still resolves an index
+    // against the booted chain (index 0 would address `insert-1`, which is now second).
+    const { engine } = await boot(base());
+    try {
+      const held = await engine.liveControls();
+      const reordered = transaction(base()).upsertTrack("t1", {
+        source: "a",
+        inserts: [effect("miso.compressor", { ratio: 2 }, { slotId: "glue" }), effect("miso.parametric-eq", {}, { slotId: "insert-1" })],
+      });
+      assert.equal((await engine.apply(reordered.build())).path, "rebuild");
+      for (const controls of [held, await engine.liveControls()]) {
+        assert.doesNotThrow(() => controls.edit.track("t2").insert(0, "miso.parametric-eq").bypass(true));
+        assert.throws(() => controls.edit.track("t1").insert(0, "miso.parametric-eq"), MisoUsageError);
+        assert.doesNotThrow(() => controls.edit.track("t1").insert("glue", "miso.compressor").bypass(true));
+      }
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("#2193: a host's raw miso.error.v1 rejection of a live-control frame is a MisoEngineError", async () => {
+    // Red if the live queue's send passes the host's local refusal record (not an Error) to the app:
+    // a writer then throws the record instead of retrying the host's in-flight backpressure, and a
+    // submit rejects with the record. Red too if a failed host's sticky result 6 is raised as
+    // `backpressure` (the writer then retries a dead host on every flush and never throws), or if
+    // the refusal waits for a status() reply (a flush then hangs on a host that stopped answering).
+    const { engine, host } = await boot(base());
+    const forward = host.control;
+    let refusal;
+    let sticky;
+    host.control = async (frame, replacement) => {
+      if (sticky !== undefined) throw sticky;
+      const once = refusal;
+      refusal = undefined;
+      if (once !== undefined) throw Object.freeze({ tag: "miso.error.v1", requestId: 0, result: once });
+      return forward.call(host, frame, replacement);
+    };
+    // The shipped host's status(): a failed host rejects it at once with its sticky record; a
+    // healthy one answers behind the frames in flight, here never, so the refusal must not wait.
+    host.status = () => sticky !== undefined ? Promise.reject(sticky) : new Promise(() => {});
+    try {
+      const controls = await engine.liveControls();
+      const writer = controls.writer();
+      writer.stage(controls.edit.track("t1").faderDb(-3).edits[0]);
+      // More than 64 frames in flight: the host's `RESULT_BACKPRESSURE`, which drains.
+      refusal = 6;
+      const refused = await writer.flush();
+      assert.deepEqual([refused.refused, refused.reason, refused.pending], [true, "backpressure", 1]);
+      assert.equal((await writer.flush()).admitted, 1, "the retry lands");
+      // An over-limit frame: `RESULT_INVALID_ARGUMENT`, which never succeeds on resend.
+      refusal = 1;
+      await assert.rejects(controls.submit(controls.edit.track("t1").faderDb(-4)), (error) =>
+        error instanceof MisoEngineError && error.code === "invalidArgument" && error.result === 1);
+      // A host that failed with sticky result 6 (a refused control-event dequeue) is not drained.
+      sticky = Object.freeze({ tag: "miso.error.v1", requestId: 7, result: 6 });
+      writer.stage(controls.edit.track("t1").faderDb(-5).edits[0]);
+      await assert.rejects(writer.flush(), (error) =>
+        error instanceof MisoEngineError && error.code === "wrongState" && error.result === 6);
+      assert.equal(writer.pending, 0, "a failed host's batch is dropped");
+    } finally {
+      await engine.close();
+    }
+  });
+
   test("#2190: a host's raw miso.error.v1 rejection of a protocol frame is a MisoEngineError", async () => {
     // Red if the transport passes the host's local refusal record (not an Error) through to the app.
     const { engine, host } = await boot(base());

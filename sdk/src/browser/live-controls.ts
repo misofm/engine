@@ -27,10 +27,56 @@ export function hostRecordFailure(error: unknown): unknown {
   return new MisoEngineError(message, { phase: "lifecycle", code, result });
 }
 
-/** Post one command frame to the host's `control` message; a call that failed throws. */
+/**
+ * A `control()` rejection as the SDK raises it (#2193). It is {@link hostRecordFailure}'s mapping,
+ * with one question asked of the host for `backpressure`: the host refuses a frame with
+ * `RESULT_BACKPRESSURE` (6) while 64 frames are in flight, which drains, but a host that failed
+ * rejects every later call with its sticky record, and that record can carry result 6 too (a
+ * control-event dequeue the engine refused). The two records are the same shape, so the SDK asks
+ * `status()`: a failed host refuses it locally, before it posts anything, with its sticky record. A
+ * failed host's `backpressure` is raised as `wrongState`, which the writer never retries, so a
+ * writer cannot retry a dead host forever. A host without `status()` is outside the shipped
+ * declaration; its record keeps the plain mapping.
+ *
+ * The question waits for no reply. A healthy host answers `status()` behind the frames in flight,
+ * on the same port, and one that stopped answering never does; so the SDK waits one task turn, by
+ * which a local refusal has settled, and a `status()` still unsettled then is a host that has not
+ * failed: the refusal stays `backpressure` and the call returns at once, as before the question.
+ */
+async function hostControlFailure(host: MisoAudioWorkletHost, error: unknown): Promise<unknown> {
+  const mapped = hostRecordFailure(error);
+  if (!(mapped instanceof MisoEngineError) || mapped.code !== "backpressure") return mapped;
+  if (typeof (host as { readonly status?: unknown }).status !== "function") return mapped;
+  let failed = false;
+  // Its reply, if one comes, is not wanted, and a late rejection is not left unhandled.
+  try {
+    host.status().then(() => undefined, () => { failed = true; });
+  } catch {
+    failed = true;
+  }
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  if (failed) {
+    return new MisoEngineError(
+      "the browser host failed a control call (its sticky result is 6, backpressure)",
+      { phase: "lifecycle", code: "wrongState", result: mapped.result },
+    );
+  }
+  return mapped;
+}
+
+/**
+ * Post one command frame to the host's `control` message; a call that failed throws. A frame the
+ * host refuses before the core rejects as {@link hostControlFailure} maps it (#2193), so a
+ * live-control submit and a control-list read never hand the app the host's raw record.
+ */
 function hostControlSend(host: MisoAudioWorkletHost): (frame: Uint8Array) => Promise<Uint8Array> {
   return async (frame) => {
-    const reply = await host.control(frame);
+    let reply: Awaited<ReturnType<MisoAudioWorkletHost["control"]>>;
+    try {
+      reply = await host.control(frame);
+    } catch (error) {
+      throw await hostControlFailure(host, error);
+    }
     if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
     return reply.response;
   };
@@ -60,6 +106,8 @@ export function createBrowserStripOrder(host: MisoAudioWorkletHost): () => Promi
 export interface BrowserStripOrders {
   /** The order of the newest committed list, read again when its structure epoch moved. */
   readonly current: () => Promise<ControlStripOrder>;
+  /** The order `current` returned last, without a read; `undefined` before the first read. */
+  readonly latest: () => ControlStripOrder | undefined;
   /** The order of the list of `epoch` if the page holds it now. */
   readonly held: (epoch: number | bigint) => ControlStripOrder | undefined;
   /**
@@ -111,6 +159,7 @@ function newBrowserStripOrders(host: MisoAudioWorkletHost): BrowserStripOrders {
   const held = (epoch: number | bigint): ControlStripOrder | undefined => orders.get(BigInt(epoch));
   return Object.freeze({
     current,
+    latest: () => newest,
     held,
     of: async (epoch: number | bigint) => {
       const known = held(epoch);
@@ -195,5 +244,8 @@ export async function createBrowserLiveControls(
     metersAttached: remoteMap.metersAttached,
     submixes: order.submixes,
   });
-  return new EngineLiveControls(map, { queue, order }, session, booted);
+  // The live controls follow the host's newest order (#2189): every read of it -- the browser
+  // engine's after a committed rebuild, a meter frame's, a feed's -- moves the strips they check, so
+  // live controls an app already holds are never left on the strip set they were made with.
+  return new EngineLiveControls(map, { queue, order: () => orders.latest() ?? order }, session, booted);
 }

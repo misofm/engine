@@ -481,6 +481,22 @@ that the edit adds or changes starts from rest; `engine.counters(["stripsRestart
 strip that a swap started at rest. After a committed `replaceSession`, `engine.liveControls()`
 binds to the new document.
 
+Live controls follow a rebuild that adds, removes or reorders strips (issue #2189). Before a
+committed `apply` or `replaceSession` on the `rebuild` path resolves, the engine reads the core's
+strip order again, and every `EngineLiveControls` from this engine, also one the app already holds,
+checks strips and names effects against that order: `edit.strip("<new bus>")` is accepted, and
+`edit.strip("<removed bus>")` throws `MisoUsageError`. An edit staged before the rebuild keeps the
+address it was built for, and the core refuses it if that strip or effect is gone. A console slot
+or insert addressed by index (`effect()`, `insert(<index>)`) resolves against the session the live
+controls were made from only while the core's list still shows that strip as the session declares
+it: the same tracks and submixes, and the same console slots and inserts on that strip, in the
+same order. A rebuild that changes the inserts of one strip leaves index addressing on the other
+strips as it was. On the changed strip, and on every strip once the strips moved, an index throws
+`MisoUsageError` and IDs resolve from the control list alone, so an index never addresses an insert
+that the rebuild moved. A strip change that another page commits on the same host is seen
+when the page next reads the strip order. If that read fails after a commit, the call still
+resolves (the edit is committed), and the next read catches up.
+
 On a page without cross-origin isolation (`"single"` mode), the worklet's message handler
 prepares a `rebuild` on the audio thread. The audio thread is blocked while it prepares, and
 `(await engine.host.status()).blockingRebuilds` counts each blocking rebuild. In `"worker"` mode
@@ -630,7 +646,15 @@ Parameter keys and units come from the catalog. `inputFilters({ hpfHz, lpfHz })`
 builtin cutoffs in one transaction; zero disables a filter. `controls.writer()` returns a
 `LiveControlWriter` that stages edits by address, coalesces latest values and flushes bounded
 batches through the queue, for gesture loops; the core's `backpressure` status is flow control and
-never an error. The root entry's `parameter()` helper provides exact decimal/lattice edits for
+never an error. In the browser, a live-control frame the host refuses before the core rejects with
+`MisoEngineError` that carries the host's result, never with the host's raw `miso.error.v1` record
+(issue #2193). The writer retries only `backpressure` (more than 64 frames in flight), which drains.
+A host that failed answers with its sticky record, which can also carry result 6; the SDK asks the
+host's `status()`, which a failed host refuses at once, and raises that failure as `wrongState`.
+It does not wait for a reply: a refusal stays `backpressure` and returns at once from a host that
+has not failed, also from one that stopped answering.
+Any other host result (`invalidArgument` for a frame over the limit, `wrongState` or `internal` for
+a host that failed) never succeeds on resend: the writer drops the batch and throws. The root entry's `parameter()` helper provides exact decimal/lattice edits for
 agent-facing controls.
 
 Observation subscriptions (`engine.subscribeObservations(...)`) send the core's `Observe` edit
@@ -687,8 +711,10 @@ a typed effect builder takes the effect it is typed for, and the SDK sends that 
 (`expected-effect`) of the `SET_CONTROL` address. If that insert or slot runs another effect when the core applies the edit
 (`insert("comp", "miso.compressor")` after a rebuild made `comp` a soft clip), the core refuses
 the transaction with `control.effect.changed`, which `submit()` rejects as `MisoControlRefusal`, and
-nothing changes. A named row stays bound to the effect it was resolved for: after a rebuild, call
-`engine.liveControls()` again so that names resolve against the new list. A numeric address names
+nothing changes. A named row stays bound to the effect it was resolved for when the edit was staged.
+In the browser, the live controls resolve the next names against the list a committed rebuild left
+(see "Edit a playing session"); headless, call `engine.liveControls()` again after a rebuild so that
+names resolve against the new list. A numeric address names
 no effect unless it carries `expectedEffect`, and without it the edit applies to whatever runs
 there. A section the list does not have cannot be named; use the list entry's numeric address.
 `set` checks only that the edit can be encoded. The value's domain, the lane, the owner and whether the

@@ -1116,6 +1116,19 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         maximumFrameBytes: endpoint.maximumFrameBytes(),
       });
     };
+    // Issue #2189: a rebuild can add, remove or reorder strips, and the live controls follow the
+    // host's newest strip order. So the strip order is read again before a committed rebuild's call
+    // resolves: live controls the app holds then check strips against the committed session's. The
+    // edit is committed, so a failed read does not reject the call; the next read of the order
+    // (a later rebuild's, a meter frame's, a feed's) catches up.
+    const followStructure = async (path: string): Promise<void> => {
+      if (path !== "rebuild") return;
+      try {
+        await createBrowserStripOrders(host).current();
+      } catch {
+        // See above: the commit stands, and the order is read again on its next use.
+      }
+    };
     const getLiveControls = (): Promise<EngineLiveControls> => {
       // Every value edit is a SET_CONTROL transaction, so the semantic controls need no boot word.
       if (semanticLiveControls === undefined) {
@@ -1652,6 +1665,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       apply: async (transaction: SessionTransaction) => {
         if (closed) throw new MisoUsageError("the browser engine is closed");
         const outcome = await (await protocolClient()).applyTransaction(transaction);
+        await followStructure(outcome.path);
         // Issue #1297b D6: a removed source's ring keeps draining until the removal is in effect.
         const removed = transaction.edits.flatMap((edit) => edit.kind === "removeSource" ? [edit.sourceId] : []);
         if (removed.length !== 0) feedRetirement.retire(removed, () => engine.applied(outcome.revision));
@@ -1661,6 +1675,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         if (closed) throw new MisoUsageError("the browser engine is closed");
         const bytes = documentBytes(replacement);
         const outcome = await (await protocolClient()).replaceSession(bytes);
+        await followStructure(outcome.path);
         // The committed model is now `replacement`'s: the next `liveControls()` binds to it. A
         // refusal threw above and rebinds nothing.
         liveSession = replacement instanceof SessionBuilder ? replacement : undefined;
