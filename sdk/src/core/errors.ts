@@ -111,6 +111,8 @@ export interface MisoEngineErrorInit {
   /** The engine's result code; absent when the SDK itself raised `code` (an `SdkTimeoutCode`). */
   readonly result?: number | undefined;
   readonly diagnostics?: readonly MisoDiagnostic[];
+  /** What the SDK mapped into this error, such as the host's raw `miso.error.v1` record (#2201). */
+  readonly cause?: unknown;
 }
 
 /**
@@ -134,7 +136,7 @@ export class MisoEngineError extends Error {
     const detail = diagnostics.length === 0
       ? ""
       : ` (${diagnostics.map((row) => (row.path ? `${row.code} at ${row.path}` : row.code)).join("; ")})`;
-    super(`${init.phase}: ${init.code}: ${message}${detail}`);
+    super(`${init.phase}: ${init.code}: ${message}${detail}`, init.cause === undefined ? undefined : { cause: init.cause });
     this.name = "MisoEngineError";
     this.phase = init.phase;
     this.code = init.code;

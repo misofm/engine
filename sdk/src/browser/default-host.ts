@@ -3,6 +3,7 @@ import type { BootOptions } from "../core/abi.ts";
 import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
 import { BUNDLED_ENGINE_ASSETS } from "../assets.ts";
 import { toWebBootOptions } from "./host-mirror.ts";
+import { MisoEngineError, resultName } from "../core/errors.ts";
 
 /** Failures in package-owned browser construction, before an engine refusal is available. */
 export class BrowserBootError extends Error {
@@ -51,6 +52,18 @@ export async function createDefaultHost(request: {
     // #1332 D6: the control Worker failed before its boot reply; never a silent `single` boot.
     if ((error as { tag?: unknown } | null)?.tag === "miso.worker-failed.v1") {
       throw new BrowserBootError("worker-failed", "Engine control Worker failed before its boot reply", error);
+    }
+    // #2201: the host refuses a boot with its raw `miso.error.v1` record (the worklet's refusal,
+    // a context mismatch, a module it could not fetch), which is not an `Error`. The app gets the
+    // SDK's error with the host's result; the record stays its `cause`.
+    const { tag, result } = (error ?? {}) as { readonly tag?: unknown; readonly result?: unknown };
+    if (tag === "miso.error.v1" && typeof result === "number" && Number.isSafeInteger(result) && result >= 0) {
+      throw new MisoEngineError("the browser host refused the boot", {
+        phase: "boot",
+        code: resultName(result, "boot"),
+        result,
+        cause: error,
+      });
     }
     throw error;
   }

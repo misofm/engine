@@ -43,7 +43,7 @@ function hostRecordFailure(error: unknown): unknown {
  * which a local refusal has settled, and a `status()` still unsettled then is a host that has not
  * failed: the refusal stays `backpressure` and the call returns at once, as before the question.
  */
-async function hostControlFailure(host: MisoAudioWorkletHost, error: unknown): Promise<unknown> {
+async function hostControlFailure(host: Pick<MisoAudioWorkletHost, "status">, error: unknown): Promise<unknown> {
   const mapped = hostRecordFailure(error);
   if (!(mapped instanceof MisoEngineError) || mapped.code !== "backpressure") return mapped;
   if (typeof (host as { readonly status?: unknown }).status !== "function") return mapped;
@@ -82,11 +82,11 @@ export function hostControl(
 }
 
 /**
- * Any other host call whose rejection can reach the app (#2201 attempt 2): `status()`,
- * `sessionMap()` and `dispose()` reject with the host's raw record too (a failed host's sticky one,
+ * Any other host call whose rejection can reach the app (#2201 attempt 2): `status()` (the engine's
+ * and the PCM feed's), `sessionMap()` and `dispose()` reject with the host's raw record too (a failed host's sticky one,
  * or a local refusal), and it is mapped as {@link hostControl} maps a frame's.
  */
-export async function hostCall<T>(host: MisoAudioWorkletHost, call: () => Promise<T>): Promise<T> {
+export async function hostCall<T>(host: Pick<MisoAudioWorkletHost, "status">, call: () => Promise<T>): Promise<T> {
   try {
     return await call();
   } catch (error) {

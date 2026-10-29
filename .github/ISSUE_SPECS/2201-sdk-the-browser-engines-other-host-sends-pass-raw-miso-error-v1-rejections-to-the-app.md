@@ -33,7 +33,17 @@ the PCM feed files (another branch owns them). Root ruling at the attempt-1 veri
   - `status()`: `engine.position()` and the observation render wait (its `mark` and its poll),
     which a host-local result 6 now reaches because it is retryable;
   - `sessionMap()`: `engine.liveControls()`;
-  - `dispose()`: `engine.close()`.
+  - `dispose()`: `engine.close()`;
+  - `status()` in the PCM feed's anchored start (`pcm-feed.ts`, one `readAnchor` read for the
+    `frameAt` and `alignTo` starts; the residual of the feed branch, after #2207 merged).
+- D1b (folded after the attempt-2 PASS, root ruling on verify MINOR 1): `createEngine()` does not
+  reject with the host's raw record on a boot refusal. In `default-host.ts`, the catch after
+  `createMisoAudioWorkletHost` already raised `miso.worker-failed.v1` as `BrowserBootError`. It now
+  also raises a raw `miso.error.v1` (the worklet's error ready reply, `webError(255)`, a context
+  mismatch `webError(1)`, a module fetch failure `webError(RESULT_UNSUPPORTED)`) as
+  `MisoEngineError`, phase `boot`. The code is named as for a boot (`resultName(result, "boot")`,
+  so result 1 is `refusedDocument`), the result is the host's, and the raw record is the error's
+  `cause`. `MisoEngineErrorInit` gains an optional `cause`.
 
   `hostRecordFailure` is no longer exported. The callers keep their own reply handling (the
   revision note and `controlCallFailure`).
@@ -44,8 +54,9 @@ the PCM feed files (another branch owns them). Root ruling at the attempt-1 veri
   - The track-response watch maps a `status()` rejection to its lifecycle error.
   - The `sessionMap()` of source retirement after a replace (`retireAbsent`) and the boot path's
     `dispose()` after a refused spectrum boot swallow their rejection, so it never reaches the app.
-  - `pcm-feed.ts` calls `host.status()` too. It is out of scope here (another branch owns the
-    feed files), and is recorded as a residual for that branch.
+  - `pcm-feed.ts`'s `seekSourceAt()` and `seekReport()` already turn the record's result into
+    the feed's typed refusal.
+  - An app's own `createHost` is the app's code: `createEngine()` passes its rejection through.
 - D2 (retries): each caller's retry rule is unchanged and reads the error's code, as #2193 D2
   decided for the writer. The one input that changes is a host-local refusal, which was a raw
   record before and is now typed. The observation owner resends an `Observe` refused with
@@ -76,6 +87,12 @@ record`. This is one table test, and each row fails at its own host call:
   `counters()` reject with `invalidArgument` (attempt 2, MAJOR 1).
 - A boot with a spectrum tap, whose second `CAPABILITIES_GET` the host refuses, rejects in the same
   way.
+- On the failed host, the PCM feed's anchored start (`feed.ready()`) rejects with `wrongState`
+  (fold).
+
+`sdk/test/browser-defaults-evals.mjs`, `default host failures close accepted context and map the
+factory's raw refusal` (D1b): this test pinned the old behaviour (the raw record) and now asserts
+the new contract. It is the one test of that claim.
 
 Folded: the #2190 browser test (a protocol frame, now the `protocol` row) is deleted, and so is the
 #2193 test's `submit()` result-1 step (now the `liveControls` row). The #2193 test keeps the
@@ -101,11 +118,21 @@ writer's retry and sticky-failure claims.
   | render wait `mark` | `the observation render mark` |
   | render wait poll | `the observation render wait` |
   | `dispose()` in `close()` | `close() on a failed host` |
+  | `status()` in the PCM feed's `readAnchor` (fold) | `the feed's anchored start on a failed host` |
+  | the `miso.error.v1` mapping in `default-host.ts` (fold) | `default host failures ... map the factory's raw refusal` |
 
   The test passed 10 of 10 runs on the tree.
 - Attempt 1 verify (of `2cabe4121`): the queue-probe revert left every test green (MAJOR 1, now a
   row). Chromium and WebKit passed on both legs, with one #2198 `sdk-protocol-lossy` flake on WebKit
   worker that passed on rerun.
+- Fold (rebased onto `e858c2503`, artifact rebuilt from that tree; the wasm module is unchanged and
+  the control worker is #2207's): every row above red on its own revert and green on the tree. The
+  SDK headless evals pass (709 of 709), and so do `browser-pcm-evals.mjs` (the PCM case table, 51
+  of 51), `check-sdk-types.sh`, `check-sdk-deletions.py`, `check-sdk-generated.sh`,
+  `sdk-package.sh check`, `check-workspace-policy.sh` and the Chromium browser qualification
+  (`--sdk-root --check-matrix`), single and worker legs.
+- README: the SDK README has no section for the next release, so there is no upgrade note. The
+  "Observe the rendered mix" paragraph states the boot refusal's new type.
 - Attempt 2 green: the SDK headless evals (705 of 705); `check-sdk-types.sh`,
   `check-sdk-generated.sh`, `check-sdk-deletions.py`, `sdk-package.sh check`,
   `check-workspace-policy.sh`; the Chromium browser qualification (`--sdk-root --check-matrix`),

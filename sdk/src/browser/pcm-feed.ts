@@ -9,6 +9,7 @@ import {
   Msb1RingWriter,
 } from "./pcm-ring.ts";
 import type { MisoAudioWorkletHost, MisoSeekReport } from "./shipped-host.d.ts";
+import { hostCall } from "./live-controls.ts";
 
 export type PcmFeedOperation = "moduleLoad" | "nodeCreate" | "attachPost" | "readyTimeout" | "closed"
   | "prepareState" | "prepareBusy" | "preparePost" | "prepareTimeout" | "prepareSuperseded" | "prepareRefused"
@@ -524,11 +525,13 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       const earliest = status.nextAbsoluteSample + BigInt(capacity) * quantum;
       return (earliest + quantum - 1n) / quantum * quantum;
     };
+    // The one status read of a start; a failed host's raw record is mapped (#2201).
+    const readAnchor = async (): Promise<bigint> => anchorFrom(await hostCall(host, () => host.status()));
     const { alignTo } = entry.start;
     let anchorSample: bigint;
     let frame: bigint;
     if (alignTo === undefined) {
-      anchorSample = anchorFrom(await host.status());
+      anchorSample = await readAnchor();
       frame = entry.start.frameAt!(anchorSample);
       if (!nonnegativeI64(frame)) throw new MisoUsageError(`frameAt for source ${entry.source.sourceId} must return a nonnegative bigint within the MSB1 frame domain`);
     } else {
@@ -537,7 +540,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       const before = await readSeekReport(host, entry.source.sourceId, alignTo);
       const started = pendingStart(link!, alignTo, before.generation, refuse);
       if (started === undefined && before.generation === 0n) throw refuse("it has not rendered yet", "feed.align.unrendered");
-      anchorSample = anchorFrom(await host.status());
+      anchorSample = await readAnchor();
       if (started !== undefined) {
         // The reference's own anchored start is not rendered yet: its report is the old
         // generation's, so the frame comes from that start, exactly.

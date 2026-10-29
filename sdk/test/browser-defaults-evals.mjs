@@ -119,11 +119,16 @@ test("injected context and host independently retain default scratch worker", as
   worker.emit("message", { type: "worker-ready" }); const engine = await pending;
   assert.equal(request.moduleUrl, "override"); assert.deepEqual(request.options, scratchBootOptions({})); worker.assertClosed(); await engine.close();
 });
-test("default host failures close accepted context and preserve factory refusal", async () => {
-  const refusalUrl = hostUrl('export async function createMisoAudioWorkletHost() { throw { tag: "miso.error.v1", result: 1 }; }');
+test("default host failures close accepted context and map the factory's raw refusal", async () => {
+  // Red if createEngine rejects with the host's raw miso.error.v1 boot refusal (not an Error)
+  // instead of MisoEngineError with its result and the record as cause (#2201).
+  const record = { tag: "miso.error.v1", result: 1 };
+  const refusalUrl = hostUrl(`export async function createMisoAudioWorkletHost() { throw ${JSON.stringify(record)}; }`);
   for (const url of ["data:text/javascript,throw new Error('load')", refusalUrl]) {
     const candidate = context();
-    await assert.rejects(createEngine({ document: "opaque", scratchBoot: async () => shape, createContext: () => candidate, hostModuleUrl: url }), error => url === refusalUrl ? error.tag === "miso.error.v1" : error instanceof BrowserBootError && error.operation === "host-import");
+    await assert.rejects(createEngine({ document: "opaque", scratchBoot: async () => shape, createContext: () => candidate, hostModuleUrl: url }), error => url === refusalUrl
+      ? error instanceof MisoEngineError && error.phase === "boot" && error.result === 1 && error.code === "refusedDocument" && error.cause?.tag === "miso.error.v1" && error.cause.result === 1
+      : error instanceof BrowserBootError && error.operation === "host-import");
     assert.equal(candidate.closed, 1);
   }
 });

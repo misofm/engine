@@ -36,6 +36,7 @@ import {
   workletBootOptions,
 } from "../src/browser/index.ts";
 import { toWebBootOptions } from "../src/browser/host-mirror.ts";
+import { MSB1_CONTROL, MSB1_CONTROL_BYTES } from "../src/browser/pcm-ring.ts";
 import { onEndpointIds } from "./control-support.mjs";
 import { effectEntry, moduleBytes, sessionDocument } from "./support.mjs";
 
@@ -1374,7 +1375,8 @@ describe("browser session edits", () => {
     // protocol call, a live-control submit, the spectrum, observation, loudness and
     // track-response frames, a new queue's revision probe, the boot's capability probe), the
     // status() of the observation render wait, and the status(), sessionMap() and dispose() of a
-    // failed host, which reject with its sticky record. Each row fails at its own call.
+    // failed host (the PCM feed's status() included), which reject with its sticky record. Each row
+    // fails at its own call.
     const message = (frame) => frame[16] | (frame[17] << 8);
     const passes = new Set([0x0001, 0x000c, 0x000d]);
     const record = (result) => Object.freeze({ tag: "miso.error.v1", requestId: 7, result });
@@ -1443,6 +1445,16 @@ describe("browser session edits", () => {
     lost.host.dispose = () => Promise.reject(record(6));
     await assert.rejects(lost.engine.liveControls(), failed, "liveControls() on a failed host passed the host's raw record");
     await assert.rejects(lost.engine.position(), failed, "position() on a failed host passed the host's raw record");
+    // The PCM feed's anchored start reads the host's status() once.
+    const feed = attachEngineFeed({
+      engine: lost.engine, context: { audioWorklet: { addModule: async () => {} } }, quantumFrames: QUANTUM,
+      sources: [{ sourceId: "a", channels: 2, start: { frameAt: () => 0n, prime() {} } }],
+      createNode: () => ({ port: { postMessage() {} }, disconnect() {} }),
+    });
+    // The feed worklet confirms the attach in the ring's control block.
+    Atomics.store(new Int32Array(feed.rings[0], 0, MSB1_CONTROL_BYTES / 4), MSB1_CONTROL.ATTACHED, 1);
+    await assert.rejects(feed.ready(), failed, "the feed's anchored start on a failed host passed the host's raw record");
+    feed.close();
     await assert.rejects(lost.engine.close(), failed, "close() on a failed host passed the host's raw record");
     // A new queue's revision probe: the first CAPABILITIES_GET of the host.
     await assert.rejects((async () => {
