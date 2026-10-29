@@ -307,6 +307,7 @@ fn the_entry_serves_queries_and_refuses_bad_frames_without_failing_the_host() {
         after_handle: 0,
         limit: 4,
         owner: None,
+        headers_only: false,
     };
     let response = rig.command(
         CommandPayload::ControlListGet(&request),

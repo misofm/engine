@@ -118,6 +118,7 @@ fn prepare_corpus() -> Corpus {
         after_handle: 0,
         limit: 1,
         owner: None,
+        headers_only: false,
     };
     let response_request = protocol::ResponseGetRequest {
         target: protocol::ResponseTarget::Configuration(

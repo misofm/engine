@@ -430,6 +430,7 @@ pub(super) fn control_list_all_c(
                 after_handle,
                 limit,
                 owner: None,
+                headers_only: false,
             },
         )
         .expect("a list page");
@@ -464,6 +465,7 @@ pub(super) fn control_state_all_c(
                 after_handle,
                 limit,
                 owner: None,
+                headers_only: false,
             },
         )
         .expect("a state page");
@@ -3948,6 +3950,7 @@ fn capi_controller_dispatches_every_advertised_command_family() {
         after_handle: 0,
         limit: 1,
         owner: None,
+        headers_only: false,
     };
     assert_eq!(
         dispatch!(

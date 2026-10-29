@@ -351,6 +351,11 @@ export interface ControlListRequest {
   /** The most rows to return. */
   readonly limit: number;
   readonly owner?: ControlOwner | undefined;
+  /**
+   * Only the header rows (owner and section headers) of the window, with their list handles and in
+   * list order (#2206; field 6, sent only when `true`). `limit` then counts header rows.
+   */
+  readonly headersOnly?: boolean | undefined;
 }
 
 function u64Bytes(value: bigint): Uint8Array {
@@ -392,6 +397,7 @@ export function encodeControlListRequest(request: ControlListRequest): Uint8Arra
       fields.push(field(5, WIRE_UTF8, false, text(requireId(owner.id, "an owner ID"))));
     }
   }
+  if (request.headersOnly === true) fields.push(field(6, WIRE_BOOL, false, u8(1)));
   return commandFrame(
     request.kind === "list" ? MESSAGE_CONTROL_LIST_GET : MESSAGE_CONTROL_STATE_GET,
     FLAG_REVISION_ANY,
@@ -751,7 +757,11 @@ async function driveAsync<T>(
   return step.value;
 }
 
-function* listSteps(requestIds: ControlRequestIds, filter: ControlListFilter | undefined): Steps<ControlList> {
+function* listSteps(
+  requestIds: ControlRequestIds,
+  filter: ControlListFilter | undefined,
+  headersOnly = false,
+): Steps<ControlList> {
   const limit = pageLimit(filter);
   const owner = filter?.owner;
   for (let attempt = 0; attempt <= CONTROL_LIST_RESTARTS; attempt += 1) {
@@ -770,6 +780,7 @@ function* listSteps(requestIds: ControlRequestIds, filter: ControlListFilter | u
         afterHandle: after,
         limit,
         owner,
+        headersOnly,
       }));
       requireReply(reply, requestId);
       if (!reply.ok) {
@@ -929,7 +940,8 @@ export function stripOrderOf(list: ControlList): ControlStripOrder {
 
 /**
  * Probe the current structure epoch with the smallest list request the core serves (one row of the
- * session owner), then read the full list only when the epoch is not `known`'s.
+ * session owner), then, only when the epoch is not `known`'s, read the list's header rows alone
+ * (#2206): the order and each strip's sections are all {@link stripOrderOf} reads.
  */
 function* stripOrderSteps(
   requestIds: ControlRequestIds,
@@ -947,7 +959,7 @@ function* stripOrderSteps(
   requireReply(probe, requestId);
   if (!probe.ok) throw refusalError(probe.refusal);
   if (known !== undefined && known.structureEpoch === probe.page.structureEpoch) return known;
-  return stripOrderOf(yield* listSteps(requestIds, undefined));
+  return stripOrderOf(yield* listSteps(requestIds, undefined, true));
 }
 
 /**

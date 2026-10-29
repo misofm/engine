@@ -1002,7 +1002,11 @@ pub enum ConformanceDecoder {
 /// frame does not list `0x0014`, with bit 17 clear, which the bit-17 invariant allows. The 59
 /// earlier frames are byte-equal: their hash is the old pin. Re-pinned from `dea650f7e506833e`;
 /// the frame count is 61.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xde7d_7cf5_04ca_191a;
+/// #2206 adds the control list request's optional field 6, `headers_only`: the shared request of
+/// `command.control_list_get` and `command.control_state_get` carries it as `true`. Only those two
+/// frames move; the 59 others are byte-equal, and with the field absent the corpus hashes to the
+/// old pin. Re-pinned from `de7d7cf504ca191a`; the frame count stays 61.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xf056_88f0_cd7e_6f28;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1021,6 +1025,8 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             kind: ControlOwnerKind::Strip,
             id: Some("vocal".to_owned()),
         }),
+        // #2206: the optional field 6, so both control frames carry it.
+        headers_only: true,
     };
     let response_request = ResponseGetRequest {
         target: ResponseTarget::Configuration(ResponseConfiguration::Effect {

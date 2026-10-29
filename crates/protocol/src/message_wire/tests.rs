@@ -1107,6 +1107,7 @@ fn control_messages_round_trip_every_kind_and_optional_field() {
             after_handle: 4,
             limit: 256,
             owner,
+            headers_only: false,
         };
         let mut bytes = vec![
             0;
@@ -1257,6 +1258,7 @@ fn control_request_rules_refuse_on_encode_and_decode_alike() {
             kind: ControlOwnerKind::Strip,
             id: Some("vocal".to_owned()),
         }),
+        headers_only: false,
     };
     let mut bytes = vec![0; 256];
     let length = codec

@@ -70,3 +70,88 @@ wire validation, the provider's `window`, the generated SDK protocol tables and 
 codec gate for each side. A full-list reader (`controls()`, `controlState()`) does not change.
 Expected effect at 64 tracks: about 6 pages of 1,409 header rows instead of 57 pages of 14,588
 rows.
+
+## Decision (root ruling, 2026-10-29)
+
+Approved as proposed: optional field 6 `headers_only` (BOOL) on `control_list_request`, an in-place
+V1 amendment. The field is written only as `true`; a present `false` is `INVALID_FIELD` (one
+spelling per value). With it, the core serves only the owner and section headers of the window,
+with the list's own handles, order, epoch and cursor rules; `limit` counts header rows, and `eof`
+says no header row of the window follows. A `CONTROL_STATE_GET` with it covers the same header
+rows, so its page has no record. Without it, the request and the reply are byte-identical to
+before; no fixture or generated SDK surface changed. Attempt 2 adds a corpus frame value for the
+field and re-pins `COMPLETE_SCHEMA_HASH` (below). The C ABI serves it through the existing `CONTROL_LIST_GET` frame (no new symbol).
+The SDK codec (`encodeControlListRequest`, optional `headersOnly`) sends it, and
+`stripOrderSteps` uses it, so `stripOrderOf` reads the same header rows as before. Full-list
+readers (`controls()`, `controlState()`) do not change. #2189's guarantees stand: the #2189 and
+#2193 SDK evals stay green. No render path changed.
+
+## Gates and evidence (attempt 1)
+
+- Protocol gate, `crates/host-core/src/control_provider.rs`,
+  `a_headers_only_request_round_trips_and_pages_exactly_the_lists_header_rows`: the request
+  encodes and decodes through `ProtocolCodec` to itself, and the provider's headers-only pages, at
+  limit 4 with no owner and at limit 2 with an owner filter, hold exactly the full list's header
+  rows, with their handles and order, in `ceil(headers / limit)` pages. Red on three reverts: the
+  provider ignores the field (control rows appear), the encoder drops it (`Truncated`), the decoder
+  ignores it (the round-trip assertion).
+- SDK codec gate, `sdk/test/strip-order-evals.mjs` (#2206 describe): `readControlStripOrder`
+  against the shipped core gets no control row on any page, the header rows equal the full list's,
+  and the order and sections equal `stripOrderOf(full list)`. Red on three reverts:
+  `stripOrderSteps` without `headersOnly`, the encoder not sending field 6, and field 6 sent with
+  the wrong wire type (the core refuses).
+- Apply-to-resolve times (descriptive, the attempt-1 probe; four bus adds per row; "before" is the
+  2cabe4121 SDK on the e65c1595 module, "after" this branch's SDK on its module; held controls
+  followed every apply in both):
+
+  | tracks | before | after | before, 3 ms per frame | after, 3 ms per frame | frames before / after | reply per apply before / after |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 32 | 107-137 ms | 26-41 ms | 236-258 ms | 44-62 ms | 35-36 / 6-7 | 3.8-4.0 MB / 124-128 KiB |
+  | 64 | 198-210 ms | 40-43 ms | 419-436 ms | 71-77 ms | 63-64 / 9-10 | 7.0-7.2 MB / 235-239 KiB |
+
+- Checks: `cargo fmt --all --check`; clippy `-D warnings --all-targets --all-features` on
+  protocol, host-core, control-plane, host-web, capi, conformance and audit; their tests with
+  `--all-features` (1,387 passed, 0 failed); `check-workspace-policy.sh`; `realtime_policy` (291
+  marked regions in 46 files); `build-web-audioworklet.sh` (AudioWorklet module `bbdfd0cd...`, a
+  later release re-pins it); `check-sdk-headless.sh` (706 passed); `check-sdk-types.sh`;
+  `check-sdk-generated.sh`; `check-sdk-deletions.py`; `sdk-package.sh check`; Chromium
+  qualification with `--sdk-root --check-matrix`, single and worker legs, both passed.
+
+## Attempt 2 (verify of 3f97c105f: FAIL on two MAJORs, both folded)
+
+- MAJOR 1 and MAJOR 2: the protocol gate now also asserts that a headers-only
+  `CONTROL_STATE_GET` page has no record (with the list page's `last_handle` and `eof`), and that
+  decoding field 6 = `0` is `INVALID_FIELD`. Red on each mutation: decoder `Some(false) => false`
+  (`Ok(.. headers_only: false)` against `Err(InvalidField)`); state path without
+  `&& !request.headers_only` (28 records against 0).
+- MINORs: the unexercised `MockProvider` branch is removed (the mock ignores the field). A
+  headers-only list page reserves at most `limit` entries and a headers-only state page reserves
+  none; the full path's reservation is unchanged. The registry says field 6 is non-mandatory (a
+  peer that does not know it skips it and serves the full list), and that unlike
+  `include-window` a present `false` is refused.
+- Re-pin: the corpus's shared control request carries `headers_only: true`, so
+  `command.control_list_get` and `command.control_state_get` move; `COMPLETE_SCHEMA_HASH`
+  `de7d7cf504ca191a` -> `f05688f0cd7e6f28`, 61 frames, the 59 other frames byte-equal. Updated
+  with it: `crates/conformance/src/protocol_corpus.rs`, the two self-test search strings in
+  `scripts/check-protocol-wasm-parity.sh`, `docs/CONTROL_PROTOCOL_CONFORMANCE.md` and
+  `fuzz/corpus/complete-schema-manifest.md`. No fuzz seed carries a control list frame, so none
+  moved; there is no other wasm golden.
+- Checks: fmt; clippy and tests of the touched crates (1,387 passed); workspace policy; realtime
+  policy; `check-conformance-boundaries.sh`; `cargo run -p conformance`;
+  `check-protocol-wasm-parity.sh` and its `--self-test`; `build-web-audioworklet.sh` (module
+  `f613f286...`); `check-sdk-headless.sh` (706 passed); the strip-order eval.
+
+## Rebase onto main dd386abf0 (after #2208)
+
+Attempt 2 passed review. The branch carries only the #2206 commits on top of main, and two review
+MINORs are folded: the re-pin is recorded beside `COMPLETE_SCHEMA_HASH`, and the `MockProvider` doc
+says it ignores `headers_only`. On the rebased tree every gate is green again:
+- fmt, clippy and the touched crates' tests (1,387 passed);
+- `cargo run -p conformance` and the wasm parity check;
+- the workspace and realtime policies;
+- the AudioWorklet module build (`f613f286...`);
+- the SDK gates: headless (710 passed), types, generated, deletions and package;
+- the strip-order eval;
+- the Chromium qualification with `--sdk-root --check-matrix`, both legs.
+
+The probe at 32 / 64 tracks gives 26-42 / 40-43 ms, and 45-62 / 72-78 ms at 3 ms per frame.

@@ -99,6 +99,7 @@ fn control_list(handle: u32, request: &mut u64) -> (u64, Vec<String>) {
             after_handle: after,
             limit: 64,
             owner: None,
+            headers_only: false,
         };
         let (result, bytes) = native_staging::control_command(
             handle,

@@ -8,7 +8,7 @@ refused forms). Optional/boundary values are represented by the transaction's ne
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`de7d7cf504ca191a`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`f05688f0cd7e6f28`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -154,3 +154,7 @@ Issue #2115 re-pinned it from `dea650f7e506833e`: `LOUDNESS` (`0014`) adds `comm
 start) and `response.loudness` (an armed read with every optional level present). The static
 capabilities response does not list `0014` and leaves bit 17 clear, which the invariant allows.
 The 59 earlier frames are byte-equal (their hash is the old pin). The frame count is 61.
+Issue #2206 re-pinned it from `de7d7cf504ca191a`: the control list request carries the optional
+field 6, `headers_only` (`true`), so `command.control_list_get` and `command.control_state_get`,
+which share it, move. The 59 other frames are byte-equal (with the field absent the corpus hashes
+to the old pin). The frame count is 61.

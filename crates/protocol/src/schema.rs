@@ -379,9 +379,18 @@ pub(crate) mod control_list_request {
     pub(crate) const LIMIT: FieldSpec = FieldSpec::req(3, Wire::U16);
     pub(crate) const OWNER_KIND: FieldSpec = FieldSpec::opt(4, Wire::U8);
     pub(crate) const OWNER_ID: FieldSpec = FieldSpec::opt(5, Wire::Utf8);
+    /// Only the window's header rows (#2206); written only when true.
+    pub(crate) const HEADERS_ONLY: FieldSpec = FieldSpec::opt(6, Wire::Bool);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "ControlListRequest",
-        fields: &[STRUCTURE_EPOCH, AFTER_HANDLE, LIMIT, OWNER_KIND, OWNER_ID],
+        fields: &[
+            STRUCTURE_EPOCH,
+            AFTER_HANDLE,
+            LIMIT,
+            OWNER_KIND,
+            OWNER_ID,
+            HEADERS_ONLY,
+        ],
     };
 }
 

@@ -1037,6 +1037,7 @@ mod tests {
             after_handle: 0,
             limit: 1,
             owner: None,
+            headers_only: false,
         };
         let response_request = crate::ResponseGetRequest {
             target: crate::ResponseTarget::Configuration(
