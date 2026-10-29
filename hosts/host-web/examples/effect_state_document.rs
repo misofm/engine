@@ -3,7 +3,7 @@
 //! `scripts/check-web-boot-budget.mjs` boots it in the wasm module and requires the refusal to come
 //! before the linear memory grows past the document's parse projection.
 //!
-//! `tests/boot_transient_budget.rs` builds its documents from [`document`].
+//! `tests/common/effect_state_document.rs` is a copy of [`document`] for `tests/boot_transient_budget.rs`.
 
 use std::io::{self, Write as _};
 

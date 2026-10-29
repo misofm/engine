@@ -337,7 +337,7 @@ fn a_frame_the_budget_cannot_hold_is_refused_before_anything_is_allocated() {
     );
 }
 
-#[path = "../examples/effect_state_document.rs"]
+#[path = "common/effect_state_document.rs"]
 #[allow(dead_code)]
 mod effect_state_document;
 
