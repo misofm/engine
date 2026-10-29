@@ -844,6 +844,14 @@ zero can also mean unobserved, while master `null` means unavailable. For hypoth
 edits, `createResponsePreview()` evaluates an explicit configuration without a live session or
 live-session timestamp.
 
+In the browser, every frame the engine posts to its host (a spectrum, observation, loudness or
+track-response frame, a protocol call, a live-control submit or the boot's capability probe) goes
+through one path (issue #2201). A frame that the host refuses before the core rejects with
+`MisoEngineError` that carries the host's result, never with the host's raw `miso.error.v1`
+record; a failed host's sticky result 6 is `wrongState`, as for the live controls. Each call keeps
+its retry rule, which reads the error's code: an observation refused for `backpressure` waits for
+a render and is sent again, and every other refusal is thrown.
+
 ## Ownership and artifact integrity
 
 The realtime engine owns a preallocated render plan and executes on one render thread. Render

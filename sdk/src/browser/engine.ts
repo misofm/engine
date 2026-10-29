@@ -29,7 +29,7 @@ import type { EngineLiveControls } from "../core/live-controls.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
-import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders, hostRecordFailure } from "./live-controls.ts";
+import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders, hostControl } from "./live-controls.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
 import { ProtocolClient, decodeCapabilitiesReply, decodeProtocolEvent } from "../core/protocol-messages.ts";
@@ -570,7 +570,7 @@ async function sendSpectrumFrame<T>(
   decode: (bytes: Uint8Array) => SpectrumFrameReply<T>,
 ): Promise<SpectrumFrameReply<T>> {
   const requestId = queue.requestIds.next();
-  const reply = await host.control(encodeSpectrumCommand(requestId, request));
+  const reply = await hostControl(host, encodeSpectrumCommand(requestId, request));
   queue.noteCommit(reply.revision);
   if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
   const decoded = decode(reply.response);
@@ -603,7 +603,7 @@ async function confirmBootSpectrum(
   );
   const queue = await awaitSpectrum(createBrowserControlQueue(host), started, deadlineMs, signal, expired);
   const requestId = queue.requestIds.next();
-  const probe = await awaitSpectrum(host.control(encodeRevisionProbe(requestId)), started, deadlineMs, signal, expired);
+  const probe = await awaitSpectrum(hostControl(host, encodeRevisionProbe(requestId)), started, deadlineMs, signal, expired);
   queue.noteCommit(probe.revision);
   if (probe.result !== 0) throw controlCallFailure(probe.result, probe.response);
   const capabilities = decodeCapabilitiesReply(probe.response);
@@ -1094,7 +1094,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       const queue = await createBrowserControlQueue(host);
       return {
         send: async (frame: Uint8Array): Promise<Uint8Array> => {
-          const reply = await host.control(frame);
+          const reply = await hostControl(host, frame);
           queue.noteCommit(reply.revision);
           if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
           return reply.response;
@@ -1176,7 +1176,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         spectrumQueue = queue;
         editQueue ??= queue;
         const requestId = queue.requestIds.next();
-        const reply = await host.control(encodeLoudnessCommand(requestId, operation));
+        const reply = await hostControl(host, encodeLoudnessCommand(requestId, operation));
         queue.noteCommit(reply.revision);
         if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
         const decoded = decodeLoudnessReply(reply.response);
@@ -1362,7 +1362,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         const requester = new TrackResponseRequester({
           // A frame beside the queue tells it the revision its reply reports (#1389 root ruling (b)).
           send: async (frame) => {
-            const reply = await host.control(frame);
+            const reply = await hostControl(host, frame);
             queue.noteCommit(reply.revision);
             if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
             return reply.response;
@@ -1522,15 +1522,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           // `revision_conflict`, and the queue takes the new revision from that refusal's reply
           // (no lock, no retry: #1389 R3).
           send: async (frame, document) => {
-            let reply: Awaited<ReturnType<typeof host.control>>;
-            try {
-              reply = await host.control(frame, document);
-            } catch (error) {
-              // The host rejects a frame it refuses locally (one over its frame limit, a disposed
-              // host) with its numeric `miso.error.v1` record, which is not an `Error`; keep the
-              // result in the SDK's vocabulary, as the seek path does (#2190).
-              throw hostRecordFailure(error);
-            }
+            // The host rejects a frame it refuses locally (one over its frame limit, a disposed
+            // host) with its numeric `miso.error.v1` record, which is not an `Error`; the one send
+            // keeps it in the SDK's vocabulary (#2190, #2201).
+            const reply = await hostControl(host, frame, document);
             queue.noteCommit(reply.revision);
             if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
             return reply.response;
