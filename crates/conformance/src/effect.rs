@@ -180,6 +180,12 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
         &DUAL_ACCUMULATOR_DELAY_DESCRIPTOR
     }
+    fn prepared_inline_bytes(&self) -> u64 {
+        size_of::<DualAccumulatorDelay>() as u64
+    }
+    fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+        0
+    }
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,

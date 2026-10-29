@@ -2125,6 +2125,22 @@ pub trait NativeEffectFactory: Send + Sync {
         request: PrepareEffectRequest<'_>,
     ) -> Result<PreparedEffect, EffectPrepareError>;
 
+    /// The inline bytes of the processor [`Self::prepare`] boxes: `size_of` of its prepared
+    /// type, or of the largest when it prepares more than one (issue #2194, root ruling R1).
+    ///
+    /// A plan charges a prepared processor its box plus its own heap
+    /// ([`PreparedNativeEffect::retained_bytes`]). The heap is bounded by the declared
+    /// `maximum_state`, and this bounds the box, so a session's effect bytes are projected from
+    /// the descriptor and this value before any instance is prepared. Allocation-free.
+    fn prepared_inline_bytes(&self) -> u64;
+
+    /// The heap a prepared instance at `quality` retains beyond its declared `maximum_state` and
+    /// scratch, at most (issue #2194): a table or a mirrored history its state payload does not
+    /// carry. Zero for an effect whose declaration covers its heap. A session projection charges
+    /// each instance its declared state and scratch, [`Self::prepared_inline_bytes`] and this.
+    /// Allocation-free.
+    fn prepared_undeclared_heap_bytes(&self, quality: &QualityDescriptor) -> u64;
+
     /// Returns this owner's optional native requested-configuration response capability.
     ///
     /// The companion descriptor is validated when the factory enters a [`NativeEffectRegistry`].
@@ -3325,6 +3341,37 @@ const fn scratch_for(quality: QualityDescriptor, quantum: u32) -> Result<u64, Ef
     }
 }
 
+/// The quality row and scratch one instance of `d` declares at `(quality, sample_rate)` and
+/// `quantum`, read from the descriptor alone, without a request or an allocation (issue #2194).
+///
+/// [`validate_prepare_request`] resolves a request through it, and a session projection sums it
+/// over every instance before the first one is prepared, so the projected and the prepared
+/// instance read the same table cell.
+///
+/// # Errors
+///
+/// `effect.quality.unsupported` for a rate or quality the descriptor does not declare, and
+/// `effect.resource.limit` when its scratch overflows.
+pub fn declared_instance_resources(
+    d: &EffectDescriptor,
+    quality: EffectQuality,
+    sample_rate: u32,
+    quantum: u32,
+) -> Result<ValidatedPrepare, EffectPrepareError> {
+    let q = d
+        .qualities
+        .iter()
+        .find(|q| q.quality == quality && q.sample_rate == sample_rate)
+        .copied()
+        .ok_or(EffectPrepareError {
+            code: "effect.quality.unsupported",
+        })?;
+    Ok(ValidatedPrepare {
+        quality: q,
+        scratch_bytes: scratch_for(q, quantum)?,
+    })
+}
+
 /// Validate one preparation request against its effect's descriptor.
 ///
 /// # Precondition: `d` is already a valid descriptor
@@ -3369,18 +3416,13 @@ pub fn validate_prepare_request(
             code: "effect.link_mode.unsupported",
         });
     }
-    let q = d
-        .qualities
-        .iter()
-        .find(|q| q.quality == r.quality && q.sample_rate == r.sample_rate)
-        .copied()
-        .ok_or(EffectPrepareError {
-            code: "effect.quality.unsupported",
-        })?;
+    let ValidatedPrepare {
+        quality: q,
+        scratch_bytes: scratch,
+    } = declared_instance_resources(d, r.quality, r.sample_rate, r.quantum)?;
     let state = q.maximum_state.total().ok_or(EffectPrepareError {
         code: "effect.resource.limit",
     })?;
-    let scratch = scratch_for(q, r.quantum)?;
     if state > r.limits.maximum_total_state_bytes
         || scratch > r.limits.maximum_scratch_bytes
         || usize::try_from(state).is_err()

@@ -2684,6 +2684,14 @@ impl NativeEffectFactory for MultibandCompressorFactory {
         &MULTIBAND_COMPRESSOR_DESCRIPTOR
     }
 
+    fn prepared_inline_bytes(&self) -> u64 {
+        size_of::<PreparedMultibandCompressor>() as u64
+    }
+
+    fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+        0
+    }
+
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,

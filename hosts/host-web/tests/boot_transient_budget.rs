@@ -336,3 +336,54 @@ fn a_frame_the_budget_cannot_hold_is_refused_before_anything_is_allocated() {
         "the refusal allocated {peak} bytes; nothing past the diagnostic may be allocated"
     );
 }
+
+#[path = "common/effect_state_document.rs"]
+#[allow(dead_code)]
+mod effect_state_document;
+
+/// Issue #2194 gate C: a session whose declared effect state fits the effect cap alone but whose
+/// retained projection does not (128 tracks with four delays each, about 400 MB of delay state,
+/// under a budget of exactly that state) is refused by the retained projection, which names its
+/// effect row, before the control plane compiles or prepares anything: the boot's peak stays
+/// inside the document's parse transient.
+///
+/// Test value: red when the retained projection has no effect row. Host-core's effect cap admits
+/// the state, so the boot then prepares every delay before the exact aggregate refuses it, peaking
+/// at about the whole budget (on wasm, a linear memory that never shrinks).
+#[test]
+fn effect_state_the_budget_cannot_hold_is_refused_before_preparation() {
+    let document = effect_state_document::document(128);
+    let model = parse_host_session(core::str::from_utf8(&document).expect("UTF-8"))
+        .expect("the document parses");
+    let compiled = compile_host_model(&model, unlimited_caps()).expect("the document compiles");
+    let declared = host_core::project_effects(&compiled)
+        .expect("a projection")
+        .state_bytes;
+    drop((compiled, model));
+    assert!(declared <= host_web::DEFAULT_MAXIMUM_MEMORY_BYTES);
+    let (failure, peak) = measured_peak(|| {
+        AudioWorkletEngineHost::boot(
+            &document,
+            WebBootOptions {
+                maximum_memory_bytes: declared,
+                ..WebBootOptions::default()
+            },
+        )
+        .err()
+        .expect("the effect state and the other rows over the budget refuse")
+    });
+    let transient = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
+    assert!(
+        peak as u64 <= transient,
+        "the refusal peaked at {peak} bytes, over the {transient}-byte parse transient"
+    );
+    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+    let diagnostic = String::from_utf8_lossy(failure.diagnostic()).into_owned();
+    let effect_state_bytes: u64 = diagnostic
+        .strip_prefix("host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes=")
+        .and_then(|rest| rest.split_once(&format!(",budget_bytes={declared},effect_state_bytes=")))
+        .and_then(|(_, effect)| effect.strip_suffix("]\n"))
+        .and_then(|effect| effect.parse().ok())
+        .unwrap_or_else(|| panic!("{diagnostic}"));
+    assert!(effect_state_bytes > declared, "{diagnostic}");
+}

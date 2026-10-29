@@ -614,3 +614,100 @@ fn every_document_refusal_happens_before_anything_commits() {
     assert_eq!((revision(&session), snapshot(&session)), before);
     assert_eq!(reliable_events(&mut session), 0);
 }
+
+/// `tracks` tracks on the nine-track fixture's first source, each with `delays` default delay
+/// inserts and a post-pan route to the main output (issue #2194).
+fn delay_document(tracks: usize, delays: usize) -> String {
+    let mut model = model(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+    ));
+    let mut track = model.tracks[1].clone();
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    track.console.clear();
+    track.inserts.effects = (0..delays)
+        .map(|index| session::Effect {
+            id: id(&format!("delay-{index}")),
+            identity: session::EffectIdentity::Native {
+                effect_id: id("miso.delay"),
+            },
+            quality: session::EffectQuality::Normal,
+            bypass: false,
+            link_mode: session::LinkMode::DualMono,
+            params: Vec::new(),
+            sidechain: session::SidechainDeclaration::None,
+        })
+        .collect();
+    let route = model.routes[0].clone();
+    model.tracks.clear();
+    model.routes.clear();
+    model.automation.clear();
+    for index in 0..tracks {
+        let track_id = id(&format!("track-{index:03}"));
+        let mut next_track = track.clone();
+        next_track.id = track_id.clone();
+        model.tracks.push(next_track);
+        let mut next_route = route.clone();
+        next_route.id = id(&format!("route-{index:03}"));
+        next_route.source = RouteSource::Track {
+            track_id,
+            tap: session::SendTap::PostPan,
+        };
+        model.routes.push(next_route);
+    }
+    json(&model)
+}
+
+/// Issue #2194 gate F: a `SESSION_REPLACE` whose candidate declares about 1.5 GB of effect state
+/// (512 tracks with four delays each) under a 512 MiB replacement peak is refused
+/// `control.resource.replacement_peak` before the candidate is prepared: the command's heap peak
+/// stays inside the document's parse transient, and the running session is untouched. The effect
+/// cap is unbounded here, so only the replacement admission can refuse it.
+///
+/// Test value: red when the control plane prepares the candidate before it admits it (the command
+/// then peaks at about 1.5 GB before the post-preparation admission refuses it), which no other
+/// replace test can see: their candidates fit.
+#[test]
+fn a_replace_whose_effects_cannot_fit_is_refused_before_it_is_prepared() {
+    use bench_support::alloc as audited_allocator;
+    /// `host_web::PARSE_TRANSIENT_MULTIPLIER`, which this crate does not depend on.
+    const PARSE_TRANSIENT_MULTIPLIER: usize = 20;
+    audited_allocator::assert_installed();
+    let booted = delay_document(1, 0);
+    let candidate = delay_document(512, 4);
+    let limits = ControlLimits {
+        maximum_tracks: u64::MAX,
+        maximum_sources: u64::MAX,
+        maximum_routes: u64::MAX,
+        maximum_effects: u64::MAX,
+        maximum_graph_session_plus_plan_bytes: u64::MAX,
+        maximum_effect_state_bytes: u64::MAX,
+        maximum_named_allocation_bytes: u64::MAX,
+        maximum_replacement_peak_bytes: 512 << 20,
+        ..limits(u64::try_from(candidate.len()).expect("a bounded document"))
+    };
+    let CompiledChildren {
+        mut session,
+        plan: _plan,
+    } = compile_children::<Adapter>(&booted, limits, Box::new(Preparer)).expect("boot compile");
+    reliable_events(&mut session);
+    let before = (revision(&session), snapshot(&session));
+    let frame = replace_frame(1, before.0, candidate.as_bytes());
+    audited_allocator::current_thread_peak_reset();
+    let refused = session.command_with_document(&frame, candidate.as_bytes(), 16_384);
+    let peak = audited_allocator::current_thread_peak().peak_bytes;
+    let transient = (candidate.len() * PARSE_TRANSIENT_MULTIPLIER) as u64;
+    assert!(
+        peak <= transient,
+        "the replace peaked at {peak} bytes, over the {transient}-byte parse transient"
+    );
+    let Err(control_plane::CommandError::CompileRejected(failure)) = refused else {
+        panic!("a permanent refusal: {refused:?}")
+    };
+    assert_eq!(
+        &*failure.diagnostic(),
+        b"control.resource.replacement_peak\t$\n"
+    );
+    assert_eq!((revision(&session), snapshot(&session)), before);
+    assert_eq!(reliable_events(&mut session), 0);
+}

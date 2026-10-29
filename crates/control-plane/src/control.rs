@@ -3649,6 +3649,46 @@ where
         Ok(HeldEpochs { rows, len })
     }
 
+    /// The replacement admission of a candidate before it is prepared (issue #2194):
+    /// [`validate_prospective_projection`] over every held plan and model and `prospective`'s
+    /// effect projection, with the retryable or permanent split of the post-preparation
+    /// admission: a refusal that fits beside the newest plan and the committed model alone is
+    /// backpressure a render frees, and any other is permanent.
+    fn admit_prospective_projection(
+        &self,
+        prospective: &session::CompiledSession,
+    ) -> Result<(), CommandError> {
+        let effects = host_core::project_effects(prospective)
+            .map_err(|diagnostics| CommandError::CompileRejected(prepare_failure(diagnostics)))?;
+        let held = self.held_epochs()?;
+        let models = self.held_models()?;
+        let admit = |held: &[LiveEpochResources], models: &[session::ResourceEstimate]| {
+            validate_prospective_projection(
+                held,
+                effects,
+                compiled_model_admission_over(models, prospective.resource_estimate())?,
+                self.limits,
+            )
+        };
+        let Err(failure) = admit(held.as_slice(), models.as_slice()) else {
+            return Ok(());
+        };
+        Err(
+            match held
+                .as_slice()
+                .split_last()
+                .filter(|(_, older)| !older.is_empty())
+            {
+                Some((newest, _))
+                    if admit(core::slice::from_ref(newest), &models.as_slice()[..1]).is_ok() =>
+                {
+                    CommandError::Backpressure
+                }
+                _ => CommandError::CompileRejected(failure),
+            },
+        )
+    }
+
     /// Every compiled model the control plane holds, as both admissions charge them (#1398 D4,
     /// #1310 D3): the committed model, then each held epoch's kept model. A kept model lives only
     /// while a successor of its epoch is pending, so while one waits and a live edit is admitted,
@@ -5716,6 +5756,12 @@ where
             )
             .map_err(spectrum_invariant)
         };
+        // Issue #2194: the candidate's projected effect bytes beside every plan and model held,
+        // before any of it is prepared. The transition across a donor is not admitted again (the
+        // donor's submit admitted it, below).
+        if !fallback {
+            self.admit_prospective_projection(prospective)?;
+        }
         let mut prepared_runtime = prepare(base)?;
         // #1325 D7: after preparation, the pure transition step against the plan the successor
         // displaces. A declared discontinuity need not continue the running plan's output
@@ -7567,6 +7613,30 @@ where
     /// first plan is prepared, and the limits the session was built with are a plain value.
     pub fn set_replacement_peak_limit(&mut self, bytes: u64) {
         self.limits.maximum_replacement_peak_bytes = bytes;
+    }
+
+    /// The bytes the plans and compiled models the control plane holds retain now (issue #2194):
+    /// the replacement peak's held terms (`held_peak_bytes`), every held plan's graph and
+    /// allocated source rows and every held model. A host adds its own fixed rows to project what
+    /// a replacement's parse may grow beside the live session.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError::Internal`] for an accounting fault, [`CommandError::CompileRejected`] for an
+    /// arithmetic overflow.
+    pub fn held_retained_bytes(&self) -> Result<u64, CommandError> {
+        let held = self.held_epochs()?;
+        let models = self.held_models()?;
+        let models_retained = models
+            .as_slice()
+            .iter()
+            .try_fold(0_u64, |total, model| {
+                total.checked_add(model.compiled_model_bytes)
+            })
+            .ok_or(CommandError::CompileRejected(
+                crate::error::CompileFailure::Resource(ResourceFault::Arithmetic),
+            ))?;
+        held_peak_bytes(held.as_slice(), models_retained).map_err(CommandError::CompileRejected)
     }
 
     /// The epoch of the newest plan (#1290a): the pending candidate's while one waits for its

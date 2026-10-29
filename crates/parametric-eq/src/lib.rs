@@ -3767,6 +3767,14 @@ impl NativeEffectFactory for ParametricEqFactory {
         &PARAMETRIC_EQ_DESCRIPTOR
     }
 
+    fn prepared_inline_bytes(&self) -> u64 {
+        size_of::<PreparedParametricEq<f32, 1>>() as u64
+    }
+
+    fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+        0
+    }
+
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,

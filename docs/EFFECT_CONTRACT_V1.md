@@ -25,6 +25,14 @@ data (#1461). The compiler caches the returned metadata on the control side; gra
 never query a live processor. The semantic `EffectProgramKey`
 contains these fields directly and is not a digest or persistence identity.
 
+A host admits a session's effect memory before it prepares any instance (issue #2194). Each
+factory reports, without allocating, `prepared_inline_bytes()` (the `size_of` of the processor it
+boxes) and `prepared_undeclared_heap_bytes(quality)` (heap its state payload does not carry, such
+as a mirrored history or a lookup table; zero for most effects). A prepared processor's box plus
+its own heap is at most its quality row's declared state and scratch plus those two values, for
+every launch effect, quality, rate and quantum (`effect-compiler/tests/prepared_state_ceiling.rs`),
+so `effect_compiler::project_session_effects` is a ceiling on what preparing a session allocates.
+
 The callback receives disjoint in-place planar L/R slices and optional planar sidechain slices.
 It performs no allocation/free, synchronization, I/O, network, logging, syscall, dynamic loading,
 feature detection, panic, callbacks, or unbounded work.

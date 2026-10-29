@@ -826,6 +826,18 @@ impl NativeEffectFactory for ReverbFactory {
         &REVERB_DESCRIPTOR
     }
 
+    fn prepared_inline_bytes(&self) -> u64 {
+        size_of::<PreparedReverb>() as u64
+    }
+
+    fn prepared_undeclared_heap_bytes(&self, quality: &effect_contract::QualityDescriptor) -> u64 {
+        // The prime sieve `prepare_reverb` keeps for its line lengths, one flag per sample up to
+        // the longest line plus the search window; the payload does not carry it.
+        let largest = (f64::from(BASE_MAX) * 2.0 * f64::from(quality.sample_rate) / 48_000.0 + 0.5)
+            .floor() as u64;
+        largest + 2 * u64::from(PRIME_SEARCH) + 1
+    }
+
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,

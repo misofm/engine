@@ -9,8 +9,9 @@ use effect_contract::{
 };
 use engine::realtime::{LiveStamp, LiveValuesSuperseded, ObservationReader, observation_slot};
 use session::{
-    CompiledSession, ConsoleLinkMode, EffectIdentity, LinkMode as SessionLinkMode,
-    ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, SidechainDeclaration,
+    CompiledSession, ConsoleLinkMode, ConsoleSlot, Effect, EffectIdentity,
+    LinkMode as SessionLinkMode, ParameterChannel as SessionChannel, ParameterUnit as SessionUnit,
+    SessionModel, SidechainDeclaration, StripRef,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -20,7 +21,10 @@ use crate::{EffectDiagnostic, EffectDiagnosticSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectCompileCaps {
+    /// Ceiling on one instance's declared state ([`PrepareEffectLimits`]). A session's sum is a
+    /// host's aggregate budget, projected with [`project_session_effects`] (issue #2194).
     pub maximum_total_state_bytes: u64,
+    /// Ceiling on one instance's declared scratch.
     pub maximum_scratch_bytes: u64,
     /// Ceiling on the descriptor-derived per-instance capacity; never a requested window size.
     pub maximum_automation_spans_per_block: u32,
@@ -359,266 +363,250 @@ fn prepare_with_console_eligibility(
             }
         }
     }
-    for strip in model.strips() {
-        // Decision 12, class A by lowering: `pre_insert` is the first internal rack, the strip's
-        // inserts the second and `post_insert` the third, each console entry an ordinary effect.
-        let lowered = model.lower_strip(&strip);
-        let strip_path = strip.path_prefix();
-        let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
-        let pre_slots = model.console.pre_insert.len();
-        for (rack, effects, console_slots) in [
-            (
-                EffectRack::Simd1,
-                pre_insert,
-                Some((0, &model.console.pre_insert)),
-            ),
-            (EffectRack::Dynamic, inserts, None),
-            (
-                EffectRack::Simd2,
-                post_insert,
-                Some((pre_slots, &model.console.post_insert)),
-            ),
-        ] {
-            for (index, effect) in effects.iter().enumerate() {
-                let path = format!("{strip_path}.effects[id={}]", effect.id);
-                // #1369 D2: a console entry that overrides its slot's link mode is diagnosed at the
-                // entry's own `link_mode`; an entry on `slot` keeps the effect path.
-                let console_override = console_slots.and_then(|(offset, slots)| {
-                    let entry = strip.console.get(offset + index)?;
-                    let declared = slots.get(index)?.link_mode;
-                    (entry.link_mode != ConsoleLinkMode::Slot).then(|| {
-                        (
-                            format!("{strip_path}.console[slot={}].link_mode", entry.slot),
-                            declared,
-                        )
-                    })
+    // Issue #2194 (root ruling R4): pass 2 of the one walk. Pass 1 is
+    // [`project_session_effects`], which a host runs against its aggregate budget before it calls
+    // this; each instance below reads the same quality-table cell, and `effect.metadata.mismatch`
+    // holds every prepared instance to it.
+    for_each_session_effect(model, |site| {
+        let EffectSite {
+            strip,
+            strip_path,
+            rack,
+            index,
+            effect,
+            console_slots,
+        } = site;
+        let path = format!("{strip_path}.effects[id={}]", effect.id);
+        // #1369 D2: a console entry that overrides its slot's link mode is diagnosed at the
+        // entry's own `link_mode`; an entry on `slot` keeps the effect path.
+        let console_override = console_slots.and_then(|(offset, slots)| {
+            let entry = strip.console.get(offset + index)?;
+            let declared = slots.get(index)?.link_mode;
+            (entry.link_mode != ConsoleLinkMode::Slot).then(|| {
+                (
+                    format!("{strip_path}.console[slot={}].link_mode", entry.slot),
+                    declared,
+                )
+            })
+        });
+        let EffectIdentity::Native { effect_id } = &effect.identity else {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.third_party.unavailable_at_launch",
+                path,
+            });
+            return;
+        };
+        let Some(factory) = registry.get_shared_ascii(effect_id.as_str()) else {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.native.unavailable",
+                path,
+            });
+            return;
+        };
+        let descriptor = factory.descriptor();
+        let quality = contract_quality(effect.quality);
+        let link_mode = match effect.link_mode {
+            SessionLinkMode::DualMono => LinkMode::DualMono,
+            SessionLinkMode::Maximum => LinkMode::Maximum,
+            SessionLinkMode::Average => LinkMode::Average,
+        };
+        if !descriptor.supported_link_modes.contains(link_mode) {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.link_mode.unsupported",
+                path: console_override.map_or(path, |(entry_path, _)| entry_path),
+            });
+            return;
+        }
+        // #1369 R3: an effect whose bank does not hold the link mode per lane would split
+        // the slot's bank into two cohorts on a differing override, and a console slot
+        // binds one bank (decision 12). Refused until that effect holds it per lane.
+        // An unsupported resolved mode refuses first; the bank guard applies only to a
+        // supported mode.
+        if let Some((entry_path, declared)) = &console_override
+            && effect.link_mode != *declared
+            && !descriptor.lane_link
+        {
+            diagnostics.push(EffectDiagnostic {
+                code: "console.link_mode.override_unbanked",
+                path: entry_path.clone(),
+            });
+            return;
+        }
+        // Issue #1462 D1: the registry's table entry, not a call of the descriptor's
+        // `tail_and_rest`. A rate or quality the effect does not declare has no entry and
+        // is `effect.quality.unsupported`, as it always was.
+        let tail_bound = match registry.tail_bound(descriptor.id, session.sample_rate().0, quality)
+        {
+            Ok(entry) => entry,
+            Err(error) => {
+                diagnostics.push(EffectDiagnostic {
+                    code: error.code,
+                    path,
                 });
-                let EffectIdentity::Native { effect_id } = &effect.identity else {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.third_party.unavailable_at_launch",
-                        path,
-                    });
-                    continue;
-                };
-                let Some(factory) = registry.get_shared_ascii(effect_id.as_str()) else {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.native.unavailable",
-                        path,
-                    });
-                    continue;
-                };
-                let descriptor = factory.descriptor();
-                let quality = match effect.quality {
-                    session::EffectQuality::Draft => EffectQuality::Draft,
-                    session::EffectQuality::Normal => EffectQuality::Normal,
-                    session::EffectQuality::High => EffectQuality::High,
-                };
-                let link_mode = match effect.link_mode {
-                    SessionLinkMode::DualMono => LinkMode::DualMono,
-                    SessionLinkMode::Maximum => LinkMode::Maximum,
-                    SessionLinkMode::Average => LinkMode::Average,
-                };
-                if !descriptor.supported_link_modes.contains(link_mode) {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.link_mode.unsupported",
-                        path: console_override.map_or(path, |(entry_path, _)| entry_path),
-                    });
-                    continue;
-                }
-                // #1369 R3: an effect whose bank does not hold the link mode per lane would split
-                // the slot's bank into two cohorts on a differing override, and a console slot
-                // binds one bank (decision 12). Refused until that effect holds it per lane.
-                // An unsupported resolved mode refuses first; the bank guard applies only to a
-                // supported mode.
-                if let Some((entry_path, declared)) = &console_override
-                    && effect.link_mode != *declared
-                    && !descriptor.lane_link
-                {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "console.link_mode.override_unbanked",
-                        path: entry_path.clone(),
-                    });
-                    continue;
-                }
-                // Issue #1462 D1: the registry's table entry, not a call of the descriptor's
-                // `tail_and_rest`. A rate or quality the effect does not declare has no entry and
-                // is `effect.quality.unsupported`, as it always was.
-                let tail_bound =
-                    match registry.tail_bound(descriptor.id, session.sample_rate().0, quality) {
-                        Ok(entry) => entry,
-                        Err(error) => {
-                            diagnostics.push(EffectDiagnostic {
-                                code: error.code,
-                                path,
-                            });
-                            continue;
-                        }
-                    };
-                let initial = match resolve_initial_values(descriptor, &effect.params) {
-                    Ok(initial) => initial,
-                    Err(code) => {
-                        diagnostics.push(EffectDiagnostic { code, path });
-                        continue;
-                    }
-                };
-                let declared_sidechain = descriptor
-                    .ports
-                    .iter()
-                    .find(|port| port.role == effect_contract::PortRole::SidechainInput);
-                let ports = match (&effect.sidechain, declared_sidechain) {
-                    (SidechainDeclaration::None, None) => PreparedPorts {
-                        sidechain: PreparedSidechainPort::None,
-                    },
-                    (SidechainDeclaration::None, Some(port)) if !port.required => PreparedPorts {
-                        sidechain: PreparedSidechainPort::Unconnected {
+                return;
+            }
+        };
+        let initial = match resolve_initial_values(descriptor, &effect.params) {
+            Ok(initial) => initial,
+            Err(code) => {
+                diagnostics.push(EffectDiagnostic { code, path });
+                return;
+            }
+        };
+        let declared_sidechain = descriptor
+            .ports
+            .iter()
+            .find(|port| port.role == effect_contract::PortRole::SidechainInput);
+        let ports = match (&effect.sidechain, declared_sidechain) {
+            (SidechainDeclaration::None, None) => PreparedPorts {
+                sidechain: PreparedSidechainPort::None,
+            },
+            (SidechainDeclaration::None, Some(port)) if !port.required => PreparedPorts {
+                sidechain: PreparedSidechainPort::Unconnected {
+                    id: port.id,
+                    required: false,
+                },
+            },
+            (SidechainDeclaration::None, Some(_)) => {
+                diagnostics.push(EffectDiagnostic {
+                    code: "effect.sidechain.missing",
+                    path,
+                });
+                return;
+            }
+            (SidechainDeclaration::Routed(_), None) => {
+                diagnostics.push(EffectDiagnostic {
+                    code: "effect.sidechain.unexpected",
+                    path,
+                });
+                return;
+            }
+            (SidechainDeclaration::Routed(sidechain), Some(_)) => {
+                match descriptor.ports.iter().find(|port| {
+                    port.role == effect_contract::PortRole::SidechainInput
+                        && port.id.as_str() == sidechain.port_id.as_str()
+                }) {
+                    Some(port) => PreparedPorts {
+                        sidechain: PreparedSidechainPort::Connected {
                             id: port.id,
-                            required: false,
+                            required: port.required,
                         },
                     },
-                    (SidechainDeclaration::None, Some(_)) => {
+                    None => {
                         diagnostics.push(EffectDiagnostic {
-                            code: "effect.sidechain.missing",
+                            code: "effect.sidechain.unknown_port",
                             path,
                         });
-                        continue;
+                        return;
                     }
-                    (SidechainDeclaration::Routed(_), None) => {
-                        diagnostics.push(EffectDiagnostic {
-                            code: "effect.sidechain.unexpected",
-                            path,
-                        });
-                        continue;
-                    }
-                    (SidechainDeclaration::Routed(sidechain), Some(_)) => {
-                        match descriptor.ports.iter().find(|port| {
-                            port.role == effect_contract::PortRole::SidechainInput
-                                && port.id.as_str() == sidechain.port_id.as_str()
-                        }) {
-                            Some(port) => PreparedPorts {
-                                sidechain: PreparedSidechainPort::Connected {
-                                    id: port.id,
-                                    required: port.required,
-                                },
-                            },
-                            None => {
-                                diagnostics.push(EffectDiagnostic {
-                                    code: "effect.sidechain.unknown_port",
-                                    path,
-                                });
-                                continue;
-                            }
-                        }
-                    }
-                };
-                // Issue #1087: a session's bypass is per-lane shunt state, not a prepared
-                // program. The effect is prepared enabled, so a banking effect shares its program
-                // key and its bank with every enabled instance, and the bit rides the instance's
-                // control lane to the shunt, which emits the latency-matched dry signal for this
-                // lane. An effect that never banks lowers it too and renders per node (issue
-                // #1339), and the multiband's bank recovers per lane (issue #1340), so every
-                // effect lowers it.
-                let automation_capacity =
-                    u32::try_from(EffectLaneShape::live_parameter_cells(descriptor))
-                        .unwrap_or(u32::MAX)
-                        .max(1);
-                if automation_capacity > caps.maximum_automation_spans_per_block {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.resource.limit",
-                        path,
-                    });
-                    continue;
                 }
-                let bank_preparation = EffectBankPreparation {
-                    sample_rate: session.sample_rate().0,
-                    quantum: session.quantum().0,
-                    quality,
-                    bypass: false,
-                    link_mode,
-                    ports,
-                    initial_values: initial.into_boxed_slice(),
-                    limits: PrepareEffectLimits {
-                        maximum_total_state_bytes: caps.maximum_total_state_bytes,
-                        maximum_scratch_bytes: caps.maximum_scratch_bytes,
-                        // Decision 15, D15-2 and #1345 D4: the window holds a span for every live
-                        // parameter cell, so the effect accepts that many. The bound depends on the
-                        // descriptor alone, so every instance of one effect has one capacity and
-                        // attaching a live lane changes no program key. The parametric EQ is
-                        // raised too, though its lane holds target cells in place of parameter
-                        // cells and so stages no parameter span: whether an instance is attached
-                        // to a lane, or to an owner, must not change its capacity.
-                        maximum_automation_spans_per_block: automation_capacity,
-                    },
-                    tail_bound,
-                };
-                let request = bank_preparation.request();
-                let expected = match expected_prepared_metadata(descriptor, request) {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        diagnostics.push(EffectDiagnostic {
-                            code: error.code,
-                            path,
-                        });
-                        continue;
-                    }
-                };
-                // Issue #1461: the prepare result carries the metadata beside the processor,
-                // which holds no copy of it; this compares that returned value, field by field.
-                let PreparedEffect {
-                    processor,
-                    metadata,
-                } = match factory.prepare(request) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        diagnostics.push(EffectDiagnostic {
-                            code: error.code,
-                            path,
-                        });
-                        continue;
-                    }
-                };
-                if metadata.descriptor.id != expected.descriptor.id
-                    || metadata.descriptor.contract_major != expected.descriptor.contract_major
-                    || metadata.descriptor.state_layout_version
-                        != expected.descriptor.state_layout_version
-                    || metadata.sample_rate != expected.sample_rate
-                    || metadata.quantum != expected.quantum
-                    || metadata.quality != expected.quality
-                    || metadata.bypass != expected.bypass
-                    || metadata.link_mode != expected.link_mode
-                    || metadata.ports != expected.ports
-                    || metadata.latency != expected.latency
-                    || metadata.tail != expected.tail
-                    || metadata.tail_every_peak != expected.tail_every_peak
-                    || metadata.rest != expected.rest
-                    || metadata.composition != expected.composition
-                    || metadata.state_sizes != expected.state_sizes
-                    || metadata.scratch_bytes != expected.scratch_bytes
-                    || metadata.automation_capacity != expected.automation_capacity
-                {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.metadata.mismatch",
-                        path,
-                    });
-                    continue;
-                }
-                entries.push(EffectPreparedEntry {
-                    track_id: strip.id.as_str().to_owned(),
-                    strip_path: strip_path.as_str().into(),
-                    rack,
-                    effect_id: effect.id.as_str().to_owned(),
-                    processor,
-                    metadata,
-                    factory,
-                    bank_preparation,
-                    initial_bypass: effect.bypass,
-                    control: effect
-                        .bypass
-                        .then(|| Box::new(EffectControlLane::without_channel(true))),
-                    observation: None,
-                });
             }
+        };
+        // Issue #1087: a session's bypass is per-lane shunt state, not a prepared
+        // program. The effect is prepared enabled, so a banking effect shares its program
+        // key and its bank with every enabled instance, and the bit rides the instance's
+        // control lane to the shunt, which emits the latency-matched dry signal for this
+        // lane. An effect that never banks lowers it too and renders per node (issue
+        // #1339), and the multiband's bank recovers per lane (issue #1340), so every
+        // effect lowers it.
+        let automation_capacity = u32::try_from(EffectLaneShape::live_parameter_cells(descriptor))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        if automation_capacity > caps.maximum_automation_spans_per_block {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.resource.limit",
+                path,
+            });
+            return;
         }
-    }
+        let bank_preparation = EffectBankPreparation {
+            sample_rate: session.sample_rate().0,
+            quantum: session.quantum().0,
+            quality,
+            bypass: false,
+            link_mode,
+            ports,
+            initial_values: initial.into_boxed_slice(),
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: caps.maximum_total_state_bytes,
+                maximum_scratch_bytes: caps.maximum_scratch_bytes,
+                // Decision 15, D15-2 and #1345 D4: the window holds a span for every live
+                // parameter cell, so the effect accepts that many. The bound depends on the
+                // descriptor alone, so every instance of one effect has one capacity and
+                // attaching a live lane changes no program key. The parametric EQ is
+                // raised too, though its lane holds target cells in place of parameter
+                // cells and so stages no parameter span: whether an instance is attached
+                // to a lane, or to an owner, must not change its capacity.
+                maximum_automation_spans_per_block: automation_capacity,
+            },
+            tail_bound,
+        };
+        let request = bank_preparation.request();
+        let expected = match expected_prepared_metadata(descriptor, request) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                diagnostics.push(EffectDiagnostic {
+                    code: error.code,
+                    path,
+                });
+                return;
+            }
+        };
+        // Issue #1461: the prepare result carries the metadata beside the processor,
+        // which holds no copy of it; this compares that returned value, field by field.
+        let PreparedEffect {
+            processor,
+            metadata,
+        } = match factory.prepare(request) {
+            Ok(value) => value,
+            Err(error) => {
+                diagnostics.push(EffectDiagnostic {
+                    code: error.code,
+                    path,
+                });
+                return;
+            }
+        };
+        if metadata.descriptor.id != expected.descriptor.id
+            || metadata.descriptor.contract_major != expected.descriptor.contract_major
+            || metadata.descriptor.state_layout_version != expected.descriptor.state_layout_version
+            || metadata.sample_rate != expected.sample_rate
+            || metadata.quantum != expected.quantum
+            || metadata.quality != expected.quality
+            || metadata.bypass != expected.bypass
+            || metadata.link_mode != expected.link_mode
+            || metadata.ports != expected.ports
+            || metadata.latency != expected.latency
+            || metadata.tail != expected.tail
+            || metadata.tail_every_peak != expected.tail_every_peak
+            || metadata.rest != expected.rest
+            || metadata.composition != expected.composition
+            || metadata.state_sizes != expected.state_sizes
+            || metadata.scratch_bytes != expected.scratch_bytes
+            || metadata.automation_capacity != expected.automation_capacity
+        {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.metadata.mismatch",
+                path,
+            });
+            return;
+        }
+        entries.push(EffectPreparedEntry {
+            track_id: strip.id.as_str().to_owned(),
+            strip_path: strip_path.into(),
+            rack,
+            effect_id: effect.id.as_str().to_owned(),
+            processor,
+            metadata,
+            factory,
+            bank_preparation,
+            initial_bypass: effect.bypass,
+            control: effect
+                .bypass
+                .then(|| Box::new(EffectControlLane::without_channel(true))),
+            observation: None,
+        });
+    });
     if diagnostics.is_empty() {
         entries.sort_by(|a, b| {
             (&a.track_id, a.rack, &a.effect_id).cmp(&(&b.track_id, b.rack, &b.effect_id))
@@ -630,6 +618,157 @@ fn prepare_with_console_eligibility(
     } else {
         Err(EffectDiagnosticSet::sorted(diagnostics))
     }
+}
+
+/// One effect instance of a session's strips, as [`for_each_session_effect`] visits it.
+struct EffectSite<'a> {
+    strip: StripRef<'a>,
+    /// The strip's compiler path prefix ([`StripRef::path_prefix`]).
+    strip_path: &'a str,
+    rack: EffectRack,
+    /// The instance's position in its lowered rack.
+    index: usize,
+    effect: &'a Effect,
+    /// For a console rack: the rack's first slot index in the strip's `console` array and the
+    /// session's slots of that section.
+    console_slots: Option<(usize, &'a [ConsoleSlot])>,
+}
+
+/// The one walk of a session's effect instances (issue #2194, root ruling R4): every strip in
+/// model order, its three lowered racks in chain order (decision 12, class A by lowering:
+/// `pre_insert` is the first internal rack, the strip's inserts the second and `post_insert` the
+/// third, each console entry an ordinary effect), and each rack's instances in order. The
+/// session projection and the preparation are two passes over it, so they cannot visit different
+/// instances. Control thread only; it allocates one strip's lowering at a time.
+fn for_each_session_effect(model: &SessionModel, mut visit: impl FnMut(EffectSite<'_>)) {
+    for strip in model.strips() {
+        let lowered = model.lower_strip(&strip);
+        let strip_path = strip.path_prefix();
+        let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
+        let pre_slots = model.console.pre_insert.len();
+        for (rack, effects, console_slots) in [
+            (
+                EffectRack::Simd1,
+                pre_insert,
+                Some((0, model.console.pre_insert.as_slice())),
+            ),
+            (EffectRack::Dynamic, inserts, None),
+            (
+                EffectRack::Simd2,
+                post_insert,
+                Some((pre_slots, model.console.post_insert.as_slice())),
+            ),
+        ] {
+            for (index, effect) in effects.iter().enumerate() {
+                visit(EffectSite {
+                    strip,
+                    strip_path: &strip_path,
+                    rack,
+                    index,
+                    effect,
+                    console_slots,
+                });
+            }
+        }
+    }
+}
+
+/// The session quality's effect-contract twin.
+const fn contract_quality(quality: session::EffectQuality) -> EffectQuality {
+    match quality {
+        session::EffectQuality::Draft => EffectQuality::Draft,
+        session::EffectQuality::Normal => EffectQuality::Normal,
+        session::EffectQuality::High => EffectQuality::High,
+    }
+}
+
+/// What a session's native effect instances declare, summed before any of them is prepared
+/// (issue #2194).
+///
+/// Every row is read from the registry's descriptors and factories, never from a prepared
+/// instance: the declared state and scratch are the instance's quality-table row
+/// ([`effect_contract::declared_instance_resources`]), which preparation then holds every
+/// prepared instance to (`effect.metadata.mismatch`), and the inline and undeclared heap bytes are
+/// each factory's own report.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EffectStateProjection {
+    /// Native instances whose identity, rate and quality resolve.
+    pub instances: u64,
+    /// The sum of their declared `maximum_state` totals: the report's `effect_scalar_state_bytes`.
+    pub state_bytes: u64,
+    /// The sum of their declared scratch: the report's `effect_scalar_scratch_bytes`.
+    pub scratch_bytes: u64,
+    /// The sum of their prepared processors' inline bytes
+    /// ([`NativeEffectFactory::prepared_inline_bytes`]).
+    pub inline_bytes: u64,
+    /// The sum of the heap they retain beyond their declared state and scratch
+    /// ([`NativeEffectFactory::prepared_undeclared_heap_bytes`]).
+    pub undeclared_heap_bytes: u64,
+}
+
+impl EffectStateProjection {
+    /// The bytes a plan retains for these instances' processors at most: each one's box and its
+    /// own heap, which its declared state and scratch and its factory's undeclared heap bound
+    /// (root ruling R1; `effect-compiler/tests/prepared_state_ceiling.rs`). `None` on overflow.
+    #[must_use]
+    pub const fn retained_bytes(self) -> Option<u64> {
+        match self.state_bytes.checked_add(self.scratch_bytes) {
+            Some(declared) => match declared.checked_add(self.inline_bytes) {
+                Some(boxed) => boxed.checked_add(self.undeclared_heap_bytes),
+                None => None,
+            },
+            None => None,
+        }
+    }
+}
+
+/// Project `session`'s native effect instances against `registry` without preparing any
+/// (issue #2194): the first pass of the walk [`prepare_native_session_effects`] prepares in, for a
+/// host that admits the session's effect bytes against its aggregate budget before it prepares.
+///
+/// An instance that does not resolve (a third-party identity, an effect the registry lacks, a rate
+/// or quality its descriptor does not declare) adds nothing: preparation refuses it. `None` when a
+/// sum overflows `u64`.
+#[must_use]
+pub fn project_session_effects(
+    session: &CompiledSession,
+    registry: &NativeEffectRegistry,
+) -> Option<EffectStateProjection> {
+    let model = session.normalized_model();
+    let (sample_rate, quantum) = (session.sample_rate().0, session.quantum().0);
+    let mut total = Some(EffectStateProjection::default());
+    for_each_session_effect(model, |site| {
+        let EffectIdentity::Native { effect_id } = &site.effect.identity else {
+            return;
+        };
+        let Some(factory) = registry.get_shared_ascii(effect_id.as_str()) else {
+            return;
+        };
+        let Ok(declared) = effect_contract::declared_instance_resources(
+            factory.descriptor(),
+            contract_quality(site.effect.quality),
+            sample_rate,
+            quantum,
+        ) else {
+            return;
+        };
+        total = total.and_then(|sum| {
+            Some(EffectStateProjection {
+                instances: sum.instances.checked_add(1)?,
+                state_bytes: sum
+                    .state_bytes
+                    .checked_add(declared.quality.maximum_state.total()?)?,
+                scratch_bytes: sum.scratch_bytes.checked_add(declared.scratch_bytes)?,
+                inline_bytes: sum
+                    .inline_bytes
+                    .checked_add(factory.prepared_inline_bytes())?,
+                undeclared_heap_bytes: sum
+                    .undeclared_heap_bytes
+                    .checked_add(factory.prepared_undeclared_heap_bytes(&declared.quality))?,
+            })
+        });
+    });
+    total
 }
 
 /// One prepared live-control lane for one effect instance, as control holds it (issue #140 A;
@@ -957,6 +1096,12 @@ mod metadata_mismatch_tests {
     impl NativeEffectFactory for ForgingEq {
         fn descriptor(&self) -> &'static EffectDescriptor {
             &PARAMETRIC_EQ_DESCRIPTOR
+        }
+        fn prepared_inline_bytes(&self) -> u64 {
+            ParametricEqFactory.prepared_inline_bytes()
+        }
+        fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+            0
         }
         fn prepare(
             &self,
@@ -2172,6 +2317,12 @@ mod tail_bound_count_tests {
     impl NativeEffectFactory for Factory {
         fn descriptor(&self) -> &'static EffectDescriptor {
             &DESCRIPTOR
+        }
+        fn prepared_inline_bytes(&self) -> u64 {
+            size_of::<Processor>() as u64
+        }
+        fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+            0
         }
         fn prepare(
             &self,

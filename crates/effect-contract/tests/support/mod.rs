@@ -113,6 +113,12 @@ impl NativeEffectFactory for Factory {
         self.0
     }
 
+    fn prepared_inline_bytes(&self) -> u64 {
+        0
+    }
+    fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+        0
+    }
     fn prepare(
         &self,
         _request: PrepareEffectRequest<'_>,

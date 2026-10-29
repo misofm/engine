@@ -67,6 +67,12 @@ impl NativeEffectFactory for PaddingDouble {
     fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
         self.delegate.descriptor()
     }
+    fn prepared_inline_bytes(&self) -> u64 {
+        self.delegate.prepared_inline_bytes()
+    }
+    fn prepared_undeclared_heap_bytes(&self, quality: &effect_contract::QualityDescriptor) -> u64 {
+        self.delegate.prepared_undeclared_heap_bytes(quality)
+    }
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,

@@ -147,6 +147,7 @@ pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
 pub use duck::DuckOverlay;
+pub use effect_compiler::EffectStateProjection;
 pub use engine::LAUNCH_SAMPLE_RATES;
 pub use engine::realtime::{
     ObserverCarry, ObserverKind, ResponseSnapshotAvailability, ResponseSnapshotCapture,
@@ -177,7 +178,7 @@ pub use prepare::{
     LiveRampRow, LiveRamps, MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, MonitorBase,
     NO_OBSERVATION, PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS, SendRecord,
     SourceInventoryRow, SuccessorBase, WarmConfig, WarmDecision, WarmLead, WarmUnavailable,
-    check_counts, compile_host_model, compile_host_session, count_effects,
+    check_counts, check_effect_projection, compile_host_model, compile_host_session, count_effects,
     default_source_ring_frames, effect_producer_position, follow_route_producer_for,
     follow_route_producer_position, jump_length_retained_bytes, launch_maximum_observation_taps,
     p_max_samples, pair_carried_meters, pair_carried_observations, parse_host_session,
@@ -187,8 +188,8 @@ pub use prepare::{
     prepare_host_runtime_with_live_lanes_successor, prepare_host_runtime_with_selected_meters,
     prepare_host_runtime_with_selected_meters_successor, prepare_host_runtime_with_spectrum,
     prepare_host_runtime_with_spectrum_collection, prepare_host_session,
-    prepare_host_session_with_live_controls, session_jump_lengths, stall_ring_frames,
-    strip_control_table_bytes, strip_position, warm_lead,
+    prepare_host_session_with_live_controls, project_effects, session_jump_lengths,
+    stall_ring_frames, strip_control_table_bytes, strip_position, warm_lead,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
