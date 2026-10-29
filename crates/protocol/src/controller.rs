@@ -856,7 +856,7 @@ impl MockProvider {
     }
 
     /// The rows after the request's cursor, at most its limit, of its owner, and the page's last
-    /// handle and end flag.
+    /// handle and end flag. The mock ignores `headers_only` (#2206) and serves every row.
     fn control_window(
         &self,
         request: &ControlListRequest,
