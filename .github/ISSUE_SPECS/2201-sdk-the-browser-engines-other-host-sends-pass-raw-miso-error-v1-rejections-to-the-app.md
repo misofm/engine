@@ -57,6 +57,8 @@ writer's retry and sticky-failure claims.
   that names its row: `spectrum`, `the boot's capability probe`, `observation`, `loudness`,
   `trackResponse`, `protocol` (the #2190 mapping removed) and `liveControls` (the #2193 mapping
   removed), `... passed the host's raw record`.
-- Green: the SDK headless evals (705 of 705) and `check-sdk-types.sh`.
+- Green: the SDK headless evals (705 of 705); `check-sdk-types.sh`, `check-sdk-generated.sh`,
+  `check-sdk-deletions.py`, `sdk-package.sh check`, `check-workspace-policy.sh`; the Chromium
+  browser qualification (`--sdk-root --check-matrix`), single and worker legs, with the SDK rows.
 - README: a paragraph at the end of "Observe the rendered mix" states the one path and the retry
   rule.
