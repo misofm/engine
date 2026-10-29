@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.10.0
+npm install @misofm/engine@0.10.1
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -847,7 +847,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.10.0 release record](https://github.com/misofm/engine/issues/2196) contains the accepted artifact
+[0.10.1 release record](https://github.com/misofm/engine/issues/2203) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -873,6 +873,25 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.10.0
+
+0.10.1 removes no export. One refusal changes its code (see the first item).
+
+- Changed: the engine projects a session's effect state against the memory budget before it
+  allocates, on boot, replace and rebuild (issue #2194). A session whose effects cannot fit is
+  refused before memory grows, with `host.effect.resource.limit`,
+  `host.budget.retained_projection` or `control.resource.replacement_peak`. A `replaceSession`
+  whose document cannot be parsed beside the live session rejects with `MisoEngineError`
+  `refusedBudget` (diagnostic `host.budget.parse_projection`, whose detail names
+  `live_retained_bytes`). In 0.10.0 it rejected with `bufferTooSmall`.
+- Changed: in the browser, the live controls an app holds follow a rebuild that adds, removes or
+  reorders strips (issue #2189; see "Edit a playing session"). Index addressing of console slots
+  and inserts stays valid on each strip whose racks the rebuild did not change, and throws
+  `MisoUsageError` on a strip whose racks changed.
+- Changed: in the browser, a live-control frame that the host refuses before the core rejects with
+  `MisoEngineError`, never with the host's raw `miso.error.v1` record (issue #2193). A host that
+  failed is `wrongState` (terminal: the writer drops the batch and throws), not `backpressure`.
 
 ## Upgrading from 0.9.0
 
