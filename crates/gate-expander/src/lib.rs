@@ -1962,6 +1962,14 @@ impl NativeEffectFactory for GateExpanderFactory {
         &GATE_EXPANDER_DESCRIPTOR
     }
 
+    fn prepared_inline_bytes(&self) -> u64 {
+        (size_of::<PreparedGate<f32, true>>()).max(size_of::<PreparedGate<f32, false>>()) as u64
+    }
+
+    fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+        0
+    }
+
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,

@@ -1874,6 +1874,12 @@ mod tests {
         fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
             DualAccumulatorDelayFactory::correct().descriptor()
         }
+        fn prepared_inline_bytes(&self) -> u64 {
+            DualAccumulatorDelayFactory::correct().prepared_inline_bytes()
+        }
+        fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+            0
+        }
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
@@ -1898,6 +1904,15 @@ mod tests {
     impl NativeEffectFactory for ScalarOnlyDelegateFactory {
         fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
             self.delegate.descriptor()
+        }
+        fn prepared_inline_bytes(&self) -> u64 {
+            self.delegate.prepared_inline_bytes()
+        }
+        fn prepared_undeclared_heap_bytes(
+            &self,
+            quality: &effect_contract::QualityDescriptor,
+        ) -> u64 {
+            self.delegate.prepared_undeclared_heap_bytes(quality)
         }
         fn prepare(
             &self,
@@ -9175,6 +9190,15 @@ mod tests {
     impl NativeEffectFactory for ErroringBankFactory {
         fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
             self.delegate.descriptor()
+        }
+        fn prepared_inline_bytes(&self) -> u64 {
+            self.delegate.prepared_inline_bytes()
+        }
+        fn prepared_undeclared_heap_bytes(
+            &self,
+            quality: &effect_contract::QualityDescriptor,
+        ) -> u64 {
+            self.delegate.prepared_undeclared_heap_bytes(quality)
         }
         fn prepare(
             &self,

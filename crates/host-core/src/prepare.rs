@@ -20,9 +20,9 @@ use builtins_compiler::{
 };
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
-    LiveEffectAddress, LiveEffectRack, attach_effect_live_controls, attach_effect_observation,
-    effect_control_resources, launch_native_effect_registry, prepare_native_session_effects,
-    resolve_initial_values,
+    EffectStateProjection, LiveEffectAddress, LiveEffectRack, attach_effect_live_controls,
+    attach_effect_observation, effect_control_resources, launch_native_effect_registry,
+    prepare_native_session_effects, resolve_initial_values,
 };
 use effect_contract::{
     AutomationRate, BypassSwitch, EffectControlRecord, NativeEffectFactory,
@@ -2143,6 +2143,8 @@ fn compile_for_arrivals(
     overlay: &controls::MonitorOverlay,
     floors: BTreeMap<GraphNodeId, effect_contract::LatencySamples>,
 ) -> Result<graph_compiler::PreparedGraphBuiltinsArtifact, PrepareDiagnostics> {
+    // Issue #2194: the effect state inside the caps before any instance is allocated.
+    check_effect_projection(project_effects(compiled)?, caps)?;
     let registry =
         launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
     let effects = prepare_native_session_effects(
@@ -3391,6 +3393,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_superseded = superseded.cloned().unwrap_or_default();
     let model = compiled.normalized_model();
     check_counts(model, caps)?;
+    // Issue #2194: the session's effect state and scratch, projected from the descriptors, inside
+    // the caps before this preparation allocates any of it.
+    let effect_projection = project_effects(compiled)?;
+    check_effect_projection(effect_projection, caps)?;
     // The counts the report carries; `check_counts` has proved them inside the caps.
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let submix_count = u64::try_from(model.submixes.len()).map_err(|_| platform("host.count"))?;
@@ -3808,10 +3814,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                         .ok_or_else(|| resource("host.effect.resource.arithmetic"))?,
                 ))
             })?;
-    if effect_state_bytes > caps.maximum_effect_state_bytes
-        || effect_scratch_bytes > caps.maximum_effect_scratch_bytes
+    // Issue #2194: the prepared instances' declared rows are the projection's, which
+    // `check_effect_projection` admitted before anything was allocated; preparation holds each
+    // instance's metadata to its descriptor row (`effect.metadata.mismatch`), so a difference here
+    // is an internal fault, never a session's.
+    if effect_state_bytes != effect_projection.state_bytes
+        || effect_scratch_bytes != effect_projection.scratch_bytes
     {
-        return Err(resource("host.effect.resource.limit"));
+        return Err(platform("host.effect.projection"));
     }
     #[cfg(feature = "control-provider")]
     let control_catalog = crate::ControlCatalog::build(
@@ -9547,6 +9557,60 @@ pub fn check_counts(
         && model.vca_reach_pairs(caps.maximum_vca_reach_pairs) > caps.maximum_vca_reach_pairs
     {
         return Err(resource("host.resource.vca_reach_pairs"));
+    }
+    Ok(())
+}
+
+/// The session's native effect instances, projected without preparing any (issue #2194):
+/// [`effect_compiler::project_session_effects`] against the launch registry.
+///
+/// # Errors
+///
+/// `host.effect.registry` when the launch registry failed to build, and
+/// `host.effect.resource.arithmetic` when a sum overflows.
+pub fn project_effects(
+    compiled: &CompiledSession,
+) -> Result<EffectStateProjection, PrepareDiagnostics> {
+    let registry =
+        launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
+    effect_compiler::project_session_effects(compiled, registry)
+        .ok_or_else(|| resource("host.effect.resource.arithmetic"))
+}
+
+/// Refuse a projection whose declared effect state or scratch exceeds its cap (issue #2194):
+/// `host.effect.resource.limit`, naming the projected bytes, the cap and the instances, at
+/// `$.maximum_effect_state_bytes` or `$.maximum_effect_scratch_bytes`. Preparation runs it before
+/// it allocates, and a control plane may run it on a candidate before it prepares one.
+///
+/// # Errors
+///
+/// `host.effect.resource.limit` as above.
+pub fn check_effect_projection(
+    projection: EffectStateProjection,
+    caps: &HostPrepareCaps,
+) -> Result<(), PrepareDiagnostics> {
+    for (field, projected, limit) in [
+        (
+            "maximum_effect_state_bytes",
+            projection.state_bytes,
+            caps.maximum_effect_state_bytes,
+        ),
+        (
+            "maximum_effect_scratch_bytes",
+            projection.scratch_bytes,
+            caps.maximum_effect_scratch_bytes,
+        ),
+    ] {
+        if projected > limit {
+            return Err(PrepareDiagnostics::new(
+                PrepareRejection::Resource,
+                format!(
+                    "host.effect.resource.limit\t$.{field}[projected_bytes={projected},limit_bytes={limit},instances={}]\n",
+                    projection.instances
+                )
+                .into_bytes(),
+            ));
+        }
     }
     Ok(())
 }

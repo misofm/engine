@@ -103,6 +103,12 @@ impl NativeEffectFactory for Factory {
     fn descriptor(&self) -> &'static EffectDescriptor {
         self.0
     }
+    fn prepared_inline_bytes(&self) -> u64 {
+        size_of::<Processor>() as u64
+    }
+    fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+        0
+    }
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,

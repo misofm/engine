@@ -995,6 +995,12 @@ impl NativeEffectFactory for DecliningPaddedLimiter {
     fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
         self.delegate.descriptor()
     }
+    fn prepared_inline_bytes(&self) -> u64 {
+        self.delegate.prepared_inline_bytes()
+    }
+    fn prepared_undeclared_heap_bytes(&self, quality: &effect_contract::QualityDescriptor) -> u64 {
+        self.delegate.prepared_undeclared_heap_bytes(quality)
+    }
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
@@ -1381,6 +1387,14 @@ struct Double {
 impl NativeEffectFactory for Double {
     fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
         self.delegate.descriptor()
+    }
+    fn prepared_inline_bytes(&self) -> u64 {
+        self.delegate
+            .prepared_inline_bytes()
+            .max(size_of::<EpisodeEffect>() as u64)
+    }
+    fn prepared_undeclared_heap_bytes(&self, quality: &effect_contract::QualityDescriptor) -> u64 {
+        self.delegate.prepared_undeclared_heap_bytes(quality)
     }
     fn prepare(
         &self,

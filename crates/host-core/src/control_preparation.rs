@@ -484,6 +484,15 @@ mod tests {
         fn descriptor(&self) -> &'static EffectDescriptor {
             &PARAMETRIC_EQ_DESCRIPTOR
         }
+        fn prepared_inline_bytes(&self) -> u64 {
+            ParametricEqFactory.prepared_inline_bytes()
+        }
+        fn prepared_undeclared_heap_bytes(
+            &self,
+            quality: &effect_contract::QualityDescriptor,
+        ) -> u64 {
+            ParametricEqFactory.prepared_undeclared_heap_bytes(quality)
+        }
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,

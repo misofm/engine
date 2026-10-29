@@ -1569,6 +1569,19 @@ impl NativeEffectFactory for SoftClipFactory {
         &SOFT_CLIP_DESCRIPTOR
     }
 
+    fn prepared_inline_bytes(&self) -> u64 {
+        size_of::<PreparedSoftClip>() as u64
+    }
+
+    fn prepared_undeclared_heap_bytes(&self, quality: &effect_contract::QualityDescriptor) -> u64 {
+        // One lane per channel: its defaults row, its ramps and its three histories, each
+        // `HALFBAND63_ROWS` long because the 31-row window is double-written; the payload
+        // carries one copy of each window and the ramps' fields.
+        let channel = PARAMETER_COUNT * (size_of::<f32>() + size_of::<LinearRamp>())
+            + 3 * lane::kernels::halfband::HALFBAND63_ROWS * size_of::<f32>();
+        (2 * channel as u64).saturating_sub(quality.maximum_state.total().unwrap_or(0))
+    }
+
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,

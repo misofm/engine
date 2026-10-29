@@ -1723,6 +1723,14 @@ impl NativeEffectFactory for DeEsserFactory {
         &DE_ESSER_DESCRIPTOR
     }
 
+    fn prepared_inline_bytes(&self) -> u64 {
+        (size_of::<DeEsser<f32, true>>()).max(size_of::<DeEsser<f32, false>>()) as u64
+    }
+
+    fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
+        0
+    }
+
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
