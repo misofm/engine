@@ -1276,6 +1276,28 @@ describe("browser session edits", () => {
     }
   });
 
+  test("#2189: live controls an app holds follow a rebuild that adds or removes a submix", async () => {
+    // Red if the live controls check strips against the set they were made with: `strip()` then
+    // refuses the bus an apply added, and accepts it after an apply removed it.
+    const { engine, tick } = await boot(base());
+    try {
+      const held = await engine.liveControls();
+      assert.throws(() => held.edit.strip("bus"), MisoUsageError);
+      const added = await engine.apply(transaction(base()).upsertSubmix("bus").build());
+      assert.equal(added.path, "rebuild");
+      tick();
+      await engine.applied(added.revision);
+      assert.equal((await held.submit(held.edit.strip("bus").faderDb(-6))).ok, true);
+      const asked = await engine.liveControls();
+      assert.doesNotThrow(() => asked.edit.strip("bus"));
+      const removed = await engine.apply(transaction(base().submix("bus")).removeSubmix("bus").build());
+      assert.equal(removed.path, "rebuild");
+      assert.throws(() => held.edit.strip("bus"), MisoUsageError);
+    } finally {
+      await engine.close();
+    }
+  });
+
   test("#2193: a host's raw miso.error.v1 rejection of a live-control frame is a MisoEngineError", async () => {
     // Red if the live queue's send passes the host's local refusal record (not an Error) to the app:
     // a writer then throws the record instead of retrying the host's in-flight backpressure, and a

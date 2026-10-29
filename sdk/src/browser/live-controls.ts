@@ -69,6 +69,8 @@ export function createBrowserStripOrder(host: MisoAudioWorkletHost): () => Promi
 export interface BrowserStripOrders {
   /** The order of the newest committed list, read again when its structure epoch moved. */
   readonly current: () => Promise<ControlStripOrder>;
+  /** The order `current` returned last, without a read; `undefined` before the first read. */
+  readonly latest: () => ControlStripOrder | undefined;
   /** The order of the list of `epoch` if the page holds it now. */
   readonly held: (epoch: number | bigint) => ControlStripOrder | undefined;
   /**
@@ -120,6 +122,7 @@ function newBrowserStripOrders(host: MisoAudioWorkletHost): BrowserStripOrders {
   const held = (epoch: number | bigint): ControlStripOrder | undefined => orders.get(BigInt(epoch));
   return Object.freeze({
     current,
+    latest: () => newest,
     held,
     of: async (epoch: number | bigint) => {
       const known = held(epoch);
@@ -204,5 +207,8 @@ export async function createBrowserLiveControls(
     metersAttached: remoteMap.metersAttached,
     submixes: order.submixes,
   });
-  return new EngineLiveControls(map, { queue, order }, session, booted);
+  // The live controls follow the host's newest order (#2189): every read of it -- the browser
+  // engine's after a committed rebuild, a meter frame's, a feed's -- moves the strips they check, so
+  // live controls an app already holds are never left on the strip set they were made with.
+  return new EngineLiveControls(map, { queue, order: () => orders.latest() ?? order }, session, booted);
 }

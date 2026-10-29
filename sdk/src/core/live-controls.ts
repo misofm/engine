@@ -62,8 +62,19 @@ export type { InputFilterValues, MatrixValues } from "../generated/control-build
 export interface LiveControlTransport {
   /** Every value edit goes here, as a `SET_CONTROL` transaction. */
   readonly queue: ControlTransactionQueue;
-  /** The order the transport read when it made these live controls. */
-  readonly order?: ControlStripOrder;
+  /**
+   * The core's strip order: the order the transport read when it made these live controls, or a
+   * function that returns the newest order the transport holds (#2189). With a function the live
+   * controls follow a structure change: each edit checks strip IDs and names effects against the
+   * order the function returns then, so live controls an app holds across a rebuild that added or
+   * removed a strip address the new strip set.
+   */
+  readonly order?: ControlStripOrder | (() => ControlStripOrder);
+}
+
+/** The order of `order` now: the newest one when the transport gives a function. */
+function orderNow(order: LiveControlTransport["order"]): ControlStripOrder | undefined {
+  return typeof order === "function" ? order() : order;
 }
 
 function modelOf(session: SessionLike): SessionModel {
@@ -210,19 +221,24 @@ function controlEdit(
  * index (`effect()`) to its stable ID.
  */
 export class LiveControlEdits {
-  readonly #tracks: ReadonlySet<string>;
-  readonly #submixes: ReadonlySet<string>;
+  readonly #map: SessionMap;
   readonly #layout: LiveControlLayout | undefined;
-  /** The core's strips and effects as the live controls were made; supplies the effect of a named section. */
-  readonly #order: ControlStripOrder | undefined;
+  /**
+   * The core's strips and effects: the order the live controls were made with, or the transport's
+   * newest order (#2189). It supplies the strip set `strip()` checks and the effect of a named
+   * section.
+   */
+  readonly #order: LiveControlTransport["order"];
+  /** The structure epoch the session's layout was checked against; another epoch drops the layout. */
+  readonly #layoutEpoch: bigint | undefined;
   /** What a strip reaches `set` and its effect builders through. */
   readonly #context: StripContext;
 
-  constructor(map: SessionMap, session?: SessionLike, order?: ControlStripOrder) {
-    this.#tracks = new Set(map.tracks);
-    this.#submixes = new Set(map.submixes);
+  constructor(map: SessionMap, session?: SessionLike, order?: LiveControlTransport["order"]) {
+    this.#map = map;
     this.#layout = session === undefined ? undefined : layoutOf(session, map);
     this.#order = order;
+    this.#layoutEpoch = orderNow(order)?.structureEpoch;
     this.#context = {
       set: (address, value, options) => this.set(address, value, options),
       effect: <E extends EffectId, R extends LiveControlRack>(
@@ -340,9 +356,28 @@ export class LiveControlEdits {
    */
   #effectOf(owner: ControlOwner, section: ControlSection): string | undefined {
     if (owner.kind !== "strip" || (section.kind !== "console" && section.kind !== "inserts")) return undefined;
-    const listed = this.#order === undefined ? undefined : stripEffectOf(this.#order, owner.id, section);
+    const order = orderNow(this.#order);
+    const listed = order === undefined ? undefined : stripEffectOf(order, owner.id, section);
     if (listed !== undefined) return listed;
-    return this.#layout === undefined ? undefined : this.#instanceOf(this.#layout, owner.id, section)?.effectId;
+    const layout = this.#currentLayout();
+    return layout === undefined ? undefined : this.#instanceOf(layout, owner.id, section)?.effectId;
+  }
+
+  /**
+   * The session's layout while the core's structure is the one it was checked against. A rebuild
+   * that moved the strips moves the structure epoch, and the session no longer describes the engine:
+   * names then resolve from the core's control list alone, as `withSession()` does for a session
+   * whose strips moved.
+   */
+  #currentLayout(): LiveControlLayout | undefined {
+    if (this.#layout === undefined) return undefined;
+    const epoch = orderNow(this.#order)?.structureEpoch;
+    return epoch === this.#layoutEpoch ? this.#layout : undefined;
+  }
+
+  /** The strips the core runs now: the transport's order when it has one, else the map's. */
+  #strips(): { readonly tracks: readonly string[]; readonly submixes: readonly string[] } {
+    return orderNow(this.#order) ?? this.#map;
   }
 
   #instanceOf(
@@ -363,7 +398,7 @@ export class LiveControlEdits {
   track(trackId: string): TrackEdits {
     return new TrackEdits(
       id(trackId, "a track ID"),
-      this.#layout,
+      this.#currentLayout(),
       this.#context,
     );
   }
@@ -375,7 +410,7 @@ export class LiveControlEdits {
   submix(submixId: string): SubmixEdits {
     return new SubmixEdits(
       id(submixId, "a submix ID"),
-      this.#layout,
+      this.#currentLayout(),
       this.#context,
     );
   }
@@ -383,14 +418,16 @@ export class LiveControlEdits {
   /**
    * Either kind of strip by its ID -- a track, else a submix (strip IDs are unique across both) --
    * for an edit every strip shares, such as arming an effect observation. It never offers `solo`.
-   * An ID that is neither is refused here.
+   * An ID that is neither is refused here. The strips are the core's newest order when the
+   * transport follows it (#2189): a strip a rebuild added is accepted, and one it removed refused.
    */
   strip(stripId: string): StripEdits {
-    if (this.#tracks.has(stripId)) return this.track(stripId);
-    if (this.#submixes.has(stripId)) return this.submix(stripId);
+    const { tracks, submixes } = this.#strips();
+    if (tracks.includes(stripId)) return this.track(stripId);
+    if (submixes.includes(stripId)) return this.submix(stripId);
     throw new MisoUsageError(
       `the compiled session has no track or submix '${stripId}'; expected one of `
-        + `${[...this.#tracks, ...this.#submixes].join(", ")}`,
+        + `${[...tracks, ...submixes].join(", ")}`,
     );
   }
 
@@ -532,10 +569,14 @@ export class EngineLiveControls {
     }
     assertBootedSession(session, this.#booted);
     // After a rebuild moved the strips the engine is no longer the booted session: the names then
-    // resolve from the core's control list alone.
-    const describes = sessionDescribesStrips(session, this.#map);
+    // resolve from the core's control list alone. The strips are the transport's newest (#2189).
+    const order = orderNow(this.#transport.order);
+    const map: SessionMap = order === undefined
+      ? this.#map
+      : Object.freeze({ ...this.#map, tracks: order.tracks, submixes: order.submixes });
+    const describes = sessionDescribesStrips(session, map);
     return new EngineLiveControls(
-      this.#map,
+      map,
       this.#transport,
       describes ? session : undefined,
       this.#booted,
