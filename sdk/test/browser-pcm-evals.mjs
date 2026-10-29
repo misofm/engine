@@ -662,7 +662,9 @@ function preludeConsumer(source) {
       this.quantumFrames = 4; this.maximumSourceChannels = 2; this.memoryBuffer = new ArrayBuffer(65_536);
       this.sourceIdPointer = 0; this.sourceIdCapacity = 128; this.sourcePcm = new sandbox.Float32Array(this.memoryBuffer, 1024, 8);
       this.diagnosticView = new sandbox.Uint8Array(this.memoryBuffer, 4096, 256);
-      this.sampleRateHz = 48_000;
+      // #2185: a rate that makes the deferral bound and runway 4 blocks at 4-frame quanta, the
+      // Worker adapter's too, so a case can publish a runway within its 8-slot rings.
+      this.sampleRateHz = 320;
       this.handle = 1; this.ready = true; this.disposed = false; this.stickyResult = 0;
       this.exports = recordFeedCalls({
         memory: { buffer: this.memoryBuffer },

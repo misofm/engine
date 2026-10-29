@@ -992,9 +992,9 @@ class ControlWorker {
       // #2184: the last whole seek publication `readSharedSeek` read.
       seekEpoch: 0,
       seekTag: 0,
-      seekGeneration: 0n,
-      seekGenerationHigh: 0,
-      seekGenerationLow: 0,
+      publishedGeneration: 0n,
+      publishedGenerationHigh: 0,
+      publishedGenerationLow: 0,
       seekFrame: 0n,
       seekAnchor: NO_ANCHOR,
       seekWrite: 0,
@@ -1240,9 +1240,9 @@ class ControlWorker {
     ring.seekEpoch = epoch;
     ring.seekTag = tag;
     ring.seekWrite = write;
-    ring.seekGeneration = generation;
-    ring.seekGenerationHigh = Number(BigInt.asUintN(32, generation >> 32n));
-    ring.seekGenerationLow = Number(BigInt.asUintN(32, generation));
+    ring.publishedGeneration = generation;
+    ring.publishedGenerationHigh = Number(BigInt.asUintN(32, generation >> 32n));
+    ring.publishedGenerationLow = Number(BigInt.asUintN(32, generation));
     ring.seekFrame = frame;
     ring.seekAnchor = anchor;
     return true;
@@ -1254,15 +1254,16 @@ class ControlWorker {
   sharedSlotAge(ring, word) {
     if (ring.seekEpoch === 0) return ring.headers[word + 1] === ring.seekTag ? 0 : -1;
     const high = ring.headers[word + 5] >>> 0;
-    if (high !== ring.seekGenerationHigh) return high < ring.seekGenerationHigh ? -1 : 1;
+    if (high !== ring.publishedGenerationHigh) return high < ring.publishedGenerationHigh ? -1 : 1;
     const low = ring.headers[word + 4] >>> 0;
-    if (low !== ring.seekGenerationLow) return low < ring.seekGenerationLow ? -1 : 1;
+    if (low !== ring.publishedGenerationLow) return low < ring.publishedGenerationLow ? -1 : 1;
     return 0;
   }
 
-  /// The prelude's `deferSharedSeek` (#2185): while no slot of a live plain seek's generation is
-  /// published, free every slot of an older one, ask no seek and submit nothing (a newer one stops
-  /// the scan); the first slot of the seek's generation, or `seekDeferralQuanta` rendered quanta (counted from the pass after the first
+  /// The prelude's `deferSharedSeek` (#2185): until a live plain seek's generation has its runway
+  /// published (`seekDeferralQuanta` chunks, at most a ring, or a chunk that ends its region),
+  /// free every slot of an older one, ask no seek and submit nothing (a newer one stops the scan);
+  /// the runway, or `seekDeferralQuanta` rendered quanta (counted from the pass after the first
   /// deferral, `elapsed` being the quanta rendered since the last pass), applies it. A newer seek
   /// replaces the deferred one and inherits its count; an anchored seek is never deferred.
   deferSharedSeek(ring, elapsed) {
@@ -1271,25 +1272,36 @@ class ControlWorker {
     if (ring.deferredQuanta >= this.seekDeferralQuanta) return false;
     const control = ring.control;
     const write = ring.seekWrite;
+    // #2185 attempt 2: the new generation's runway, as the prelude's: the bound, at most a ring.
+    const runway = Math.min(this.seekDeferralQuanta, ring.capacity);
     let read = control[RING.READ_INDEX];
-    let published = false;
-    for (let remaining = ring.capacity; read !== write && remaining > 0; remaining -= 1) {
-      const word = (read & (ring.capacity - 1)) * (SLOT_HEADER_BYTES / 4);
-      if (ring.headers[word] !== read) {
+    let current = 0;
+    let ended = false;
+    for (let index = read, remaining = ring.capacity; index !== write && remaining > 0; remaining -= 1) {
+      const word = (index & (ring.capacity - 1)) * (SLOT_HEADER_BYTES / 4);
+      if (ring.headers[word] !== index) {
         control[RING.TORN] += 1;
         break;
       }
       const age = this.sharedSlotAge(ring, word);
-      if (age === 0) {
-        published = true;
+      if (age > 0) break;
+      if (age < 0) {
+        if (current !== 0) break;
+        index = (index + 1) & SAB_WRAP_MASK;
+        read = index;
+        control[RING.STALE] += 1;
+        continue;
+      }
+      current += 1;
+      if ((ring.headers[word + 3] & SLOT_FLAG_END_OF_REGION) !== 0) {
+        ended = true;
         break;
       }
-      if (age > 0) break;
-      read = (read + 1) & SAB_WRAP_MASK;
-      control[RING.STALE] += 1;
+      if (current >= runway) break;
+      index = (index + 1) & SAB_WRAP_MASK;
     }
     Atomics.store(control, RING.READ_INDEX, read);
-    if (published) return false;
+    if (current >= runway || ended) return false;
     ring.deferring = true;
     return true;
   }
@@ -1297,7 +1309,7 @@ class ControlWorker {
   /// The prelude's seek rule: a published plain seek is applied through `source_seek` before any
   /// slot is read; an anchored one only once `source_seek_at` answered OK for the same tuple. The
   /// defaults are the publication `readSharedSeek` read last.
-  applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.seekGeneration, frame = ring.seekFrame,
+  applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.publishedGeneration, frame = ring.seekFrame,
     anchor = ring.seekAnchor) {
     const control = ring.control;
     if (epoch === ring.seenEpoch) return RESULT_OK;
@@ -1376,7 +1388,7 @@ class ControlWorker {
     if (rings.some((ring) => ring === undefined)) return { kind: "refused", result: RESULT_WRONG_STATE };
     // #2184: the live publication is read whole, so the anchor the apply reads is the seek's own.
     const matches = (ring, seek) => seek && seek.epoch !== 0 && this.readSharedSeek(ring)
-      && ring.seekEpoch === seek.epoch && ring.seekGeneration === seek.generation
+      && ring.seekEpoch === seek.epoch && ring.publishedGeneration === seek.generation
       && ring.seekFrame === seek.frame;
     if (!rings.every((ring, index) => matches(ring, seeks[index]))) return { kind: "superseded" };
     for (let index = 0; index < rings.length; index += 1) {

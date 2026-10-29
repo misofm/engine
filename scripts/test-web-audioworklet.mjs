@@ -5012,14 +5012,17 @@ async function testControlWorker() {
       // A seek in `worker` mode: the drain seeks the source before it reads a slot, drops the
       // chunks of the old generation and resumes at the new one. Red if the drain submits a stale
       // chunk, or reads a slot before the seek.
+      // #2185: a live plain seek applies once its runway (here the 4-slot ring) is published.
       write(1n, 256n, 1);
       writer.seek(2n, 4800n);
-      write(2n, 4800n, 0.75);
+      for (const frame of [4800n, 4864n, 4928n]) write(2n, frame, 0.75);
       const submitted = fake.calls.source.length;
       tick.callback();
+      write(2n, 4992n, 0.75);
+      tick.callback();
       assert.deepEqual(fake.calls.seek.at(-1), [1, 5, 2n, 4800n], "the ring's seek reaches source_seek");
-      assert.deepEqual(fake.calls.source.slice(submitted), [[1, 5, 2n, 4800n, 2, 64, 0]],
-        "only the new generation's chunk is submitted");
+      assert.deepEqual(fake.calls.source.slice(submitted).map((call) => call[3]), [4800n, 4864n, 4928n, 4992n],
+        "only the new generation's chunks are submitted");
       assert.deepEqual([control[MSB1_CONTROL.STALE], control[MSB1_CONTROL.SEEKS_APPLIED]], [1, 1]);
       // An anchored seek waits for this Worker's own `source_seek_at`, and is then consumed with no
       // `source_seek` (#1297b). Red if the Worker does not record the applied tuple: the ring stalls.
@@ -5031,7 +5034,7 @@ async function testControlWorker() {
       rendered(6n);
       tick.callback();
       assert.equal(control[MSB1_CONTROL.DRAIN_BLOCKS], drained, "the quanta of the wait pass uncounted");
-      assert.equal(fake.calls.source.length, submitted + 1, "nothing of the anchored ring is read before the handler");
+      assert.equal(fake.calls.source.length, submitted + 4, "nothing of the anchored ring is read before the handler");
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: 6400n });
       assert.deepEqual(fake.calls.source.at(-1), [1, 5, 3n, 0n, 2, 64, 0], "the drain after the message resumes it");
       assert.equal(fake.calls.seek.length, seeks, "with no second seek of the source");
@@ -5166,7 +5169,9 @@ async function testControlWorker() {
     // Issue #1387 (MAJOR-2): the shared MSB1 consumer case table over this Worker, at 4-frame
     // quanta (`sdk/test/msb1-consumer-cases.mjs`; the prelude runs it in browser-pcm-evals).
     for (const { name, run } of MSB1_CONSUMER_CASES) {
-      const { send, fromWorklet } = await boot({}, 4);
+      // #2185: an 8-quantum engine ring caps the deferral bound and runway at 4 quanta, the
+      // prelude adapter's too.
+      const { send, fromWorklet } = await boot({}, 4, (engine) => { engine.calls.ringQuanta = 8; });
       const tick = intervals.at(-1);
       const replies = [];
       const port = { onmessage: null, postMessage: (data) => replies.push(structuredClone(data)), close() {} };

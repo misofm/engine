@@ -95,3 +95,52 @@ old generation applies no seek before a new-generation chunk is published (or th
 
   The baseline window (500 ms of steady play before the first seek) was 0 in every run. WebKit's
   headless sink renders in bursts (#1387), so its rows are not gated.
+
+## Attempt 2 (2026-10-29, verify of 66dd43bad: FAIL)
+
+- **Blocker 1: a newer seek's first chunk was freed as STALE.** Root ruling: do both. (a) Both
+  consumers classify each slot by its u64 generation against the snapshot's seek generation
+  (`sharedSlotAge`, the rule `releaseStaleSharedSlots` states): lower is stale and freed, equal is
+  current, higher belongs to a newer seek and stops the pass, unfreed and unsubmitted. Before any
+  seek (epoch 0) the engaged tag decides, as before. (b) The write index is read inside the seek
+  snapshot (#2184 attempt 2). New row "#2185: a newer seek and its chunk published after a pass's
+  snapshot survive to be submitted after their seek", with an `onSnapshot` seam in both adapters
+  (a hook right after `readSharedSeek`). It covers the drain (g2 applied, g3 and its chunk land
+  behind it) and a deferral (g4 deferred, g5 and its chunk land). Red on 66dd43bad on both
+  adapters; mutants of the current code with the old scan (a live write index and a tag compare)
+  are red on the drain phase alone and on the deferral phase alone, on both adapters.
+- **Major 3: the one-quantum misses.** One bounded investigation, with temporary counters in the
+  MSB1 reserved words 34/35 and a seek-report timeline polled every 8 ms (not committed):
+  - *Single mode: cause found and fixed in this JS.* Every miss came from a seek applied with no
+    deferral (deferral 0, the writer's first fill right after its seek found free slots): the
+    pass that saw the first new chunks applied the seek with only those few chunks published, and
+    the writer's next chunks came a writer tick (5 ms, about two blocks) later, so the engine ran
+    one quantum dry. Fix (both consumers): a deferred seek applies only once its generation has a
+    **runway** published, `min(B, ring capacity)` chunks (B is the bound, 19 at 48 kHz/128), or
+    a chunk that ends its region; the bound still applies it after 50 ms. The #2185 row now
+    asserts that one chunk is not the runway: red on 296cb0298 (the prelude) and on a runway-1
+    mutant (the Worker).
+  - *Worker mode: cause found; not closable with a plain seek; root ruling needed.* After the
+    runway fix, Chromium single mode had 0 misses in 190 seeks (38 runs: 12 on the final build, 26
+    instrumented), and worker mode 4 misses of 128 frames in 190 seeks. The timeline puts each miss at the seek's landing block: the first
+    report after the seek already names the new generation with 128 missing frames, and the count
+    never grows. The bound never fired, and the deferral had published its runway (19 to 64 chunks
+    submitted in the applying pass). Cause: the Worker applies the plain `source_seek` from its own
+    thread while render runs; render pops the seek at its next block and drops the old chunks, and
+    a block that starts between the Worker's `source_seek` and its first `source_submit` (the same
+    pass, microseconds apart) renders the new generation with no chunk. The order cannot change
+    (the engine refuses a new-generation chunk before its seek), and single mode has no such window
+    (one thread). Options for root: (1) narrow the window by reading the report and the fill
+    before the seek, which makes the miss rarer but does not remove it; (2) the Worker applies a
+    live plain seek as an anchored seek (`source_seek_at`) at a sample a few quanta ahead: the
+    engine keeps the old generation playing until the anchor, so the chunks land first. This is JS
+    only, but it changes the seek's semantics and latency (#2205 makes the same choice for the
+    transport path); (3) an engine primitive (Rust). The Chromium worker gate stays at 0 frames
+    and is red about once in 47 seeks (a 5-seek run is red about one time in 10).
+- **Minor 4:** the Worker headroom rig no longer repeats the row's "no seek before its
+  generation's first chunk" assertion (its anchored-seek repair stays). The Worker's own seek
+  smoke publishes a runway (its 4-slot ring) and now checks four submitted chunks.
+- **Test rates.** Both adapters run the case table with B = 4 quanta (the prelude fake at 320 Hz,
+  the Worker fake's engine ring at 8 quanta), so a case can publish a runway (`publish`) inside
+  its 8-slot rings. Rows that seek and expect the seek to apply in one pass now publish a runway.
+  Rows that drain over several passes let the bound apply the seek.

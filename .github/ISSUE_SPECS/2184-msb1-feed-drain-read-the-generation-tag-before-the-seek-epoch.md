@@ -58,3 +58,26 @@ interleaves the writer's two stores with a drain pass: red on the current read o
   fix on both.
 - The case table's literal prepare-seek epochs now read the ring's epoch back; the writer's layout
   test expects 2 and 4 after two seeks.
+
+## Attempt 2 (2026-10-29, verify of 66dd43bad: FAIL)
+
+- **Write index inside the window (verify blocker 1, root ruling (b)).** `readSharedSeek` now also
+  loads `WRITE_INDEX` between its two epoch loads, and the drain and the deferral read slots only
+  below that index. A seek publication completes before its first chunk is committed, so every
+  slot below an index read inside the window belongs to the snapshot's seek or an earlier one. The
+  #2185 spec has the row and its red evidence (the slot classification by generation is #2185's).
+- **No BigInt on an idle block (verify major 2).** A pass whose first epoch load equals the cached
+  even epoch skips the three `i64` tuple loads (the tag, the write index and the second epoch
+  load are `i32`). The slot generation compare reads the `i64` as two `i32` words. The repo's
+  prelude allocation probe (`runPrelude` `tracking`) counts typed-array constructions only and
+  cannot see a heap BigInt, and a GC-count gate would be a new framework, so the fix is measured,
+  not gated: the verify's probe (16 idle rings, 2 000 000 `process()` calls, `node:perf_hooks` gc
+  entries) counts 527 GCs on 66dd43bad and 28 with the fix, the 723595ed5 baseline the verify
+  reported (two runs each, identical).
+- **Writer order (verify minor 5).** The pump-writer layout test now wraps `Atomics.store` (the
+  writers' own store path) and asserts that each writer stores the generation, frame, anchor and
+  tag while the epoch is odd. Red on the 723595ed5 writers of both `pcm-ring.ts` and `pcm-pump.js`.
+- **Found while fixing:** the control Worker's snapshot field `seekGeneration` (attempt 1) had the
+  name of #1387's seek-transition field in the same ring record, so the object literal kept one of
+  them and the two uses overwrote each other. The snapshot's generation is now
+  `publishedGeneration` in both consumers.
