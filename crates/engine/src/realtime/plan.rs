@@ -303,6 +303,11 @@ pub trait PreparedPlanExecutor: Send {
     fn prepare_source_seek(&mut self, _source_index: usize, _generation: u64, _frame: u64) -> bool {
         false
     }
+    /// Apply every admitted plain seek on the exclusively owned source consumers without
+    /// rendering or advancing any sample clock (#2213); the number of consumers that applied one.
+    fn prepare_admitted_seeks(&mut self) -> usize {
+        0
+    }
     /// Copy one selected track's retained response owners at an already-established block
     /// boundary. The executor receives only the engine-owned sink surface, so this crate does not
     /// depend on graph or effect types.
@@ -1136,6 +1141,16 @@ impl PreparedRenderPlan {
         self.executor
             .as_mut()
             .is_some_and(|executor| executor.prepare_source_seek(source_index, generation, frame))
+    }
+
+    /// Prepare every admitted plain seek on the exclusive render owner between blocks (#2213):
+    /// each source consumer applies its seek and recycles the old generation's queued PCM. Does
+    /// not render, mutate topology, or advance the plan's sample clock. Returns the number of
+    /// consumers that applied a seek.
+    pub fn prepare_admitted_seeks(&mut self) -> usize {
+        self.executor
+            .as_mut()
+            .map_or(0, |executor| executor.prepare_admitted_seeks())
     }
 
     /// Copy one selected track's retained response owners at the current exclusive boundary.

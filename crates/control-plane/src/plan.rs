@@ -326,6 +326,13 @@ impl<A: ControlAdapter> PlanState<A> {
             .prepare_source_seek(source_index, generation, frame)
     }
 
+    /// Prepare every admitted plain seek on the active plan between blocks (#2213): the owner's
+    /// [`RealtimePlanOwner::prepare_admitted_seeks`]. Render side: the caller is the plan's
+    /// exclusive render owner while render does not run.
+    pub fn prepare_admitted_seeks(&mut self) -> usize {
+        self.owner.prepare_admitted_seeks()
+    }
+
     /// Copy one track's retained response owners at the current completed block boundary
     /// (#1381a): the owner's [`RealtimePlanOwner::copy_response_snapshot`].
     ///

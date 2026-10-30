@@ -7096,6 +7096,12 @@ impl PreparedPlanExecutor for GraphExecutor {
         })
     }
 
+    fn prepare_admitted_seeks(&mut self) -> usize {
+        self.source_set
+            .as_mut()
+            .map_or(0, |set| set.driver.prepare_admitted_seeks())
+    }
+
     fn copy_response_snapshot(
         &self,
         track_id: &str,
