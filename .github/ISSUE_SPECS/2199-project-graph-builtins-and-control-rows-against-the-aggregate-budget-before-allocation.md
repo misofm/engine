@@ -49,7 +49,8 @@ Implementation decisions:
   (`host.graph.resource.limit`) before any processor, bank, plan, ring or lane exists. Exact rows:
   graph, builtins, effect producers, sources, carried sources, source control set, provider
   catalog, strip heap and observation counts. Ceiling rows: send lanes, carry beyond the carry
-  program (Q2) and the state inventory. Preparation checks its report against the projection and
+  program (Q2) and the state inventory. The admission charges the exact rows only (D3); the
+  ceiling rows feed the browser boot (D4) and the consistency check. Preparation checks its report against the projection and
   refuses a disagreement as an internal fault (`host.graph.projection`, `host.control.projection`).
 - D3. Every admission before allocation charges the exact rows only: the carry program, not the
   successor's later carry sections; no send-lane or inventory ceiling. So it never refuses a
