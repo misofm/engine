@@ -8,7 +8,10 @@ use builtins_compiler::{
     PreparedBuiltinsGraphArtifact, PreparedBuiltinsGraphBindFailure, PreparedBuiltinsGraphBound,
     PreparedBuiltinsSession, SessionPoolClasses,
 };
-use effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
+use effect_compiler::{
+    EffectPreparedEntry, EffectPreparedSession, EffectProjectedEntry, EffectProjectedSession,
+    EffectRack,
+};
 use effect_contract::{BankWidth, ChannelSymmetryWitness};
 use effect_contract::{
     CompositionBound, FlushStall, LatencySamples, NodeTailBound, PeakGain,
@@ -19,11 +22,10 @@ use engine::realtime::RenderEnvelope;
 use graph::{
     BufferAssignment, DependencyLevel, EffectNodeId, GraphCompileCaps, GraphDiagnostic,
     GraphDiagnosticSet, GraphEdge, GraphEdgeId, GraphNode, GraphNodeId, GraphPortId, GraphPortKind,
-    GraphPreparedEffect, GraphPreparedEffectBank, GraphResourceEstimate,
-    GraphScalarOwnerResourceEstimate, GraphSpec, InsertedDelay, PreparedGraphPlan,
-    PreparedGraphPlanParts, PreparedRoute, PreparedTrackDelay, RackId, ReductionRecord, RouteGate,
-    RouteTiming, RouteTransform, SourceClaimLine, StableGraphId, TrackStage,
-    gated_route_coefficients,
+    GraphPreparedEffect, GraphResourceEstimate, GraphScalarOwnerResourceEstimate, GraphSpec,
+    InsertedDelay, PreparedGraphPlan, PreparedGraphPlanParts, PreparedRoute, PreparedTrackDelay,
+    RackId, ReductionRecord, RouteGate, RouteTiming, RouteTransform, SourceClaimLine,
+    StableGraphId, TrackStage, gated_route_coefficients,
 };
 /// Re-exported so a caller can name the compile input without taking a `lane`
 /// dependency of its own: the backend is this crate's input now, so this crate publishes its type
@@ -595,6 +597,9 @@ mod ids;
 mod pdc;
 mod schedule;
 
+pub use compile::{
+    GraphProjectedCompileFailure, GraphProjection, GraphProjectionFailure, GraphProjectionRequest,
+};
 pub use ids::{RouteValueError, route_coefficients, route_values};
 
 #[cfg(test)]
@@ -642,7 +647,9 @@ mod tests {
     fn indexed_effect_ids(
         prepared: &EffectPreparedSession,
     ) -> (PreparedEffectIndex<'_>, Vec<Option<EffectNodeId>>) {
-        let (index, _) = PreparedEffectIndex::from_entries(&prepared.entries);
+        let (index, _) = PreparedEffectIndex::from_entries(
+            prepared.entries.iter().map(|entry| &entry.projected),
+        );
         let nodes = prepared
             .entries
             .iter()
@@ -9503,10 +9510,13 @@ mod tests {
             .unwrap_or_else(|diagnostics| {
                 panic!("{dispatch:?}: a re-plan bind error refused the compile: {diagnostics:?}")
             });
+        // Issue #2199: the plan binds each bank to read its factory's answer and drops it, and the
+        // compile binds the kept plan's banks once more.
         assert_eq!(
             bound.load(Ordering::SeqCst),
-            2,
-            "{dispatch:?}: the trial's bank, then the re-plan's first before its error"
+            3,
+            "{dispatch:?}: the trial's bank, the re-plan's first before its error, then the \
+             trial's bank bound for the plan"
         );
         assert_eq!(
             live.load(Ordering::SeqCst),

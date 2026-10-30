@@ -25,7 +25,7 @@ use effect_contract::{BypassShunt, EffectControlLane, PreparedAutomationSpan};
 /// for `R` prepared routes over `N` nodes (`N` bounds the executor's units). With no silencing gate
 /// bind builds nothing and the charge is zero, so the estimate is byte for byte what it was.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn resource_estimate(
+pub(crate) fn resource_estimate<'e>(
     quantum: u32,
     session_bytes: u64,
     table: &NodeTable<'_>,
@@ -33,7 +33,7 @@ pub(crate) fn resource_estimate(
     levels: &[DependencyLevel],
     buffers: &[BufferAssignment],
     timing: &TimingResult,
-    effects: &[EffectPreparedEntry],
+    effects: impl ExactSizeIterator<Item = &'e EffectProjectedEntry>,
     // `sum(delay_samples) * 4` over both lanes of every delayed strip, track or submix (#210
     // phase 2, #1201).
     track_delay_bytes: u64,
@@ -188,9 +188,11 @@ pub(crate) fn resource_estimate(
 /// lane holds no window in either form, which is what lets a live-control-free session bypass bind
 /// at any automation capacity. Before #1100 none of this was charged: P1's session bypass put a
 /// per-node owner on every live-control-free host, and live controls already had the gap.
-pub(crate) fn effect_control_resource(
-    effects: &[EffectPreparedEntry],
-    banks: &[GraphPreparedEffectBank],
+pub(crate) fn effect_control_resource<'e>(
+    effects: impl Iterator<Item = &'e EffectProjectedEntry> + Clone,
+    banks: &[crate::banks::PlannedEffectBank],
+    // The session quantum: every bank's scratch is allocated at it (`bind_planned_banks`).
+    quantum: u32,
 ) -> Option<GraphScalarOwnerResourceEstimate> {
     let bytes = |value: usize| u64::try_from(value).ok();
     let span_bytes = bytes(core::mem::size_of::<PreparedAutomationSpan>())?;
@@ -213,7 +215,7 @@ pub(crate) fn effect_control_resource(
             banked.insert((member.track_id.as_str(), rack, member.effect_id.as_str()));
         }
     }
-    for entry in effects {
+    for entry in effects.clone() {
         let Some(control) = entry.control.as_deref() else {
             continue;
         };
@@ -255,7 +257,6 @@ pub(crate) fn effect_control_resource(
     // quadratic in the effect count, and so in the track count on any session with a banked
     // effect per track.
     let controlled: BTreeMap<(&str, EffectRack, &str), &EffectControlLane> = effects
-        .iter()
         .filter_map(|entry| {
             let control = entry.control.as_deref()?;
             Some((
@@ -293,7 +294,7 @@ pub(crate) fn effect_control_resource(
             }
         }
         if has_control {
-            let lane_count = bank.scratch.width().lanes();
+            let lane_count = bank.metadata.width.lanes();
             let lanes = u64::from(lane_count);
             let lane_array = lanes.checked_mul(
                 u64::try_from(core::mem::size_of::<
@@ -326,9 +327,7 @@ pub(crate) fn effect_control_resource(
             };
             let (shunt, shunt_largest) = if shunted {
                 let lane_count = usize::try_from(lane_count).ok()?;
-                let frames = usize::try_from(bank.scratch.quantum())
-                    .ok()?
-                    .checked_mul(lane_count)?;
+                let frames = usize::try_from(quantum).ok()?.checked_mul(lane_count)?;
                 let latency = usize::try_from(metadata.program_key.latency.0)
                     .ok()?
                     .checked_mul(lane_count)?;

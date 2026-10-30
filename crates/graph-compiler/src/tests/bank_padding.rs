@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::banks::effect_bank_resource;
+use graph::GraphPreparedEffectBank;
 
 /// Past the limiter's latency line, with room for its release.
 const BLOCKS: u64 = 12;
@@ -261,12 +262,14 @@ fn a_console_remainder_always_pads_and_an_insert_remainder_pads_from_k_members()
             .map(|group| group.program.len())
             .sum();
         assert_eq!(report.bound_slots.len(), slots, "{what}: one bank per slot");
+        // Each slot's mask is asked for twice (issue #2199): once while the compile plans its
+        // banks, whose bank it drops, and once when it binds the planned banks.
         let mut expected = Vec::new();
         if partial != 0 {
-            expected.push(((1_usize << partial) - 1, 3));
+            expected.push(((1_usize << partial) - 1, 2 * 3));
         }
         if tracks >= lanes {
-            expected.push((full, 3 * (tracks / lanes) as u64));
+            expected.push((full, 2 * 3 * (tracks / lanes) as u64));
         }
         assert_eq!(asked(&seen), expected, "{what}: the masks asked for");
         let console =
@@ -301,12 +304,13 @@ fn a_console_remainder_always_pads_and_an_insert_remainder_pads_from_k_members()
         let (registry, seen) = padding_registry();
         let folded = compile_console_model_with_builtins(&inserts, 1_088, &[], &registry);
         let insert_pads = partial >= k;
+        // Twice per slot, as above: the plan's bind and the compile's.
         let mut expected = Vec::new();
         if partial != 0 && insert_pads {
-            expected.push(((1_usize << partial) - 1, 3));
+            expected.push(((1_usize << partial) - 1, 2 * 3));
         }
         if tracks >= lanes {
-            expected.push((full, 3 * (tracks / lanes) as u64));
+            expected.push((full, 2 * 3 * (tracks / lanes) as u64));
         }
         assert_eq!(
             asked(&seen),

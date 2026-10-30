@@ -3,7 +3,7 @@
 //! One cohort former, over whole rack chains: see [`bind_rack_banks`] (#96 F1, #99 F3).
 
 use super::*;
-use crate::ids::{PreparedEffectIndex, diag, prepared_effect_node};
+use crate::ids::{AsProjected, EffectInputs, PreparedEffectIndex, diag, prepared_effect_node};
 use rack_compiler::CohortPoolClass;
 
 /// The `RackLocation` a graph rack id addresses.
@@ -171,22 +171,27 @@ pub(crate) fn bind_rack_banks_indexed(
     dispatch: Backend,
     classes: &mut SessionPoolClasses,
 ) -> Result<(Vec<graph::GraphPreparedEffectBank>, GraphRackBankReport), GraphDiagnostic> {
-    bind_rack_banks_placed(
-        effects,
+    let inputs = EffectInputs::prepared(effects);
+    let (planned, report) = plan_rack_banks_placed(
+        &inputs,
         prepared,
         ids,
         levels,
         &PlacementLevels::single_point(levels),
         dispatch,
         classes,
-    )
+    )?;
+    Ok((
+        bind_planned_banks(planned, &inputs, prepared, dispatch)?,
+        report,
+    ))
 }
 
 /// Every strip's rack chains, in session slot order, and each chain's program: the rack planner's
 /// candidates (one per `(strip, rack)` whose slots may bank), shared by the bind and by the
 /// placement's bank count ([`placement_levels`]) so the two read one candidate set.
-pub(crate) fn rack_chains(
-    effects: &EffectPreparedSession,
+pub(crate) fn rack_chains<E: AsProjected>(
+    effects: &EffectInputs<'_, E>,
     prepared: &PreparedEffectIndex<'_>,
     ids: &[Option<EffectNodeId>],
 ) -> Result<RackChains, GraphDiagnostic> {
@@ -228,7 +233,7 @@ pub(crate) fn rack_chains(
                 let Some(slot) = prepared.get(key.0, key.1, key.2) else {
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };
-                let Some(entry) = effects.entries.get(slot.index()) else {
+                let Some(entry) = effects.entry(slot.index()) else {
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };
                 let Some(node) = prepared_effect_node(ids, slot) else {
@@ -254,18 +259,25 @@ pub(crate) type RackChains = (
     BTreeMap<RackChainId, RackProgram>,
 );
 
-/// [`bind_rack_banks_indexed`] with the cohorts bucketed by `placement` (issue #2136,
+/// The rack banks of the compile, planned with the cohorts bucketed by `placement` (issue #2136,
 /// [`placement_levels`]) rather than by `levels`. `levels` stays the graph's: the path-arithmetic
 /// invariant below (#966) is checked on it, and the diagnostics name it.
-pub(crate) fn bind_rack_banks_placed(
-    effects: &EffectPreparedSession,
+///
+/// Issue #2199: the plan is every bank the factories bind, without its processor. Each slot is
+/// bound once here, as before, to learn whether its factory binds it and with which metadata,
+/// and the bank is dropped at once, so at most one bank is resident while the plan is formed and
+/// no prepared processor is needed; [`bind_planned_banks`] binds the planned banks after the
+/// compile's resources are admitted. Binding is a function of the requests, so the two binds
+/// agree.
+pub(crate) fn plan_rack_banks_placed<E: AsProjected>(
+    effects: &EffectInputs<'_, E>,
     prepared: &PreparedEffectIndex<'_>,
     ids: &[Option<EffectNodeId>],
     levels: &[DependencyLevel],
     placement: &PlacementLevels,
     dispatch: Backend,
     classes: &mut SessionPoolClasses,
-) -> Result<(Vec<graph::GraphPreparedEffectBank>, GraphRackBankReport), GraphDiagnostic> {
+) -> Result<(Vec<PlannedEffectBank>, GraphRackBankReport), GraphDiagnostic> {
     let (mut chains, programs) = rack_chains(effects, prepared, ids)?;
     let model = effects.session.normalized_model();
 
@@ -380,7 +392,7 @@ pub(crate) fn bind_rack_banks_placed(
     let mut plan = plan_bank_groups(&levels_in, width)
         .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
     let bind_group = |index: usize, group: &BankGroup<RackChainId>| {
-        bind_group_banks(
+        plan_group_banks(
             index,
             group,
             pads(group, width),
@@ -606,7 +618,7 @@ pub(crate) fn bind_rack_banks_placed(
 /// Banking regroups lanes only, so a leftover bank renders each lane's own arithmetic: the
 /// per-node bits.
 #[allow(clippy::too_many_arguments)] // The bind's whole context.
-fn leftover_pass(
+fn leftover_pass<E: AsProjected>(
     plan: &mut BankPlan<RackChainId>,
     bound: &mut Vec<BoundGroup>,
     chains: &mut BTreeMap<RackChainId, Vec<EffectNodeId>>,
@@ -614,7 +626,7 @@ fn leftover_pass(
     programs: &BTreeMap<RackChainId, RackProgram>,
     placement: &PlacementLevels,
     classes: &SessionPoolClasses,
-    effects: &EffectPreparedSession,
+    effects: &EffectInputs<'_, E>,
     prepared: &PreparedEffectIndex<'_>,
     dispatch: Backend,
     width: BankWidth,
@@ -642,7 +654,7 @@ fn leftover_pass(
         let slot = prepared
             .get(node.track_id.as_str(), node.rack, node.effect_id.as_str())
             .ok_or_else(invariant)?;
-        let entry = effects.entries.get(slot.index()).ok_or_else(invariant)?;
+        let entry = effects.entry(slot.index()).ok_or_else(invariant)?;
         let requests = vec![entry.bank_preparation.request(); lanes];
         let binds_with = |active_mask: &[bool]| {
             entry
@@ -881,7 +893,7 @@ fn leftover_pass(
         placed.iter().map(|(node, level)| (node, *level)).collect();
     for group in leftover.groups {
         let index = plan.groups.len();
-        bound.push(bind_group_banks(
+        bound.push(plan_group_banks(
             index,
             &group,
             pads(&group, width),
@@ -1415,15 +1427,15 @@ fn unbanked_console_slot(
 /// population from the prepared entries instead and refuses a missing one with the same
 /// `console.slot.unbanked` spelling. A prepared entry with no node, or a node with no level, is
 /// `graph.internal.invariant`.
-fn uncollected_console_slot(
-    effects: &EffectPreparedSession,
+fn uncollected_console_slot<E: AsProjected>(
+    effects: &EffectInputs<'_, E>,
     ids: &[Option<EffectNodeId>],
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
     level_by_node: &BTreeMap<&EffectNodeId, u64>,
     classes: &SessionPoolClasses,
 ) -> Option<GraphDiagnostic> {
     let collected: BTreeSet<&EffectNodeId> = chains.values().flatten().collect();
-    for (index, entry) in effects.entries.iter().enumerate() {
+    for (index, entry) in effects.iter().enumerate() {
         if !is_console_rack(rack_location(crate::ids::rack_id(entry.rack))) {
             continue;
         }
@@ -1455,19 +1467,96 @@ fn uncollected_console_slot(
     None
 }
 
-/// The banks bound from one plan group's slots, each with its report entry, in slot order.
-type BoundGroup = Vec<(graph::GraphPreparedEffectBank, GraphRackBoundSlot)>;
+/// The banks planned from one plan group's slots, each with its report entry, in slot order.
+type BoundGroup = Vec<(PlannedEffectBank, GraphRackBoundSlot)>;
 
-/// Binds every slot of plan group `group_index` that can be one homogeneous bank and whose
+/// One bank the compile's factories bind, planned without its processor (issue #2199): its members
+/// on lanes `0..members`, its active mask, the metadata its factory's bind returned and its cohort.
+/// [`bind_planned_banks`] binds it.
+#[derive(Clone, Debug)]
+pub(crate) struct PlannedEffectBank {
+    pub(crate) members: Box<[EffectNodeId]>,
+    pub(crate) active_mask: Box<[bool]>,
+    pub(crate) metadata: effect_contract::PreparedBankMetadata,
+    pub(crate) cohort: graph::GraphBankCohort,
+}
+
+/// The shape of a bank the estimate charges: a planned bank, or a bound one.
+pub(crate) trait BankLayout {
+    fn members(&self) -> &[EffectNodeId];
+    fn active_mask(&self) -> &[bool];
+    fn metadata(&self) -> &effect_contract::PreparedBankMetadata;
+}
+
+impl BankLayout for PlannedEffectBank {
+    fn members(&self) -> &[EffectNodeId] {
+        &self.members
+    }
+    fn active_mask(&self) -> &[bool] {
+        &self.active_mask
+    }
+    fn metadata(&self) -> &effect_contract::PreparedBankMetadata {
+        &self.metadata
+    }
+}
+
+impl BankLayout for graph::GraphPreparedEffectBank {
+    fn members(&self) -> &[EffectNodeId] {
+        &self.members
+    }
+    fn active_mask(&self) -> &[bool] {
+        &self.active_mask
+    }
+    fn metadata(&self) -> &effect_contract::PreparedBankMetadata {
+        &self.metadata
+    }
+}
+
+/// The one request per lane a bank of `members` is bound with: each member's own on its active
+/// lane and, on every padded lane, a clone of the first member's -- never zeros (issue #1088, the
+/// padding contract). The planner emits members before padding, so the members are exactly lanes
+/// `0..members`.
+fn bank_requests<'e, E: AsProjected>(
+    members: &[EffectNodeId],
+    effects: &'e EffectInputs<'_, E>,
+    prepared: &PreparedEffectIndex<'_>,
+    width: BankWidth,
+) -> Result<
+    (
+        &'e EffectProjectedEntry,
+        Vec<effect_contract::PrepareEffectRequest<'e>>,
+    ),
+    GraphDiagnostic,
+> {
+    let invariant = || diag("graph.internal.invariant", "$.effects");
+    let mut requests = Vec::with_capacity(width.lanes() as usize);
+    let mut first = None;
+    for node in members {
+        let slot = prepared
+            .get(node.track_id.as_str(), node.rack, node.effect_id.as_str())
+            .ok_or_else(invariant)?;
+        let entry = effects.entry(slot.index()).ok_or_else(invariant)?;
+        first.get_or_insert(entry);
+        requests.push(entry.bank_preparation.request());
+    }
+    let first = first.ok_or_else(invariant)?;
+    requests.resize(width.lanes() as usize, requests[0]);
+    Ok((first, requests))
+}
+
+/// Plans every slot of plan group `group_index` that can be one homogeneous bank and whose
 /// factory consents. `padded` says whether a partial group is padded (issue #1088).
+///
+/// The factory's consent is its bind's own answer: each slot is bound and the bank dropped at once
+/// (issue #2199), keeping its metadata, so the plan is exactly the banks the bind will return.
 #[allow(clippy::too_many_arguments)] // The binder's whole context, passed from one closure.
-fn bind_group_banks(
+fn plan_group_banks<E: AsProjected>(
     group_index: usize,
     group: &BankGroup<RackChainId>,
     padded: bool,
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
     level_by_node: &BTreeMap<&EffectNodeId, u64>,
-    effects: &EffectPreparedSession,
+    effects: &EffectInputs<'_, E>,
     prepared: &PreparedEffectIndex<'_>,
     dispatch: Backend,
     width: BankWidth,
@@ -1478,23 +1567,7 @@ fn bind_group_banks(
         else {
             continue;
         };
-        let entries: Vec<&EffectPreparedEntry> = members
-            .iter()
-            .map(|node| {
-                let slot = prepared
-                    .get(node.track_id.as_str(), node.rack, node.effect_id.as_str())
-                    .expect("prepared effect node has an entry");
-                &effects.entries[slot.index()]
-            })
-            .collect();
-        // One request per lane: each member's own on its active lane and, on every padded lane, a
-        // clone of the first member's -- never zeros (issue #1088, the padding contract). The
-        // planner emits members before padding, so the members are exactly lanes `0..members`.
-        let mut requests: Vec<_> = entries
-            .iter()
-            .map(|entry| entry.bank_preparation.request())
-            .collect();
-        requests.resize(width.lanes() as usize, requests[0]);
+        let (first, requests) = bank_requests(&members, effects, prepared, width)?;
         let request = PrepareEffectBankRequest {
             backend: dispatch,
             width,
@@ -1503,10 +1576,7 @@ fn bind_group_banks(
         };
         // Equal program key implies the same registry factory: the registry maps one
         // `EffectId` to one `Arc` (#96 F12), so a per-chunk `Arc::ptr_eq` scan proved nothing.
-        let Some(effect_contract::PreparedEffectBank {
-            processor,
-            metadata,
-        }) = entries[0]
+        let Some(effect_contract::PreparedEffectBank { metadata, .. }) = first
             .factory
             .bind_homogeneous_bank(request)
             .map_err(|error| diag(error.code, "$.effects"))?
@@ -1518,16 +1588,20 @@ fn bind_group_banks(
         if metadata.width != width || metadata.program_key != group.program[slot] {
             return Err(diag("graph.effect.bank_metadata", "$.effects"));
         }
-        let scratch = rack::AoSoaScratch::new(width, effects.session.quantum().0)
-            .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
-        let bank = graph::GraphPreparedEffectBank {
+        // `rack::AoSoaScratch::new`'s refusals, checked here so the plan holds only banks whose
+        // scratch [`bind_planned_banks`] can allocate.
+        let quantum = effects.session.quantum().0;
+        if quantum == 0
+            || (quantum as usize)
+                .checked_mul(width.lanes() as usize)
+                .is_none()
+        {
+            return Err(diag("graph.resource.arithmetic_overflow", "$.graph"));
+        }
+        let bank = PlannedEffectBank {
             members: members.clone().into_boxed_slice(),
             active_mask: group.active_mask.clone(),
-            processor,
             metadata,
-            response_snapshot_declared: entries[0].factory.response_analysis().is_some(),
-            native_id: entries[0].factory.descriptor().id.as_str(),
-            scratch,
             // Issue #181: the group this slot came out of, carried forward so the runtime can
             // build one chain per cohort instead of one per slot. It is the same `(group,
             // slot)` pair `bound_slots` already reports; the report was the only consumer.
@@ -1548,6 +1622,54 @@ fn bind_group_banks(
         ));
     }
     Ok(bound)
+}
+
+/// Bind every planned bank (issue #2199), in plan order: each slot's members' requests, the
+/// planned mask, the factory of its first member. A bank its factory declines, or binds with other
+/// metadata, contradicts the plan the compile's resources were admitted for, and is
+/// `graph.effect.bank_metadata`; a factory error is its own code, as the plan's bind's was.
+pub(crate) fn bind_planned_banks<E: AsProjected>(
+    planned: Vec<PlannedEffectBank>,
+    effects: &EffectInputs<'_, E>,
+    prepared: &PreparedEffectIndex<'_>,
+    dispatch: Backend,
+) -> Result<Vec<graph::GraphPreparedEffectBank>, GraphDiagnostic> {
+    let mut banks = Vec::with_capacity(planned.len());
+    for plan in planned {
+        let width = plan.metadata.width;
+        let (first, requests) = bank_requests(&plan.members, effects, prepared, width)?;
+        let Some(effect_contract::PreparedEffectBank {
+            processor,
+            metadata,
+        }) = first
+            .factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: dispatch,
+                width,
+                requests: &requests,
+                active_mask: &plan.active_mask,
+            })
+            .map_err(|error| diag(error.code, "$.effects"))?
+        else {
+            return Err(diag("graph.effect.bank_metadata", "$.effects"));
+        };
+        if metadata != plan.metadata {
+            return Err(diag("graph.effect.bank_metadata", "$.effects"));
+        }
+        let scratch = rack::AoSoaScratch::new(width, effects.session.quantum().0)
+            .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
+        banks.push(graph::GraphPreparedEffectBank {
+            members: plan.members,
+            active_mask: plan.active_mask,
+            processor,
+            metadata,
+            response_snapshot_declared: first.factory.response_analysis().is_some(),
+            native_id: first.factory.descriptor().id.as_str(),
+            scratch,
+            cohort: plan.cohort,
+        });
+    }
+    Ok(banks)
 }
 
 /// #96 F7, the one predicate: a slot can be one homogeneous bank only when every member lane runs
@@ -1661,8 +1783,8 @@ pub(crate) struct EffectBankResourceEstimate {
 /// layout the graph runtime gathers and scatters by. Scratch is charged for every lane, because a
 /// padded lane still occupies its AoSoA column; member metadata for the members only. The runtime
 /// buffers are the chain's staging planes, plus a padded bank's `+0.0` plane (issue #887).
-pub(crate) fn effect_bank_resource(
-    banks: &[graph::GraphPreparedEffectBank],
+pub(crate) fn effect_bank_resource<B: BankLayout>(
+    banks: &[B],
     quantum: u32,
 ) -> Option<EffectBankResourceEstimate> {
     let bank_count = u64::try_from(banks.len()).ok()?;
@@ -1676,18 +1798,19 @@ pub(crate) fn effect_bank_resource(
     resource.metadata_bytes = bank_array_bytes;
     resource.largest_allocation_bytes = bank_array_bytes;
     for bank in banks {
-        let lanes = u64::from(bank.scratch.width().lanes());
-        let members = u64::try_from(bank.members.len()).ok()?;
-        if bank.scratch.quantum() != quantum
-            || members == 0
+        // A bound bank's scratch is `AoSoaScratch::new(metadata.width, quantum)`
+        // (`bind_planned_banks`), so the planned bank's width and the session quantum are its
+        // shape.
+        let lanes = u64::from(bank.metadata().width.lanes());
+        let members = u64::try_from(bank.members().len()).ok()?;
+        if members == 0
             || members > lanes
-            || u64::try_from(bank.active_mask.len()).ok()? != lanes
+            || u64::try_from(bank.active_mask().len()).ok()? != lanes
             || bank
-                .active_mask
+                .active_mask()
                 .iter()
                 .enumerate()
-                .any(|(lane, active)| *active != (lane < bank.members.len()))
-            || bank.metadata.width != bank.scratch.width()
+                .any(|(lane, active)| *active != (lane < bank.members().len()))
         {
             return None;
         }
@@ -1730,7 +1853,7 @@ pub(crate) fn effect_bank_resource(
             .max(member_array_bytes)
             .max(scratch_plane_bytes)
             .max(u64::from(quantum).checked_mul(4)?);
-        for member in &bank.members {
+        for member in bank.members() {
             for id in [&member.track_id, &member.effect_id] {
                 let string_bytes = u64::try_from(id.as_str().len()).ok()?;
                 resource.metadata_bytes = resource.metadata_bytes.checked_add(string_bytes)?;
