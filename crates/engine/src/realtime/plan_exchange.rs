@@ -1129,6 +1129,12 @@ impl RealtimePlanOwner {
             .1
             .prepare_source_seek(source_index, generation, frame)
     }
+
+    /// [`PreparedRenderPlan::prepare_admitted_seeks`] on the active plan (#2213). A published
+    /// candidate is not prepared: its consumers apply their seeks at the block that adopts it.
+    pub fn prepare_admitted_seeks(&mut self) -> usize {
+        self.active.1.prepare_admitted_seeks()
+    }
 }
 impl PlanRetirer {
     /// Reclaim one displaced plan on the control/retirement owner. The plan's slot is free before

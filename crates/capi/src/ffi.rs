@@ -203,6 +203,55 @@ unsafe fn plan_error_slot(plan: *const Plan) -> *const AtomicU32 {
     unsafe { &raw const (*plan).last_error }
 }
 
+/// Projects the render side's claim word (#2213) without borrowing the whole handle.
+///
+/// # Safety
+///
+/// `plan` must have passed [`plan_kind`].
+unsafe fn plan_busy_slot(plan: *const Plan) -> *const AtomicU32 {
+    // SAFETY: See `plan_state`; the projection is disjoint from `state`.
+    unsafe { &raw const (*plan).render_busy }
+}
+
+/// A render-side call's claim on a plan's render state (#2213): `render_f32_planar` and
+/// `plan_prepare_seek` each hold one for the whole time they touch `state`, so at most one thread
+/// ever holds the exclusive `PlanState` borrow, even when a host breaks the thread rule. The claim
+/// is one compare-exchange (`Acquire`, so the holder sees every write of the previous holder) and
+/// its drop is one `Release` store, on every exit, an unwind included. It never waits or spins and
+/// makes no syscall: a call that finds the word held is refused.
+struct RenderClaim<'a>(&'a AtomicU32);
+
+impl<'a> RenderClaim<'a> {
+    /// Claim `word`, or `None` when another render-side call holds it.
+    fn try_claim(word: &'a AtomicU32) -> Option<Self> {
+        word.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Self(word))
+    }
+}
+
+impl Drop for RenderClaim<'_> {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Release);
+    }
+}
+
+/// Claims `plan`'s render state for one render-side call, or records `render.busy` and returns
+/// `None` (#2213).
+///
+/// # Safety
+///
+/// `plan` must have passed [`plan_kind`].
+unsafe fn claim_render_side<'a>(plan: *const Plan) -> Option<RenderClaim<'a>> {
+    // SAFETY: The caller proved the live kind; both projections are disjoint from `state`.
+    let claim = RenderClaim::try_claim(unsafe { &*plan_busy_slot(plan) });
+    if claim.is_none() {
+        // SAFETY: See above.
+        unsafe { &*plan_error_slot(plan) }.store(plan_error::BUSY, Ordering::Relaxed);
+    }
+    claim
+}
+
 /// Projects the any-thread resource query view without borrowing the whole handle.
 ///
 /// # Safety
@@ -708,10 +757,11 @@ pub unsafe extern "C" fn miso_engine_v1_session_seek(
 /// after the call, without waiting for a runway, so the stop position never plays after the
 /// host restarts: `control_plane::SessionState::session_seek_at_once`. Same arguments, results,
 /// declaration (root ruling B16-R9) and thread rule as [`miso_engine_v1_session_seek`]. PCM of the
-/// old generation still queued in a source's ring is dropped at that block; a host that filled
-/// its rings before the stop and cannot drain them while stopped underruns at restart until it
-/// submits the new generation. A host checks `MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE` before
-/// calling it.
+/// old generation still queued in a source's ring is dropped at that block. A host that filled
+/// its rings before the stop calls [`miso_engine_v1_plan_prepare_seek`] while stopped (#2213): it
+/// drops that PCM at once, so the host submits the new generation before the restart and the first
+/// block plays it. Without it the host underruns at restart until it submits the new generation.
+/// A host checks `MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE` before calling it.
 ///
 /// # Safety
 ///
@@ -1209,7 +1259,11 @@ pub unsafe extern "C" fn miso_engine_v1_dequeue_event(
 ///
 /// `plan` must be live and exclusive; `output` must satisfy the caller-owned output contract.
 ///
-/// Thread: render only, never concurrently with itself.
+/// A call made while another render-side call holds the plan (a concurrent render or
+/// [`miso_engine_v1_plan_prepare_seek`]) touches no plan state and returns
+/// `RESULT_RENDER_REJECTED` with `render.busy` (#2213).
+///
+/// Thread: render only, never concurrently with itself or with `plan_prepare_seek`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
     plan: *mut Plan,
@@ -1227,6 +1281,12 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
         if kind != RESULT_OK {
             return kind;
         }
+        // #2213: held to the end of the call, so no other render-side call can form a second
+        // `&mut PlanState` while this one runs.
+        // SAFETY: `plan` passed the live-kind check.
+        let Some(_claim) = (unsafe { claim_render_side(plan) }) else {
+            return RESULT_RENDER_REJECTED;
+        };
         if output.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
@@ -1314,6 +1374,48 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
                 RESULT_RENDER_REJECTED
             }
         }
+    })
+}
+
+/// Prepare the plan's admitted seeks while render does not run (#2213): the stopped host's step
+/// between a seek and its restart. Every source of the active plan whose command slot holds a
+/// plain seek (a session seek, `miso_engine_v1_session_seek_at_once` above all, or a per-source
+/// seek), or that holds a plain seek for its runway, applies it now and discards the old
+/// generation's queued PCM, so the host can submit the new generation into a ring that was full
+/// before the stop. The timeline is not moved here; it lands at the next render. An anchored seek
+/// stays held and is not prepared. A source with no admitted seek is unchanged, so a call with
+/// nothing to prepare is `RESULT_OK` and does nothing. It renders nothing, advances no clock and
+/// allocates nothing.
+///
+/// A call made while another render-side call holds the plan touches no plan state and returns
+/// `RESULT_RENDER_REJECTED` with `render.busy`. A success clears the plan's diagnostic.
+///
+/// # Safety
+///
+/// `plan` must be live.
+///
+/// Thread: render side. The render thread between blocks, or any thread while the host's render
+/// callback is stopped; never concurrently with `render_f32_planar` or with itself.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_plan_prepare_seek(plan: *mut Plan) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { plan_kind(plan) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        // SAFETY: `plan` passed the live-kind check.
+        let Some(_claim) = (unsafe { claim_render_side(plan) }) else {
+            return RESULT_RENDER_REJECTED;
+        };
+        // SAFETY: The live-kind check establishes the concrete representation and the claim
+        // excludes every other render-side borrow of `state`. The projections are disjoint, so a
+        // concurrent query on another thread never aliases this exclusive borrow.
+        let state = unsafe { &mut *plan_state(plan) };
+        let _prepared = state.prepare_admitted_seeks();
+        // SAFETY: See above; the diagnostic slot is disjoint from `state`.
+        unsafe { &*plan_error_slot(plan) }.store(plan_error::NONE, Ordering::Relaxed);
+        RESULT_OK
     })
 }
 
@@ -1829,6 +1931,27 @@ pub(crate) fn test_source_seek_at(
             anchor_sample,
         )
     }
+}
+
+/// The plan's diagnostic, as `miso_engine_v1_last_error` on the plan copies it.
+#[cfg(test)]
+pub(crate) fn test_plan_last_error(plan: *mut Plan) -> &'static [u8] {
+    // SAFETY: Test callers retain the live plan; the slot is an any-thread atomic projection.
+    plan_error::text(unsafe { &*plan_error_slot(plan) }.load(Ordering::Relaxed))
+}
+
+#[cfg(test)]
+pub(crate) fn test_plan_prepare_seek(plan: *mut Plan) -> u32 {
+    // SAFETY: Test callers retain the live plan, with no render in flight.
+    unsafe { miso_engine_v1_plan_prepare_seek(plan) }
+}
+
+/// Holds (`true`) or releases (`false`) `plan`'s render-side claim word, as a render-side call
+/// on another thread would (#2213).
+#[cfg(test)]
+pub(crate) fn test_hold_render_claim(plan: *const Plan, held: bool) {
+    // SAFETY: Test callers retain the live plan; the word is an any-thread atomic projection.
+    unsafe { &*plan_busy_slot(plan) }.store(u32::from(held), Ordering::Release);
 }
 
 #[cfg(test)]

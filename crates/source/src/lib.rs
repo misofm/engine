@@ -2219,6 +2219,32 @@ impl PcmSourceConsumer {
         self.seek.held_seek.is_none() && self.seek.active_generation == generation
     }
 
+    /// Apply the admitted plain seek, if any, on the exclusive consumer owner between blocks
+    /// (#2213), under the session's published generation `published`: the form of
+    /// [`Self::prepare_seek_published`] for an owner that does not know the seek's identity, a C
+    /// ABI host whose render is stopped. The seek is observed under [`SeekClock::Hold`]: a plain
+    /// seek in the command slot, or one held for its runway, applies now, and every queued block
+    /// of an older generation is discarded and recycled, so the producer has room for the new
+    /// generation before render runs again. An anchored seek has no block time here: it stays
+    /// held and nothing is discarded for it.
+    ///
+    /// Returns the applied seek's generation and the frame the consumer reads from next, or
+    /// `None` when no seek applied. Allocation-free and wait-free; the acquire is bounded by the
+    /// ring's capacity.
+    fn prepare_admitted_seek(&mut self, published: u64) -> Option<(SourceGeneration, SourceFrame)> {
+        self.observed_published = published;
+        self.end_block();
+        self.flush_deferred_recycle();
+        // Generations strictly increase, so a seek applied here always changes the active one.
+        let before = self.seek.active_generation;
+        self.observe_seek_at_block_boundary(SeekClock::Hold);
+        if self.seek.active_generation == before {
+            return None;
+        }
+        self.acquire_current_block(SeekClock::Hold, CommandObservation::Allowed);
+        Some((self.seek.active_generation, self.next_frame))
+    }
+
     /// Immutable prepared ring shape shared with the producer endpoint.
     #[must_use]
     pub const fn shape(&self) -> PcmSourceShape {
@@ -3747,6 +3773,24 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
                 consumer.prepare_seek_published(generation, SourceFrame(frame), published)
             });
         if prepared {
+            self.pending_generation_change = true;
+        }
+        prepared
+    }
+
+    fn prepare_admitted_seeks(&mut self) -> usize {
+        let published = self.published_at_entry();
+        let mut prepared = 0;
+        for consumer in self
+            .sources
+            .iter_mut()
+            .filter_map(|source| source.consumer.as_mut())
+        {
+            if consumer.prepare_admitted_seek(published).is_some() {
+                prepared += 1;
+            }
+        }
+        if prepared != 0 {
             self.pending_generation_change = true;
         }
         prepared
@@ -8185,6 +8229,83 @@ mod tests {
                 block,
                 ([(Some(value(2, 100)), 2, 0), (None, 2, 4)], 100),
                 "every source and the timeline land at once; no old audio plays"
+            );
+        }
+
+        /// A ring of its own session word, filled with generation 1 from frame 0 until the
+        /// producer refuses a block; the number of blocks queued.
+        fn full_ring(word: &PublishedGeneration) -> (HostChunkProvider, PcmSourceConsumer, u64) {
+            let (producer, consumer, _) =
+                PcmSourceRing::prepare_host_region(landing_config(), SourceFrame(0), word.clone())
+                    .expect("ring");
+            let mut host = producer.into_host_chunk_provider(RATE);
+            let mut queued = 0;
+            while host
+                .submit(chunk(
+                    1,
+                    queued * Q,
+                    &[&[value(1, queued * Q); 4]],
+                    4,
+                    false,
+                ))
+                .is_ok()
+            {
+                queued += 1;
+            }
+            (host, consumer, queued)
+        }
+
+        /// #2213. Test value: red when preparing an admitted seek between blocks pops nothing, or
+        /// discards the old generation's blocks without recycling them: the full ring stays full,
+        /// the target's submit is refused, and the block after the prepare underruns.
+        #[test]
+        fn a_prepared_admitted_seek_frees_a_full_ring_for_its_generation() {
+            let word = PublishedGeneration::new(SourceGeneration(1));
+            let (mut host, mut consumer, queued) = full_ring(&word);
+            let mut seek = word.session_seek(2, None).expect("open");
+            seek.push_source(&mut host, 100).expect("source");
+            seek.land_at_once();
+            seek.publish();
+            assert_eq!(
+                consumer.prepare_admitted_seek(word.load_at_block_entry()),
+                Some((SourceGeneration(2), SourceFrame(100)))
+            );
+            assert_eq!(consumer.stale_generation_discard_count, queued);
+            for frame in [100, 104, 108] {
+                feed(&mut host, 2, frame);
+            }
+            let report = consumer.begin_block_at(0);
+            assert_eq!(
+                (
+                    played(&consumer),
+                    report.active_generation.0,
+                    report.underrun_frames
+                ),
+                (Some(value(2, 100)), 2, 0),
+                "the target plays from its first frame"
+            );
+        }
+
+        /// #2213. Test value: red when preparing an admitted seek lands an anchored seek, which
+        /// has no block time between blocks, or drops the old generation's PCM for it.
+        #[test]
+        fn a_prepared_anchored_seek_stays_held() {
+            let word = PublishedGeneration::new(SourceGeneration(1));
+            let (mut host, mut consumer, _) = full_ring(&word);
+            let mut seek = word.session_seek(2, Some(8)).expect("open");
+            seek.push_source(&mut host, 100).expect("source");
+            seek.publish();
+            assert_eq!(
+                consumer.prepare_admitted_seek(word.load_at_block_entry()),
+                None
+            );
+            assert_eq!(consumer.stale_generation_discard_count, 0);
+            assert!(consumer.seek.held_seek.is_some(), "still held");
+            let report = consumer.begin_block_at(0);
+            assert_eq!(
+                (played(&consumer), report.active_generation.0),
+                (Some(value(1, 0)), 1),
+                "the old generation plays to the anchor"
             );
         }
     }

@@ -361,9 +361,28 @@ results and declaration as the plain form, through `control_plane::SessionState:
 but every source and the timeline land at the first block rendered after the call, without waiting
 for a runway, so the stop position never plays after the host restarts. Old-generation PCM still
 queued in a ring is dropped at that block; a host that filled its rings before the stop and cannot
-drain them while stopped underruns at restart until it submits generation `g` (a mobile successor
-names that refill). `capi` test
+drain them while stopped underruns at restart until it submits generation `g`, unless it prepares
+the plan first (#2213, below). `capi` test
 `session_seek::an_at_once_session_seek_plays_no_old_block_after_a_stop` holds it.
+
+`miso_engine_v1_plan_prepare_seek(plan)` (#2213) is that refill step, an in-place V1 amendment:
+one new exported symbol, announced by `MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK` (bit 13, 8192) in
+the capability report, whose feature mask grows to 16383; the frozen exported set grows from 23 to
+24 symbols; no struct, size or `ABI_VERSION` changes (`Plan` is opaque, so its new atomic word is
+not a layout change). It takes the plan, so it sits on the render side by construction: the host
+calls it on the render thread between blocks, or on any thread while its render callback is
+stopped, never concurrently with `render_f32_planar`. Every source of the active plan applies its
+admitted plain seek under the consumer's hold clock (`source::PcmSourceConsumer` through
+`GraphPreparedSourceSetDriver::prepare_admitted_seeks`) and discards and recycles the old
+generation's queued blocks, so the producer accepts the new generation before the restart; the
+timeline lands at the next block through the at-once word. An anchored seek stays held. It returns
+`RESULT_OK` with nothing to prepare too. Misuse is refused, not raced: both render-side calls claim
+a `render_busy` word with one compare-exchange on entry and release it with one `Release` store on
+every exit; a call that finds it claimed touches no state and returns `RESULT_RENDER_REJECTED` with
+`render.busy`. A refused render writes nothing into its output, so the host writes silence; the
+result code is authoritative, because the winner may overwrite the plan's last error. The claim never waits, spins or makes a syscall. `capi` tests
+`session_seek::a_stopped_host_refills_a_full_ring_before_restart` (the issue's gate) and
+`session_seek::a_render_side_call_during_render_is_refused_not_raced` hold it.
 
 A plain session seek is a declared discontinuity; the engine declares it in the same call, and a
 refused seek declares nothing (root ruling B16-R9). `control_plane::SessionState::session_seek`,

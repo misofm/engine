@@ -25,7 +25,10 @@ ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT == 512);
 ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SESSION_SEEK == 1024);
 ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SESSION_REPLACE == 2048);
 ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE == 4096);
-ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 8191);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK == 8192);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 16383);
+ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK) ==
+           MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK);
 ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE) ==
            MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE);
 ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SESSION_REPLACE) ==
@@ -165,6 +168,8 @@ static uint32_t (*const session_seek_at_signature)(miso_engine_v1_session *, uin
 static uint32_t (*const session_seek_at_once_signature)(miso_engine_v1_session *, uint64_t,
                                                         uint64_t) =
     miso_engine_v1_session_seek_at_once;
+static uint32_t (*const plan_prepare_seek_signature)(miso_engine_v1_plan *) =
+    miso_engine_v1_plan_prepare_seek;
 static uint32_t (*const last_error_signature)(const void *, miso_engine_v1_bytes_out *) =
     miso_engine_v1_last_error;
 static void (*const session_destroy_signature)(miso_engine_v1_session *) =
@@ -294,7 +299,8 @@ static int reports_every_defined_feature(uint64_t mask) {
            (mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT) != 0 &&
            (mask & MISO_ENGINE_V1_FEATURE_SESSION_SEEK) != 0 &&
            (mask & MISO_ENGINE_V1_FEATURE_SESSION_REPLACE) != 0 &&
-           (mask & MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE) != 0;
+           (mask & MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK) != 0;
 }
 
 int main(void) {
@@ -371,6 +377,13 @@ int main(void) {
         return 10;
     }
 
+    /* A host checks the seek-preparation bit before calling the symbol (issue 2213); a null plan
+     * is refused. */
+    if ((capabilities.feature_mask & MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK) == 0 ||
+        plan_prepare_seek_signature(NULL) != MISO_ENGINE_V1_INVALID_ARGUMENT) {
+        return 11;
+    }
+
     return compile_session_signature == NULL || source_submit_signature == NULL ||
                    source_seek_signature == NULL || source_seek_report_signature == NULL ||
                    submit_command_signature == NULL ||
@@ -379,6 +392,7 @@ int main(void) {
                    watermark_signature == NULL || service_signature == NULL ||
                    declare_discontinuity_signature == NULL || session_seek_signature == NULL ||
                    session_seek_at_signature == NULL || session_seek_at_once_signature == NULL ||
+                   plan_prepare_seek_signature == NULL ||
                    submit_document_command_signature == NULL ||
                    last_error_signature == NULL || session_destroy_signature == NULL ||
                    plan_destroy_signature == NULL
