@@ -3636,6 +3636,12 @@ pub trait GraphPreparedSourceSetDriver: Send {
     fn prepare_source_seek(&mut self, _source_index: usize, _generation: u64, _frame: u64) -> bool {
         false
     }
+    /// Apply every admitted plain seek on this set's consumers between blocks (#2213), on the
+    /// render owner while render does not run; returns the number of consumers that applied one.
+    /// A set with no consumers prepares none.
+    fn prepare_admitted_seeks(&mut self) -> usize {
+        0
+    }
     fn claim_count(&self) -> usize;
     fn begin_block(&mut self, first_sample: u64, frames: u32) -> Result<(), RenderError>;
     fn copy_track_input(
