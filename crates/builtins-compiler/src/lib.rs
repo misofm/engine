@@ -6868,6 +6868,17 @@ impl PreparedBuiltinsSession {
         self.track_controls.len()
     }
 
+    /// The heap the sealed live-control producers own beyond their table: each one's
+    /// [`TrackControlProducer::retained_heap_bytes`], summed (issue #2199), as the control plane
+    /// charges its strip producer table from the producers it keeps.
+    #[must_use]
+    pub fn track_control_heap_bytes(&self) -> u64 {
+        self.track_controls
+            .iter()
+            .map(TrackControlProducer::retained_heap_bytes)
+            .fold(0, u64::saturating_add)
+    }
+
     /// Strip `track_id`'s stored mute automation (#1651 D1), for the route lanes of #1652 that
     /// follow it: the plan's one automation program (the same `Arc` every fader owner of the plan
     /// reads) and the program's mute cell index of each lane, `[left, right]`, `None` for a lane

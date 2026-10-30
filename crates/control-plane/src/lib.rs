@@ -67,8 +67,9 @@ pub use adapter::{
     ControlAdapter, ControlLimits, PlanResources, TAIL_FINITE, TAIL_INFINITE, tail_words,
 };
 pub use compile::{
-    CompiledChildren, RuntimePreparer, compile_children, compile_children_with_boot_command,
-    frame_scaled_retained_bytes,
+    BootProjection, CompiledChildren, RuntimePreparer, compile_children,
+    compile_children_with_boot_command, frame_scaled_retained_bytes, project_boot,
+    projected_control_retained_bytes,
 };
 pub use control::{
     CarriedTaps, CommandError, EventError, EventLane, ObservationChange, ObservationForward,

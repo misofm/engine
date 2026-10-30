@@ -3686,25 +3686,50 @@ where
         Ok(HeldEpochs { rows, len })
     }
 
-    /// The replacement admission of a candidate before it is prepared (issue #2194):
-    /// [`validate_prospective_projection`] over every held plan and model and `prospective`'s
-    /// effect projection, with the retryable or permanent split of the post-preparation
-    /// admission: a refusal that fits beside the newest plan and the committed model alone is
-    /// backpressure a render frees, and any other is permanent.
+    /// The replacement admission of a candidate before it is prepared (issues #2194, #2199):
+    /// [`validate_replacement_peak`], the admission the prepared candidate meets, over every held
+    /// plan and model and the candidate's projected plan ([`projected_plan`]: its preparer's
+    /// projection of the preparation it is about to run with `base` and `spectrum`, and the
+    /// control plane's rows for it), with the retryable or permanent split of the
+    /// post-preparation admission: a refusal that fits beside the newest plan and the committed
+    /// model alone is backpressure a render frees, and any other is permanent.
     fn admit_prospective_projection(
         &self,
         prospective: &session::CompiledSession,
+        base: host_core::SuccessorBase<'_>,
+        spectrum: Option<&host_core::SpectrumPreparation>,
     ) -> Result<(), CommandError> {
-        let effects = host_core::project_effects(prospective)
+        let lanes: host_core::HostLiveLanes =
+            controls::live_lanes(prospective.normalized_model()).into();
+        let projection = self
+            .preparer
+            .project(
+                prospective,
+                &prepare_caps(self.limits),
+                lanes,
+                spectrum,
+                Some(base),
+                &self.live_values_superseded,
+            )
             .map_err(|diagnostics| CommandError::CompileRejected(prepare_failure(diagnostics)))?;
+        let candidate = projected_plan::<A>(
+            prospective,
+            &projection,
+            self.limits,
+            self.observation_slots_high_water,
+            self.capture_owners_high_water,
+            spectrum.is_some(),
+        )
+        .map_err(CommandError::CompileRejected)?;
         let held = self.held_epochs()?;
         let models = self.held_models()?;
         let admit = |held: &[LiveEpochResources], models: &[session::ResourceEstimate]| {
-            validate_prospective_projection(
+            validate_replacement_peak(
                 held,
-                effects,
+                candidate,
                 compiled_model_admission_over(models, prospective.resource_estimate())?,
                 self.limits,
+                AdmissionPeak::Single,
             )
         };
         let Err(failure) = admit(held.as_slice(), models.as_slice()) else {
@@ -5800,7 +5825,13 @@ where
         // before any of it is prepared. The transition across a donor is not admitted again (the
         // donor's submit admitted it, below).
         if !fallback {
-            self.admit_prospective_projection(prospective)?;
+            self.admit_prospective_projection(
+                prospective,
+                base,
+                spectrum_configuration
+                    .as_ref()
+                    .map(|configuration| &configuration.preparation),
+            )?;
         }
         let mut prepared_runtime = prepare(base)?;
         // #1325 D7: after preparation, the pure transition step against the plan the successor
@@ -7705,6 +7736,29 @@ where
                 crate::error::CompileFailure::Resource(ResourceFault::Arithmetic),
             ))?;
         held_peak_bytes(held.as_slice(), models_retained).map_err(CommandError::CompileRejected)
+    }
+
+    /// The bytes the control plane itself retains for the plans it holds now (issue #2199): the
+    /// newest plan's `control_retained_bytes` (the session's fixed rows once, and that plan's
+    /// epoch rows) and every older held epoch's own rows, as the replacement admission counts
+    /// them. A host adds it to [`Self::held_retained_bytes`] and its own fixed rows to project
+    /// what the live session retains, whichever session it has replaced since its boot.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError::Internal`] for an accounting fault, [`CommandError::CompileRejected`] for an
+    /// arithmetic overflow.
+    pub fn held_control_bytes(&self) -> Result<u64, CommandError> {
+        let held = self.held_epochs()?;
+        let (newest, older) = held.as_slice().split_last().ok_or(CommandError::Internal)?;
+        older
+            .iter()
+            .try_fold(newest.report.control_retained_bytes, |total, epoch| {
+                total.checked_add(epoch.capi.epoch_retained)
+            })
+            .ok_or(CommandError::CompileRejected(
+                crate::error::CompileFailure::Resource(ResourceFault::Arithmetic),
+            ))
     }
 
     /// The epoch of the newest plan (#1290a): the pending candidate's while one waits for its

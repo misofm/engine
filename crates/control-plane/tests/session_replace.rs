@@ -711,3 +711,123 @@ fn a_replace_whose_effects_cannot_fit_is_refused_before_it_is_prepared() {
     assert_eq!((revision(&session), snapshot(&session)), before);
     assert_eq!(reliable_events(&mut session), 0);
 }
+
+/// The dense console shape of #2191 at `tracks` tracks: four EQ inserts per track, each track with
+/// a post-pan route to the main output (`hosts/host-web/examples/dense_document.rs` emits it at
+/// 6,000 tracks for the browser's boot gate).
+fn dense_document(tracks: usize) -> Vec<u8> {
+    use session::SendTap;
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+    ))
+    .expect("seed fixture parses");
+    let mut track = model.tracks[1].clone();
+    // Four full effect declarations per track, as inserts: the densest per-track declaration
+    // the schema accepts (a console entry is smaller than the effect it configures).
+    let effect = model.lower_track(&track).pre_insert[0].clone();
+    model.console.pre_insert.clear();
+    track.console.clear();
+    track.inserts.effects.clear();
+    for index in 0..4 {
+        let mut effect = effect.clone();
+        effect.id = StableId::parse(&format!("effect-{index}")).expect("effect ID");
+        track.inserts.effects.push(effect);
+    }
+    let route = model.routes[0].clone();
+    model.tracks.clear();
+    model.routes.clear();
+    model.automation.clear();
+    model.tracks.reserve(tracks);
+    model.routes.reserve(tracks);
+    for index in 0..tracks {
+        let track_id = StableId::parse(&format!("track-{index:03}")).expect("track ID");
+        let mut next_track = track.clone();
+        next_track.id = track_id.clone();
+        model.tracks.push(next_track);
+
+        let mut next_route = route.clone();
+        next_route.id = StableId::parse(&format!("route-{index:03}")).expect("route ID");
+        next_route.source = RouteSource::Track {
+            track_id,
+            tap: SendTap::PostPan,
+        };
+        model.routes.push(next_route);
+    }
+    canonical_session_json(&model)
+        .expect("the dense shape canonicalizes")
+        .into_bytes()
+}
+
+/// Issue #2199: a `SESSION_REPLACE` whose candidate is the dense 6,000-track console shape of
+/// #2191 (about 16.5 MB of JSON, four EQ inserts per track; its graph row is about 394 MB),
+/// replacing a one-track session under a 256 MiB replacement peak, is refused
+/// `control.resource.replacement_peak` before the candidate is prepared: its graph, source and
+/// control rows are projected and admitted before any effect processor, bank, plan or lane exists,
+/// so the command's heap peak stays inside the document's parse transient, and the running session
+/// is untouched. Every other cap is unbounded, so only the replacement admission can refuse it.
+///
+/// Test value: red when the replacement admission before preparation charges the candidate's
+/// effect state alone (#2194): about 48 MB of EQ state and scratch fits, the control plane prepares
+/// the candidate, and only the post-preparation admission refuses it, after the command's heap
+/// peaked over twice the peak it was refused against.
+#[test]
+fn a_replace_whose_graph_cannot_fit_is_refused_before_it_is_prepared() {
+    use bench_support::alloc as audited_allocator;
+    /// `host_web::PARSE_TRANSIENT_MULTIPLIER`, which this crate does not depend on.
+    const PARSE_TRANSIENT_MULTIPLIER: usize = 20;
+    audited_allocator::assert_installed();
+    let booted = delay_document(1, 0);
+    let candidate = dense_document(6_000);
+    let limits = ControlLimits {
+        maximum_tracks: u64::MAX,
+        maximum_sources: u64::MAX,
+        maximum_routes: u64::MAX,
+        maximum_effects: u64::MAX,
+        maximum_graph_session_plus_plan_bytes: u64::MAX,
+        maximum_source_total_bytes: u64::MAX,
+        maximum_source_overhead_bytes: u64::MAX,
+        maximum_effect_state_bytes: u64::MAX,
+        maximum_effect_scratch_bytes: u64::MAX,
+        maximum_builtin_retained_bytes: u64::MAX,
+        maximum_control_retained_bytes: u64::MAX,
+        maximum_named_allocation_bytes: u64::MAX,
+        maximum_meter_streams: u64::MAX,
+        maximum_meter_items: u64::MAX,
+        maximum_meter_bytes: u64::MAX,
+        maximum_replacement_peak_bytes: 256 << 20,
+        // A frame of 64 KiB bounds a transaction at 32,768 edits, which the replace's 12,001 fit.
+        maximum_control_frame_bytes: 1 << 16,
+        maximum_replay_bytes: 1 << 20,
+        ..limits(u64::try_from(candidate.len()).expect("a bounded document"))
+    };
+    let CompiledChildren {
+        mut session,
+        plan: _plan,
+    } = compile_children::<Adapter>(&booted, limits, Box::new(Preparer)).expect("boot compile");
+    reliable_events(&mut session);
+    let before = (revision(&session), snapshot(&session));
+    let frame = replace_frame(1, before.0, &candidate);
+    audited_allocator::current_thread_peak_reset();
+    let refused = session.command_with_document(&frame, &candidate, 1 << 16);
+    let peak = audited_allocator::current_thread_peak().peak_bytes;
+    let transient = (candidate.len() * PARSE_TRANSIENT_MULTIPLIER) as u64;
+    if let Ok(length) = refused {
+        panic!(
+            "a permanent refusal: {:?}",
+            reply(session.command_response(length))
+        );
+    }
+    let Err(control_plane::CommandError::CompileRejected(failure)) = refused else {
+        panic!("a permanent refusal: {refused:?}")
+    };
+    assert_eq!(
+        &*failure.diagnostic(),
+        b"control.resource.replacement_peak\t$\n"
+    );
+    assert!(
+        peak <= transient,
+        "the replace peaked at {peak} bytes, over the {transient}-byte parse transient"
+    );
+    assert_eq!((revision(&session), snapshot(&session)), before);
+    assert_eq!(reliable_events(&mut session), 0);
+}

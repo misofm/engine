@@ -519,6 +519,12 @@ impl MeterFrame {
             + size_of_val::<[f32]>(&self.strip_gain_reduction_db)
             + size_of_val::<[bool]>(&self.strip_gain_reduction_present)
     }
+
+    /// [`Self::heap_bytes`] of `Self::new(strip_count)`, before it is built (issue #2199).
+    #[must_use]
+    pub const fn projected_heap_bytes(strip_count: usize) -> usize {
+        strip_count * (size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>())
+    }
 }
 
 fn filled<T: Clone>(count: usize, value: T) -> Result<Box<[T]>, TryReserveError> {
@@ -792,6 +798,25 @@ impl MeterTables {
             + size_of_val::<[usize]>(&self.remaining)
             + size_of_val::<[u64]>(&self.carried_from)
             + self.frame.heap_bytes()
+    }
+
+    /// [`Self::heap_bytes`] and [`Self::largest_allocation_bytes`] of
+    /// `Self::new(meter_count, strip_count)`, before it is built (issue #2199).
+    #[must_use]
+    pub const fn projected_bytes(meter_count: usize, strip_count: usize) -> (usize, usize) {
+        let pending = meter_count * size_of::<Option<MeterSnapshot>>();
+        let heap = pending
+            + meter_count * (size_of::<usize>() + size_of::<u64>())
+            + MeterFrame::projected_heap_bytes(strip_count);
+        let frame_largest = strip_count * size_of::<[f32; 2]>();
+        (
+            heap,
+            if pending > frame_largest {
+                pending
+            } else {
+                frame_largest
+            },
+        )
     }
 
     /// The largest single allocation of [`Self::heap_bytes`].

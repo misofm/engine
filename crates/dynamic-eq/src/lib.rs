@@ -1928,6 +1928,33 @@ fn initial_defaults(
     Ok(defaults)
 }
 
+/// The scalar instance [`DynamicEqFactory::prepare`] boxes: keyed by a connected sidechain or by its own
+/// input.
+enum Scalar {
+    Keyed(DynamicEq<f32, true>),
+    Internal(DynamicEq<f32, false>),
+}
+
+/// The scalar instance [`DynamicEqFactory::prepare`] boxes, and its metadata.
+fn prepare_scalar(
+    request: PrepareEffectRequest<'_>,
+) -> Result<(Scalar, PreparedEffectMetadata), EffectPrepareError> {
+    let metadata = expected_prepared_metadata(&DYNAMIC_EQ_DESCRIPTOR, request)?;
+    let defaults = [initial_defaults(request.initial_values)?; MAX_WIDTH];
+    let invalid = EffectPrepareError {
+        code: "effect.parameter.initial",
+    };
+    let scalar = match metadata.ports.sidechain {
+        PreparedSidechainPort::Connected { .. } => {
+            Scalar::Keyed(DynamicEq::<f32, true>::new(&metadata, None, defaults).ok_or(invalid)?)
+        }
+        _ => Scalar::Internal(
+            DynamicEq::<f32, false>::new(&metadata, None, defaults).ok_or(invalid)?,
+        ),
+    };
+    Ok((scalar, metadata))
+}
+
 impl NativeEffectFactory for DynamicEqFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
         &DYNAMIC_EQ_DESCRIPTOR
@@ -1945,20 +1972,26 @@ impl NativeEffectFactory for DynamicEqFactory {
         &self,
         request: PrepareEffectRequest<'_>,
     ) -> Result<PreparedEffect, EffectPrepareError> {
-        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
-        let defaults = [initial_defaults(request.initial_values)?; MAX_WIDTH];
-        let invalid = EffectPrepareError {
-            code: "effect.parameter.initial",
-        };
-        let processor: Box<dyn PreparedNativeEffect> = match metadata.ports.sidechain {
-            PreparedSidechainPort::Connected { .. } => {
-                Box::new(DynamicEq::<f32, true>::new(&metadata, None, defaults).ok_or(invalid)?)
-            }
-            _ => Box::new(DynamicEq::<f32, false>::new(&metadata, None, defaults).ok_or(invalid)?),
+        let (scalar, metadata) = prepare_scalar(request)?;
+        let processor: Box<dyn PreparedNativeEffect> = match scalar {
+            Scalar::Keyed(instance) => Box::new(instance),
+            Scalar::Internal(instance) => Box::new(instance),
         };
         Ok(PreparedEffect {
             processor,
             metadata,
+        })
+    }
+
+    /// Issue #2199: the scalar instance `prepare` boxes, built inline and asked. It holds no heap,
+    /// so the answer allocates nothing.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        prepare_scalar(request).map(|(scalar, _)| match scalar {
+            Scalar::Keyed(instance) => instance.channel_symmetry(),
+            Scalar::Internal(instance) => instance.channel_symmetry(),
         })
     }
 

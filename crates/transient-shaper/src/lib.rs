@@ -1796,6 +1796,21 @@ struct PreparedTransientShaperBank<L: Lane, const W: usize> {
     quantum: u32,
 }
 
+/// The scalar instance [`TransientShaperFactory::prepare`] boxes, and its metadata.
+fn prepare_scalar(
+    request: PrepareEffectRequest<'_>,
+) -> Result<(PreparedTransientShaper, PreparedEffectMetadata), EffectPrepareError> {
+    let metadata = expected_prepared_metadata(&TRANSIENT_SHAPER_DESCRIPTOR, request)?;
+    let row = coefficient_row(metadata.sample_rate).ok_or(EffectPrepareError {
+        code: "effect.quality.unsupported",
+    })?;
+    let (left, right) = initial_defaults(request.initial_values)?;
+    Ok((
+        PreparedTransientShaper(Shaper::new(&metadata, row, [left], [right])),
+        metadata,
+    ))
+}
+
 impl NativeEffectFactory for TransientShaperFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
         &TRANSIENT_SHAPER_DESCRIPTOR
@@ -1813,20 +1828,20 @@ impl NativeEffectFactory for TransientShaperFactory {
         &self,
         request: PrepareEffectRequest<'_>,
     ) -> Result<PreparedEffect, EffectPrepareError> {
-        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
-        let row = coefficient_row(metadata.sample_rate).ok_or(EffectPrepareError {
-            code: "effect.quality.unsupported",
-        })?;
-        let (left, right) = initial_defaults(request.initial_values)?;
+        let (processor, metadata) = prepare_scalar(request)?;
         Ok(PreparedEffect {
-            processor: Box::new(PreparedTransientShaper(Shaper::new(
-                &metadata,
-                row,
-                [left],
-                [right],
-            ))),
+            processor: Box::new(processor),
             metadata,
         })
+    }
+
+    /// Issue #2199: the scalar instance `prepare` boxes, built inline and asked. It holds no heap,
+    /// so the answer allocates nothing.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        prepare_scalar(request).map(|(processor, _)| processor.channel_symmetry())
     }
 
     fn bind_homogeneous_bank(

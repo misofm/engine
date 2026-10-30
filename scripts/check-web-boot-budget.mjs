@@ -11,6 +11,8 @@ const BOOT_OPTIONS_BYTES = 64;
 const DOCUMENT_BYTES = 1 << 20;
 const PARSE_TRANSIENT_MULTIPLIER = 20n;
 const WASM_PAGE_BYTES = 1 << 16;
+// `host_web::DEFAULT_MAXIMUM_MEMORY_BYTES`: the budget a zero `maximum_memory_bytes` word selects.
+const DEFAULT_MAXIMUM_MEMORY_BYTES = 512 * 1024 * 1024;
 
 if (process.argv.length !== 3) {
   throw new Error("usage: check-web-boot-budget.mjs MODULE.wasm");
@@ -138,7 +140,7 @@ let frameRows;
   const { exports } = stage(instance, 0n, true, effectDocument);
   assert.equal(exports.miso_engine_web_v1_boot(effectDocument.byteLength), 0);
   const diagnostic = stagingRefusal(exports);
-  const effect = /^host\.budget\.retained_projection\t\$\.maximum_memory_bytes\[projected_bytes=\d+,budget_bytes=\d+,effect_state_bytes=(\d+)\]\n$/
+  const effect = /^host\.budget\.retained_projection\t\$\.maximum_memory_bytes\[projected_bytes=\d+,budget_bytes=\d+,effect_state_bytes=(\d+),graph_bytes=\d+,builtin_bytes=\d+,control_bytes=\d+\]\n$/
     .exec(diagnostic);
   assert.ok(effect && BigInt(effect[1]) > 512n << 20n, diagnostic);
   const bound = BigInt(effectDocument.byteLength) * PARSE_TRANSIENT_MULTIPLIER + frameRows
@@ -149,6 +151,37 @@ let frameRows;
     `effect-state refusal grew wasm memory by ${growth}, over ${bound}`,
   );
   console.log(`web boot budget: effect-state refusal growth ${growth} of bound ${bound}`);
+}
+
+// Issue #2199: the dense 6,000-track shape of #2191, about 16.5 MB of JSON whose retained rows
+// exceed the default 512 MiB budget. The boot's retained projection (the graph, builtin and
+// control rows beside the effect row) refuses it before the control plane prepares an effect,
+// binds a bank or compiles the plan, so the linear memory grows by at most the budget plus one
+// page; before #2199 the boot prepared everything and the module trapped in `memory.grow`.
+{
+  const denseDocument = execFileSync(
+    "cargo",
+    ["run", "--locked", "-q", "-p", "host-web", "--example", "dense_document"],
+    { cwd: new URL("../", import.meta.url), maxBuffer: 32 << 20 },
+  );
+  const instance = await WebAssembly.instantiate(compiledModule, sharedMemoryImports());
+  const initialBytes = instance.exports.memory.buffer.byteLength;
+  const { exports } = stage(instance, 0n, true, denseDocument);
+  assert.equal(exports.miso_engine_web_v1_boot(denseDocument.byteLength), 0);
+  const diagnostic = stagingRefusal(exports);
+  const projected = /^host\.budget\.retained_projection\t\$\.maximum_memory_bytes\[projected_bytes=(\d+),budget_bytes=(\d+),/
+    .exec(diagnostic);
+  assert.ok(projected && BigInt(projected[1]) > BigInt(projected[2]), diagnostic);
+  const budget = BigInt(DEFAULT_MAXIMUM_MEMORY_BYTES);
+  assert.equal(BigInt(projected[2]), budget, diagnostic);
+  const growth = exports.memory.buffer.byteLength - initialBytes;
+  assert.ok(
+    BigInt(growth) <= budget + BigInt(WASM_PAGE_BYTES),
+    `dense-shape refusal grew wasm memory by ${growth}, over the budget plus one page`,
+  );
+  console.log(
+    `web boot budget: dense-shape refusal growth ${growth} of budget ${budget} (document ${denseDocument.byteLength})`,
+  );
 }
 
 console.log("web boot budget high-water gate passed; mismatches: 0");

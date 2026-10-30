@@ -3713,6 +3713,44 @@ fn prepare_width<L: Lane, const W: usize>(
 ) -> Result<PreparedParametricEq<L, W>, EffectPrepareError> {
     debug_assert_eq!(L::WIDTH, W);
     debug_assert_eq!(active_mask.len(), W);
+    let (initial, initial_words) = designed_bands::<W>(&metadata, requests)?;
+    Ok(PreparedParametricEq {
+        sample_rate: metadata.sample_rate,
+        bypass: metadata.bypass,
+        initial,
+        initial_words,
+        left: Channel::from_prepared(
+            core::array::from_fn(|track| initial[track][0]),
+            core::array::from_fn(|track| initial_words[track][0]),
+        ),
+        right: Channel::from_prepared(
+            core::array::from_fn(|track| initial[track][1]),
+            core::array::from_fn(|track| initial_words[track][1]),
+        ),
+        active: core::array::from_fn(|lane| active_mask.get(lane).copied().unwrap_or(false)),
+        // Nothing has been observed yet, so nothing is claimed.
+        silent_fixed_point: false,
+        collapsed: false,
+        rest: [
+            vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
+            vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
+        ],
+    })
+}
+
+/// Every track's band targets and designed words, per channel, as [`prepare_width`] seats them:
+/// the design half of preparation, which allocates nothing (issue #2199).
+#[allow(clippy::type_complexity)] // The two seat tables, in `prepare_width`'s own shapes.
+fn designed_bands<const W: usize>(
+    metadata: &PreparedEffectMetadata,
+    requests: &[PrepareEffectRequest<'_>],
+) -> Result<
+    (
+        [[[BandTarget; EQ_SECTION_COUNT]; 2]; W],
+        [[[EqSvfWords; EQ_SECTION_COUNT]; 2]; W],
+    ),
+    EffectPrepareError,
+> {
     let sample_rate = SampleRateHz(metadata.sample_rate);
     let mut initial = [[[BandTarget {
         enabled: false,
@@ -3738,28 +3776,7 @@ fn prepare_width<L: Lane, const W: usize>(
             }
         }
     }
-    Ok(PreparedParametricEq {
-        sample_rate: metadata.sample_rate,
-        bypass: metadata.bypass,
-        initial,
-        initial_words,
-        left: Channel::from_prepared(
-            core::array::from_fn(|track| initial[track][0]),
-            core::array::from_fn(|track| initial_words[track][0]),
-        ),
-        right: Channel::from_prepared(
-            core::array::from_fn(|track| initial[track][1]),
-            core::array::from_fn(|track| initial_words[track][1]),
-        ),
-        active: core::array::from_fn(|lane| active_mask.get(lane).copied().unwrap_or(false)),
-        // Nothing has been observed yet, so nothing is claimed.
-        silent_fixed_point: false,
-        collapsed: false,
-        rest: [
-            vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
-            vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
-        ],
-    })
+    Ok((initial, initial_words))
 }
 
 impl NativeEffectFactory for ParametricEqFactory {
@@ -3784,6 +3801,23 @@ impl NativeEffectFactory for ParametricEqFactory {
             processor: Box::new(prepare_width::<f32, 1>(metadata, &[request], &[true])?),
             metadata,
         })
+    }
+
+    /// Issue #2199: the two channels `prepare` seats, designed inline (they hold no heap) and
+    /// compared as the prepared processor compares them; the processor's rest planes are not
+    /// allocated.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
+        let ([[left_targets, right_targets]], [[left_words, right_words]]) =
+            designed_bands::<1>(&metadata, &[request])?;
+        Ok(channels_symmetric(
+            &Channel::<f32, 1>::from_prepared([left_targets], [left_words]),
+            &Channel::<f32, 1>::from_prepared([right_targets], [right_words]),
+            0,
+        ))
     }
 
     fn response_analysis(&self) -> Option<&dyn NativeEffectResponseFactory> {
@@ -4065,29 +4099,40 @@ const LANE_DEFAULT_BYTES: usize = 2 * EQ_SECTION_COUNT * DEFAULT_WORDS_PER_BAND 
 /// * `silent_fixed_point`, `bypass` -- whole-instance, so they cannot be asymmetric.
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     fn designed_channel_symmetry(&self, lane: usize) -> bool {
-        if lane >= W || lane >= L::WIDTH {
-            return false;
-        }
-        for section in 0..EQ_SECTION_COUNT {
-            let left = &self.left.sections[section];
-            let right = &self.right.sections[section];
-            for word in 0..EQ_COEFFICIENT_WORDS {
-                if lane_bits(coef_word(&left.coef, word), lane)
-                    != lane_bits(coef_word(&right.coef, word), lane)
-                    || lane_bits(step_word(&left.step, word), lane)
-                        != lane_bits(step_word(&right.step, word), lane)
-                    || lane_bits(coef_word(&left.target, word), lane)
-                        != lane_bits(coef_word(&right.target, word), lane)
-                {
-                    return false;
-                }
-            }
-            if self.left.remaining[section][lane] != self.right.remaining[section][lane] {
+        channels_symmetric(&self.left, &self.right, lane)
+    }
+}
+
+/// [`PreparedParametricEq::designed_channel_symmetry`] over two channels: the one comparison, which
+/// [`ParametricEqFactory::designed_channel_symmetry`] also runs on the channels it designs inline
+/// (issue #2199).
+fn channels_symmetric<L: Lane, const W: usize>(
+    left_channel: &Channel<L, W>,
+    right_channel: &Channel<L, W>,
+    lane: usize,
+) -> bool {
+    if lane >= W || lane >= L::WIDTH {
+        return false;
+    }
+    for section in 0..EQ_SECTION_COUNT {
+        let left = &left_channel.sections[section];
+        let right = &right_channel.sections[section];
+        for word in 0..EQ_COEFFICIENT_WORDS {
+            if lane_bits(coef_word(&left.coef, word), lane)
+                != lane_bits(coef_word(&right.coef, word), lane)
+                || lane_bits(step_word(&left.step, word), lane)
+                    != lane_bits(step_word(&right.step, word), lane)
+                || lane_bits(coef_word(&left.target, word), lane)
+                    != lane_bits(coef_word(&right.target, word), lane)
+            {
                 return false;
             }
         }
-        true
+        if left_channel.remaining[section][lane] != right_channel.remaining[section][lane] {
+            return false;
+        }
     }
+    true
 }
 
 impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {

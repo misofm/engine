@@ -899,6 +899,19 @@ impl NativeEffectFactory for DelayFactory {
         })
     }
 
+    /// Issue #2199: the two lanes `prepare` seats, built without their rings (a ring is running
+    /// state, never compared, and the instance's whole state), so the answer allocates nothing.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        let (_, _, left_defaults, right_defaults, _) = validate_inputs(request)?;
+        Ok(lanes_symmetric(
+            &DelayLane::new(&left_defaults, 0),
+            &DelayLane::new(&right_defaults, 0),
+        ))
+    }
+
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
@@ -1558,24 +1571,30 @@ fn mix_sample(dry: f32, wet: f32, mix: f32, bypass: Mask) -> f32 {
 /// asymmetric.
 impl PreparedDelay {
     fn designed_channel_symmetry(&self) -> bool {
-        let (left, right) = (&self.left, &self.right);
-        for parameter in 0..ORDINARY_RAMP_COUNT {
-            let (l, r) = (&left.ramps[parameter], &right.ramps[parameter]);
-            if l.current.to_bits() != r.current.to_bits()
-                || l.target.to_bits() != r.target.to_bits()
-                || l.step.to_bits() != r.step.to_bits()
-                || l.remaining != r.remaining
-            {
-                return false;
-            }
-        }
-        left.delay_target_ms.to_bits() == right.delay_target_ms.to_bits()
-            && left.active_delay == right.active_delay
-            && left.transition_delay == right.transition_delay
-            && left.pending_delay == right.pending_delay
-            && left.transition_remaining == right.transition_remaining
-            && left.valid_history == right.valid_history
+        lanes_symmetric(&self.left, &self.right)
     }
+}
+
+/// [`PreparedDelay::designed_channel_symmetry`] over two lanes: the one comparison, which
+/// [`DelayFactory::designed_channel_symmetry`] also runs on lanes it designs without their rings
+/// (issue #2199). The ring is running state and is not compared.
+fn lanes_symmetric(left: &DelayLane, right: &DelayLane) -> bool {
+    for parameter in 0..ORDINARY_RAMP_COUNT {
+        let (l, r) = (&left.ramps[parameter], &right.ramps[parameter]);
+        if l.current.to_bits() != r.current.to_bits()
+            || l.target.to_bits() != r.target.to_bits()
+            || l.step.to_bits() != r.step.to_bits()
+            || l.remaining != r.remaining
+        {
+            return false;
+        }
+    }
+    left.delay_target_ms.to_bits() == right.delay_target_ms.to_bits()
+        && left.active_delay == right.active_delay
+        && left.transition_delay == right.transition_delay
+        && left.pending_delay == right.pending_delay
+        && left.transition_remaining == right.transition_remaining
+        && left.valid_history == right.valid_history
 }
 
 impl PreparedNativeEffect for PreparedDelay {

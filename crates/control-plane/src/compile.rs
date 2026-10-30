@@ -645,6 +645,122 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     )
 }
 
+/// The capi resources a plan of `compiled` would be prepared with, from its preparation's
+/// projection (issue #2199), before the plan is prepared: [`prepare_runtime`]'s and
+/// [`prepared_capi_resources`]' rows, each from the projection's exact or ceiling counterpart
+/// (the provider catalog, the state inventory, the strip, effect and send producers, the
+/// observation handles, their index and carried-tap record at its own-attachment size, and the
+/// meter tables). `spectrum` says whether the plan has spectrum captures.
+pub(crate) fn projected_capi_resources<A: ControlAdapter>(
+    compiled: &CompiledSession,
+    projection: &host_core::HostProjection,
+    limits: ControlLimits,
+    observation_slots_high_water: usize,
+    capture_owners_high_water: usize,
+    spectrum: bool,
+) -> Result<CapiResources, CompileFailure> {
+    let arithmetic = || failure(ResourceFault::Arithmetic);
+    let model = compiled.normalized_model();
+    let source_id_bytes = model
+        .sources
+        .iter()
+        .try_fold(0_usize, |total, source| {
+            total.checked_add(source.id.as_str().len())
+        })
+        .ok_or_else(arithmetic)?;
+    let handles = projection.observation_handles;
+    // The observation readers' handles and their strips (`observation_handle_bytes`), the index of
+    // an adapter that serves `OBSERVATION_READ` over every producer and reader, and the
+    // carried-tap record of an adapter that serves the meter batches, at its larger, own-attachment
+    // size.
+    let index = if A::OBSERVE_EDIT {
+        host_core::observation::ObservationIndex::projected_retained_bytes(
+            projection.effect_producers,
+            projection.effect_producer_id_bytes,
+            projection.observation_taps,
+            if handles == 0 { 0 } else { handles + 1 },
+        )
+        .ok_or_else(arithmetic)?
+    } else {
+        0
+    };
+    let carried_taps = if A::METER_DELIVERY && handles != 0 {
+        crate::control::CarriedTaps::retained_bytes(handles, true)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(arithmetic)?
+    } else {
+        0
+    };
+    let observation_bytes = projection
+        .observation_handle_bytes
+        .checked_add(checked_layout::<u32>(handles)?)
+        .and_then(|bytes| bytes.checked_add(index))
+        .and_then(|bytes| bytes.checked_add(carried_taps))
+        .ok_or_else(arithmetic)?;
+    let strip_count = projection.strips;
+    let meter_tables = if A::METER_DELIVERY && !A::RENDER_METER_FOLD {
+        let (retained, largest) =
+            host_core::MeterTables::projected_bytes(projection.meters, strip_count);
+        (retained, largest)
+    } else {
+        (0, 0)
+    };
+    let (ring, ring_largest) = if A::METER_DELIVERY && A::RENDER_METER_FOLD {
+        (
+            host_core::MeterFrameRing::heap_bytes(strip_count).ok_or_else(arithmetic)?,
+            host_core::MeterFrameRing::largest_allocation_bytes(strip_count)
+                .ok_or_else(arithmetic)?,
+        )
+    } else {
+        (0, 0)
+    };
+    let to_u64 = |bytes: usize| u64::try_from(bytes).map_err(|_| failure(ResourceFault::Platform));
+    let meter_rows = MeterTableRows {
+        retained: to_u64(meter_tables.0.checked_add(ring).ok_or_else(arithmetic)?)?,
+        largest: to_u64(meter_tables.1.max(ring_largest))?,
+    };
+    let provider = host_core::SessionControlProvider::resource_report_for(
+        projection.catalog,
+        controller_retained_capacity(limits)?,
+        RENDER_DIAGNOSTIC_SLOTS,
+    )
+    .map_err(|_| failure(ResourceFault::Arithmetic))?;
+    let mut capi = capi_resources::<A>(
+        limits,
+        compiled.source_count(),
+        source_id_bytes,
+        host_core::strip_control_table_bytes(
+            strip_count,
+            usize::try_from(projection.strip_id_bytes).map_err(|_| arithmetic())?,
+            projection.strip_heap_bytes,
+        )
+        .ok_or_else(arithmetic)?,
+        provider,
+        projection.inventory_bytes,
+        projection.effect_control_resources,
+        projection.route_controls,
+        ObservationResources {
+            producers: projection.effect_producers,
+            handle_bytes: observation_bytes,
+            slots: projection.observation_slots,
+            reserve_slots: projection
+                .observation_slots
+                .max(observation_slots_high_water),
+        },
+        monitor_rows(model)?,
+        meter_rows,
+        response_capture_bytes(model, capture_owners_high_water)?,
+    )?;
+    if spectrum {
+        capi.spectrum_service = crate::spectrum::SPECTRUM_MONITOR_RETAINED_BYTES;
+        capi.active_retained = capi
+            .active_retained
+            .checked_add(capi.spectrum_service)
+            .ok_or_else(arithmetic)?;
+    }
+    Ok(capi)
+}
+
 /// One epoch's meter tables (#1587a R2): their heap and its largest allocation.
 #[derive(Clone, Copy)]
 pub(crate) struct MeterTableRows {
@@ -1336,6 +1452,25 @@ pub fn frame_scaled_retained_bytes<A: ControlAdapter>(
     frame_rows::<A>(limits)?.retained()
 }
 
+/// The bytes the control plane retains for a first plan of `compiled` while it is active, from
+/// the plan's preparation projection (issue #2199), before the plan is prepared: the
+/// [`PlanResources::control_retained_bytes`] its boot would report, at most. A host's boot
+/// admission charges it beside the projection's own rows; `spectrum` says whether the boot plan
+/// has spectrum captures.
+///
+/// # Errors
+///
+/// Arithmetic overflow in a row.
+pub fn projected_control_retained_bytes<A: ControlAdapter>(
+    compiled: &CompiledSession,
+    projection: &host_core::HostProjection,
+    limits: ControlLimits,
+    spectrum: bool,
+) -> Result<u64, CompileFailure> {
+    projected_capi_resources::<A>(compiled, projection, limits, 0, 0, spectrum)
+        .map(|capi| capi.active_retained)
+}
+
 /// The candidate a structural command prepared, as the replacement admission reads it.
 #[derive(Clone, Copy)]
 pub(crate) struct ProspectivePlan {
@@ -1389,53 +1524,89 @@ pub(crate) fn validate_replacement_peak(
     }
 }
 
-/// The replacement admission before preparation (issue #2194): may a candidate whose effect
-/// bytes are `effects` be prepared beside every plan and model the control plane holds?
-///
-/// The candidate is not prepared yet, so its rows are its compiled model's (in `compiled_models`)
-/// and its effect projection's, which bounds what preparing its instances allocates; its graph,
-/// builtin and source rows are not known before preparation (#2199) and count zero here. Each
-/// held term is [`replacement_peak_fits`]'s: the held plans' graph rows plus every model plus the
-/// candidate's projected effect bytes, with the held plans' source totals (a carried ring counted
-/// once), against [`ControlLimits::maximum_replacement_peak_bytes`]
-/// (`control.resource.replacement_peak`); the held effect state and scratch plus the candidate's
-/// against their caps (`effect.resource.limit`). [`validate_replacement_peak`] still checks the
-/// exact rows after preparation. The projection charges every instance's processor, also for a
-/// banking effect, whose bank the exact admission charges in place of its members: the graph
-/// compiler holds every per-instance processor alive while it binds the banks, so the transient
-/// really holds them. This pre-check can therefore be stricter than the exact admission for
-/// banking effects, deliberately; for the other rows it refuses nothing the exact admission
-/// would admit except by the projection's ceiling margin.
-///
-/// Nothing is prepared or committed on a refusal.
-pub(crate) fn validate_prospective_projection(
-    held: &[LiveEpochResources],
-    effects: host_core::EffectStateProjection,
-    compiled_models: CompiledModelAdmission,
+/// A candidate's plan as the replacement admission reads it, from its preparation's projection
+/// (issue #2199), before it is prepared: the plan row its preparation will report, with the graph
+/// row's carry program (a successor's later carry sections are charged by the admission after the
+/// candidate is prepared), the sources (the carried rings and timeline apart, as
+/// the prepared plan's carry splits them), the effect state and scratch, the builtins, and the
+/// control plane's rows ([`projected_capi_resources`]). The rows the admission does not read are
+/// zero; the largest-allocation term is the prepared candidate's to meet.
+pub(crate) fn projected_plan<A: ControlAdapter>(
+    compiled: &CompiledSession,
+    projection: &host_core::HostProjection,
     limits: ControlLimits,
-) -> Result<(), CompileFailure> {
+    observation_slots_high_water: usize,
+    capture_owners_high_water: usize,
+    spectrum: bool,
+) -> Result<ProspectivePlan, CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
-    let peak = held_peak_bytes(held, compiled_models.retained_bytes)?
-        .checked_add(effects.retained_bytes().ok_or_else(arithmetic)?)
-        .ok_or_else(arithmetic)?;
-    if peak > limits.maximum_replacement_peak_bytes {
-        return Err(diagnostic("control.resource.replacement_peak"));
-    }
-    let sum = |field: fn(&PlanResources) -> u64, candidate: u64| {
-        held.iter()
-            .try_fold(candidate, |total, epoch| {
-                total.checked_add(field(&epoch.report))
-            })
-            .ok_or_else(arithmetic)
+    // The ceiling rows (the state inventory and the send lanes) are the admission after
+    // preparation's to charge, exactly: this admission charges the exact rows only, so it never
+    // refuses a candidate that the exact admission admits.
+    let first = host_core::HostProjection {
+        inventory_bytes: 0,
+        route_controls: host_core::RouteControlResources::default(),
+        ..*projection
     };
-    if sum(|row| row.effect_scalar_state_bytes, effects.state_bytes)?
-        > limits.maximum_effect_state_bytes
-        || sum(|row| row.effect_scalar_scratch_bytes, effects.scratch_bytes)?
-            > limits.maximum_effect_scratch_bytes
-    {
-        return Err(diagnostic("effect.resource.limit"));
-    }
-    Ok(())
+    let capi = projected_capi_resources::<A>(
+        compiled,
+        &first,
+        limits,
+        observation_slots_high_water,
+        capture_owners_high_water,
+        spectrum,
+    )?;
+    let carried = CarriedSourceBytes {
+        total: projection.carried_source_total_bytes,
+        overhead: projection.carried_source_overhead_bytes,
+    };
+    let source_total = projection
+        .source_total_bytes
+        .checked_add(carried.total)
+        .ok_or_else(arithmetic)?;
+    let source_overhead = projection
+        .source_overhead_bytes
+        .checked_add(carried.overhead)
+        .ok_or_else(arithmetic)?;
+    Ok(ProspectivePlan {
+        resources: PlanResources {
+            sample_rate_hz: compiled.sample_rate().0,
+            quantum_frames: compiled.quantum().0,
+            source_count: u64::try_from(compiled.source_count()).map_err(|_| arithmetic())?,
+            track_count: u64::try_from(compiled.normalized_model().tracks.len())
+                .map_err(|_| arithmetic())?,
+            latency_samples: 0,
+            output_tail_every_peak: effect_contract::TailSamples::Finite(0),
+            // The carry program, exact; a successor's later sections are the admission after
+            // bind's to charge (`HostProjection::admitted_graph_and_model`).
+            graph_session_plus_plan_bytes: projection
+                .graph_session_plus_plan_bytes
+                .checked_add(projection.carry_program_bytes)
+                .ok_or_else(arithmetic)?,
+            graph_incremental_plan_bytes: 0,
+            graph_metadata_bytes: 0,
+            graph_delay_bytes: 0,
+            effect_bank_scratch_bytes: 0,
+            effect_bank_runtime_buffer_bytes: 0,
+            effect_bank_metadata_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            source_pcm_payload_bytes: source_total
+                .checked_sub(source_overhead)
+                .ok_or_else(arithmetic)?,
+            source_overhead_bytes: source_overhead,
+            source_total_bytes: source_total,
+            effect_scalar_state_bytes: projection.effects.state_bytes,
+            effect_scalar_scratch_bytes: projection.effects.scratch_bytes,
+            builtin_processor_payload_bytes: 0,
+            builtin_meter_payload_bytes: 0,
+            builtin_retained_payload_bytes: projection.builtin_retained_payload_bytes,
+            control_retained_bytes: capi.active_retained,
+            largest_named_allocation_bytes: 0,
+        },
+        carried,
+        capi,
+    })
 }
 
 /// The replacement peak's held terms (#1290a D3, issue #2194): every held plan's graph row, the
@@ -1890,6 +2061,45 @@ pub trait RuntimePreparer: Send {
         ),
         PrepareDiagnostics,
     >;
+
+    /// What [`Self::prepare`] would retain for the same arguments, projected before anything of the
+    /// plan is prepared (issue #2199): host-core's [`host_core::project_host_session`] of the same
+    /// preparation. The replacement admission admits a candidate on it before preparing it.
+    ///
+    /// The default projects host-core's live-lanes preparation with the default live-control
+    /// request at [`Self::meter_window_blocks`], which is what a preparer that prepares with that
+    /// entry prepares; a preparer that prepares with another request or entry projects with it.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal the preparation makes up to its projection.
+    fn project(
+        &self,
+        compiled: &CompiledSession,
+        caps: &HostPrepareCaps,
+        lanes: HostLiveLanes,
+        spectrum: Option<&host_core::SpectrumPreparation>,
+        successor: Option<SuccessorBase<'_>>,
+        superseded: &host_core::LiveValuesSuperseded,
+    ) -> Result<host_core::HostProjection, PrepareDiagnostics> {
+        let live = host_core::HostLiveControlRequest {
+            meter_window_blocks: self.meter_window_blocks(),
+            ..host_core::HostLiveControlRequest::default()
+        };
+        host_core::project_host_session(
+            compiled,
+            caps,
+            host_core::HostProjectionRequest {
+                live_controls: Some(&live),
+                selected_meters: None,
+                backend: lane::Backend::current(),
+                spectrum,
+                successor,
+                lanes,
+                superseded: Some(superseded),
+            },
+        )
+    }
 
     /// The meter window, in blocks, this adapter prepares its plans' strip meters with (#1581 D2):
     /// `0`, the default, is host-core's [`host_core::default_meter_window_blocks`]. The session's
@@ -2363,6 +2573,92 @@ where
     compile_children_warm(document, limits, preparer, None, Some(boot_command))
 }
 
+/// The session's protocol codec, at the control frame `limits` name.
+fn session_codec(limits: ControlLimits) -> Result<ProtocolCodec, CompileFailure> {
+    let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
+        .map_err(|_| failure(ResourceFault::Platform))?;
+    let maximum_tlvs = u32::try_from(control_bytes / size_of::<u16>()).unwrap_or(u32::MAX);
+    Ok(ProtocolCodec::new(ProtocolLimits {
+        max_frame_bytes: control_bytes,
+        max_tlv_count: maximum_tlvs,
+        max_string_bytes: control_bytes,
+        max_nesting: 4,
+    }))
+}
+
+/// What a session's boot retains for its first plan, projected before anything of the plan is
+/// prepared (issue #2199): host-core's [`host_core::HostProjection`] of the boot preparation and
+/// the control plane's retained bytes for that plan ([`projected_control_retained_bytes`]).
+#[derive(Clone, Copy, Debug)]
+pub struct BootProjection {
+    /// The boot preparation's projection.
+    pub host: host_core::HostProjection,
+    /// The control plane's [`PlanResources::control_retained_bytes`] for the boot plan, at most.
+    pub control_retained_bytes: u64,
+}
+
+/// Project the boot of `compiled` under `limits` (issue #2199), as [`compile_children`] (or, with
+/// a `boot_command`, [`compile_children_with_boot_command`]) prepares its first plan with a
+/// preparer that attaches `lanes` and `live_controls` on this build's backend: host-core's
+/// projection of that preparation under `caps`, with the boot command's spectrum taps, and the
+/// control plane's rows for it. No effect processor, bank, plan, ring or lane is allocated. A host
+/// that admits the projection against its own budget passes caps whose byte ceilings do not
+/// refuse, so the projection names every row.
+///
+/// # Errors
+///
+/// A refused boot command, any refusal of the preparation up to its projection (with its
+/// [`host_core::PrepareRejection`], as a preparer records it), or arithmetic overflow.
+pub fn project_boot<A: ControlAdapter>(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    limits: ControlLimits,
+    live_controls: &host_core::HostLiveControlRequest,
+    lanes: HostLiveLanes,
+    boot_command: Option<&[u8]>,
+) -> Result<BootProjection, (CompileFailure, Option<host_core::PrepareRejection>)> {
+    let spectrum = boot_command
+        .map(|frame| {
+            boot_command_spectrum(
+                &session_codec(limits)?,
+                frame,
+                compiled.normalized_model(),
+                limits,
+            )
+        })
+        .transpose()
+        .map_err(|failure| (failure, None))?
+        .flatten();
+    let superseded = host_core::LiveValuesSuperseded::default();
+    let host = host_core::project_host_session(
+        compiled,
+        caps,
+        host_core::HostProjectionRequest {
+            live_controls: Some(live_controls),
+            selected_meters: None,
+            backend: lane::Backend::current(),
+            spectrum: spectrum
+                .as_ref()
+                .map(|configuration| &configuration.preparation),
+            successor: None,
+            lanes,
+            superseded: Some(&superseded),
+        },
+    )
+    .map_err(|diagnostics| {
+        let rejection = diagnostics.kind();
+        (prepare_failure(diagnostics), Some(rejection))
+    })?;
+    let control_retained_bytes =
+        projected_capi_resources::<A>(compiled, &host, limits, 0, 0, spectrum.is_some())
+            .map_err(|failure| (failure, None))?
+            .active_retained;
+    Ok(BootProjection {
+        host,
+        control_retained_bytes,
+    })
+}
+
 /// The configuration a boot command frame sets (#2166, [`compile_children_with_boot_command`]),
 /// decoded with `codec` and checked against `model`.
 fn boot_command_spectrum(
@@ -2438,12 +2734,7 @@ where
     let replay_entries = usize::try_from(limits.maximum_replay_entries)
         .map_err(|_| failure(ResourceFault::Platform))?;
     let maximum_tlvs = u32::try_from(control_bytes / size_of::<u16>()).unwrap_or(u32::MAX);
-    let codec = ProtocolCodec::new(ProtocolLimits {
-        max_frame_bytes: control_bytes,
-        max_tlv_count: maximum_tlvs,
-        max_string_bytes: control_bytes,
-        max_nesting: 4,
-    });
+    let codec = session_codec(limits)?;
     // #2166: the boot command's taps are the first plan's.
     let boot_spectrum = boot_command
         .map(|frame| {

@@ -12,20 +12,20 @@
 
 use super::*;
 use crate::banks::{
-    PlacementLevels, bind_rack_banks_placed, checked_add_effect_banks, effect_bank_resource,
-    placement_levels, rack_chains,
+    PlacementLevels, PlannedEffectBank, bind_planned_banks, checked_add_effect_banks,
+    effect_bank_resource, placement_levels, plan_rack_banks_placed, rack_chains,
 };
 use crate::canonical::{
     Sha256Writer, canonical_parts, dot, hex_digest, hex_sha256, reductions_of, write_canonical,
 };
 use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_estimate};
 use crate::ids::{
-    NodeTable, PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
-    add_route_source_edge, diag, effect_path, gid, into_effects, port, ports_for,
-    prepared_effect_node, route_destination_node, route_source_node, route_values,
+    AsProjected, EffectInputs, NodeTable, PreparedEffectIndex, add_main_edge, add_node,
+    add_route_destination_edge, add_route_source_edge, diag, effect_path, gid, into_effects, port,
+    ports_for, prepared_effect_node, route_destination_node, route_source_node, route_values,
     sidechain_matches, stages, track_node,
 };
-use crate::pdc::timings;
+use crate::pdc::{TimingResult, timings};
 use crate::schedule::{Topo, buffer_assignments, cycle_primary_path, cycle_witnesses, topo};
 use graph::program::LoweringHint;
 
@@ -81,6 +81,9 @@ impl GraphCompiler {
     /// matrix, and the builtins-less entry that compiled a plan without them was deleted (issue
     /// #959). On any failure the prepared effects and builtins are handed back with the sorted
     /// diagnostics.
+    ///
+    /// It is [`Self::project`] and [`Self::compile_projected`] with every entry's processor
+    /// supplied: the plan keeps each one, a banked member's too, as it always did.
     // The transactional API returns the complete prepared-effect and builtin inputs by value on
     // failure. Boxing them would change that ownership contract solely to optimize a cold path.
     #[allow(clippy::result_large_err)]
@@ -101,66 +104,156 @@ impl GraphCompiler {
             return Err(GraphBuiltinsCompileFailure {
                 effects,
                 builtins,
-                diagnostics: GraphDiagnosticSet::sorted(
-                    builtin_diagnostics
-                        .0
-                        .into_iter()
-                        .map(|diagnostic| diag(diagnostic.code, &diagnostic.path))
-                        .collect(),
-                ),
+                diagnostics: builtin_failure(builtin_diagnostics),
             });
         }
-        let compiled = match Self::compile_graph(
-            plan_id,
-            effects,
+        let front = match Self::graph_front(
+            &EffectInputs {
+                session: &effects.session,
+                entries: &effects.entries,
+            },
             caps,
             dispatch,
             &builtins,
             &input_floors,
             gain_liveness,
         ) {
-            Ok(value) => value,
-            Err(failure) => {
+            Ok(front) => front,
+            Err(diagnostics) => {
                 return Err(GraphBuiltinsCompileFailure {
-                    effects: failure.effects,
+                    effects,
                     builtins,
-                    diagnostics: failure.diagnostics,
+                    diagnostics: GraphDiagnosticSet::sorted(diagnostics),
                 });
             }
         };
-        // Issue #2136: the builtin strip banks are bucketed by the placement the rack chains were.
-        let levels = compiled.placement.levels().to_vec();
-        // #1647a (R17-2): each builtin bank takes its members' floored input arrivals `a(n)`.
-        let arrivals = compiled.report.input_arrivals.clone();
-        let mut artifact = builtins.into_graph_artifact_with_banks(
-            compiled.graph,
-            compiled.report,
+        let (projected, processors) = effects.into_projected();
+        let EffectProjectedSession { session, entries } = projected;
+        match Self::graph_back(
+            plan_id,
+            front,
+            &session,
+            entries,
+            processors.into_iter().map(Some).collect(),
             dispatch,
-            &levels,
-            // The *same* object `bind_rack_banks` was handed inside the compile above. This is
-            // the whole of the two-planner agreement mechanism (`SessionPoolClasses`): there
-            // is one derivation and both planners read it, so they cannot form different
-            // opinions about a track and silently decline the strip's chain merges.
-            &compiled.pool_classes,
-        );
-        artifact.install_builtin_input_arrivals(&arrivals);
-        Ok(artifact)
+        ) {
+            Ok(compiled) => Ok(attach_builtins(compiled, builtins, dispatch)),
+            Err((entries, processors, diagnostics)) => Err(GraphBuiltinsCompileFailure {
+                effects: EffectPreparedSession {
+                    session,
+                    entries: entries
+                        .into_iter()
+                        .zip(processors)
+                        .map(|(entry, processor)| {
+                            entry.with_processor(
+                                processor.expect("every processor was supplied and kept"),
+                            )
+                        })
+                        .collect(),
+                },
+                builtins,
+                diagnostics,
+            }),
+        }
     }
 
-    /// The graph pipeline, run against builtins `compile_with_builtins` has already validated
-    /// for this session. The builtin banks are attached by the caller; this charges their
-    /// reservation, lists their three stages for binding, and takes each track's input-section
-    /// bound from them.
-    #[allow(clippy::result_large_err, clippy::too_many_arguments)]
-    fn compile_graph(
-        plan_id: u64,
-        effects: EffectPreparedSession,
+    /// Project a session's graph from its projected effects and its prepared builtins, before any
+    /// effect processor exists (issue #2199): the graph, its bank plan and its capped resource
+    /// estimate, which is the estimate the plan [`Self::compile_projected`] compiles from it
+    /// reports. Nothing it computes is recomputed there.
+    ///
+    /// The projection prepares no processor and keeps no bank: each planned bank is bound once,
+    /// to read its factory's answer, and dropped (`plan_rack_banks_placed`). On a failure the
+    /// projected effects are handed back with the sorted diagnostics.
+    #[allow(clippy::result_large_err)]
+    pub fn project(
+        request: GraphProjectionRequest<'_>,
+    ) -> Result<GraphProjection, GraphProjectionFailure> {
+        let GraphProjectionRequest {
+            plan_id,
+            effects,
+            builtins,
+            caps,
+            dispatch,
+            input_floors,
+            gain_liveness,
+        } = request;
+        let builtin_diagnostics = builtins.validate_for_session(&effects.session);
+        if !builtin_diagnostics.0.is_empty() {
+            return Err(GraphProjectionFailure {
+                effects,
+                diagnostics: builtin_failure(builtin_diagnostics),
+            });
+        }
+        match Self::graph_front(
+            &EffectInputs::projected(&effects),
+            caps,
+            dispatch,
+            builtins,
+            &input_floors,
+            gain_liveness,
+        ) {
+            Ok(front) => Ok(GraphProjection {
+                plan_id,
+                dispatch,
+                effects,
+                front,
+            }),
+            Err(diagnostics) => Err(GraphProjectionFailure {
+                effects,
+                diagnostics: GraphDiagnosticSet::sorted(diagnostics),
+            }),
+        }
+    }
+
+    /// Compile `projection` with the builtins it was projected with (issue #2199): bind its
+    /// planned banks, prepare a processor for each entry its bank plan leaves per node, lower the
+    /// plan and attach the builtin banks.
+    ///
+    /// A banked member's processor is never prepared, so the compile holds the banks and the
+    /// per-node processors, never both for one instance. A bank whose factory binds it otherwise
+    /// than the plan assumed is `graph.effect.bank_metadata`. On a failure the projected effects
+    /// and the builtins are handed back with the sorted diagnostics.
+    #[allow(clippy::result_large_err)]
+    pub fn compile_projected(
+        projection: GraphProjection,
+        builtins: PreparedBuiltinsSession,
+    ) -> Result<PreparedGraphBuiltinsArtifact, GraphProjectedCompileFailure> {
+        let GraphProjection {
+            plan_id,
+            dispatch,
+            effects,
+            front,
+        } = projection;
+        let EffectProjectedSession { session, entries } = effects;
+        let processors = core::iter::repeat_with(|| None)
+            .take(entries.len())
+            .collect();
+        match Self::graph_back(plan_id, front, &session, entries, processors, dispatch) {
+            Ok(compiled) => Ok(attach_builtins(compiled, builtins, dispatch)),
+            Err((entries, _, diagnostics)) => Err(GraphProjectedCompileFailure {
+                effects: EffectProjectedSession { session, entries },
+                builtins,
+                diagnostics,
+            }),
+        }
+    }
+
+    /// The graph pipeline's front (issue #2199), run against builtins the caller has already
+    /// validated for this session: nodes, edges, schedule, levels, PDC, buffers, the pool classes,
+    /// the bank plan and the capped resource estimate, from the entries' projections alone. It
+    /// prepares no processor and keeps no bank. The builtin banks are attached by the back half;
+    /// this charges their reservation, lists their three stages for binding, and takes each
+    /// track's input-section bound from them.
+    #[allow(clippy::too_many_arguments)]
+    fn graph_front<E: AsProjected>(
+        effects: &EffectInputs<'_, E>,
         caps: GraphCompileCaps,
         dispatch: Backend,
         builtins: &PreparedBuiltinsSession,
         input_floors: &BTreeMap<GraphNodeId, LatencySamples>,
         gain_liveness: GainLiveness,
-    ) -> Result<CompiledGraph, GraphFailure> {
+    ) -> Result<GraphFront, Vec<GraphDiagnostic>> {
         // `validate_for_session` has checked the bound set against the session's tracks, so every
         // track has exactly one entry here.
         let builtin_bounds: BTreeMap<&str, NodeTailBound> = builtins.input_bounds().collect();
@@ -168,18 +261,16 @@ impl GraphCompiler {
         if !caps.all_nonzero() {
             diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));
         }
-        // Borrow only the session field: rejecting branches end the borrow before returning
-        // all of `effects`, while success consumes the disjoint entries field after validation.
-        let session = &effects.session;
+        let session = effects.session;
         let model = session.normalized_model();
         if model.outputs.len() != 1 {
             diagnostics.push(diag("graph.output.cardinality", "$.outputs"));
         }
         if !diagnostics.is_empty() {
-            return Err(failure(effects, diagnostics));
+            return Err(diagnostics);
         }
 
-        let (prepared, duplicate_prepared) = PreparedEffectIndex::from_entries(&effects.entries);
+        let (prepared, duplicate_prepared) = PreparedEffectIndex::from_entries(effects.iter());
         for _ in 0..duplicate_prepared {
             diagnostics.push(diag("graph.effect.duplicate_prepared", "$.effects"));
         }
@@ -212,7 +303,10 @@ impl GraphCompiler {
                         ));
                         continue;
                     };
-                    if !sidechain_matches(&effect.sidechain, &effects.entries[slot.index()]) {
+                    if !effects
+                        .entry(slot.index())
+                        .is_some_and(|entry| sidechain_matches(&effect.sidechain, entry))
+                    {
                         diagnostics.push(diag(
                             "graph.effect.metadata_mismatch",
                             &effect_path(&strip.path_prefix(), rack, effect.id.as_str()),
@@ -227,7 +321,7 @@ impl GraphCompiler {
             }
         }
         if !diagnostics.is_empty() {
-            return Err(failure(effects, diagnostics));
+            return Err(diagnostics);
         }
 
         let mut nodes = Vec::new();
@@ -274,7 +368,10 @@ impl GraphCompiler {
                         .get(strip.id.as_str(), rack, effect.id.as_str())
                         .expect("validated prepared effect");
                     let index = slot.index();
-                    let metadata = effects.entries[index].metadata;
+                    let metadata = effects
+                        .entry(index)
+                        .expect("validated prepared effect")
+                        .metadata;
                     add_node(
                         &mut nodes,
                         node.clone(),
@@ -429,7 +526,7 @@ impl GraphCompiler {
             });
         }
         if !diagnostics.is_empty() {
-            return Err(failure(effects, diagnostics));
+            return Err(diagnostics);
         }
         let Topo {
             levels,
@@ -464,10 +561,7 @@ impl GraphCompiler {
         if schedule.len() as u64 > caps.maximum_schedule_items
             || levels.len() as u64 > caps.maximum_dependency_levels
         {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.limit", "$.graph_compile_caps")],
-            ));
+            return Err(vec![diag("graph.resource.limit", "$.graph_compile_caps")]);
         }
         // #1287 D1: every track's `Input` reads its source through a claim, so a floor on it is a
         // source-claim line. A submix's `Input` sums its routes, which carry its compensation.
@@ -478,7 +572,7 @@ impl GraphCompiler {
             .collect();
         let timing = match timings(&table, &dense_schedule, input_floors, &sources, &caps) {
             Ok(value) => value,
-            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+            Err(diagnostic) => return Err(vec![diagnostic]),
         };
         let buffers = buffer_assignments(&table, &dense_schedule);
         let ports = ports_for(&nodes, &edges);
@@ -497,13 +591,14 @@ impl GraphCompiler {
         // `bind_rack_banks_indexed` is the one place the map then changes (issue #971): a mono
         // track that every effect group would strand is pooled as stereo, before the rack plan it
         // keeps and before the builtin-stage planner below reads the map.
+        //
+        // Issue #2199: an effect's `DESIGNED` term is its factory's answer from the request
+        // (`EffectProjectedEntry::designed_symmetry`), which preparation holds every prepared
+        // processor's `channel_symmetry` to, so the classes are known before any processor exists.
         let mut pool_classes = SessionPoolClasses::from_session(session);
-        for entry in &effects.entries {
+        for entry in effects.iter() {
             let mut witness = ChannelSymmetryWitness::SYMMETRIC;
-            witness.set(
-                ChannelSymmetryWitness::DESIGNED,
-                entry.processor.channel_symmetry(),
-            );
+            witness.set(ChannelSymmetryWitness::DESIGNED, entry.designed_symmetry);
             pool_classes.conjoin(&entry.track_id, witness);
         }
         for (track, witness) in builtins.input_channel_symmetry() {
@@ -514,15 +609,14 @@ impl GraphCompiler {
         // own levels and schedule are unchanged, and lowering places each bank by the graph
         // contracted by bank (#2134).
         let per_node: BTreeSet<EffectNodeId> = effects
-            .entries
             .iter()
             .zip(&effect_ids)
             .filter(|(entry, _)| rack::BankSlotKey::blocks_banking(&entry.metadata.program_key()))
             .filter_map(|(_, id)| id.clone())
             .collect();
-        let candidates = match rack_chains(&effects, &prepared, &effect_ids) {
+        let candidates = match rack_chains(effects, &prepared, &effect_ids) {
             Ok(value) => value,
-            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+            Err(diagnostic) => return Err(vec![diagnostic]),
         };
         let placement = match placement_levels(
             &nodes,
@@ -534,10 +628,10 @@ impl GraphCompiler {
             BankWidth::for_backend(dispatch),
         ) {
             Ok(value) => value,
-            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+            Err(diagnostic) => return Err(vec![diagnostic]),
         };
-        let (banks, rack_cohorts) = match bind_rack_banks_placed(
-            &effects,
+        let (banks, rack_cohorts) = match plan_rack_banks_placed(
+            effects,
             &prepared,
             &effect_ids,
             &levels,
@@ -546,7 +640,7 @@ impl GraphCompiler {
             &mut pool_classes,
         ) {
             Ok(value) => value,
-            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+            Err(diagnostic) => return Err(vec![diagnostic]),
         };
         // Every strip, in `strips()` order: tracks, then submixes (#1201 D1). The entry is keyed
         // by the strip's `Input` node either way, and the runtime tells the two apart by what
@@ -599,13 +693,10 @@ impl GraphCompiler {
             });
         }
         let Some(track_delay_bytes) = track_delay_bytes else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.track_delays",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.track_delays",
+            )]);
         };
         let Some(mut estimate) = resource_estimate(
             session.quantum().0,
@@ -615,51 +706,41 @@ impl GraphCompiler {
             &levels,
             &buffers,
             &timing,
-            &effects.entries,
+            effects.iter(),
             track_delay_bytes,
             &track_delays,
             &route_transforms,
         ) else {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
-            ));
+            return Err(vec![diag("graph.resource.arithmetic_overflow", "$.graph")]);
         };
         // Runtime-selected banks do not change the target-neutral semantic graph hash. Preserve
         // the pre-bank estimate for canonical bytes while publishing and capping the exact
         // retained candidate estimate below.
         let semantic_estimate = estimate.clone();
-        let Some(control_resource) = effect_control_resource(&effects.entries, &banks) else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.effect_controls",
-                )],
-            ));
+        let Some(control_resource) =
+            effect_control_resource(effects.iter(), &banks, session.quantum().0)
+        else {
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.effect_controls",
+            )]);
         };
         if estimate
             .checked_add_scalar_owners(control_resource)
             .is_none()
         {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.effect_controls",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.effect_controls",
+            )]);
         }
         let Some(emitted_op_count) = levels.iter().try_fold(0_u64, |total, level| {
             total.checked_add(u64::try_from(level.nodes.len()).ok()?)
         }) else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.runtime_metadata",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.runtime_metadata",
+            )]);
         };
         // The prepared runtime retains one ordered response owner for each input-filter stage
         // and prepared effect. Charge the table and both cloned identity strings here, while the
@@ -669,13 +750,10 @@ impl GraphCompiler {
             .ok()
             .and_then(|tracks| tracks.checked_add(u64::try_from(effects.entries.len()).ok()?))
         else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.runtime_metadata.response_bindings",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.runtime_metadata.response_bindings",
+            )]);
         };
         let Some((response_binding_string_bytes, largest_response_binding_string_bytes)) = strips
             .iter()
@@ -694,7 +772,6 @@ impl GraphCompiler {
             })
             .and_then(|(total, largest)| {
                 effects
-                    .entries
                     .iter()
                     .try_fold((total, largest), |(total, largest), entry| {
                         let track_bytes = u64::try_from(entry.track_id.len()).ok()?;
@@ -712,13 +789,10 @@ impl GraphCompiler {
                     })
             })
         else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.runtime_metadata.response_bindings",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.runtime_metadata.response_bindings",
+            )]);
         };
         let Some(runtime_resource) =
             graph::GraphRuntimeMetadataResourceEstimate::checked_for_with_response_bindings(
@@ -728,66 +802,48 @@ impl GraphCompiler {
                 largest_response_binding_string_bytes,
             )
         else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.runtime_metadata",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.runtime_metadata",
+            )]);
         };
         if estimate
             .checked_add_runtime_metadata(runtime_resource)
             .is_none()
         {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.runtime_metadata",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.runtime_metadata",
+            )]);
         }
         let Some(bank_resource) = effect_bank_resource(&banks, session.quantum().0) else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.effect_banks",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.effect_banks",
+            )]);
         };
         if checked_add_effect_banks(&mut estimate, bank_resource).is_none() {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.effect_banks",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.effect_banks",
+            )]);
         }
         let Some(scalar_owner_resource) =
             builtins.graph_scalar_owner_resource(dispatch, placement.levels(), &pool_classes)
         else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.scalar_owners",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.scalar_owners",
+            )]);
         };
         if estimate
             .checked_add_scalar_owners(scalar_owner_resource)
             .is_none()
         {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.scalar_owners",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.scalar_owners",
+            )]);
         }
         // The runtime chain retains one slot and one cloned mask per prepared membership.  Fold
         // its conservative coexistence reservation into the published estimate before caps; the
@@ -797,38 +853,29 @@ impl GraphCompiler {
             placement.levels(),
             &pool_classes,
         ) else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.builtin_banks",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.builtin_banks",
+            )]);
         };
         let mut capped_estimate = estimate.clone();
         if capped_estimate
             .checked_add_builtin_banks(builtin_bank_resource)
             .is_none()
         {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.builtin_banks",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.builtin_banks",
+            )]);
         }
         let bank_count = bank_resource
             .bank_count
             .checked_add(builtin_bank_resource.bank_count);
         let Some(bank_count) = bank_count else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.bank_slots",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.bank_slots",
+            )]);
         };
         let effect_mask_bytes = banks
             .iter()
@@ -839,55 +886,40 @@ impl GraphCompiler {
             })
             .try_fold(0_u64, |maximum, value| Some(maximum.max(value?)));
         let Some(effect_mask_bytes) = effect_mask_bytes else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.bank_slots",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.bank_slots",
+            )]);
         };
         let mask_bytes = effect_mask_bytes.max(builtin_bank_resource.maximum_mask_bytes);
         let Some(slot_resource) =
             graph::GraphBankSlotResourceEstimate::checked_for_mask(bank_count, mask_bytes)
         else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.bank_slots",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.bank_slots",
+            )]);
         };
         if capped_estimate
             .checked_add_bank_slot_owners(slot_resource)
             .is_none()
         {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.bank_slots",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.bank_slots",
+            )]);
         }
         if estimate
             .checked_add_bank_slot_owners(slot_resource)
             .is_none()
         {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.bank_slots",
-                )],
-            ));
+            return Err(vec![diag(
+                "graph.resource.arithmetic_overflow",
+                "$.graph.bank_slots",
+            )]);
         }
         if !estimate_fits_platform(&capped_estimate) {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
-            ));
+            return Err(vec![diag("graph.resource.arithmetic_overflow", "$.graph")]);
         }
         if capped_estimate.materialized_nodes > caps.maximum_nodes
             || capped_estimate.edges > caps.maximum_edges
@@ -898,16 +930,126 @@ impl GraphCompiler {
             || capped_estimate.incremental_plan_bytes > caps.maximum_plan_bytes
             || capped_estimate.largest_allocation_bytes > caps.maximum_single_allocation_bytes
         {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.limit", "$.graph_compile_caps")],
-            ));
+            return Err(vec![diag("graph.resource.limit", "$.graph_compile_caps")]);
         }
+        Ok(GraphFront {
+            effect_ids,
+            ports,
+            nodes,
+            edges,
+            schedule,
+            levels,
+            lowering_hint,
+            timing,
+            buffers,
+            route_transforms,
+            track_delays,
+            pool_classes,
+            placement,
+            banks,
+            rack_cohorts,
+            semantic_estimate,
+            estimate,
+            capped_estimate,
+        })
+    }
+
+    /// The graph pipeline's back half (issue #2199): bind the planned banks, prepare a processor
+    /// for every entry that renders per node and has none, and lower the plan. On a failure every
+    /// input is handed back, with each processor that existed.
+    #[allow(clippy::type_complexity)] // The handed-back inputs, by value.
+    fn graph_back(
+        plan_id: u64,
+        front: GraphFront,
+        session: &session::CompiledSession,
+        entries: Vec<EffectProjectedEntry>,
+        mut processors: Vec<Option<Box<dyn effect_contract::PreparedNativeEffect>>>,
+        dispatch: Backend,
+    ) -> Result<
+        CompiledGraph,
+        (
+            Vec<EffectProjectedEntry>,
+            Vec<Option<Box<dyn effect_contract::PreparedNativeEffect>>>,
+            GraphDiagnosticSet,
+        ),
+    > {
+        let GraphFront {
+            effect_ids,
+            ports,
+            nodes,
+            edges,
+            schedule,
+            levels,
+            lowering_hint,
+            timing,
+            buffers,
+            route_transforms,
+            track_delays,
+            pool_classes,
+            placement,
+            banks,
+            rack_cohorts,
+            semantic_estimate,
+            estimate,
+            capped_estimate: _,
+        } = front;
+        let inputs = EffectInputs {
+            session,
+            entries: &entries,
+        };
+        let (prepared, _) = PreparedEffectIndex::from_entries(inputs.iter());
+        let banks = match bind_planned_banks(banks, &inputs, &prepared, dispatch) {
+            Ok(banks) => banks,
+            Err(diagnostic) => {
+                drop(prepared);
+                return Err((
+                    entries,
+                    processors,
+                    GraphDiagnosticSet::sorted(vec![diagnostic]),
+                ));
+            }
+        };
+        // Issue #2199 (#2194 residual c): a processor is prepared only for an entry the bank plan
+        // leaves per node; a banked member renders in its bank and never gets one, so the compile
+        // never holds a member's processor beside its bank.
+        let banked: BTreeSet<&EffectNodeId> =
+            banks.iter().flat_map(|bank| bank.members.iter()).collect();
+        let mut diagnostics = Vec::new();
+        // The estimate charged each lane as the projection laid it out; a lane attached since
+        // must be that lane, or the plan's estimate is not its own.
+        if entries.iter().any(|entry| {
+            entry.planned_lane.is_some_and(|planned| {
+                entry
+                    .control
+                    .as_deref()
+                    .map(effect_contract::EffectControlLane::layout)
+                    != Some(planned)
+            })
+        }) {
+            diagnostics.push(diag("graph.effect.control_layout", "$.effects"));
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            let per_node = effect_ids[index]
+                .as_ref()
+                .is_none_or(|node| !banked.contains(node));
+            if per_node && processors[index].is_none() {
+                match entry.prepare() {
+                    Ok(processor) => processors[index] = Some(processor),
+                    Err(diagnostic) => diagnostics.push(diag(diagnostic.code, &diagnostic.path)),
+                }
+            }
+        }
+        drop(banked);
+        drop(prepared);
+        if !diagnostics.is_empty() {
+            return Err((entries, processors, GraphDiagnosticSet::sorted(diagnostics)));
+        }
+        let model = session.normalized_model();
         // No canonical text, no SHA-256 and no Graphviz here: they are evidence, not plan, and
         // `GraphCompiler::evidence` produces them from the finished plan when something asks
         // (#99 F5). Nothing on the structural-mutation path pays for them any more.
         let (effect_nodes, effect_controls, effect_observations) =
-            into_effects(effects.entries, &effect_ids);
+            into_effects(entries, processors, &effect_ids);
         let spec = GraphSpec {
             ports,
             nodes,
@@ -992,6 +1134,171 @@ impl GraphCompiler {
     }
 }
 
+/// What the graph front computed (issue #2199): everything the back half lowers into the plan,
+/// with the bank plan and the capped estimate, and no processor.
+pub(crate) struct GraphFront {
+    effect_ids: Vec<Option<EffectNodeId>>,
+    ports: Vec<GraphPortId>,
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+    schedule: Vec<GraphNodeId>,
+    levels: Vec<DependencyLevel>,
+    lowering_hint: LoweringHint,
+    timing: TimingResult,
+    buffers: Vec<BufferAssignment>,
+    route_transforms: Vec<PreparedRoute>,
+    track_delays: Vec<PreparedTrackDelay>,
+    pool_classes: SessionPoolClasses,
+    placement: PlacementLevels,
+    banks: Vec<PlannedEffectBank>,
+    rack_cohorts: GraphRackBankReport,
+    semantic_estimate: GraphResourceEstimate,
+    estimate: GraphResourceEstimate,
+    /// The estimate with the builtin banks' reservation: what the caps were checked against, and
+    /// the finished artifact's [`PreparedGraphBuiltinsArtifact::graph_resource_estimate`].
+    capped_estimate: GraphResourceEstimate,
+}
+
+/// The builtins' session diagnostics as graph diagnostics, sorted.
+fn builtin_failure(diagnostics: builtins_compiler::BuiltinDiagnosticSet) -> GraphDiagnosticSet {
+    GraphDiagnosticSet::sorted(
+        diagnostics
+            .0
+            .into_iter()
+            .map(|diagnostic| diag(diagnostic.code, &diagnostic.path))
+            .collect(),
+    )
+}
+
+/// Attach the builtin banks to a compiled graph: the artifact.
+fn attach_builtins(
+    compiled: CompiledGraph,
+    builtins: PreparedBuiltinsSession,
+    dispatch: Backend,
+) -> PreparedGraphBuiltinsArtifact {
+    // Issue #2136: the builtin strip banks are bucketed by the placement the rack chains were.
+    let levels = compiled.placement.levels().to_vec();
+    // #1647a (R17-2): each builtin bank takes its members' floored input arrivals `a(n)`.
+    let arrivals = compiled.report.input_arrivals.clone();
+    let mut artifact = builtins.into_graph_artifact_with_banks(
+        compiled.graph,
+        compiled.report,
+        dispatch,
+        &levels,
+        // The *same* object the rack-bank planner was handed inside the compile. This is the
+        // whole of the two-planner agreement mechanism (`SessionPoolClasses`): there is one
+        // derivation and both planners read it, so they cannot form different opinions about a
+        // track and silently decline the strip's chain merges.
+        &compiled.pool_classes,
+    );
+    artifact.install_builtin_input_arrivals(&arrivals);
+    artifact
+}
+
+/// A graph projected from a session's projected effects and its builtins (issue #2199,
+/// [`GraphCompiler::project`]): the graph, its bank plan and its resource estimate, before any
+/// effect processor exists. [`GraphCompiler::compile_projected`] compiles it.
+pub struct GraphProjection {
+    plan_id: u64,
+    dispatch: Backend,
+    effects: EffectProjectedSession,
+    front: GraphFront,
+}
+
+impl GraphProjection {
+    /// The capped retained estimate: what the caps were checked against, and exactly the
+    /// [`PreparedGraphBuiltinsArtifact::graph_resource_estimate`] of the plan compiled from this
+    /// projection.
+    #[must_use]
+    pub const fn resource_estimate(&self) -> &GraphResourceEstimate {
+        &self.front.capped_estimate
+    }
+
+    /// The floored input arrival of every node at which it is nonzero, sorted by node ID: the
+    /// compiled plan's [`GraphCompileReport::input_arrivals`].
+    #[must_use]
+    pub fn input_arrivals(&self) -> &[(GraphNodeId, LatencySamples)] {
+        &self.front.timing.input_arrivals
+    }
+
+    /// The natural arrival of every node a floor raised: the compiled plan's
+    /// [`GraphCompileReport::raised_arrivals`].
+    #[must_use]
+    pub fn raised_arrivals(&self) -> &[(GraphNodeId, LatencySamples)] {
+        &self.front.timing.raised_arrivals
+    }
+
+    /// The compensation delays PDC inserts: the compiled plan's compensation lines.
+    #[must_use]
+    pub fn inserted_delays(&self) -> &[InsertedDelay] {
+        &self.front.timing.delays
+    }
+
+    /// The strips' input-side delay lines, declared delays and source-claim lines together.
+    #[must_use]
+    pub fn track_delays(&self) -> &[PreparedTrackDelay] {
+        &self.front.track_delays
+    }
+
+    /// The graph's nodes, before PDC's.
+    #[must_use]
+    pub fn nodes(&self) -> &[GraphNode] {
+        &self.front.nodes
+    }
+
+    /// The graph's prepared routes.
+    #[must_use]
+    pub fn routes(&self) -> &[PreparedRoute] {
+        &self.front.route_transforms
+    }
+
+    /// The projected effects, which travel into the compile.
+    #[must_use]
+    pub const fn effects(&self) -> &EffectProjectedSession {
+        &self.effects
+    }
+
+    /// The projected effects, for a caller that attaches each instance's live-control and
+    /// observation lanes before the compile.
+    ///
+    /// The estimate charged each entry's lane as it stood when the graph was projected; a caller
+    /// that attaches lanes after projecting must have projected with lanes of the same layout,
+    /// which its own check of the compiled artifact's estimate against
+    /// [`Self::resource_estimate`] holds it to.
+    pub fn effects_mut(&mut self) -> &mut EffectProjectedSession {
+        &mut self.effects
+    }
+}
+
+/// What [`GraphCompiler::project`] takes: [`GraphBuiltinsCompileRequest`]'s inputs, with the
+/// effects projected and the builtins borrowed (the compile takes them by value).
+pub struct GraphProjectionRequest<'b> {
+    pub plan_id: u64,
+    pub effects: EffectProjectedSession,
+    pub builtins: &'b PreparedBuiltinsSession,
+    pub caps: GraphCompileCaps,
+    /// As [`GraphBuiltinsCompileRequest::dispatch`].
+    pub dispatch: Backend,
+    /// As [`GraphBuiltinsCompileRequest::input_floors`].
+    pub input_floors: BTreeMap<GraphNodeId, LatencySamples>,
+    /// As [`GraphBuiltinsCompileRequest::gain_liveness`].
+    pub gain_liveness: GainLiveness,
+}
+
+/// A refused projection: the projected effects handed back, and why.
+pub struct GraphProjectionFailure {
+    pub effects: EffectProjectedSession,
+    pub diagnostics: GraphDiagnosticSet,
+}
+
+/// A refused [`GraphCompiler::compile_projected`]: the projected effects and the builtins handed
+/// back, and why.
+pub struct GraphProjectedCompileFailure {
+    pub effects: EffectProjectedSession,
+    pub builtins: PreparedBuiltinsSession,
+    pub diagnostics: GraphDiagnosticSet,
+}
+
 /// The graph half of a compile: the plan before the builtin banks are attached, its report, and
 /// the pool classes the second bank planner must read.
 struct CompiledGraph {
@@ -1006,19 +1313,6 @@ struct CompiledGraph {
     /// The placement both bank planners bucket by (issue #2136): `bind_rack_banks` read it inside
     /// the compile, and the builtin strip planner reads the same value.
     placement: PlacementLevels,
-}
-
-/// A rejected graph half: the prepared effects handed back, and why.
-struct GraphFailure {
-    effects: EffectPreparedSession,
-    diagnostics: GraphDiagnosticSet,
-}
-
-fn failure(effects: EffectPreparedSession, diagnostics: Vec<GraphDiagnostic>) -> GraphFailure {
-    GraphFailure {
-        effects,
-        diagnostics: GraphDiagnosticSet::sorted(diagnostics),
-    }
 }
 
 /// The `f32` unit roundoff, `2^-24`.

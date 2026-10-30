@@ -157,6 +157,9 @@ pub use engine::realtime::{
 /// A following route's seven-word cell (#1652 D1): what a host writes a [`SendRecord::Following`]
 /// with (#1653).
 pub use graph::{FollowRouteControlRecord, GraphFollowRouteControlProducer, RouteFollowFlags};
+/// The bank dispatch a preparation or a projection is planned for ([`HostProjectionRequest::backend`]):
+/// re-exported so a host names it without a `lane` dependency of its own.
+pub use graph_compiler::Backend;
 #[cfg(feature = "control-provider")]
 pub use live_delta::{
     LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, automation_jump_row,
@@ -174,23 +177,24 @@ pub use meters::{
 };
 pub use prepare::{
     GraphJumpLengthProducer, GraphJumpLengths, HostLiveControlHandles, HostLiveControlRequest,
-    HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
-    LiveRampRow, LiveRamps, MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, MonitorBase,
-    NO_OBSERVATION, PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS, SendRecord,
-    SourceInventoryRow, SuccessorBase, WarmConfig, WarmDecision, WarmLead, WarmUnavailable,
-    check_counts, check_effect_projection, compile_host_model, compile_host_session, count_effects,
-    default_source_ring_frames, effect_producer_position, follow_route_producer_for,
-    follow_route_producer_position, jump_length_retained_bytes, launch_maximum_observation_taps,
-    p_max_samples, pair_carried_meters, pair_carried_observations, parse_host_session,
-    prepare_host_runtime, prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
+    HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostProjection,
+    HostProjectionRequest, HostShapePolicy, LiveRampRow, LiveRamps, MAXIMUM_VCA_REACH_PAIRS,
+    MAXIMUM_VCAS_BOUNDED, MonitorBase, NO_OBSERVATION, PlanStateInventory, PreparedHost,
+    SOURCE_STALL_TOLERANCE_MS, SendRecord, SourceInventoryRow, SuccessorBase, WarmConfig,
+    WarmDecision, WarmLead, WarmUnavailable, check_counts, check_effect_projection,
+    compile_host_model, compile_host_session, count_effects, default_source_ring_frames,
+    effect_producer_position, follow_route_producer_for, follow_route_producer_position,
+    jump_length_retained_bytes, launch_maximum_observation_taps, p_max_samples,
+    pair_carried_meters, pair_carried_observations, parse_host_session, prepare_host_runtime,
+    prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
     prepare_host_runtime_with_live_controls_successor, prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_live_lanes_and_spectrum,
     prepare_host_runtime_with_live_lanes_successor, prepare_host_runtime_with_selected_meters,
     prepare_host_runtime_with_selected_meters_successor, prepare_host_runtime_with_spectrum,
     prepare_host_runtime_with_spectrum_collection, prepare_host_session,
-    prepare_host_session_with_live_controls, project_effects, session_jump_lengths,
-    source_seek_runway_blocks, stall_ring_frames, strip_control_table_bytes, strip_position,
-    warm_lead,
+    prepare_host_session_with_live_controls, project_effects, project_host_session,
+    session_jump_lengths, source_seek_runway_blocks, stall_ring_frames, strip_control_table_bytes,
+    strip_position, warm_lead,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{

@@ -1607,6 +1607,50 @@ pub fn route_control_resources(
     producers: &[GraphRouteControlProducer],
     following: &[GraphFollowRouteControlProducer],
 ) -> RouteControlResources {
+    let producers: Vec<RouteLaneFacts> = producers
+        .iter()
+        .map(|producer| RouteLaneFacts {
+            route_id_bytes: producer.route_id.len(),
+            activity_bytes: producer.activity_bytes,
+            activity_largest: producer.activity_largest,
+            cursor_bytes: 0,
+            cursor_largest: 0,
+            activity_offset_bytes: 0,
+        })
+        .collect();
+    let following: Vec<RouteLaneFacts> = following
+        .iter()
+        .map(|producer| RouteLaneFacts {
+            route_id_bytes: producer.route_id.len(),
+            activity_bytes: producer.activity_bytes,
+            activity_largest: producer.activity_largest,
+            cursor_bytes: producer.cursor_bytes,
+            cursor_largest: producer.cursor_largest,
+            activity_offset_bytes: producer.activity_offset_bytes,
+        })
+        .collect();
+    route_control_resources_of(&producers, &following)
+}
+
+/// What one route lane's producer contributes to [`route_control_resources`]: its ID's length,
+/// the attach's route-activity charge and, for a following route, its cursor tables and
+/// activation offsets.
+#[derive(Clone, Copy, Debug)]
+struct RouteLaneFacts {
+    route_id_bytes: usize,
+    activity_bytes: u64,
+    activity_largest: u64,
+    cursor_bytes: u64,
+    cursor_largest: u64,
+    activity_offset_bytes: u64,
+}
+
+/// [`route_control_resources`] over each lane's [`RouteLaneFacts`]: the one composition, which
+/// [`route_control_resources_bound`] runs before any lane exists.
+fn route_control_resources_of(
+    producers: &[RouteLaneFacts],
+    following: &[RouteLaneFacts],
+) -> RouteControlResources {
     let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
     if producers.is_empty() && following.is_empty() {
         return RouteControlResources::default();
@@ -1634,12 +1678,12 @@ pub fn route_control_resources(
     }
     let route_ids = producers
         .iter()
-        .map(|producer| &producer.route_id)
-        .chain(following.iter().map(|producer| &producer.route_id));
+        .map(|producer| producer.route_id_bytes)
+        .chain(following.iter().map(|producer| producer.route_id_bytes));
     for route_id in route_ids {
         // The producer's copy and the binding's node-ID copy.
-        route_id_bytes = route_id_bytes.saturating_add(count(route_id.len()).saturating_mul(2));
-        largest = largest.max(count(route_id.len()));
+        route_id_bytes = route_id_bytes.saturating_add(count(route_id).saturating_mul(2));
+        largest = largest.max(count(route_id));
     }
     let lane = count(core::mem::size_of::<RouteControlLane>());
     let binding = count(core::mem::size_of::<GraphRouteControlBinding>());
@@ -1719,6 +1763,78 @@ pub fn route_control_resources(
             .saturating_add(activity_bytes),
         largest_allocation_bytes: largest,
     }
+}
+
+/// One following route as [`route_control_resources_bound`] reads it: its ID, its source's mute
+/// cells and the VCA mute cells reaching each source lane.
+pub type FollowingRouteBound<'a> = (&'a str, [Option<u32>; 2], [&'a [u32]; 2]);
+
+/// An upper bound on the [`route_control_resources`] of the lanes
+/// [`PreparedGraphPlan::attach_route_controls_following`] attaches, with its transition routes
+/// ([`RouteControlResources::with_transition_routes`]), before the plan is compiled (issue #2199).
+///
+/// `six_word` are the IDs of the routes that get a six-word lane, `following` each following
+/// route's ID with its source's mute cells and VCA mute cells (the arguments of
+/// [`GraphFollowRouteSource::new`]), `transition` the transition routes' IDs. `prepared_routes`
+/// and `nodes` are the plan's prepared routes and graph nodes, and `gate_silences` whether a
+/// prepared route's gate silences (the compile then charges the activity table). The cursor
+/// tables and the activity table are the attach's own; a route the compile's attach gives no lane
+/// is charged as one that gets it, so the bound holds whichever lanes attach.
+#[must_use]
+pub fn route_control_resources_bound(
+    six_word: &[&str],
+    following: &[FollowingRouteBound<'_>],
+    transition: &[&str],
+    prepared_routes: u64,
+    nodes: u64,
+    gate_silences: bool,
+) -> RouteControlResources {
+    let (activity_bytes, activity_largest) = if gate_silences
+        || (six_word.is_empty() && following.is_empty() && transition.is_empty())
+    {
+        (0, 0)
+    } else {
+        (
+            runtime::route_activity_bound_bytes(prepared_routes, nodes).unwrap_or(u64::MAX),
+            runtime::route_activity_largest_bytes(prepared_routes, nodes).unwrap_or(u64::MAX),
+        )
+    };
+    let six: Vec<RouteLaneFacts> = six_word
+        .iter()
+        .map(|route_id| RouteLaneFacts {
+            route_id_bytes: route_id.len(),
+            activity_bytes,
+            activity_largest,
+            cursor_bytes: 0,
+            cursor_largest: 0,
+            activity_offset_bytes: 0,
+        })
+        .collect();
+    let seven: Vec<RouteLaneFacts> = following
+        .iter()
+        .map(|(route_id, cells, vca_mutes)| {
+            let (cursor_bytes, cursor_largest) =
+                runtime::follow_route_cursor_bytes_of(cells, *vca_mutes);
+            RouteLaneFacts {
+                route_id_bytes: route_id.len(),
+                activity_bytes,
+                activity_largest,
+                cursor_bytes,
+                cursor_largest,
+                activity_offset_bytes: runtime::route_activity_offset_bytes(prepared_routes)
+                    .unwrap_or(u64::MAX),
+            }
+        })
+        .collect();
+    let lanes = !six.is_empty() || !seven.is_empty();
+    route_control_resources_of(&six, &seven).with_transition_routes(&GraphTransitionRoutes {
+        routes: u64::try_from(transition.len()).unwrap_or(u64::MAX),
+        route_id_bytes: transition.iter().fold(0_u64, |sum, route_id| {
+            sum.saturating_add(u64::try_from(route_id.len()).unwrap_or(u64::MAX))
+        }),
+        activity_bytes: if lanes { 0 } else { activity_bytes },
+        activity_largest: if lanes { 0 } else { activity_largest },
+    })
 }
 /// Words of the plan's jump-length cell (#1639 D1): the session's `fader_ms`, `mute_ms` and
 /// `pan_ms` lengths in samples, in that order.

@@ -1957,6 +1957,39 @@ fn initial_defaults(
     Ok(defaults)
 }
 
+/// The scalar instance [`GateExpanderFactory::prepare`] boxes: keyed by a connected sidechain or
+/// by its own input.
+enum ScalarGate {
+    Keyed(PreparedGate<f32, true>),
+    Internal(PreparedGate<f32, false>),
+}
+
+/// The scalar instance [`GateExpanderFactory::prepare`] boxes, and its metadata.
+fn prepare_scalar(
+    request: PrepareEffectRequest<'_>,
+) -> Result<(ScalarGate, PreparedEffectMetadata), EffectPrepareError> {
+    let metadata = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR, request)?;
+    let values = initial_defaults(request.initial_values)?;
+    // Every row of the lane table holds validated values, never zeros: only row 0 is read at
+    // `WIDTH = 1`, and a zero row would lie outside the ratio, attack and release domains.
+    let defaults = [values; MAX_WIDTH];
+    let connected = matches!(
+        metadata.ports.sidechain,
+        PreparedSidechainPort::Connected { .. }
+    );
+    let invalid = EffectPrepareError {
+        code: "effect.parameter.initial",
+    };
+    let scalar = if connected {
+        ScalarGate::Keyed(PreparedGate::<f32, true>::new(&metadata, None, defaults).ok_or(invalid)?)
+    } else {
+        ScalarGate::Internal(
+            PreparedGate::<f32, false>::new(&metadata, None, defaults).ok_or(invalid)?,
+        )
+    };
+    Ok((scalar, metadata))
+}
+
 impl NativeEffectFactory for GateExpanderFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
         &GATE_EXPANDER_DESCRIPTOR
@@ -1974,26 +2007,26 @@ impl NativeEffectFactory for GateExpanderFactory {
         &self,
         request: PrepareEffectRequest<'_>,
     ) -> Result<PreparedEffect, EffectPrepareError> {
-        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
-        let values = initial_defaults(request.initial_values)?;
-        // Every row of the lane table holds validated values, never zeros: only row 0 is read at
-        // `WIDTH = 1`, and a zero row would lie outside the ratio, attack and release domains.
-        let defaults = [values; MAX_WIDTH];
-        let connected = matches!(
-            metadata.ports.sidechain,
-            PreparedSidechainPort::Connected { .. }
-        );
-        let invalid = EffectPrepareError {
-            code: "effect.parameter.initial",
-        };
-        let processor: Box<dyn PreparedNativeEffect> = if connected {
-            Box::new(PreparedGate::<f32, true>::new(&metadata, None, defaults).ok_or(invalid)?)
-        } else {
-            Box::new(PreparedGate::<f32, false>::new(&metadata, None, defaults).ok_or(invalid)?)
+        let (scalar, metadata) = prepare_scalar(request)?;
+        let processor: Box<dyn PreparedNativeEffect> = match scalar {
+            ScalarGate::Keyed(gate) => Box::new(gate),
+            ScalarGate::Internal(gate) => Box::new(gate),
         };
         Ok(PreparedEffect {
             processor,
             metadata,
+        })
+    }
+
+    /// Issue #2199: the scalar instance `prepare` boxes, built inline and asked. It holds no heap,
+    /// so the answer allocates nothing.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        prepare_scalar(request).map(|(scalar, _)| match scalar {
+            ScalarGate::Keyed(gate) => gate.channel_symmetry(),
+            ScalarGate::Internal(gate) => gate.channel_symmetry(),
         })
     }
 

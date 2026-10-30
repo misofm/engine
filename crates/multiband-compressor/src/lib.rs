@@ -2679,6 +2679,23 @@ fn prepare_bank<L: Lane, const W: usize>(
     }))
 }
 
+/// The scalar instance [`MultibandCompressorFactory::prepare`] boxes, and its metadata.
+fn prepare_scalar(
+    request: PrepareEffectRequest<'_>,
+) -> Result<(PreparedMultibandCompressor, PreparedEffectMetadata), EffectPrepareError> {
+    let metadata = expected_prepared_metadata(&MULTIBAND_COMPRESSOR_DESCRIPTOR, request)?;
+    let (left, right) = initial_defaults(request.initial_values)?;
+    let instance = Instance::<f32, 1>::new([left], [right], metadata).ok_or(PREPARE_FAILED)?;
+    Ok((
+        PreparedMultibandCompressor {
+            automation_capacity: metadata.automation_capacity,
+            state_sizes: metadata.state_sizes,
+            instance,
+        },
+        metadata,
+    ))
+}
+
 impl NativeEffectFactory for MultibandCompressorFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
         &MULTIBAND_COMPRESSOR_DESCRIPTOR
@@ -2696,17 +2713,20 @@ impl NativeEffectFactory for MultibandCompressorFactory {
         &self,
         request: PrepareEffectRequest<'_>,
     ) -> Result<PreparedEffect, EffectPrepareError> {
-        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
-        let (left, right) = initial_defaults(request.initial_values)?;
-        let instance = Instance::<f32, 1>::new([left], [right], metadata).ok_or(PREPARE_FAILED)?;
+        let (processor, metadata) = prepare_scalar(request)?;
         Ok(PreparedEffect {
-            processor: Box::new(PreparedMultibandCompressor {
-                automation_capacity: metadata.automation_capacity,
-                state_sizes: metadata.state_sizes,
-                instance,
-            }),
+            processor: Box::new(processor),
             metadata,
         })
+    }
+
+    /// Issue #2199: the scalar instance `prepare` boxes, built inline and asked. It holds no heap,
+    /// so the answer allocates nothing.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        prepare_scalar(request).map(|(processor, _)| processor.channel_symmetry())
     }
 
     fn bind_homogeneous_bank(

@@ -15,11 +15,68 @@ pub(crate) struct PreparedEffectIndex<'a> {
     by_key: BTreeMap<(&'a str, RackId, &'a str), PreparedEffectSlot>,
 }
 
+/// An effect entry as the graph front reads it: a projected entry, or a prepared one read as its
+/// projection (issue #2199). The front plans the graph and its banks from the projection alone.
+pub(crate) trait AsProjected {
+    fn projected(&self) -> &EffectProjectedEntry;
+}
+
+impl AsProjected for EffectProjectedEntry {
+    fn projected(&self) -> &EffectProjectedEntry {
+        self
+    }
+}
+
+impl AsProjected for EffectPreparedEntry {
+    fn projected(&self) -> &EffectProjectedEntry {
+        &self.projected
+    }
+}
+
+/// A session's effect entries as the graph front reads them, projected or prepared.
+pub(crate) struct EffectInputs<'a, E> {
+    pub(crate) session: &'a session::CompiledSession,
+    pub(crate) entries: &'a [E],
+}
+
+impl<'a> EffectInputs<'a, EffectProjectedEntry> {
+    pub(crate) fn projected(effects: &'a EffectProjectedSession) -> Self {
+        Self {
+            session: &effects.session,
+            entries: &effects.entries,
+        }
+    }
+}
+
+impl<'a> EffectInputs<'a, EffectPreparedEntry> {
+    #[cfg(test)]
+    pub(crate) fn prepared(effects: &'a EffectPreparedSession) -> Self {
+        Self {
+            session: &effects.session,
+            entries: &effects.entries,
+        }
+    }
+}
+
+impl<E: AsProjected> EffectInputs<'_, E> {
+    /// Entry `index`'s projection.
+    pub(crate) fn entry(&self, index: usize) -> Option<&EffectProjectedEntry> {
+        self.entries.get(index).map(AsProjected::projected)
+    }
+
+    /// Every entry's projection, in entry order.
+    pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = &EffectProjectedEntry> + Clone {
+        self.entries.iter().map(AsProjected::projected)
+    }
+}
+
 impl<'a> PreparedEffectIndex<'a> {
-    pub(crate) fn from_entries(entries: &'a [EffectPreparedEntry]) -> (Self, usize) {
+    pub(crate) fn from_entries(
+        entries: impl Iterator<Item = &'a EffectProjectedEntry>,
+    ) -> (Self, usize) {
         let mut by_key = BTreeMap::new();
         let mut duplicates = 0;
-        for (index, entry) in entries.iter().enumerate() {
+        for (index, entry) in entries.enumerate() {
             if by_key
                 .insert(
                     (
@@ -350,7 +407,7 @@ pub(crate) fn effect_path(strip: &str, rack: RackId, effect: &str) -> String {
 }
 pub(crate) fn sidechain_matches(
     declaration: &SidechainDeclaration,
-    entry: &EffectPreparedEntry,
+    entry: &EffectProjectedEntry,
 ) -> bool {
     match (declaration, entry.metadata.ports.sidechain) {
         (
@@ -475,24 +532,29 @@ pub fn route_coefficients(
         },
     ))
 }
-/// Lower the prepared entries into the plan's effects, and -- separately -- the live-control
-/// channels of whichever of them live controls drive (issue #140 A).
+/// Lower the entries into the plan's effects, and -- separately -- the live-control channels of
+/// whichever of them live controls drive (issue #140 A).
+///
+/// `processors` is each entry's processor, in entry order. An entry with none is a bank member
+/// the compile never prepared one for (issue #2199): its lanes ride its bank, and the plan holds
+/// no per-node effect for it, since the bank renders it.
 ///
 /// The two vectors are returned side by side rather than as one because
 /// `core::mem::size_of::<RuntimeOp>()` is a reported byte: see
 /// [`graph::GraphEffectControlBinding`].
 pub(crate) fn into_effects(
-    entries: Vec<EffectPreparedEntry>,
+    entries: Vec<EffectProjectedEntry>,
+    processors: Vec<Option<Box<dyn effect_contract::PreparedNativeEffect>>>,
     ids: &[Option<EffectNodeId>],
 ) -> (
     Vec<GraphPreparedEffect>,
     Vec<graph::GraphEffectControlBinding>,
     Vec<graph::GraphEffectObservationBinding>,
 ) {
-    let mut effects = Vec::with_capacity(entries.len());
+    let mut effects = Vec::with_capacity(processors.iter().flatten().count());
     let mut controls = Vec::new();
     let mut observations = Vec::new();
-    for (index, entry) in entries.into_iter().enumerate() {
+    for (index, (entry, processor)) in entries.into_iter().zip(processors).enumerate() {
         let node = ids[index]
             .as_ref()
             .expect("prepared effect node assigned")
@@ -509,13 +571,15 @@ pub(crate) fn into_effects(
                 observation,
             });
         }
-        effects.push(GraphPreparedEffect {
-            id: node,
-            metadata: entry.metadata,
-            processor: entry.processor,
-            response_snapshot_declared: entry.factory.response_analysis().is_some(),
-            native_id: entry.factory.descriptor().id.as_str(),
-        });
+        if let Some(processor) = processor {
+            effects.push(GraphPreparedEffect {
+                id: node,
+                metadata: entry.metadata,
+                processor,
+                response_snapshot_declared: entry.factory.response_analysis().is_some(),
+                native_id: entry.factory.descriptor().id.as_str(),
+            });
+        }
     }
     (effects, controls, observations)
 }

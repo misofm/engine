@@ -304,19 +304,35 @@ impl ObservationIndex {
     /// readers', counted with them). `None` on overflow.
     #[must_use]
     pub fn retained_bytes(&self) -> Option<u64> {
-        let table = u64::try_from(self.entries.len())
+        let ids = self.entries.iter().try_fold(0_u64, |total, entry| {
+            total.checked_add(u64::try_from(entry.strip_id.len() + entry.effect_id.len()).ok()?)
+        })?;
+        Self::projected_retained_bytes(self.entries.len(), ids, self.taps.len(), self.starts.len())
+    }
+
+    /// [`Self::retained_bytes`] of an index of `entries` entries whose IDs are `entry_id_bytes`
+    /// long, `taps` views and `starts` start words (one per handle and one more, none without a
+    /// handle), before it is built (issue #2199). `None` on overflow.
+    #[must_use]
+    pub fn projected_retained_bytes(
+        entries: usize,
+        entry_id_bytes: u64,
+        taps: usize,
+        starts: usize,
+    ) -> Option<u64> {
+        let table = u64::try_from(entries)
             .ok()?
             .checked_mul(u64::try_from(size_of::<ObservationIndexEntry>()).ok()?)?;
-        let views = u64::try_from(self.taps.len())
+        let views = u64::try_from(taps)
             .ok()?
             .checked_mul(u64::try_from(size_of::<ObservationView>()).ok()?)?;
-        let starts = u64::try_from(self.starts.len())
+        let starts = u64::try_from(starts)
             .ok()?
             .checked_mul(u64::try_from(size_of::<u32>()).ok()?)?;
-        let fixed = table.checked_add(views)?.checked_add(starts)?;
-        self.entries.iter().try_fold(fixed, |total, entry| {
-            total.checked_add(u64::try_from(entry.strip_id.len() + entry.effect_id.len()).ok()?)
-        })
+        table
+            .checked_add(views)?
+            .checked_add(starts)?
+            .checked_add(entry_id_bytes)
     }
 }
 

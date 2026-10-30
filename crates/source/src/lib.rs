@@ -3582,6 +3582,20 @@ impl SourceGraphSource {
             additional_largest_allocation_bytes: 0,
         }
     }
+
+    /// A source of `channel_count` channels whose ring is not allocated, charged the ring
+    /// `resources` reports (issue #2199): what [`project_session_graph_source_set`] projects a
+    /// prepared ring's charge from. Projection only; it never reaches a source set.
+    #[must_use]
+    pub const fn projected(channel_count: u32, resources: SourceResourceReport) -> Self {
+        Self {
+            consumer: None,
+            channel_count,
+            resources: Some(resources),
+            additional_overhead_bytes: 0,
+            additional_largest_allocation_bytes: 0,
+        }
+    }
 }
 
 /// One immutable source-channel mapping to a graph track-input node.
@@ -4181,6 +4195,71 @@ impl SourceGraphSourceSetDriver {
 /// A vacant timeline's queue and record arrive with its carry, so its host counts them with the
 /// carried source overhead. The consumer value is inline in the driver, whose own allocation
 /// already counts it.
+/// The resource report [`prepare_session_graph_source_set`] gives a set of `sources` and
+/// `mappings` over a timeline of `timeline_capacity` history blocks, vacant or not (issue #2199):
+/// the one arithmetic behind it, so a host projects the set's charge before it allocates a ring.
+/// A source made by [`SourceGraphSource::projected`] is charged as the ring it stands for.
+///
+/// # Errors
+///
+/// `ArithmeticOverflow` when a sum overflows, `SourceIndex` for a mapping off a track input.
+pub fn project_session_graph_source_set(
+    quantum: QuantumFrames,
+    timeline_capacity: NonZeroUsize,
+    timeline_vacant: bool,
+    sources: &[SourceGraphSource],
+    mappings: &[SourceGraphTrackMapping],
+) -> Result<GraphSourceSetResourceReport, SourceGraphSourceSetError> {
+    let retained = source_set_retained_resources(sources, mappings)?;
+    let timeline_report = SourceTimeline::resource_report(quantum, timeline_capacity)
+        .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
+    let mut pcm_payload = 0_u64;
+    let mut overhead = timeline_report.history_bytes;
+    let mut largest = timeline_report.history_bytes;
+    if !timeline_vacant {
+        overhead = overhead
+            .checked_add(timeline_report.command_queue_bytes)
+            .and_then(|bytes| bytes.checked_add(timeline_report.seek_report_bytes))
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        largest = largest
+            .max(timeline_report.command_queue_largest_allocation_bytes)
+            .max(timeline_report.seek_report_bytes);
+    }
+    for source in sources {
+        // A vacant source owns no ring: it charges no PCM payload and no ring overhead.
+        if let Some(resources) = source.resources {
+            pcm_payload = pcm_payload
+                .checked_add(resources.pcm_payload_already_charged_bytes)
+                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+            overhead = overhead
+                .checked_add(resources.overhead_bytes)
+                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+            largest = largest.max(resources.largest_allocation_bytes);
+        }
+        overhead = overhead
+            .checked_add(source.additional_overhead_bytes)
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        largest = largest.max(source.additional_largest_allocation_bytes);
+    }
+    overhead = overhead
+        .checked_add(
+            retained
+                .overhead_bytes()
+                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?,
+        )
+        .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+    largest = largest.max(retained.largest_allocation_bytes());
+    let total = pcm_payload
+        .checked_add(overhead)
+        .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+    Ok(GraphSourceSetResourceReport {
+        pcm_payload_already_charged_bytes: pcm_payload,
+        overhead_bytes: overhead,
+        total_engine_owned_bytes: total,
+        largest_allocation_bytes: largest,
+    })
+}
+
 pub fn prepare_session_graph_source_set(
     envelope: engine::realtime::RenderEnvelope,
     sources: Vec<SourceGraphSource>,
@@ -4200,50 +4279,20 @@ pub fn prepare_session_graph_source_set(
     {
         return Err(SourceGraphSourceSetError::SessionWord);
     }
-    let retained = source_set_retained_resources(&sources, &mappings)?;
-    let timeline_report = SourceTimeline::resource_report(envelope.quantum, timeline.capacity)
-        .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
-    let mut pcm_payload = 0_u64;
-    let mut overhead = timeline_report.history_bytes;
-    let mut largest = timeline_report.history_bytes;
-    if !timeline.is_vacant() {
-        overhead = overhead
-            .checked_add(timeline_report.command_queue_bytes)
-            .and_then(|bytes| bytes.checked_add(timeline_report.seek_report_bytes))
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        largest = largest
-            .max(timeline_report.command_queue_largest_allocation_bytes)
-            .max(timeline_report.seek_report_bytes);
-    }
-    let mut entries = Vec::with_capacity(sources.len());
-    for source in sources {
-        // A vacant source owns no ring: it charges no PCM payload and no ring overhead.
-        if let Some(resources) = source.resources {
-            pcm_payload = pcm_payload
-                .checked_add(resources.pcm_payload_already_charged_bytes)
-                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-            overhead = overhead
-                .checked_add(resources.overhead_bytes)
-                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-            largest = largest.max(resources.largest_allocation_bytes);
-        }
-        overhead = overhead
-            .checked_add(source.additional_overhead_bytes)
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        largest = largest.max(source.additional_largest_allocation_bytes);
-        entries.push(GraphSourceEntry {
+    let report = project_session_graph_source_set(
+        envelope.quantum,
+        timeline.capacity,
+        timeline.is_vacant(),
+        &sources,
+        &mappings,
+    )?;
+    let entries: Vec<GraphSourceEntry> = sources
+        .into_iter()
+        .map(|source| GraphSourceEntry {
             consumer: source.consumer,
             channel_count: source.channel_count,
-        });
-    }
-    overhead = overhead
-        .checked_add(
-            retained
-                .overhead_bytes()
-                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?,
-        )
-        .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-    largest = largest.max(retained.largest_allocation_bytes());
+        })
+        .collect();
     for mapping in &mappings {
         let source = entries
             .get(mapping.source_index)
@@ -4254,9 +4303,6 @@ pub fn prepare_session_graph_source_set(
             return Err(SourceGraphSourceSetError::ChannelIndex);
         }
     }
-    let total = pcm_payload
-        .checked_add(overhead)
-        .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
     let claims = mappings
         .iter()
         .map(|mapping| GraphSourceInputClaim {
@@ -4266,12 +4312,7 @@ pub fn prepare_session_graph_source_set(
     Ok(GraphPreparedSourceSet::new(
         envelope,
         claims,
-        GraphSourceSetResourceReport {
-            pcm_payload_already_charged_bytes: pcm_payload,
-            overhead_bytes: overhead,
-            total_engine_owned_bytes: total,
-            largest_allocation_bytes: largest,
-        },
+        report,
         Box::new(SourceGraphSourceSetDriver {
             timeline,
             published,

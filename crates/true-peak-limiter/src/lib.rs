@@ -825,10 +825,11 @@ impl ChannelState {
         values: &[f32; PARAMETER_COUNT],
         rate: u32,
     ) {
-        self.lookahead_ms[lane] = values[2];
-        self.lane[lane] = LaneShape::new(lookahead_samples(values[2], rate, shape.n), shape);
-        self.limit[lane] = LinearRamp::fixed(limit_coefficient(values[0]));
-        self.release[lane] = LinearRamp::fixed(release_coefficient(values[1], rate));
+        let words = DesignedLane::of(shape, values, rate);
+        self.lookahead_ms[lane] = words.lookahead_ms;
+        self.lane[lane] = words.lane;
+        self.limit[lane] = words.limit;
+        self.release[lane] = words.release;
     }
 
     // REALTIME_POLICY_BEGIN
@@ -5424,6 +5425,22 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
         })
     }
 
+    /// Issue #2199: the one lane's designed words, as preparation seeds them on each channel,
+    /// compared without allocating the channels' rings. `prepare`'s one failure past the defaults
+    /// is a rate with no shape, refused here alike.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
+        let (left, right) = initial_defaults(request.initial_values)?;
+        let shape = Shape::new(metadata.sample_rate).ok_or(EffectPrepareError {
+            code: "effect.parameter.initial",
+        })?;
+        let rate = metadata.sample_rate;
+        Ok(DesignedLane::of(&shape, &left, rate).agrees(&DesignedLane::of(&shape, &right, rate)))
+    }
+
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
@@ -5541,11 +5558,51 @@ impl<L: Lane> LimiterCore<L> {
         if lane >= self.left.width || lane >= self.right.width {
             return false;
         }
-        self.left.lane[lane] == self.right.lane[lane]
-            && self.left.lookahead_ms[lane].to_bits() == self.right.lookahead_ms[lane].to_bits()
-            && ramp_words_agree(&self.left.limit[lane], &self.right.limit[lane])
-            && ramp_words_agree(&self.left.release[lane], &self.right.release[lane])
+        DesignedLane::read(&self.left, lane).agrees(&DesignedLane::read(&self.right, lane))
             && ramp_words_agree(&self.left.link[lane], &self.right.link[lane])
+    }
+}
+
+/// One lane's designed words on one channel: the four that
+/// [`ChannelState::seed_lane_defaults`] writes from the lane's defaults, and that
+/// [`LimiterCore::designed_channel_symmetry`] compares with the link weight. The link weight is
+/// seated from the lane's mode on both channels alike ([`LimiterCore::rest_link`]), so at
+/// preparation the lane's two channels agree exactly when these words do, which is how
+/// [`TruePeakLimiterFactory::designed_channel_symmetry`] answers from a request (issue #2199).
+struct DesignedLane {
+    lookahead_ms: f32,
+    lane: LaneShape,
+    limit: LinearRamp,
+    release: LinearRamp,
+}
+
+impl DesignedLane {
+    /// The words a lane's `values` design at `shape` and `rate`.
+    fn of(shape: &Shape, values: &[f32; PARAMETER_COUNT], rate: u32) -> Self {
+        Self {
+            lookahead_ms: values[2],
+            lane: LaneShape::new(lookahead_samples(values[2], rate, shape.n), shape),
+            limit: LinearRamp::fixed(limit_coefficient(values[0])),
+            release: LinearRamp::fixed(release_coefficient(values[1], rate)),
+        }
+    }
+
+    /// Lane `lane`'s words as `channel` holds them now.
+    fn read(channel: &ChannelState, lane: usize) -> Self {
+        Self {
+            lookahead_ms: channel.lookahead_ms[lane],
+            lane: channel.lane[lane],
+            limit: channel.limit[lane],
+            release: channel.release[lane],
+        }
+    }
+
+    /// Whether every word compares bit-equal with `other`'s.
+    fn agrees(&self, other: &Self) -> bool {
+        self.lane == other.lane
+            && self.lookahead_ms.to_bits() == other.lookahead_ms.to_bits()
+            && ramp_words_agree(&self.limit, &other.limit)
+            && ramp_words_agree(&self.release, &other.release)
     }
 }
 

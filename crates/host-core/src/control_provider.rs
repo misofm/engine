@@ -245,7 +245,7 @@ impl SectionRecord {
 /// The retained bytes of one catalog and its largest single allocation, the catalog-only part of
 /// [`SessionControlProvider::resource_report`] (decision 17, C4). It is computed once, when the
 /// catalog is built, so a live commit reads the current catalog's figure without a walk.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CatalogResources {
     /// Bytes the catalog retains: its tables, values, choices, ladders and strings.
     pub retained_bytes: u64,
@@ -258,8 +258,8 @@ impl CatalogResources {
         owners: &[OwnerRecord],
         sections: &[SectionRecord],
         descriptors: &[ControlRow],
-        rows: &[RowRecord],
-        values: &[f32],
+        rows: usize,
+        values: usize,
     ) -> Result<Self, SessionControlProviderError> {
         let mut enum_count = 0_usize;
         let mut ladder_count = 0_usize;
@@ -307,8 +307,8 @@ impl CatalogResources {
             bytes::<OwnerRecord>(owners.len())?,
             bytes::<SectionRecord>(sections.len())?,
             bytes::<ControlRow>(descriptors.len())?,
-            bytes::<RowRecord>(rows.len())?,
-            bytes::<f32>(values.len())?,
+            bytes::<RowRecord>(rows)?,
+            bytes::<f32>(values)?,
         ];
         let catalog_retained_bytes = tables
             .into_iter()
@@ -361,7 +361,20 @@ impl SessionControlProvider {
         retained: ControllerRetainedCapacity,
         diagnostic_capacity: usize,
     ) -> Result<SessionControlProviderResources, SessionControlProviderError> {
-        let catalog_resources = catalog.resources();
+        Self::resource_report_for(catalog.resources(), retained, diagnostic_capacity)
+    }
+
+    /// [`Self::resource_report`] of a catalog whose resources are `catalog_resources`, as
+    /// [`ControlCatalog::project`] projects them before it is built (issue #2199).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::resource_report`].
+    pub fn resource_report_for(
+        catalog_resources: CatalogResources,
+        retained: ControllerRetainedCapacity,
+        diagnostic_capacity: usize,
+    ) -> Result<SessionControlProviderResources, SessionControlProviderError> {
         let catalog_retained_bytes = catalog_resources.retained_bytes;
         let diagnostics_bytes = bytes::<Diagnostic>(diagnostic_capacity)?;
         let diagnostic_live_bytes = bytes::<bool>(diagnostic_capacity)?;
@@ -1618,6 +1631,33 @@ impl ControlCatalog {
         overlay: &MonitorOverlay,
         sample_rate: u32,
     ) -> Result<Self, SessionControlProviderError> {
+        Self::build_with(model, overlay, sample_rate, true)
+    }
+
+    /// The [`resources`](Self::resources) of the catalog [`Self::build`] builds, before it is
+    /// built (issue #2199): the same walk, which keeps the owner, section and descriptor tables
+    /// (one entry per owner, per section and per distinct descriptor) but neither allocates nor
+    /// fills the row and value tables (one entry per control row), counting them instead.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::build`].
+    pub fn project(
+        model: &SessionModel,
+        overlay: &MonitorOverlay,
+        sample_rate: u32,
+    ) -> Result<CatalogResources, SessionControlProviderError> {
+        Self::build_with(model, overlay, sample_rate, false).map(|catalog| catalog.resources)
+    }
+
+    /// [`Self::build`] when `fill_rows`; with the row and value tables left empty and counted
+    /// when not ([`Self::project`]).
+    fn build_with(
+        model: &SessionModel,
+        overlay: &MonitorOverlay,
+        sample_rate: u32,
+        fill_rows: bool,
+    ) -> Result<Self, SessionControlProviderError> {
         // #1709 D1: the derived rows are composed as preparation composes them, in the
         // canonical floating-point environment, so a row shows the value render applies.
         let _canonical = lane::CanonicalFpEnv::enter();
@@ -1663,12 +1703,14 @@ impl ControlCatalog {
             .try_reserve_exact(section_count)
             .map_err(|_| SessionControlProviderError)?;
         let mut rows = Vec::new();
-        rows.try_reserve_exact(total)
-            .map_err(|_| SessionControlProviderError)?;
         let mut values = Vec::new();
-        values
-            .try_reserve_exact(total)
-            .map_err(|_| SessionControlProviderError)?;
+        if fill_rows {
+            rows.try_reserve_exact(total)
+                .map_err(|_| SessionControlProviderError)?;
+            values
+                .try_reserve_exact(total)
+                .map_err(|_| SessionControlProviderError)?;
+        }
         // The distinct descriptors, found through a table that is freed before `build` returns.
         let mut shapes = ShapeTable::default();
 
@@ -1739,20 +1781,22 @@ impl ControlCatalog {
                     };
                     // The owner's wire kind and ID are the protocol's one address conversion's.
                     let owner_address = wire_address(address)?;
-                    rows.push(RowRecord {
-                        parent: index_of(owners.len())?,
-                        control: 0,
-                        descriptor: 0,
-                        kind: RowKind::Owner,
-                        lane: ParameterChannel::Both,
-                    });
+                    if fill_rows {
+                        rows.push(RowRecord {
+                            parent: index_of(owners.len())?,
+                            control: 0,
+                            descriptor: 0,
+                            kind: RowKind::Owner,
+                            lane: ParameterChannel::Both,
+                        });
+                        values.push(0.0);
+                    }
                     owners.push(OwnerRecord {
                         kind: owner_address.owner_kind,
                         header,
                         id: owner_address.owner_id,
                         route,
                     });
-                    values.push(0.0);
                 }
                 if section_opens {
                     let identity = section_identity(model, strip.as_ref(), &address.section);
@@ -1769,33 +1813,38 @@ impl ControlCatalog {
                         _ => None,
                     };
                     let section_address = wire_address(address)?;
-                    rows.push(RowRecord {
-                        parent: index_of(sections.len())?,
-                        control: 0,
-                        descriptor: 0,
-                        kind: RowKind::Section,
-                        lane: ParameterChannel::Both,
-                    });
+                    if fill_rows {
+                        rows.push(RowRecord {
+                            parent: index_of(sections.len())?,
+                            control: 0,
+                            descriptor: 0,
+                            kind: RowKind::Section,
+                            lane: ParameterChannel::Both,
+                        });
+                        values.push(0.0);
+                    }
                     sections.push(SectionRecord {
                         owner: index_of(owners.len() - 1)?,
                         section: section_address.section,
                         slot_id: section_address.slot_id,
                         effect: effect_identity.map(try_string).transpose()?,
                     });
-                    values.push(0.0);
                 }
-                rows.push(RowRecord {
-                    parent: index_of(sections.len() - 1)?,
-                    control: address.control,
-                    descriptor: shapes.intern(Shape::of(row, ramps, effect))?,
-                    kind: RowKind::Control,
-                    lane: ParameterChannel::from(address.lane),
-                });
-                values.push(row.value);
+                let descriptor = shapes.intern(Shape::of(row, ramps, effect))?;
+                if fill_rows {
+                    rows.push(RowRecord {
+                        parent: index_of(sections.len() - 1)?,
+                        control: address.control,
+                        descriptor,
+                        kind: RowKind::Control,
+                        lane: ParameterChannel::from(address.lane),
+                    });
+                    values.push(row.value);
+                }
             }
         }
         let descriptors = shapes.into_rows()?;
-        let resources = CatalogResources::of(&owners, &sections, &descriptors, &rows, &values)?;
+        let resources = CatalogResources::of(&owners, &sections, &descriptors, total, total)?;
         Ok(Self {
             owners,
             sections,
