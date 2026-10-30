@@ -508,7 +508,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       return;
     }
     if (data?.op !== "seek-prepared" || data.requestId !== pending?.id || pending === undefined) return;
-    if (options.context.state !== "suspended") {
+    if (options.context.state !== "suspended" && (options.context.state as string) !== "interrupted") {
       pending.finish(new PcmFeedError("prepareState", "AudioContext resumed during seek preparation"));
     } else if (data.kind === "superseded" || !sameSeeks(rings, pending.seeks)) {
       pending.finish(new PcmFeedError("prepareSuperseded", "PCM seek changed during preparation"));
@@ -635,7 +635,9 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     },
     async prepareSeek(settings = {}): Promise<void> {
       if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
-      if (options.context.state !== "suspended" || !rings.every(attached)) throw new PcmFeedError("prepareState", "PCM seek preparation requires an attached feed and suspended context");
+      // An iOS "interrupted" context renders nothing, as a suspended one (#2205).
+      const suspended = options.context.state === "suspended" || (options.context.state as string) === "interrupted";
+      if (!suspended || !rings.every(attached)) throw new PcmFeedError("prepareState", "PCM seek preparation requires an attached feed and suspended context");
       if (pending !== undefined) throw new PcmFeedError("prepareBusy", "PCM seek preparation is already pending");
       const timeoutMs = settings.timeoutMs ?? 2_000;
       if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new MisoUsageError("prepareSeek timeoutMs must be finite and positive");

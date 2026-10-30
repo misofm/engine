@@ -21,7 +21,8 @@ extern "C" {
  *                miso_engine_v1_submit_command, miso_engine_v1_submit_document_command,
  *                miso_engine_v1_dequeue_event,
  *                miso_engine_v1_service, miso_engine_v1_declare_discontinuity,
- *                miso_engine_v1_session_seek, miso_engine_v1_session_seek_at, or
+ *                miso_engine_v1_session_seek, miso_engine_v1_session_seek_at,
+ *                miso_engine_v1_session_seek_at_once, or
  *                miso_engine_v1_last_error on the session; they are serialized with each other.
  *   plan         Split ownership.
  *                miso_engine_v1_render_f32_planar: render thread only, never concurrently with
@@ -531,7 +532,15 @@ extern "C" {
  * submits generation g of each source from its frame. A plain session seek lands as a plain seek
  * does, for every source and the timeline in one block (issue 2205): the first block at which
  * every source that waits has its runway queued, or the deadline R blocks after the block that
- * observed it; until then every source plays its old generation on, and the timeline runs on. g must be above every generation the host
+ * observed it; until then every source plays its old generation on, and the timeline runs on.
+ * That is a live seek. miso_engine_v1_session_seek_at_once(session, g, T) is the same seek for a
+ * host whose transport is stopped (issue 2205): same arguments, checks, results and declaration,
+ * but every source and the timeline land at the first block rendered after the call, without
+ * waiting for a runway, so the stop position never plays after the host restarts. Use it while
+ * stopped. PCM of the old generation still queued in a source's ring is dropped at that block, so
+ * a host that filled its rings before the stop and cannot drain them while stopped underruns at
+ * restart until it has submitted generation g from each source's frame. A host checks
+ * MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE before calling it. g must be above every generation the host
  * has used on the session, on any source or session seek; one above the largest it has used is
  * always valid. The refusals, all MISO_ENGINE_V1_INVALID_ARGUMENT unless named: g = 0
  * ("source.generation.zero"), g not above every generation the session has used
@@ -714,7 +723,8 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT UINT64_C(512)
 #define MISO_ENGINE_V1_FEATURE_SESSION_SEEK UINT64_C(1024)
 #define MISO_ENGINE_V1_FEATURE_SESSION_REPLACE UINT64_C(2048)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(4095)
+#define MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE UINT64_C(4096)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(8191)
 
 #define MISO_ENGINE_V1_OUTCOME_EXACT UINT64_C(1)
 #define MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK UINT64_C(2)
@@ -948,6 +958,9 @@ uint32_t miso_engine_v1_session_seek_at(miso_engine_v1_session *session,
                                         uint64_t generation,
                                         uint64_t timeline_sample,
                                         uint64_t anchor_sample);
+uint32_t miso_engine_v1_session_seek_at_once(miso_engine_v1_session *session,
+                                             uint64_t generation,
+                                             uint64_t timeline_sample);
 uint32_t miso_engine_v1_submit_command(miso_engine_v1_session *session,
                                        const uint8_t *request,
                                        uint64_t request_bytes,

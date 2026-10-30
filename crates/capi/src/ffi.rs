@@ -703,6 +703,31 @@ pub unsafe extern "C" fn miso_engine_v1_session_seek(
     unsafe { session_seek_entry(session, generation, timeline_sample, None) }
 }
 
+/// [`miso_engine_v1_session_seek`] for a seek with no live audio to keep (#2205): a host whose
+/// transport is stopped. It lands for every source and the timeline at the first block rendered
+/// after the call, without waiting for a runway, so the stop position never plays after the
+/// host restarts: `control_plane::SessionState::session_seek_at_once`. Same arguments, results,
+/// declaration (root ruling B16-R9) and thread rule as [`miso_engine_v1_session_seek`]. PCM of the
+/// old generation still queued in a source's ring is dropped at that block; a host that filled
+/// its rings before the stop and cannot drain them while stopped underruns at restart until it
+/// submits the new generation. A host checks `MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE` before
+/// calling it.
+///
+/// # Safety
+///
+/// `session` must be live.
+///
+/// Thread: control.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_session_seek_at_once(
+    session: *mut Session,
+    generation: u64,
+    timeline_sample: u64,
+) -> u32 {
+    // SAFETY: The caller's contract is this entry point's, forwarded unchanged.
+    unsafe { session_seek_landing(session, generation, timeline_sample, None, true) }
+}
+
 /// [`miso_engine_v1_session_seek`] with every command anchored at `anchor_sample`, as
 /// [`miso_engine_v1_source_seek_at`]'s anchor: the timeline and every source change at the block
 /// that starts at `anchor_sample` (or, reached late, at the first block after it, each at its frame
@@ -739,6 +764,23 @@ unsafe fn session_seek_entry(
     timeline_sample: u64,
     anchor_sample: Option<u64>,
 ) -> u32 {
+    // SAFETY: The caller's contract is this function's, forwarded unchanged.
+    unsafe { session_seek_landing(session, generation, timeline_sample, anchor_sample, false) }
+}
+
+/// [`session_seek_entry`] with the plain form's landing chosen: `at_once` for
+/// [`miso_engine_v1_session_seek_at_once`].
+///
+/// # Safety
+///
+/// `session` must be live.
+unsafe fn session_seek_landing(
+    session: *mut Session,
+    generation: u64,
+    timeline_sample: u64,
+    anchor_sample: Option<u64>,
+    at_once: bool,
+) -> u32 {
     catch_result(|| {
         // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
         let kind = unsafe { session_kind(session) };
@@ -747,10 +789,16 @@ unsafe fn session_seek_entry(
         }
         // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
         let session = unsafe { &mut *session };
-        match session
-            .state
-            .session_seek(generation, timeline_sample, anchor_sample)
-        {
+        let seeked = if at_once {
+            session
+                .state
+                .session_seek_at_once(generation, timeline_sample)
+        } else {
+            session
+                .state
+                .session_seek(generation, timeline_sample, anchor_sample)
+        };
+        match seeked {
             Ok(()) => {
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
@@ -1669,6 +1717,16 @@ pub(crate) fn test_store_live_block_errors(plan: *const Plan, count: u64) {
     // SAFETY: Test callers retain the live plan; `queries` is the any-thread projection, read
     // through a shared reference.
     unsafe { &*plan_queries(plan) }.test_store_live_block_errors(count);
+}
+
+#[cfg(test)]
+pub(crate) fn test_session_seek_at_once(
+    session: *mut Session,
+    generation: u64,
+    timeline_sample: u64,
+) -> u32 {
+    // SAFETY: Test callers retain the live session for this call.
+    unsafe { miso_engine_v1_session_seek_at_once(session, generation, timeline_sample) }
 }
 
 #[cfg(test)]

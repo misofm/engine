@@ -7163,6 +7163,62 @@ mod session_seek {
         assert_eq!(seek_report_c(rig.session, LONG).3, 0, "LONG never underran");
     }
 
+    /// #2205 (C ABI, root ruling: mobile hosts are live scope): a stopped host's
+    /// `miso_engine_v1_session_seek_at_once` over a fed source whose ring is full of the old
+    /// generation lands at the next render, and that block plays no old-generation PCM.
+    ///
+    /// Test value: red if the at-once form waits for a runway as the live form does: the full
+    /// ring cannot take the target, so the stop position would play after the restart.
+    #[test]
+    fn an_at_once_session_seek_plays_no_old_block_after_a_stop() {
+        let mut rig = Rig::new(&two_sources());
+        let mut block = rig.block + 1;
+        loop {
+            let (left, right) = continuity_block(block, 0);
+            let mut report = crate::SubmitReport {
+                struct_size: crate::SUBMIT_REPORT_SIZE,
+                reserved0: 0,
+                accepted_frames: 0,
+                cumulative_written_frames: 0,
+                active_generation: 0,
+            };
+            let planes = [left.as_ptr(), right.as_ptr()];
+            let chunk = crate::SourceChunk {
+                struct_size: crate::SOURCE_CHUNK_SIZE,
+                sample_rate_hz: 48_000,
+                generation: 1,
+                start_frame: block * Q,
+                planes: planes.as_ptr(),
+                plane_count: 2,
+                frames: 128,
+                end_of_region: 0,
+                reserved0: 0,
+            };
+            if crate::ffi::test_source_submit(rig.session, LONG, &chunk, &mut report)
+                != crate::RESULT_OK
+            {
+                break;
+            }
+            block += 1;
+        }
+        assert_eq!(
+            crate::ffi::test_session_seek_at_once(rig.session, 2, 2_000),
+            crate::RESULT_OK
+        );
+        let sample = rig.next();
+        let output = rig.render();
+        assert_eq!(
+            rig.landed(LONG),
+            (2, sample, 2_000),
+            "landed at the next render"
+        );
+        assert!(
+            output.iter().all(|value| *value == 0.0),
+            "no block of the stop position plays"
+        );
+        rig.feed_long_runway(2, 2_000);
+    }
+
     /// Gate 5, a per-source seek leaves the timeline where it is.
     ///
     /// Test value: red if a per-source seek moves the playhead.
