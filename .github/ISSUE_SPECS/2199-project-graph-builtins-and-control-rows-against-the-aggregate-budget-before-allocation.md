@@ -30,7 +30,9 @@ Root rulings (2026-10-30, attempt 1):
   admits). `HostProjection` is not threaded through `compile_children`.
 - Q2: a control row that exists only for a successor (later carry sections, restarts, fade
   arms, watch, pairings, transition send lanes) is charged at its count bound. The ceiling may be
-  loose there.
+  loose there. Superseded for every admission before allocation by D3 (attempt 2): Q2's ceiling
+  refused the C ABI's exact boundaries, so it stays only in the browser boot's projection (D4),
+  and `successor_swap` keeps its exact equality (successor = fresh + carry program).
 - Q3: there is no fallback. Every launch effect answers
   `NativeEffectFactory::designed_channel_symmetry` from its request alone, without instance state.
 - Q4: the wasm gate may boot at the default 512 MiB budget.
@@ -53,6 +55,13 @@ Implementation decisions:
   successor's later carry sections; no send-lane or inventory ceiling. So it never refuses a
   session or candidate that the exact admission after bind admits (the exact-boundary tests of the
   C ABI stay green unchanged). The exact admission after bind is unchanged and still authoritative.
+  Stated limit: a candidate can pass the pre-check and be prepared before the exact admission
+  refuses it only inside the rows D3 leaves out (send lanes, inventory, later carry sections).
+  The verify sweep of the dense replace measured that window at under 512 KiB, about 0.1 % of the
+  budget (refused before prepare at 418,643,968 B or less, prepared then refused at 418,906,112 B,
+  admitted at 419,168,256 B or more).
+- D3a. The dense replace gate runs at a 256 MiB replacement peak, not the plan's 512 MiB: the
+  dense candidate fits from about 400 MiB, so 512 MiB would admit it and test nothing.
 - D4. The browser boot charges the whole projection (`RetainedProjection`: graph, builtin and
   control rows beside the bridge and sources), a ceiling of the exact aggregate, before it
   prepares. It projects under unbounded caps so the budget, not a per-row cap, classifies the

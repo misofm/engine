@@ -493,13 +493,7 @@ fn the_carry_program_is_charged_to_the_graph_cap() {
         )
         .is_ok()
     });
-    // Issue #2199 (root ruling Q2): a successor is admitted before its carry is resolved, on its
-    // carry program and every later carry section at its count bound, so the smallest cap that
-    // admits it is at least the fresh plan's plus the program.
-    assert!(
-        successor >= fresh + program,
-        "{successor} < {fresh} + {program}"
-    );
+    assert_eq!(successor, fresh + program);
 }
 
 /// Gate 5. After the warm-up block, every block of the swapped run -- the swap block, which runs
