@@ -16,6 +16,8 @@ mod in_place;
 mod json_preflight;
 mod model;
 mod parse;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod validate;
 mod value;
 mod vca;

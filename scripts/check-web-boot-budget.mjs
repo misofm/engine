@@ -128,7 +128,9 @@ let frameRows;
 // Issue #2194 gate D: 512 tracks with four delays each declare about 1.5 GB of effect state in
 // about 1.4 MB of JSON. At the default budget the boot refuses it from its retained projection,
 // before the control plane prepares one delay, so the linear memory grows by no more than the
-// document's parse projection plus one page.
+// document's parse projection plus one page. The diagnostic keeps the name `effect_state_bytes`
+// for the effect row, which since issue #2219 charges no processor for a banked member; no delay
+// banks, so here it is every instance's.
 {
   const effectDocument = execFileSync(
     "cargo",
@@ -153,8 +155,9 @@ let frameRows;
   console.log(`web boot budget: effect-state refusal growth ${growth} of bound ${bound}`);
 }
 
-// Issue #2199: the dense 6,000-track shape of #2191, about 16.5 MB of JSON whose retained rows
-// exceed the default 512 MiB budget. The boot's retained projection (the graph, builtin and
+// Issue #2199: the dense shape of #2191 at 7,000 tracks (issue #2219,
+// `session::test_support::DENSE_GATE_TRACKS`), about 19.2 MB of JSON whose exact retained rows
+// are 16.9 % over the default 512 MiB budget. The boot's retained projection (the graph, builtin and
 // control rows beside the effect row) refuses it before the control plane prepares an effect,
 // binds a bank or compiles the plan, so the linear memory grows by at most the budget plus one
 // page; before #2199 the boot prepared everything and the module trapped in `memory.grow`.

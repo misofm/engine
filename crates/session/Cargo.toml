@@ -11,6 +11,9 @@ name = "session"
 
 [features]
 default = []
+# Issue #2219: the dense gate shape (`test_support::dense_document`), one builder for the tests and
+# the example that boot or replace it. Dev-only: only `[dev-dependencies]` turn it on.
+test-support = []
 
 [dependencies]
 # The segment time bound: one constant, `automation::TIME_LIMIT`, for the validator and the builder.

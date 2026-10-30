@@ -51,6 +51,10 @@ protocol.workspace = true
 # PCM the same way the raw-Wasm oracle does. Never linked into the browser artifact.
 sha2.workspace = true
 serde_json = "=1.0.151"
+# Issue #2219: the dense gate shape's one builder (`session::test_support::dense_document`), for
+# `tests/boot_transient_budget.rs` and `examples/dense_document.rs`. Dev-only: the browser artifact
+# never links it.
+session = { workspace = true, features = ["test-support"] }
 
 [features]
 default = []

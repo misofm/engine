@@ -97,6 +97,28 @@ impl EffectProjectedEntry {
         self.planned_lane
             .or_else(|| self.control.as_deref().map(EffectControlLane::layout))
     }
+
+    /// What this instance's prepared processor retains beyond its declared state and scratch, at
+    /// most: its factory's inline bytes and its undeclared heap at the instance's quality (root
+    /// ruling R1 of #2194; `effect-compiler/tests/prepared_state_ceiling.rs`). A host charges it
+    /// only for an instance its bank plan leaves per node, since a banked member gets no processor
+    /// (issue #2219).
+    /// `None` when the descriptor lacks the instance's rate and quality (its projection resolved
+    /// them, so a projected entry never answers `None`) or the sum overflows.
+    #[must_use]
+    pub fn processor_bytes(&self) -> Option<u64> {
+        let declared = effect_contract::declared_instance_resources(
+            self.factory.descriptor(),
+            self.bank_preparation.quality,
+            self.bank_preparation.sample_rate,
+            self.bank_preparation.quantum,
+        )
+        .ok()?;
+        self.factory.prepared_inline_bytes().checked_add(
+            self.factory
+                .prepared_undeclared_heap_bytes(&declared.quality),
+        )
+    }
 }
 
 /// One prepared native effect instance: its [`EffectProjectedEntry`] and its prepared processor.
@@ -856,11 +878,12 @@ const fn contract_quality(quality: session::EffectQuality) -> EffectQuality {
 /// What a session's native effect instances declare, summed before any of them is prepared
 /// (issue #2194).
 ///
-/// Every row is read from the registry's descriptors and factories, never from a prepared
-/// instance: the declared state and scratch are the instance's quality-table row
+/// Every row is read from the registry's descriptors, never from a prepared instance: the
+/// declared state and scratch are the instance's quality-table row
 /// ([`effect_contract::declared_instance_resources`]), which preparation then holds every
-/// prepared instance to (`effect.metadata.mismatch`), and the inline and undeclared heap bytes are
-/// each factory's own report.
+/// prepared instance to (`effect.metadata.mismatch`). The processors' own bytes are not here:
+/// only an instance its bank plan leaves per node gets a processor, so a host charges them per
+/// entry of the projected graph ([`EffectProjectedEntry::processor_bytes`], issue #2219).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EffectStateProjection {
     /// Native instances whose identity, rate and quality resolve.
@@ -869,28 +892,6 @@ pub struct EffectStateProjection {
     pub state_bytes: u64,
     /// The sum of their declared scratch: the report's `effect_scalar_scratch_bytes`.
     pub scratch_bytes: u64,
-    /// The sum of their prepared processors' inline bytes
-    /// ([`NativeEffectFactory::prepared_inline_bytes`]).
-    pub inline_bytes: u64,
-    /// The sum of the heap they retain beyond their declared state and scratch
-    /// ([`NativeEffectFactory::prepared_undeclared_heap_bytes`]).
-    pub undeclared_heap_bytes: u64,
-}
-
-impl EffectStateProjection {
-    /// The bytes a plan retains for these instances' processors at most: each one's box and its
-    /// own heap, which its declared state and scratch and its factory's undeclared heap bound
-    /// (root ruling R1; `effect-compiler/tests/prepared_state_ceiling.rs`). `None` on overflow.
-    #[must_use]
-    pub const fn retained_bytes(self) -> Option<u64> {
-        match self.state_bytes.checked_add(self.scratch_bytes) {
-            Some(declared) => match declared.checked_add(self.inline_bytes) {
-                Some(boxed) => boxed.checked_add(self.undeclared_heap_bytes),
-                None => None,
-            },
-            None => None,
-        }
-    }
 }
 
 /// Project `session`'s native effect instances against `registry` without preparing any
@@ -930,12 +931,6 @@ pub fn project_session_effects(
                     .state_bytes
                     .checked_add(declared.quality.maximum_state.total()?)?,
                 scratch_bytes: sum.scratch_bytes.checked_add(declared.scratch_bytes)?,
-                inline_bytes: sum
-                    .inline_bytes
-                    .checked_add(factory.prepared_inline_bytes())?,
-                undeclared_heap_bytes: sum
-                    .undeclared_heap_bytes
-                    .checked_add(factory.prepared_undeclared_heap_bytes(&declared.quality))?,
             })
         });
     });

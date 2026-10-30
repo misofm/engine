@@ -34,6 +34,8 @@ source.workspace = true
 [dev-dependencies]
 # #1685 gate 3: the admission allocation count, by the audited allocator's thread counters.
 bench-support.workspace = true
+# Issue #2219: the dense gate shape's one builder, for `tests/session_replace.rs`.
+session = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

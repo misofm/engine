@@ -20,7 +20,7 @@ WORKFLOW = ".github/workflows/qualification.yml"
 DEBUG_A_FEATURES = (
     "--features builtins-compiler/test-support,graph/test-support,"
     "host-web/test-support,host-web/render-lock-probe,host-core/test-support,effect-compiler/test-support,"
-    "protocol/test-support,control-plane/test-support,engine/test-support,engine/realtime-audit\n"
+    "protocol/test-support,control-plane/test-support,session/test-support,engine/test-support,engine/realtime-audit\n"
 )
 DEBUG_B_FEATURES = (
     "--features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support\n"
@@ -158,7 +158,7 @@ def main() -> int:
               feature_b(f"{package}/test-support"))
     fails("every test-support feature removed from test-debug-a",
           {"builtins-compiler", "control-plane", "effect-compiler", "effect-contract", "engine",
-           "graph", "host-core", "host-web", "protocol"},
+           "graph", "host-core", "host-web", "protocol", "session"},
           in_a(DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
     fails("every test-support feature removed from test-debug-b",
           {"builtins", "lane", "parametric-eq"},
@@ -234,8 +234,8 @@ def main() -> int:
            "          cargo test --locked --all-targets \\\n            -p lane"))
 
     # A new test-support feature nobody enables in CI.
-    fails("a new package declares test-support", {"session"},
-          ("crates/session/Cargo.toml", "[features]\n", "[features]\ntest-support = []\n"))
+    fails("a new package declares test-support", {"capi"},
+          ("crates/capi/Cargo.toml", "[features]\n", "[features]\ntest-support = []\n"))
 
     # A misspelt feature must not read as coverage or be silently ignored.
     refused("a misspelt test-support feature", "'host-web' declares no feature 'test-suport'",

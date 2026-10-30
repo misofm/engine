@@ -4019,8 +4019,11 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
 pub(crate) struct RetainedProjection {
     /// Every projected row.
     pub(crate) total: u64,
-    /// The effect row (issue #2194): every instance's declared state and scratch, prepared inline
-    /// bytes and undeclared heap ([`host_core::EffectStateProjection::retained_bytes`]).
+    /// The effect row (issue #2194): every instance's declared state and scratch, and the prepared
+    /// inline bytes and undeclared heap of each instance the bank plan leaves per node
+    /// ([`host_core::HostProjection::per_node_processor_bytes`]). Since issue #2219 it excludes
+    /// the processor of a banked member, which the plan never prepares; the diagnostic keeps the
+    /// name `effect_state_bytes`.
     pub(crate) effect_state_bytes: u64,
     /// The graph row (issue #2199): the boot plan's graph and plan bytes beyond the declared effect
     /// state and scratch the effect row charges.
@@ -4042,7 +4045,8 @@ pub(crate) struct RetainedProjection {
 /// [`HostProjection`](host_core::HostProjection) of it (the graph and plan, the builtins, the
 /// sources and the effect producers exact; the send lanes and the inventory at their ceilings) and
 /// the control plane's retained bytes for it. The effect row (issue #2194) charges the effect
-/// state, scratch and processors, so the graph row adds only what the graph holds beyond the
+/// state and scratch of every instance and the processors of the per-node instances only (issue
+/// #2219: a banked member has none), so the graph row adds only what the graph holds beyond the
 /// declared state and scratch. The boot plan's shape tables and the session's cross-thread words
 /// are their layouts. So a session the budget cannot hold is refused here, before a processor,
 /// bank, plan, ring or lane exists; a projection under the exact aggregate is a defect, which the
@@ -4058,15 +4062,6 @@ fn projected_retained_bytes(
 ) -> Result<RetainedProjection, BootFailure> {
     let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
     let estimate = compiled.resource_estimate();
-    // A refusal here is a resource or platform fault (an overflow, or no launch registry), which
-    // boot reports as a budget refusal, as `boot_refusal` does.
-    let effect_state_bytes = host_core::project_effects(compiled)
-        .map_err(|failure| BootFailure {
-            result: RESULT_REFUSED_BUDGET,
-            diagnostic: failure.as_bytes().to_vec(),
-        })?
-        .retained_bytes()
-        .ok_or_else(arithmetic)?;
     // The lanes the control plane chooses, and the request and lanes [`WebRuntimePreparer`]
     // attaches over them.
     let (live_controls, lanes) = WebRuntimePreparer::new(options)
@@ -4117,6 +4112,12 @@ fn projected_retained_bytes(
         }
     })?;
     let host = boot.host;
+    let effect_state_bytes = host
+        .effects
+        .state_bytes
+        .checked_add(host.effects.scratch_bytes)
+        .and_then(|declared| declared.checked_add(host.per_node_processor_bytes))
+        .ok_or_else(arithmetic)?;
     let graph_bytes = host
         .graph_session_plus_plan_bytes
         .checked_sub(host.graph_declared_effect_bytes)

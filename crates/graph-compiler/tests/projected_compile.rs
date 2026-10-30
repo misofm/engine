@@ -178,12 +178,14 @@ fn request(
 
 /// A projected compile prepares a processor for every instance its plan leaves per node, once,
 /// and for no banked member, so its peak stays under the plan's retained estimate plus every
-/// instance's processor.
+/// instance's processor; and the projection names those instances before any processor exists
+/// (`GraphProjection::per_node_entries`, issue #2219).
 ///
 /// Test value: red when a banked member gets a per-instance processor, as before #2199, when the
 /// effect compiler prepared every instance and the graph compiler held them all while it bound the
 /// banks: the prepare count is then every instance's, and the peak holds every processor beside
-/// the plan.
+/// the plan. Red too when the projection's per-node entries are not the ones the compile prepares
+/// (a banked member counted per node): a host charges processor bytes on them before it prepares.
 #[test]
 fn a_projected_compile_prepares_no_banked_members_processor() {
     assert_installed();
@@ -201,6 +203,10 @@ fn a_projected_compile_prepares_no_banked_members_processor() {
     let projection = GraphCompiler::project(request(effects, &builtins))
         .unwrap_or_else(|failure| panic!("the console projects: {:?}", failure.diagnostics));
     let retained = projection.resource_estimate().session_plus_plan_bytes;
+    let projected_per_node = projection
+        .per_node_entries()
+        .filter(|per_node| *per_node)
+        .count();
     let artifact = GraphCompiler::compile_projected(projection, builtins)
         .unwrap_or_else(|failure| panic!("the console compiles: {:?}", failure.diagnostics));
     let peak = current_thread_peak().peak_bytes;
@@ -214,6 +220,10 @@ fn a_projected_compile_prepares_no_banked_members_processor() {
         prepared.load(Ordering::SeqCst),
         per_node as u64,
         "one processor per per-node instance, none for a banked member"
+    );
+    assert_eq!(
+        projected_per_node, per_node,
+        "the projection's per-node entries are the compile's"
     );
     // What every instance's processor holds, measured off the window.
     let processors: u64 = projected(&session, &registry)
