@@ -33,7 +33,9 @@ extern "C" {
  *                concurrently with miso_engine_v1_render_f32_planar or with itself. Each of the
  *                two calls claims the render state on entry with one atomic compare-exchange and
  *                releases it on return; a call that finds it claimed does not wait, touches no
- *                plan state, and returns MISO_ENGINE_V1_RENDER_REJECTED with "render.busy".
+ *                plan state, and returns MISO_ENGINE_V1_RENDER_REJECTED with "render.busy". A
+ *                refused render writes nothing into its output, so the host writes silence. The
+ *                result code is authoritative: the winner may overwrite the plan's last error.
  *                miso_engine_v1_plan_resources, miso_engine_v1_plan_watermark and
  *                miso_engine_v1_last_error on a plan: any thread, at any time while the plan is
  *                live, including concurrently with a render call. They are pure with respect to

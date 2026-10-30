@@ -28,7 +28,7 @@ allocation-free, lock-free and syscall-free. No rendered bit moves on any existi
 `uint32_t miso_engine_v1_plan_prepare_seek(miso_engine_v1_plan *plan)`, an in-place V1 amendment:
 
 - **Bit.** `MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK` = bit 13 (8192). The feature mask grows from
-  8191 to 16383. The frozen exported set grows from 22 to 23 symbols. No struct, size or
+  8191 to 16383. The frozen exported set grows from 23 to 24 symbols. No struct, size or
   `ABI_VERSION` change: `Plan` is opaque, so its new atomic word is not a layout change.
 - **Who touches the consumer.** Only the render side. The call takes the *plan* handle, so it sits
   on the render side by construction. The host calls it on its render thread between blocks, or on
