@@ -4331,7 +4331,7 @@ fn prepare_or_project(
             session_model_bytes: session_resources.compiled_model_bytes,
             spectrum_capture_retained_bytes,
             effect_control_resources: projected_effect_controls,
-            route_control_bytes: routes.total_bytes,
+            route_controls: routes,
             carry_bytes,
             inventory_bytes: projected_inventory_bytes(
                 model,
@@ -4351,7 +4351,49 @@ fn prepare_or_project(
             source_total_bytes: source_report.total_engine_owned_bytes,
             source_overhead_bytes: source_report.overhead_bytes,
             strip_heap_bytes: builtins.track_control_heap_bytes(),
+            strips: model.strips().count(),
+            strip_id_bytes: u64::try_from(
+                model
+                    .strips()
+                    .map(|strip| strip.id.as_str().len())
+                    .sum::<usize>(),
+            )
+            .map_err(|_| arithmetic())?,
+            meters: meter_requests.len(),
+            effect_instances: graph_projection.effects().entries.len(),
+            effect_producers: if attach_effect_lanes {
+                graph_projection.effects().entries.len()
+            } else {
+                0
+            },
+            effect_producer_id_bytes: if attach_effect_lanes {
+                u64::try_from(
+                    graph_projection
+                        .effects()
+                        .entries
+                        .iter()
+                        .map(|entry| entry.track_id.len() + entry.effect_id.len())
+                        .sum::<usize>(),
+                )
+                .map_err(|_| arithmetic())?
+            } else {
+                0
+            },
             observation_handles: effect_observations.len(),
+            observation_handle_bytes: u64::try_from(effect_observations.iter().fold(
+                core::mem::size_of_val(effect_observations.as_slice()),
+                |total, handle| {
+                    total
+                        + handle.track_id.len()
+                        + handle.effect_id.len()
+                        + core::mem::size_of_val(&*handle.readers)
+                },
+            ))
+            .map_err(|_| arithmetic())?,
+            observation_taps: effect_observations
+                .iter()
+                .map(|handle| handle.readers.len())
+                .sum(),
             observation_slots: if attach_effect_lanes && live_controls.observation_taps != 0 {
                 graph_projection
                     .effects()
@@ -5784,7 +5826,9 @@ fn prepare_or_project(
     {
         return Err(platform("host.graph.projection"));
     }
-    if route_control_resources.total_bytes > host_projection.route_control_bytes
+    if route_control_resources.total_bytes > host_projection.route_controls.total_bytes
+        || route_control_resources.largest_allocation_bytes
+            > host_projection.route_controls.largest_allocation_bytes
         || carry_program_retained_bytes
             .checked_add(fade_arm_bytes)
             .is_none_or(|bytes| bytes > host_projection.carry_bytes)
@@ -9957,8 +10001,9 @@ pub struct HostProjection {
     pub spectrum_capture_retained_bytes: u64,
     /// The report's `effect_control_resources`, exact.
     pub effect_control_resources: EffectControlResources,
-    /// A ceiling of the report's `route_control_resources.total_bytes`.
-    pub route_control_bytes: u64,
+    /// A ceiling of the report's `route_control_resources` (every byte row, and its largest
+    /// allocation).
+    pub route_controls: graph::RouteControlResources,
     /// A ceiling of the report's `carry_program_retained_bytes`: the carry program's exact bytes
     /// and, for a successor, every later carry section at its count bound.
     pub carry_bytes: u64,
@@ -9973,9 +10018,24 @@ pub struct HostProjection {
     /// The heap the strip producers own beyond their table, exact: what the control plane charges
     /// its strip producer table from ([`crate::strip_control_table_bytes`]).
     pub strip_heap_bytes: u64,
-    /// The effect observation handles the plan's readers are, exact, and the slots their
-    /// producers' observation queues hold.
+    /// The plan's strips (tracks, then submixes) and their ID text, exact.
+    pub strips: usize,
+    /// The ID text of the plan's strips, exact.
+    pub strip_id_bytes: u64,
+    /// The plan's meter requests, exact.
+    pub meters: usize,
+    /// The plan's effect instances, exact.
+    pub effect_instances: usize,
+    /// The effect producers the plan attaches (one per instance with a lane), exact.
+    pub effect_producers: usize,
+    /// Their strip and effect ID text, exact.
+    pub effect_producer_id_bytes: u64,
+    /// The effect observation handles the plan's readers are, exact.
     pub observation_handles: usize,
+    /// The handles' heap, exact: the handle table, each handle's ID text and its readers.
+    pub observation_handle_bytes: u64,
+    /// The readers of every handle (one per declared tap), exact.
+    pub observation_taps: usize,
     /// The observation slots of the effect producers' queues, exact.
     pub observation_slots: usize,
     /// The provider catalog's resources, exact ([`crate::ControlCatalog::project`]).
@@ -9993,7 +10053,7 @@ impl HostProjection {
             .checked_add(self.session_model_bytes)?
             .checked_add(self.spectrum_capture_retained_bytes)?
             .checked_add(self.effect_control_resources.total_bytes()?)?
-            .checked_add(self.route_control_bytes)?
+            .checked_add(self.route_controls.total_bytes)?
             .checked_add(self.carry_bytes)
     }
 

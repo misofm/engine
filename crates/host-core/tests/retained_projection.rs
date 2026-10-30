@@ -156,7 +156,7 @@ fn a_projection_is_its_preparations_rows() {
                 "{name}, {lanes:?}: the provider catalog"
             );
             assert!(
-                projection.route_control_bytes >= report.route_control_resources.total_bytes
+                projection.route_controls.total_bytes >= report.route_control_resources.total_bytes
                     && projection.carry_bytes >= report.carry_program_retained_bytes
                     && projection.inventory_bytes >= report.inventory_retained_bytes,
                 "{name}, {lanes:?}: the ceilings, {projection:?} against {report:?}"

@@ -10,9 +10,7 @@ use host_core::{compile_host_model, parse_host_session};
 use host_web::{
     AudioWorkletEngineHost, PARSE_TRANSIENT_MULTIPLIER, RESULT_REFUSED_BUDGET, WebBootOptions,
 };
-use session::{
-    CompileCaps, RouteSource, SendTap, StableId, canonical_session_json, parse_session_json,
-};
+use session::{CompileCaps, canonical_session_json, parse_session_json};
 
 thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
@@ -183,48 +181,15 @@ fn unlimited_caps() -> CompileCaps {
     }
 }
 
-/// A dense accepted JSON shape: `tracks` tracks, four effect declarations per track, followed by
-/// JSON whitespace to `pad_to` bytes when given (1 MiB, the staging ceiling before issue #2191).
-fn dense_document(tracks: usize, pad_to: Option<usize>) -> Vec<u8> {
-    let mut model = parse_session_json(include_str!(
-        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
-    ))
-    .expect("seed fixture parses");
-    let mut track = model.tracks[1].clone();
-    // Four full effect declarations per track, as inserts: the densest per-track declaration
-    // the schema accepts (a console entry is smaller than the effect it configures).
-    let effect = model.lower_track(&track).pre_insert[0].clone();
-    model.console.pre_insert.clear();
-    track.console.clear();
-    track.inserts.effects.clear();
-    for index in 0..4 {
-        let mut effect = effect.clone();
-        effect.id = StableId::parse(&format!("effect-{index}")).expect("effect ID");
-        track.inserts.effects.push(effect);
-    }
-    let route = model.routes[0].clone();
-    model.tracks.clear();
-    model.routes.clear();
-    model.automation.clear();
-    model.tracks.reserve(tracks);
-    model.routes.reserve(tracks);
-    for index in 0..tracks {
-        let track_id = StableId::parse(&format!("track-{index:03}")).expect("track ID");
-        let mut next_track = track.clone();
-        next_track.id = track_id.clone();
-        model.tracks.push(next_track);
+#[path = "../examples/dense_document.rs"]
+#[allow(dead_code)]
+mod dense_document_example;
 
-        let mut next_route = route.clone();
-        next_route.id = StableId::parse(&format!("route-{index:03}")).expect("route ID");
-        next_route.source = RouteSource::Track {
-            track_id,
-            tap: SendTap::PostPan,
-        };
-        model.routes.push(next_route);
-    }
-    let mut document = canonical_session_json(&model)
-        .expect("worst accepted shape canonicalizes")
-        .into_bytes();
+/// A dense accepted JSON shape ([`dense_document_example::document`]): `tracks` tracks, four effect
+/// declarations per track, followed by JSON whitespace to `pad_to` bytes when given (1 MiB, the
+/// staging ceiling before issue #2191).
+fn dense_document(tracks: usize, pad_to: Option<usize>) -> Vec<u8> {
+    let mut document = dense_document_example::document(tracks);
     if let Some(maximum) = pad_to {
         assert!(
             document.len() <= maximum,
@@ -377,13 +342,42 @@ fn effect_state_the_budget_cannot_hold_is_refused_before_preparation() {
         peak as u64 <= transient,
         "the refusal peaked at {peak} bytes, over the {transient}-byte parse transient"
     );
-    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
     let diagnostic = String::from_utf8_lossy(failure.diagnostic()).into_owned();
+    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET, "{diagnostic}");
     let effect_state_bytes: u64 = diagnostic
         .strip_prefix("host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes=")
         .and_then(|rest| rest.split_once(&format!(",budget_bytes={declared},effect_state_bytes=")))
-        .and_then(|(_, effect)| effect.strip_suffix("]\n"))
-        .and_then(|effect| effect.parse().ok())
+        .and_then(|(_, effect)| effect.split_once(",graph_bytes="))
+        .and_then(|(effect, _)| effect.parse().ok())
         .unwrap_or_else(|| panic!("{diagnostic}"));
     assert!(effect_state_bytes > declared, "{diagnostic}");
+}
+
+/// Issue #2199: the dense 6,000-track shape of #2191 (about 16.5 MB of JSON, four EQ inserts per
+/// track) at the default budget is refused by the boot's retained projection, whose graph,
+/// builtin and control rows are projected before they are allocated: the boot's peak stays inside
+/// the document's parse transient, under the budget.
+///
+/// Test value: red when the boot projection leaves out the graph, builtin or control rows. The
+/// control plane then prepares every effect, binds every bank and compiles the plan (a peak of
+/// about 638 MB, over the 512 MiB budget) before the exact aggregate refuses the session.
+#[test]
+fn the_dense_shape_is_refused_before_its_rows_are_allocated() {
+    let document = dense_document(6_000, None);
+    let (failure, peak) = measured_peak(|| {
+        AudioWorkletEngineHost::boot(&document, WebBootOptions::default())
+            .err()
+            .expect("the dense shape exceeds the default budget")
+    });
+    let diagnostic = String::from_utf8_lossy(failure.diagnostic()).into_owned();
+    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET, "{diagnostic}");
+    assert!(
+        diagnostic.starts_with("host.budget.retained_projection\t"),
+        "{diagnostic}"
+    );
+    let transient = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
+    assert!(
+        (peak as u64) <= transient && (peak as u64) < host_web::DEFAULT_MAXIMUM_MEMORY_BYTES,
+        "the refusal peaked at {peak} bytes, over the {transient}-byte parse transient"
+    );
 }

@@ -361,7 +361,20 @@ impl SessionControlProvider {
         retained: ControllerRetainedCapacity,
         diagnostic_capacity: usize,
     ) -> Result<SessionControlProviderResources, SessionControlProviderError> {
-        let catalog_resources = catalog.resources();
+        Self::resource_report_for(catalog.resources(), retained, diagnostic_capacity)
+    }
+
+    /// [`Self::resource_report`] of a catalog whose resources are `catalog_resources`, as
+    /// [`ControlCatalog::project`] projects them before it is built (issue #2199).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::resource_report`].
+    pub fn resource_report_for(
+        catalog_resources: CatalogResources,
+        retained: ControllerRetainedCapacity,
+        diagnostic_capacity: usize,
+    ) -> Result<SessionControlProviderResources, SessionControlProviderError> {
         let catalog_retained_bytes = catalog_resources.retained_bytes;
         let diagnostics_bytes = bytes::<Diagnostic>(diagnostic_capacity)?;
         let diagnostic_live_bytes = bytes::<bool>(diagnostic_capacity)?;

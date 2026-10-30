@@ -1326,7 +1326,6 @@ impl AudioWorkletEngineHost {
         if let Some(refusal) = document_length_refusal(&options, document_bytes) {
             return Err(refusal);
         }
-        let frame_rows = control_frame_rows(control_frame_bytes)?;
         let document = core::str::from_utf8(document)
             .map_err(|_| BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.utf8"))?;
         let model = parse_host_session(document)
@@ -1341,6 +1340,9 @@ impl AudioWorkletEngineHost {
         };
         let session = compile_host_model(&model, compile_caps)
             .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
+        // Issue #2199: the parsed model is not read again, and the projection below allocates
+        // beside the compiled one only.
+        drop(model);
         let shape = compiled_session_shape(&session)
             .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
         if (options.require_sample_rate_hz != 0
@@ -1372,11 +1374,15 @@ impl AudioWorkletEngineHost {
             shape.quantum_frames,
             control_frame_bytes,
         )?;
+        let caps = prepare_caps(&session, options, source_ring_frames, memory_budget);
         let retained_projection = projected_retained_bytes(
             &session,
-            source_ring_frames,
+            options,
+            &caps,
+            memory_budget,
+            control_frame_bytes,
             projection.report.bridge_retained_bytes,
-            frame_rows,
+            boot_command,
         )?;
         if retained_projection.total > memory_budget {
             return Err(BootFailure::retained_projection(
@@ -1384,12 +1390,10 @@ impl AudioWorkletEngineHost {
                 memory_budget,
             ));
         }
-        let caps = prepare_caps(&session, options, source_ring_frames, memory_budget);
         // The control plane compiles the session again and retains the one model the host reads
         // (#1381a). What this function holds of its own is freed first, so the boot's transient
         // peak is the one compile's, as it was before.
         drop(session);
-        drop(model);
         let (mut control, ready, resources) = compile_ready(
             document,
             &caps,
@@ -3691,8 +3695,12 @@ impl BootFailure {
         Self {
             result: RESULT_REFUSED_BUDGET,
             diagnostic: format!(
-                "host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget},effect_state_bytes={}]\n",
-                projection.total, projection.effect_state_bytes
+                "host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget},effect_state_bytes={},graph_bytes={},builtin_bytes={},control_bytes={}]\n",
+                projection.total,
+                projection.effect_state_bytes,
+                projection.graph_bytes,
+                projection.builtin_bytes,
+                projection.control_bytes
             )
             .into_bytes(),
         }
@@ -3991,7 +3999,8 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
     Ok(options)
 }
 
-/// The boot's retained projection ([`projected_retained_bytes`]): the total and its effect row.
+/// The boot's retained projection ([`projected_retained_bytes`]): the total and the rows its
+/// diagnostic names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RetainedProjection {
     /// Every projected row.
@@ -3999,36 +4008,41 @@ pub(crate) struct RetainedProjection {
     /// The effect row (issue #2194): every instance's declared state and scratch, prepared inline
     /// bytes and undeclared heap ([`host_core::EffectStateProjection::retained_bytes`]).
     pub(crate) effect_state_bytes: u64,
+    /// The graph row (issue #2199): the boot plan's graph and plan bytes beyond the declared effect
+    /// state and scratch the effect row charges.
+    pub(crate) graph_bytes: u64,
+    /// The builtins' retained payload, inside the graph row; named, not added.
+    pub(crate) builtin_bytes: u64,
+    /// The control rows (issue #2199): the control plane's retained bytes for the boot plan, its
+    /// frame-scaled rows (#2191) among them, the boot plan's shape tables and the session's
+    /// cross-thread words.
+    pub(crate) control_bytes: u64,
 }
 
-/// Project all retained declaration/runtime bytes whose allocation shape is known after compile.
+/// Project every retained byte of the boot whose shape is known after compile, before the
+/// control plane compiles or prepares anything (issue #2199).
 ///
-/// The compiled-model row is the session estimator's post-canonical exact row. The runtime row is
-/// re-derived from the ring boot actually chose rather than the soon-to-be-removed document limits
-/// word. Bridge storage is the exact layout projection above. The effect row (issue #2194) is the
-/// effect state the session's instances would allocate, projected from their descriptors, so a
-/// session whose effects the budget cannot hold is refused before one is prepared. Preparation's
-/// graph and builtin subcompilers receive this same total budget and retain their existing
-/// checked pre-allocation estimators (their rows before allocation are #2199), so no structural
-/// count ceiling is introduced here.
+/// Bridge storage is the exact layout projection ([`project_buffers`]), and the compiled model and
+/// queue rows are the session estimator's. Everything the boot plan retains is the boot's
+/// preparation projected ([`control_plane::project_boot`]): host-core's
+/// [`HostProjection`](host_core::HostProjection) of it (the graph and plan, the builtins, the
+/// sources and the effect producers exact; the send lanes and the inventory at their ceilings) and
+/// the control plane's retained bytes for it. The effect row (issue #2194) charges the effect
+/// state, scratch and processors, so the graph row adds only what the graph holds beyond the
+/// declared state and scratch. The boot plan's shape tables and the session's cross-thread words
+/// are their layouts. So a session the budget cannot hold is refused here, before a processor,
+/// bank, plan, ring or lane exists; a projection under the exact aggregate is a defect, which the
+/// representative drift gate holds.
 fn projected_retained_bytes(
     compiled: &CompiledSession,
-    source_ring_frames: u32,
+    options: WebBootOptions,
+    caps: &HostPrepareCaps,
+    memory_budget: u64,
+    control_frame_bytes: u32,
     bridge_retained_bytes: u64,
-    control_frame_rows: u64,
+    boot_command: Option<&[u8]>,
 ) -> Result<RetainedProjection, BootFailure> {
     let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
-    let source_ring_bytes = compiled
-        .normalized_model()
-        .sources
-        .iter()
-        .try_fold(0_u64, |total, source| {
-            let bytes = u64::from(source_ring_frames)
-                .checked_mul(u64::from(source.channels))?
-                .checked_mul(size_of::<f32>() as u64)?;
-            total.checked_add(bytes)
-        })
-        .ok_or_else(arithmetic)?;
     let estimate = compiled.resource_estimate();
     // A refusal here is a resource or platform fault (an overflow, or no launch registry), which
     // boot reports as a budget refusal, as `boot_refusal` does.
@@ -4039,14 +4053,71 @@ fn projected_retained_bytes(
         })?
         .retained_bytes()
         .ok_or_else(arithmetic)?;
+    let live_controls = live_control_request(options, compiled.quantum().0)
+        .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_OPTIONS, "web.live_controls.config"))?;
+    // The lanes the control plane chooses, with the effect lanes on whenever taps are asked for,
+    // as [`WebRuntimePreparer`] attaches them.
+    let lanes: HostLiveLanes = controls::live_lanes(compiled.normalized_model()).into();
+    let lanes = HostLiveLanes {
+        effects: lanes.effects || live_controls.observation_taps != 0,
+        ..lanes
+    };
+    // The budget is this projection's to check, as one aggregate: the preparation's own byte
+    // ceilings, each the whole budget, would refuse a row before the projection names them all.
+    let unbounded = HostPrepareCaps {
+        maximum_graph_session_plus_plan_bytes: u64::MAX,
+        maximum_source_total_bytes: u64::MAX,
+        maximum_source_overhead_bytes: u64::MAX,
+        maximum_effect_state_bytes: u64::MAX,
+        maximum_effect_scratch_bytes: u64::MAX,
+        maximum_builtin_retained_bytes: u64::MAX,
+        maximum_named_allocation_bytes: u64::MAX,
+        maximum_meter_bytes: u64::MAX,
+        ..*caps
+    };
+    let boot = control_plane::project_boot::<WebAdapter>(
+        compiled,
+        &unbounded,
+        control_limits(
+            caps,
+            memory_budget,
+            control_frame_bytes,
+            maximum_document_bytes(&options),
+        ),
+        &live_controls,
+        lanes,
+        boot_command,
+    )
+    .map_err(|(failure, rejection)| {
+        // As [`boot_refusal`] classifies the control plane's own preparation's refusal.
+        let result = match (rejection, &failure) {
+            (Some(PrepareRejection::Resource | PrepareRejection::Platform), _)
+            | (None, CompileFailure::Resource(_)) => RESULT_REFUSED_BUDGET,
+            (Some(_), _) | (None, CompileFailure::Diagnostics(_)) => RESULT_REFUSED_DOCUMENT,
+        };
+        BootFailure {
+            result,
+            diagnostic: failure.diagnostic().into_owned(),
+        }
+    })?;
+    let host = boot.host;
+    let graph_bytes = host
+        .graph_session_plus_plan_bytes
+        .checked_sub(host.graph_declared_effect_bytes)
+        .ok_or_else(arithmetic)?;
+    let shape_bytes = projected_shape_bytes(&host).ok_or_else(arithmetic)?;
+    let control_bytes = boot
+        .control_retained_bytes
+        .checked_add(shape_bytes)
+        .ok_or_else(arithmetic)?;
     let total = [
         bridge_retained_bytes,
         estimate.compiled_model_bytes,
         estimate.queue_bytes,
-        source_ring_bytes,
-        // #2191: the control plane's frame-scaled rows, which the exact check charges again.
-        control_frame_rows,
+        host.source_total_bytes,
         effect_state_bytes,
+        graph_bytes,
+        control_bytes,
     ]
     .into_iter()
     .try_fold(0_u64, |total, row| {
@@ -4055,7 +4126,39 @@ fn projected_retained_bytes(
     Ok(RetainedProjection {
         total,
         effect_state_bytes,
+        graph_bytes,
+        builtin_bytes: host.builtin_retained_payload_bytes,
+        control_bytes,
     })
+}
+
+/// The bridge rows of the boot plan's [`PlanShape`] ([`PlanShape::bridge_rows`]) and the session's
+/// cross-thread words ([`cross_thread_bytes`]), from the boot preparation's projection, before
+/// either exists (issue #2199): the dense instance table and the producers' IDs it copies, the
+/// meter tables and frame, the plan words and the retired-shape ring.
+fn projected_shape_bytes(host: &host_core::HostProjection) -> Option<u64> {
+    let instance_table = u64::try_from(host.effect_instances)
+        .ok()?
+        .checked_mul((size_of::<Option<EffectInstance>>() + size_of::<u32>()) as u64)?;
+    let (meter_tables, _) = MeterTables::projected_bytes(host.meters, host.strips);
+    let frame = host
+        .strips
+        .checked_mul(3)?
+        .checked_add(3)?
+        .checked_mul(size_of::<f32>())?;
+    let words = engine::realtime::published_words_retained_bytes::<2>();
+    let (_, retired) = engine::realtime::bounded_spsc_move::<Box<PlanShape>>(
+        NonZeroUsize::new(RETIRED_SHAPES)?,
+        engine::realtime::QueueGeneration(0),
+    )
+    .ok()?;
+    let shared = cross_thread_bytes(retired.retained_bytes())?;
+    instance_table
+        .checked_add(host.effect_producer_id_bytes)?
+        .checked_add(u64::try_from(meter_tables).ok()?)?
+        .checked_add(u64::try_from(frame).ok()?)?
+        .checked_add(u64::try_from(words).ok()?)?
+        .checked_add(shared)
 }
 
 /// Exact aggregate retained bytes reported by the fully prepared engine plus the browser bridge.

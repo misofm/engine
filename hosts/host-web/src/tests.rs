@@ -120,11 +120,16 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> crate::Retai
         frame,
     )
     .expect("bridge projection");
+    let options = crate::validate_options(options).expect("valid boot options");
+    let budget = crate::memory_budget(&options);
     projected_retained_bytes(
         &compiled,
-        source_ring_frames,
+        options,
+        &crate::prepare_caps(&compiled, options, source_ring_frames, budget),
+        budget,
+        frame,
         projection.report.bridge_retained_bytes,
-        control_frame_rows(frame).expect("frame rows"),
+        None,
     )
     .expect("retained projection")
 }
@@ -1222,10 +1227,12 @@ fn bridge_resource_rows_are_exact() {
     );
 }
 
-/// The exact retained aggregate is one budget: it boots at exactly its value and is refused one
-/// byte below, at the 16 KiB frame floor and at the 128 KiB default frame alike. Issue #2191 gate
-/// 2: between the two frames the aggregate grows by exactly the page's staging plus the control
-/// plane's frame rows the boot projects before it allocates (`control_frame_rows`).
+/// The retained aggregate is one budget: a boot is admitted at exactly its retained projection,
+/// which is at least the exact aggregate it reports, and refused one byte below, at the 16 KiB
+/// frame floor and at the 128 KiB default frame alike. Issue #2191 gate 2: between the two frames
+/// the exact aggregate grows by exactly the page's staging plus the control plane's frame rows
+/// (`control_frame_rows`), and the projection, which the boot admits before it allocates, grows by
+/// the same bytes (issue #2199: the projection is the ceiling the exact check stands behind).
 ///
 /// Test value: red if the budget charges independent caps instead of one aggregate, if the
 /// page's staging is charged at a compiled frame, or if the control plane charges a frame-scaled
@@ -1260,42 +1267,46 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
             .queries
             .resources()
             .control_retained_bytes;
-        charged.push((frame, exact, control_retained));
+        let projected = retained_projection(document.as_bytes(), options).total;
+        assert!(projected >= exact, "{projected} < {exact}");
+        charged.push((frame, exact, control_retained, projected));
         drop(baseline);
         AudioWorkletEngineHost::boot(
             document.as_bytes(),
             WebBootOptions {
-                maximum_memory_bytes: exact,
+                maximum_memory_bytes: projected,
                 ..options
             },
         )
-        .expect("exact aggregate budget must accept");
+        .expect("a budget of the retained projection must accept");
         let failure = AudioWorkletEngineHost::boot(
             document.as_bytes(),
             WebBootOptions {
-                maximum_memory_bytes: exact - 1,
+                maximum_memory_bytes: projected - 1,
                 ..options
             },
         )
         .err()
-        .expect("one byte below exact aggregate must refuse");
+        .expect("one byte below the retained projection must refuse");
         assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
-        assert_eq!(
-            failure.diagnostic(),
-            format!(
-                "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
-                exact - 1
-            )
-            .as_bytes()
+        assert!(
+            failure
+                .diagnostic()
+                .starts_with(b"host.budget.retained_projection\t")
         );
     }
     let [
-        (small, small_exact, small_control),
-        (large, large_exact, large_control),
+        (small, small_exact, small_control, small_projected),
+        (large, large_exact, large_control, large_projected),
     ] = charged[..]
     else {
         panic!("two frames")
     };
+    assert_eq!(
+        large_projected - small_projected,
+        large_exact - small_exact,
+        "the projection follows the frame as the exact aggregate does"
+    );
     let growth = u64::from(large - small);
     // The page's staging is the bridge's row; everything else the frame scales is the control
     // plane's, nothing else in the session moves, and the control plane's growth is exactly the
@@ -1334,39 +1345,38 @@ fn retained_projection_budget_diagnostic_names_projected_bytes() {
     assert_eq!(
         failure.diagnostic(),
         format!(
-            "host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget},effect_state_bytes={}]\n",
-            projection.total, projection.effect_state_bytes
+            "host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget},effect_state_bytes={},graph_bytes={},builtin_bytes={},control_bytes={}]\n",
+            projection.total,
+            projection.effect_state_bytes,
+            projection.graph_bytes,
+            projection.builtin_bytes,
+            projection.control_bytes
         )
         .as_bytes()
     );
 }
 
+/// Issue #2199: the boot's retained projection is a ceiling of the exact aggregate the booted
+/// host reports, for the three shipped representatives, and over-projects each by at most its
+/// bound in thousandths of the projection: the measured `(projection - exact) / projection` plus
+/// about 8%, so a projector that grows a row past what the plan holds is an explicit re-pin. An
+/// undershoot of any size is red: the boot admits on the projection before anything is
+/// allocated, so a projection under the exact aggregate admits a session the budget cannot hold.
+/// Pinned at: identity 1,824 / 1,120,159 = 1.63, nine-track 17,120 / 1,491,315 = 11.48, console
+/// 368,368 / 5,314,578 = 69.31, each plus about 8% and rounded up (the console's margin is the
+/// effect row's processor boxes, which a banked member no longer has).
+///
+/// Test value: red when the projection leaves out a row the booted host retains (the graph, a
+/// control-plane row, a shape table) or charges one below its exact bytes, which the old form of
+/// this test (an undershoot bound) admitted by design, and red when a row is over-charged past its
+/// pin.
 #[test]
 fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() {
-    // #239 ruling 5459221452 authorizes an A5 boundary that deliberately leaves the
-    // transactionally rolled-back preparation delta out of the pre-prepare projection. These
-    // three shipped shapes pin that drift, each with its own bound in thousandths of the
-    // projection: the measured `gap / projection` plus about 8% headroom for harmless
-    // allocator/layout movement, so any material projector drift is an explicit review and
-    // re-pin. Dropping a projected retained row cannot hide behind the deliberately broad rollback
-    // allowance. Re-pinned by #1590, which deleted the 55,527-byte observation staging from the
-    // projection and the exact row alike (the gaps did not move, the ratios rose):
-    // identity 628,275 / 57,268 = 10.97, nine-track 954,987 / 86,248 = 11.07, console
-    // 3,846,216 / 640,894 = 6.00 (its bound did not rise: the shared multiplier was 7).
-    // Issue #2191: at the 128 KiB default frame; the projection carries the control plane's frame
-    // rows (`control_frame_rows`), so the frame moves the projection and the exact row alike.
-    // Re-pinned by #2191, whose counter tables shrank from half a frame of IDs to 256: identity
-    // 359,883 / 758,284 = 0.475, nine-track 686,763 / 787,264 = 0.872, console 3,604,132 /
-    // 1,341,910 = 2.686, each plus about 8%.
-    // Re-pinned by #2194 (root ruling R5), whose projection carries the effect row (declared
-    // state and scratch, inline and undeclared heap bytes): identity 355,867 / 762,308 = 0.467,
-    // nine-track 650,619 / 823,416 = 0.790, console 3,073,188 / 1,872,862 = 1.641, each plus
-    // about 8%.
     let defaults = boot_options(128);
     let representatives = [
         (
             "identity-one-track",
-            504_u64,
+            2_u64,
             one_track_session(128),
             WebBootOptions {
                 source_ring_frames: 128,
@@ -1375,7 +1385,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "parametric-eq-nine-track",
-            853_u64,
+            13_u64,
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1384,7 +1394,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "console-sixty-four-track",
-            1_772_u64,
+            75_u64,
             include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1401,16 +1411,17 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
                 panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
             });
         let exact = exact_retained_report_total(host.resources());
-        let gap = exact.checked_sub(projection).unwrap_or_else(|| {
-            panic!("{name}: projection {projection} exceeds exact retained aggregate {exact}")
+        let over = projection.checked_sub(exact).unwrap_or_else(|| {
+            panic!("{name}: projection {projection} is under the exact retained aggregate {exact}")
         });
-        let maximum_gap = projection
+        let maximum_over = projection
             .checked_mul(bound_permille)
             .expect("bounded representative projection")
             / 1_000;
         assert!(
-            gap <= maximum_gap,
-            "{name}: exact/projection drift gap {gap} exceeds documented bound {maximum_gap} (projection {projection}, exact {exact})"
+            over <= maximum_over,
+            "{name}: over-projection {over} exceeds its bound {maximum_over} (projection \
+             {projection}, exact {exact})"
         );
     }
 }
