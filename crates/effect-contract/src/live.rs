@@ -866,6 +866,79 @@ pub fn effect_control_lane(
     Some((writer, lane))
 }
 
+/// What a live-control lane presents to the graph's resource estimate (issue #2199): the heap it
+/// retains ([`EffectControlLane::retained_resources`]), its live parameter cells, and whether it
+/// has a channel, is bypassed and holds an observation queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectLaneLayout {
+    pub resources: EffectLaneResources,
+    pub parameter_cells: usize,
+    pub has_channel: bool,
+    pub bypassed: bool,
+    pub has_observe_queue: bool,
+    /// What [`EffectControlLane::install_carry_slots`] would allocate on this lane
+    /// ([`EffectControlLane::carry_slot_bytes`]).
+    pub carry_slot_bytes: u64,
+}
+
+/// The lane and writer [`effect_control_lane`] builds from a spec, laid out before either exists
+/// (issue #2199): the lane's [`EffectLaneLayout`] and the writer's
+/// [`EffectCellWriter::retained_resources`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectLaneProjection {
+    pub lane: EffectLaneLayout,
+    pub writer: EffectLaneResources,
+}
+
+impl EffectLaneSpec {
+    /// What [`effect_control_lane`] would build from this spec, without building it (issue #2199):
+    /// the allocations it makes, counted as the built lane's and writer's `retained_resources`
+    /// count them. `None` exactly when `effect_control_lane` would return `None` (an observation
+    /// queue that cannot be built). Allocation-free.
+    #[must_use]
+    pub fn project(&self) -> Option<EffectLaneProjection> {
+        let shape = &self.shape;
+        let parameter_cells = shape.parameter_cells();
+        let target_cells = 2 * shape.target_slots();
+        let dirty_words = shape.cell_count().div_ceil(64);
+        let mut lane = EffectLaneResources::default();
+        lane.add(Layout::new::<SharedAllocation<EffectCells>>().size());
+        lane.add_array::<ParameterGroup>(shape.groups.len());
+        lane.add_array::<LatestCell<1>>(parameter_cells);
+        lane.add_array::<LatestCell<PREPARED_EFFECT_TARGET_WORDS>>(target_cells);
+        lane.add_array::<DirtyWord>(dirty_words);
+        lane.add_array::<CellReader>(parameter_cells);
+        lane.add_array::<CellReader>(target_cells);
+        lane.add_array::<DirtyReader>(dirty_words);
+        lane.add_array::<u64>(dirty_words);
+        lane.add_array::<PreparedEffectTarget>(target_cells);
+        if let Some(depth) = NonZeroUsize::new(self.observation_depth) {
+            let payload = bounded_spsc_retained_payload::<EffectControlRecord>(depth).ok()?;
+            lane.add(payload.ring_header_bytes);
+            lane.add(payload.slot_payload_bytes);
+        }
+        let mut writer = EffectLaneResources::default();
+        writer.add_array::<CellWriter<1>>(parameter_cells);
+        writer.add_array::<CellWriter<PREPARED_EFFECT_TARGET_WORDS>>(target_cells);
+        let carry_slot_bytes = parameter_cells
+            .saturating_mul(core::mem::size_of::<CarriedCell<1>>())
+            .saturating_add(target_cells.saturating_mul(core::mem::size_of::<
+                CarriedCell<PREPARED_EFFECT_TARGET_WORDS>,
+            >()));
+        Some(EffectLaneProjection {
+            lane: EffectLaneLayout {
+                resources: lane,
+                parameter_cells,
+                has_channel: true,
+                bypassed: self.bypass,
+                has_observe_queue: self.observation_depth != 0,
+                carry_slot_bytes: u64::try_from(carry_slot_bytes).unwrap_or(u64::MAX),
+            },
+            writer,
+        })
+    }
+}
+
 /// One prepared live-control lane for one effect instance, or one lane of one bank slot: render's
 /// end of the cells and the observation queue.
 ///
@@ -1129,6 +1202,20 @@ impl EffectControlLane {
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
         self.retained_resources().total_bytes
+    }
+
+    /// This lane as the graph's resource estimate reads it (issue #2199): what
+    /// [`EffectLaneSpec::project`] laid out for it, while no carry slot is installed.
+    #[must_use]
+    pub fn layout(&self) -> EffectLaneLayout {
+        EffectLaneLayout {
+            resources: self.retained_resources(),
+            parameter_cells: self.parameter_cells(),
+            has_channel: self.has_channel(),
+            bypassed: self.bypassed(),
+            has_observe_queue: self.has_observe_queue(),
+            carry_slot_bytes: self.carry_slot_bytes(),
+        }
     }
 
     /// The bytes [`Self::install_carry_slots`] allocates for this lane, and the lane holds once it

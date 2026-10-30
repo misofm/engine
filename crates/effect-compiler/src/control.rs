@@ -143,6 +143,22 @@ impl EffectControlOwner {
         factory: Arc<dyn NativeEffectFactory>,
         preparation: &EffectBankPreparation,
     ) -> Result<Self, EffectControlOwnerError> {
+        Self::validate(factory.as_ref(), preparation)?;
+        let committed = preparation.initial_values.clone();
+        Ok(Self {
+            factory,
+            sample_rate: preparation.sample_rate,
+            committed,
+            committed_revision: 0,
+            state: OwnerState::Idle,
+        })
+    }
+
+    /// [`Self::new`]'s refusals, without building the owner (issue #2199).
+    fn validate(
+        factory: &dyn NativeEffectFactory,
+        preparation: &EffectBankPreparation,
+    ) -> Result<(), EffectControlOwnerError> {
         let descriptor = factory.descriptor();
         if !is_launch_sample_rate(engine::SampleRateHz(preparation.sample_rate)) {
             return Err(EffectControlOwnerError::Rate);
@@ -162,14 +178,22 @@ impl EffectControlOwner {
             },
             &[],
         )?;
-        let committed = preparation.initial_values.clone();
-        Ok(Self {
-            factory,
-            sample_rate: preparation.sample_rate,
-            committed,
-            committed_revision: 0,
-            state: OwnerState::Idle,
-        })
+        Ok(())
+    }
+
+    /// What [`Self::new`] would build for `factory` and `preparation` retains, before it is built
+    /// (issue #2199): [`Self::new`]'s refusals, and else the owner's
+    /// [`resource_facts`](Self::resource_facts) as it would report them. An idle owner retains only
+    /// its box and its committed values.
+    pub(crate) fn projected_resources(
+        factory: &Arc<dyn NativeEffectFactory>,
+        preparation: &EffectBankPreparation,
+    ) -> Result<
+        Result<EffectControlOwnerResources, EffectControlResourceError>,
+        EffectControlOwnerError,
+    > {
+        Self::validate(factory.as_ref(), preparation)?;
+        Ok(owner_resources(factory, preparation.initial_values.len()))
     }
 
     /// The factory's immutable capability is retained for the owner lifetime.
@@ -217,30 +241,7 @@ impl EffectControlOwner {
     pub(crate) fn resource_facts(
         &self,
     ) -> Result<EffectControlOwnerResources, EffectControlResourceError> {
-        let owner_box = u64::try_from(core::mem::size_of::<Self>())
-            .map_err(|_| EffectControlResourceError::Arithmetic)?;
-        let committed = checked_slice_bytes::<InitialParameterValue>(self.committed.len())?;
-        // An open transaction's candidate is transient (built by `begin`, dropped by `commit` or
-        // `discard`), so it is no retained allocation.
-        let owned_payload_bytes = owner_box
-            .checked_add(committed)
-            .ok_or(EffectControlResourceError::Arithmetic)?;
-        let largest_owned_allocation_bytes = owner_box.max(committed);
-
-        let header = Layout::new::<AtomicUsize>();
-        let (strong_weak, _) = header
-            .extend(header)
-            .map_err(|_| EffectControlResourceError::Arithmetic)?;
-        let (arc_layout, _) = strong_weak
-            .extend(Layout::for_value(self.factory.as_ref()))
-            .map_err(|_| EffectControlResourceError::Arithmetic)?;
-        let factory_allocation_bytes = u64::try_from(arc_layout.pad_to_align().size())
-            .map_err(|_| EffectControlResourceError::Arithmetic)?;
-        Ok(EffectControlOwnerResources {
-            owned_payload_bytes,
-            largest_owned_allocation_bytes,
-            factory_allocation_bytes,
-        })
+        owner_resources(&self.factory, self.committed.len())
     }
 
     /// Starts one candidate at the caller's checked base revision.
@@ -489,6 +490,40 @@ impl EffectControlOwner {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectControlResourceError {
     Arithmetic,
+}
+
+/// [`EffectControlOwner::resource_facts`] of an idle owner over `factory` holding
+/// `committed_values` committed values: its box, its committed values and the factory's `Arc`
+/// allocation.
+fn owner_resources(
+    factory: &Arc<dyn NativeEffectFactory>,
+    committed_values: usize,
+) -> Result<EffectControlOwnerResources, EffectControlResourceError> {
+    let owner_box = u64::try_from(core::mem::size_of::<EffectControlOwner>())
+        .map_err(|_| EffectControlResourceError::Arithmetic)?;
+    let committed = checked_slice_bytes::<InitialParameterValue>(committed_values)?;
+
+    // An open transaction's candidate is transient (built by `begin`, dropped by `commit` or
+    // `discard`), so it is no retained allocation.
+    let owned_payload_bytes = owner_box
+        .checked_add(committed)
+        .ok_or(EffectControlResourceError::Arithmetic)?;
+    let largest_owned_allocation_bytes = owner_box.max(committed);
+
+    let header = Layout::new::<AtomicUsize>();
+    let (strong_weak, _) = header
+        .extend(header)
+        .map_err(|_| EffectControlResourceError::Arithmetic)?;
+    let (arc_layout, _) = strong_weak
+        .extend(Layout::for_value(factory.as_ref()))
+        .map_err(|_| EffectControlResourceError::Arithmetic)?;
+    let factory_allocation_bytes = u64::try_from(arc_layout.pad_to_align().size())
+        .map_err(|_| EffectControlResourceError::Arithmetic)?;
+    Ok(EffectControlOwnerResources {
+        owned_payload_bytes,
+        largest_owned_allocation_bytes,
+        factory_allocation_bytes,
+    })
 }
 
 fn checked_slice_bytes<T>(length: usize) -> Result<u64, EffectControlResourceError> {

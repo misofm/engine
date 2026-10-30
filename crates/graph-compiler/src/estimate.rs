@@ -7,7 +7,7 @@ use super::*;
 use crate::canonical::node_text_len;
 use crate::ids::{NodeTable, is_summing_node};
 use crate::pdc::TimingResult;
-use effect_contract::{BypassShunt, EffectControlLane, PreparedAutomationSpan};
+use effect_contract::{BypassShunt, EffectLaneLayout, PreparedAutomationSpan};
 
 /// Eleven inputs because the estimate is a function of that many independent facts about the
 /// compile, and bundling them into a struct would only move the argument list. Was inside `lib.rs`
@@ -215,11 +215,14 @@ pub(crate) fn effect_control_resource<'e>(
             banked.insert((member.track_id.as_str(), rack, member.effect_id.as_str()));
         }
     }
+    // Issue #2199: each lane as `EffectProjectedEntry::lane_layout` gives it, the planned layout of
+    // a lane not attached yet or the attached lane's own, so a projection and its compile charge
+    // the same bytes.
     for entry in effects.clone() {
-        let Some(control) = entry.control.as_deref() else {
+        let Some(control) = entry.lane_layout() else {
             continue;
         };
-        let lane = control.retained_resources();
+        let lane = control.resources;
         total = total.checked_add(lane.total_bytes)?;
         largest = largest.max(lane.largest_allocation_bytes);
         let key = (
@@ -235,7 +238,7 @@ pub(crate) fn effect_control_resource<'e>(
             // The per-node live-control owner: `runtime::LiveControlEffect::new` at the render
             // quantum. Its staging window holds the lane's live parameter cells (#1621 D1), the
             // banked window's rule: none for a channel-less lane or a prepared-target owner.
-            let window = u64::try_from(control.parameter_cells())
+            let window = u64::try_from(control.parameter_cells)
                 .ok()?
                 .checked_mul(span_bytes)?;
             let frames = usize::try_from(entry.metadata.quantum).ok()?;
@@ -256,9 +259,9 @@ pub(crate) fn effect_control_resource<'e>(
     // "does any entry match me and carry a control" by scanning every entry made this estimate
     // quadratic in the effect count, and so in the track count on any session with a banked
     // effect per track.
-    let controlled: BTreeMap<(&str, EffectRack, &str), &EffectControlLane> = effects
+    let controlled: BTreeMap<(&str, EffectRack, &str), EffectLaneLayout> = effects
         .filter_map(|entry| {
-            let control = entry.control.as_deref()?;
+            let control = entry.lane_layout()?;
             Some((
                 (
                     entry.track_id.as_str(),
@@ -287,10 +290,10 @@ pub(crate) fn effect_control_resource<'e>(
                 controlled.get(&(member.track_id.as_str(), rack, member.effect_id.as_str()))
             {
                 has_control = true;
-                live |= control.has_channel();
-                window_spans = window_spans.max(u64::try_from(control.parameter_cells()).ok()?);
-                shunted |= control.has_channel() || control.bypassed();
-                queued_lanes += u64::from(control.has_observe_queue());
+                live |= control.has_channel;
+                window_spans = window_spans.max(u64::try_from(control.parameter_cells).ok()?);
+                shunted |= control.has_channel || control.bypassed;
+                queued_lanes += u64::from(control.has_observe_queue);
             }
         }
         if has_control {

@@ -1544,16 +1544,25 @@ fn column_cells(
 /// D4), plus the source's VCA mute cell lists, which the binding holds until bind. Returns the
 /// total bytes and the largest single allocation.
 pub(crate) fn follow_route_cursor_bytes(source: &crate::GraphFollowRouteSource) -> (u64, u64) {
+    follow_route_cursor_bytes_of(&source.cells, [&source.vca_mutes[0], &source.vca_mutes[1]])
+}
+
+/// [`follow_route_cursor_bytes`] of a source over `cells` and `vca_mutes`, before it exists (issue
+/// #2199): a column's cursors are its lane's own mute cell, if any, and its VCA mute cells.
+pub(crate) fn follow_route_cursor_bytes_of(
+    cells: &[Option<u32>; 2],
+    vca_mutes: [&[u32]; 2],
+) -> (u64, u64) {
     let mut total = 0_u64;
     let mut largest = 0_u64;
-    for list in &source.vca_mutes {
+    for list in vca_mutes {
         let bytes = u64::try_from(core::mem::size_of_val::<[u32]>(list)).unwrap_or(u64::MAX);
         total = total.saturating_add(bytes);
         largest = largest.max(bytes);
     }
     for column in 0..COLUMNS.len() {
-        let (cells, _) = column_cells(source, column);
-        let count = cells.len();
+        let count = usize::from(cells.get(column).copied().flatten().is_some())
+            + vca_mutes.get(column).map_or(0, |list| list.len());
         if count == 0 {
             continue;
         }

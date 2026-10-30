@@ -12,10 +12,10 @@ mod step;
 mod symmetry;
 pub use live::{
     BANK_CROSSFADE_LANES, BankCrossfade, BankCrossfadeLane, BypassShunt, BypassSwitch,
-    EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneResources, EffectLaneShape,
-    EffectLaneSpec, EffectWriteRefusal, LIVE_LINK_EFFECTS, LaneSwapRefusal, LinkSwitch,
-    ObservationLane, ObservePushError, Staged, apply_observe, effect_control_lane, swap_bank_lanes,
-    swap_bank_lanes_scratch_bytes,
+    EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneLayout,
+    EffectLaneProjection, EffectLaneResources, EffectLaneShape, EffectLaneSpec, EffectWriteRefusal,
+    LIVE_LINK_EFFECTS, LaneSwapRefusal, LinkSwitch, ObservationLane, ObservePushError, Staged,
+    apply_observe, effect_control_lane, swap_bank_lanes, swap_bank_lanes_scratch_bytes,
 };
 pub use prepared_target::{
     EffectTargetError, EffectTargetRequest, NativeEffectTargetPreparation,

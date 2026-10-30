@@ -20,9 +20,10 @@ use builtins_compiler::{
 };
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
-    EffectStateProjection, LiveEffectAddress, LiveEffectRack, attach_effect_live_controls,
-    attach_effect_observation, effect_control_resources, launch_native_effect_registry,
-    prepare_native_session_effects, resolve_initial_values,
+    EffectStateProjection, LiveEffectAddress, LiveEffectRack,
+    attach_projected_effect_live_controls, attach_projected_effect_observation,
+    effect_control_resources, launch_native_effect_registry, plan_projected_effect_live_controls,
+    prepare_native_session_effects, project_native_session_effects, resolve_initial_values,
 };
 use effect_contract::{
     AutomationRate, BypassSwitch, EffectControlRecord, NativeEffectFactory,
@@ -39,7 +40,7 @@ use graph::{
     TrackStage,
 };
 pub use graph::{GraphJumpLengthProducer, GraphJumpLengths, jump_length_retained_bytes};
-use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
+use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler, GraphProjectionRequest};
 use lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
 use session::{
     CompileCaps, CompiledSession, EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity,
@@ -2145,11 +2146,15 @@ fn graph_compile_caps(caps: &HostPrepareCaps) -> GraphCompileCaps {
 fn graph_compile_diagnostics(
     failure: &graph_compiler::GraphBuiltinsCompileFailure,
 ) -> PrepareDiagnostics {
+    graph_diagnostics(&failure.diagnostics)
+}
+
+/// A graph compile's or projection's diagnostics as a preparation's.
+fn graph_diagnostics(diagnostics: &graph::GraphDiagnosticSet) -> PrepareDiagnostics {
     PrepareDiagnostics::new(
         PrepareRejection::Graph,
         diagnostic_lines(
-            failure
-                .diagnostics
+            diagnostics
                 .diagnostics()
                 .iter()
                 .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
@@ -3321,7 +3326,7 @@ pub fn prepare_host_runtime_with_spectrum_collection(
     Ok((prepared, capture))
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
@@ -3340,6 +3345,62 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ),
     PrepareDiagnostics,
 > {
+    match prepare_or_project(
+        compiled,
+        caps,
+        live_controls,
+        selected_meters,
+        backend,
+        spectrum_request,
+        successor,
+        lanes,
+        superseded,
+        PrepareMode::Prepare,
+    )? {
+        PrepareOutcome::Prepared(prepared) => Ok(*prepared),
+        PrepareOutcome::Projected(_) => Err(platform("host.graph.projection")),
+    }
+}
+
+/// Whether [`prepare_or_project`] prepares the plan or stops at its projection (issue #2199).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrepareMode {
+    Prepare,
+    Project,
+}
+
+/// What [`prepare_or_project`] returns: the prepared host, or the projection it was admitted on.
+enum PrepareOutcome {
+    Prepared(
+        Box<(
+            PreparedHost,
+            HostLiveControlHandles,
+            Option<PreparedSpectrumCaptures>,
+        )>,
+    ),
+    Projected(Box<HostProjection>),
+}
+
+/// The one preparation (issue #2199): every entry's, run to its projection and the projection's
+/// admission, then, in [`PrepareMode::Prepare`], on to the plan.
+///
+/// Up to the projection it allocates the session's projected effect entries, its prepared
+/// builtins and the graph front's tables, and no effect processor, bank, plan, source ring or
+/// live-control lane: in [`PrepareMode::Project`] it returns the projection there.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn prepare_or_project(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: Option<&HostLiveControlRequest>,
+    selected_meters: Option<&[HostMeterRequest]>,
+    backend: Backend,
+    spectrum_request: Option<&SpectrumPreparation>,
+    successor: Option<SuccessorBase<'_>>,
+    lanes: HostLiveLanes,
+    superseded: Option<&LiveValuesSuperseded>,
+    mode: PrepareMode,
+) -> Result<PrepareOutcome, PrepareDiagnostics> {
+    let projecting = mode == PrepareMode::Project;
     // #1709 D1: the whole preparation runs in the canonical floating-point environment, so a
     // route or send gain (`compile_graph`'s `db_to_gain_f32`), a native effect's coefficients and
     // every value composed below are what a canonical thread prepares, whatever the caller has
@@ -3513,6 +3574,22 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             );
             graph_sources.push(SourceGraphSource::vacant(u32::from(source.channels)));
             carried_sources.push((index, predecessor_index));
+        } else if projecting {
+            // Issue #2199: the ring this source would allocate, charged without allocating it.
+            let resources = PcmSourceRing::resource_report(ring)
+                .map_err(|_| resource("host.source.prepare"))?;
+            builder.push(
+                source.id.as_str(),
+                compiled.sample_rate().0,
+                u32::from(source.channels),
+                0,
+                source.frames,
+                None,
+            );
+            graph_sources.push(SourceGraphSource::projected(
+                u32::from(source.channels),
+                resources,
+            ));
         } else {
             let (producer, consumer, resources) = PcmSourceRing::prepare_host_region(
                 ring,
@@ -3798,7 +3875,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 path: diagnostic.path,
             })
             .collect();
-    let mut effects = match prepare_native_session_effects(
+    // Issue #2199: projected, not prepared: the graph compile prepares a processor only for an
+    // instance its bank plan leaves per node, after the projection below is admitted.
+    let mut effects = match project_native_session_effects(
         graph_session,
         registry,
         EffectCompileCaps {
@@ -3852,28 +3931,21 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(platform("host.effect.projection"));
     }
-    #[cfg(feature = "control-provider")]
-    let control_catalog = crate::ControlCatalog::build(
-        compiled.normalized_model(),
-        overlay,
-        compiled.sample_rate().0,
-    )
-    .map_err(|_| resource("host.control_provider.allocation"))?;
 
     // Issue #140 A: one live-control lane per prepared strip effect instance (a submix strip's
     // included, #1207 D5): its latest-target cells and, for an effect that declares taps when the
     // host asked for observation capacity, its observation queue (decision 15, D15-2). This is
     // the only thing that creates one; a host that asks for no live controls attaches nothing and
     // the plan renders the byte-identical live-control-free path.
-    let mut effect_controls: Vec<EffectControlProducer> = if attach_live && lanes.effects {
-        attach_effect_live_controls(
-            &mut effects,
-            &live_superseded,
-            live_controls.observation_taps,
-        )
-        .map_err(effect_diagnostics)?
+    //
+    // Issue #2199: the lanes are laid out here and attached once the projection is admitted, so
+    // the projection charges them before one exists.
+    let attach_effect_lanes = attach_live && lanes.effects;
+    let projected_effect_controls = if attach_effect_lanes {
+        plan_projected_effect_live_controls(&mut effects, live_controls.observation_taps)
+            .map_err(effect_diagnostics)?
     } else {
-        Vec::new()
+        EffectControlResources::default()
     };
     // Issue #143 D3, level 1. Observation capacity is attached only when it was asked for, and
     // only alongside a control channel: a subscription is a record in the effect's own observation
@@ -3903,8 +3975,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     arm_tag: binding.arm_tag,
                 })
                 .collect();
-            attach_effect_observation(&mut effects, taps, observation_window_blocks, &arms)
-                .map_err(effect_diagnostics)?
+            attach_projected_effect_observation(
+                &mut effects,
+                taps,
+                observation_window_blocks,
+                &arms,
+            )
+            .map_err(effect_diagnostics)?
         }
     };
 
@@ -3941,27 +4018,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             id,
         )
     };
-    effect_controls.sort_unstable_by_key(|producer| {
-        (
-            strip_rank(&producer.track_id).unwrap_or(usize::MAX),
-            producer.address,
-        )
-    });
-    debug_assert!(
-        effect_controls
-            .iter()
-            .all(|producer| strip_rank(&producer.track_id).is_some())
-            && effect_controls.iter().all(|producer| {
-                effect_producer_position(
-                    &effect_controls,
-                    strip_rank,
-                    &producer.track_id,
-                    producer.address,
-                )
-                .is_some_and(|index| core::ptr::eq(&effect_controls[index], producer))
-            }),
-        "every effect producer is found by its sorted position"
-    );
     let control_requests: Vec<TrackControlRequest> = if attach_live {
         live_control_strips
             .iter()
@@ -4094,11 +4150,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             (program, cells, vca_mutes, flags, continued_vca),
         ));
     }
-    let mut artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+    // Issue #2199: the graph projected before any processor, bank or plan exists; its estimate is
+    // the one the compiled plan reports.
+    let mut graph_projection = GraphCompiler::project(GraphProjectionRequest {
         dispatch: backend,
         plan_id: 1,
         effects,
-        builtins,
+        builtins: &builtins,
         // #1285 D2: a successor keeps every surviving node's input arrival; a first plan has no
         // floors. Across a withdrawn candidate the base is P0's inventory, so these are P0's.
         // #1354 D4: a warm successor takes the lead's floors instead.
@@ -4144,7 +4202,236 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             routes: attach_live && lanes.routes,
         },
     })
-    .map_err(|failure| graph_compile_diagnostics(&failure))?;
+    .map_err(|failure| graph_diagnostics(&failure.diagnostics))?;
+    // The plan's own cells the graph row does not count: its revision gate (#1502 D1), its
+    // jump-length cell (#1639 D1, attached after bind below) and, when this preparation made its
+    // own `live_values_superseded` count rather than taking the session's, that count (#1312 D2;
+    // a session's count is the host's to charge once): the jump-length cell's reader holds a
+    // clone of it in every plan. Charged here so every host, the C ABI and the browser, counts
+    // them in the one row.
+    let plan_cell_bytes = engine::realtime::plan_revision_gate_retained_bytes()
+        .checked_add(graph::jump_length_retained_bytes())
+        .and_then(|bytes| {
+            bytes.checked_add(if superseded.is_none() {
+                LiveValuesSuperseded::retained_bytes()
+            } else {
+                0
+            })
+        })
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    // #1953b: the session the graph was compiled from, fading copies included.
+    let session_resources = graph_session.resource_estimate();
+    let spectrum_resources: Option<SpectrumCaptureResources> = match spectrum_request {
+        None => None,
+        Some(SpectrumPreparation::Single(request)) => Some(
+            crate::spectrum::spectrum_capture_resources_for(&request.target),
+        ),
+        Some(SpectrumPreparation::Collection(request)) => Some(
+            spectrum_capture_collection_resources(&request.entries)
+                .map_err(spectrum_diagnostics)?,
+        ),
+    };
+    let spectrum_capture_retained_bytes =
+        spectrum_resources.map_or(0, |resources| resources.retained_bytes);
+    let six_word = attach_live && lanes.routes;
+    #[cfg_attr(not(feature = "control-provider"), allow(unused_mut))]
+    let mut host_projection = {
+        let arithmetic = || resource("host.resource.arithmetic");
+        let estimate = graph_projection.resource_estimate();
+        // The send lanes the attach below gives: every live route that does not follow when the
+        // plan attaches six-word lanes, and every following route; a successor's transition
+        // routes at their bound, every route of the model and every fading copy.
+        let six_ids: Vec<&str> = if six_word {
+            model
+                .routes
+                .iter()
+                .filter(|route| {
+                    controls::route_rows_live(route) && !follows_automated_mute(view, route)
+                })
+                .map(|route| route.id.as_str())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let following: Vec<graph::FollowingRouteBound<'_>> = follow_cells
+            .iter()
+            .map(|(id, (_, cells, vca_mutes, _, _))| {
+                (
+                    *id,
+                    *cells,
+                    [vca_mutes[0].as_slice(), vca_mutes[1].as_slice()],
+                )
+            })
+            .collect();
+        let transition: Vec<&str> = match successor {
+            Some(base) if attach_live && !base.discontinuity => model
+                .routes
+                .iter()
+                .map(|route| route.id.as_str())
+                .chain(route_copies.iter().map(|copy| copy.route.id.as_str()))
+                .collect(),
+            _ => route_copies
+                .iter()
+                .map(|copy| copy.route.id.as_str())
+                .collect(),
+        };
+        let routes = graph::route_control_resources_bound(
+            &six_ids,
+            &following,
+            &transition,
+            u64::try_from(graph_projection.routes().len()).map_err(|_| arithmetic())?,
+            u64::try_from(graph_projection.nodes().len()).map_err(|_| arithmetic())?,
+            graph_projection
+                .routes()
+                .iter()
+                .any(|route| route.gate.silences()),
+        );
+        // The sources: each ring as the loop above charged it, the mappings and the timeline,
+        // whose history covers the largest floored input arrival (#1641 D1).
+        let largest_arrival = graph_projection
+            .input_arrivals()
+            .iter()
+            .map(|(_, arrival)| arrival.0)
+            .max()
+            .unwrap_or(0);
+        let history_blocks = largest_arrival
+            .div_ceil(u64::from(compiled.quantum().0.max(1)))
+            .checked_add(1)
+            .and_then(|blocks| usize::try_from(blocks).ok())
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(arithmetic)?;
+        let source_report = source::project_session_graph_source_set(
+            compiled.quantum(),
+            history_blocks,
+            timeline_carries,
+            &graph_sources,
+            &mappings,
+        )
+        .map_err(|_| graph_failure("host.source.graph.prepare"))?;
+        let carry_bytes = match successor {
+            None => carry_program_bytes,
+            Some(_) => successor_carry_bound(
+                model,
+                &graph_projection,
+                carry_program_bytes,
+                meter_requests.len(),
+                spectrum_resources.is_some(),
+                &route_copies,
+            )
+            .ok_or_else(arithmetic)?,
+        };
+        HostProjection {
+            effects: effect_projection,
+            graph_session_plus_plan_bytes: estimate
+                .session_plus_plan_bytes
+                .checked_add(plan_cell_bytes)
+                .ok_or_else(arithmetic)?,
+            graph_declared_effect_bytes: estimate.declared_effect_bytes,
+            builtin_retained_payload_bytes: builtin_resources.engine_owned_retained_payload_bytes,
+            session_model_bytes: session_resources.compiled_model_bytes,
+            spectrum_capture_retained_bytes,
+            effect_control_resources: projected_effect_controls,
+            route_control_bytes: routes.total_bytes,
+            carry_bytes,
+            inventory_bytes: projected_inventory_bytes(
+                model,
+                &graph_projection,
+                meter_requests.len(),
+                effect_observations.len(),
+                match spectrum_request {
+                    None => 0,
+                    Some(SpectrumPreparation::Single(_)) => 1,
+                    Some(SpectrumPreparation::Collection(request)) => request.entries.len(),
+                },
+                successor.is_some(),
+                &route_copies,
+            )
+            .ok_or_else(arithmetic)?,
+            control_retained_bytes: sources.retained_bytes().ok_or_else(arithmetic)?,
+            source_total_bytes: source_report.total_engine_owned_bytes,
+            source_overhead_bytes: source_report.overhead_bytes,
+            strip_heap_bytes: builtins.track_control_heap_bytes(),
+            observation_handles: effect_observations.len(),
+            observation_slots: if attach_effect_lanes && live_controls.observation_taps != 0 {
+                graph_projection
+                    .effects()
+                    .entries
+                    .iter()
+                    .map(|entry| entry.factory.descriptor().observations.len())
+                    .sum()
+            } else {
+                0
+            },
+            // A preparation builds the catalog itself once admitted, and records its resources.
+            #[cfg(feature = "control-provider")]
+            catalog: if projecting {
+                crate::ControlCatalog::project(
+                    compiled.normalized_model(),
+                    overlay,
+                    compiled.sample_rate().0,
+                )
+                .map_err(|_| resource("host.control_provider.allocation"))?
+            } else {
+                crate::CatalogResources::default()
+            },
+        }
+    };
+    // Issue #2199: the projection's admission, before any processor, bank, plan or lane exists:
+    // the rows the exact admission below charges, at their projected bytes.
+    if host_projection
+        .admitted_graph_and_model()
+        .ok_or_else(|| resource("host.resource.arithmetic"))?
+        > caps.maximum_graph_session_plus_plan_bytes
+    {
+        return Err(resource("host.graph.resource.limit"));
+    }
+    if projecting {
+        return Ok(PrepareOutcome::Projected(Box::new(host_projection)));
+    }
+    #[cfg(feature = "control-provider")]
+    let control_catalog = crate::ControlCatalog::build(
+        compiled.normalized_model(),
+        overlay,
+        compiled.sample_rate().0,
+    )
+    .map_err(|_| resource("host.control_provider.allocation"))?;
+    #[cfg(feature = "control-provider")]
+    {
+        host_projection.catalog = control_catalog.resources();
+    }
+    let mut effect_controls: Vec<EffectControlProducer> = if attach_effect_lanes {
+        attach_projected_effect_live_controls(
+            graph_projection.effects_mut(),
+            &live_superseded,
+            live_controls.observation_taps,
+        )
+        .map_err(effect_diagnostics)?
+    } else {
+        Vec::new()
+    };
+    effect_controls.sort_unstable_by_key(|producer| {
+        (
+            strip_rank(&producer.track_id).unwrap_or(usize::MAX),
+            producer.address,
+        )
+    });
+    debug_assert!(
+        effect_controls
+            .iter()
+            .all(|producer| strip_rank(&producer.track_id).is_some())
+            && effect_controls.iter().all(|producer| {
+                effect_producer_position(
+                    &effect_controls,
+                    strip_rank,
+                    &producer.track_id,
+                    producer.address,
+                )
+                .is_some_and(|index| core::ptr::eq(&effect_controls[index], producer))
+            }),
+        "every effect producer is found by its sorted position"
+    );
+    let mut artifact = GraphCompiler::compile_projected(graph_projection, builtins)
+        .map_err(|failure| graph_diagnostics(&failure.diagnostics))?;
     // #1354 D4: the warm successor re-checks C1 against its own compile, and counts its prime
     // over its own source-claim lines (D3).
     let warm_prime_bytes = match (successor, warm, &warm_restart, &warm_predecessor) {
@@ -4184,7 +4471,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // control channel no six-word lane is attached. #1652 D1 (#1652c): a following route gets
     // its seven-word lane on every plan, whatever the live options, and no six-word lane. A plan
     // with neither binds exactly what it bound before.
-    let six_word = attach_live && lanes.routes;
     // Issue #1363 D1 (a), (c): the routes this successor adds during playback fade in, on the
     // same terms as #1288's strips (a plan that attaches live lanes, never at a declared
     // discontinuity). Each one this plan gives no lane binds as a transition route (D2).
@@ -4374,38 +4660,18 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .map(|(node, arrival)| (node.clone(), arrival.0))
         .collect();
     let mut graph_resources = artifact.graph_resource_estimate().clone();
-    // The plan's own allocations that the graph row does not count: its revision gate (#1502 D1),
-    // its jump-length cell (#1639 D1, attached after bind below) and, when this preparation made
-    // its own `live_values_superseded` count rather than taking the session's, that count (#1312
-    // D2; a session's count is the host's to charge once): the jump-length cell's reader holds a
-    // clone of it in every plan. Charged here so every host, the C ABI and the browser, counts
-    // them in the one row.
     graph_resources.session_plus_plan_bytes = graph_resources
         .session_plus_plan_bytes
-        .checked_add(engine::realtime::plan_revision_gate_retained_bytes())
-        .and_then(|bytes| bytes.checked_add(graph::jump_length_retained_bytes()))
-        .and_then(|bytes| {
-            bytes.checked_add(if superseded.is_none() {
-                LiveValuesSuperseded::retained_bytes()
-            } else {
-                0
-            })
-        })
+        .checked_add(plan_cell_bytes)
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    // #1953b: the session the graph was compiled from, fading copies included.
-    let session_resources = graph_session.resource_estimate();
-    let spectrum_resources: Option<SpectrumCaptureResources> = match spectrum_request {
-        None => None,
-        Some(SpectrumPreparation::Single(request)) => Some(
-            crate::spectrum::spectrum_capture_resources_for(&request.target),
-        ),
-        Some(SpectrumPreparation::Collection(request)) => Some(
-            spectrum_capture_collection_resources(&request.entries)
-                .map_err(spectrum_diagnostics)?,
-        ),
-    };
-    let spectrum_capture_retained_bytes =
-        spectrum_resources.map_or(0, |resources| resources.retained_bytes);
+    // Issue #2199: the plan's graph row and builtins row are the projection's, exactly (the
+    // compile lowers the plan the projection estimated, from the builtins it projected with).
+    if graph_resources.session_plus_plan_bytes != host_projection.graph_session_plus_plan_bytes
+        || builtin_resources.engine_owned_retained_payload_bytes
+            != host_projection.builtin_retained_payload_bytes
+    {
+        return Err(platform("host.graph.projection"));
+    }
     let graph_and_model_without_effect_controls = graph_resources
         .session_plus_plan_bytes
         .checked_add(session_resources.compiled_model_bytes)
@@ -5507,6 +5773,25 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         lead_samples: warm.map_or(0, |lead| lead.lead_samples),
         prime_bytes: warm_prime_bytes,
     };
+    // Issue #2199: the rows the projection was admitted on, against what the plan holds. The
+    // exact rows are the projection's own; a ceiling row the plan exceeds, or an exact one it
+    // misses, is an internal fault, never a session's: the admission charged less than the plan.
+    let inventory_retained_bytes = inventory.retained_bytes();
+    if native_effect_control_resources != host_projection.effect_control_resources
+        || source_resources.total_engine_owned_bytes != host_projection.source_total_bytes
+        || source_resources.overhead_bytes != host_projection.source_overhead_bytes
+        || control_retained_bytes != host_projection.control_retained_bytes
+    {
+        return Err(platform("host.graph.projection"));
+    }
+    if route_control_resources.total_bytes > host_projection.route_control_bytes
+        || carry_program_retained_bytes
+            .checked_add(fade_arm_bytes)
+            .is_none_or(|bytes| bytes > host_projection.carry_bytes)
+        || inventory_retained_bytes > host_projection.inventory_bytes
+    {
+        return Err(platform("host.control.projection"));
+    }
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
         quantum_frames: compiled.quantum().0,
@@ -5533,7 +5818,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         carried_source_total_bytes: carried_total_bytes,
         carried_source_overhead_bytes: carried_overhead_bytes,
         carry_program_retained_bytes,
-        inventory_retained_bytes: inventory.retained_bytes(),
+        inventory_retained_bytes,
         effect_scalar_state_bytes: effect_state_bytes,
         effect_scalar_scratch_bytes: effect_scratch_bytes,
         builtin_processor_payload_bytes: builtin_resources.engine_owned_processor_payload_bytes,
@@ -5678,7 +5963,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
     }
 
-    Ok((
+    Ok(PrepareOutcome::Prepared(Box::new((
         PreparedHost {
             plan,
             sources,
@@ -5700,7 +5985,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             jump_lengths: Some(jump_lengths),
         },
         spectrum_capture,
-    ))
+    ))))
 }
 
 /// The meters a preparation builds, as `(strip ID, tap, metric set)` in reader order (#1327): the
@@ -9642,6 +9927,360 @@ pub fn check_effect_projection(
         }
     }
     Ok(())
+}
+
+/// What a preparation of a session retains, projected before it allocates any effect processor,
+/// effect bank, plan, source ring or live-control lane (issue #2199).
+///
+/// [`project_host_session`] returns it, and every preparation computes it at the same point and
+/// is admitted on it ([`Self::admitted_graph_and_model`] against
+/// `maximum_graph_session_plus_plan_bytes`) before it prepares a processor. The rows marked exact
+/// are the prepared report's own, and preparation refuses a plan whose report differs from them
+/// (`host.graph.projection`); the rows marked as a ceiling bound the report's from above
+/// (`host.control.projection` when one does not), at their count bound for what only a successor
+/// holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostProjection {
+    /// The effect state, scratch and processor bytes (issue #2194), from the descriptors.
+    pub effects: EffectStateProjection,
+    /// The report's `graph_session_plus_plan_bytes`, exact: the graph's capped estimate, which
+    /// holds the declared effect state and scratch and the builtins' banks and owners, and the
+    /// plan's fixed cells.
+    pub graph_session_plus_plan_bytes: u64,
+    /// The declared effect state and scratch inside [`Self::graph_session_plus_plan_bytes`].
+    pub graph_declared_effect_bytes: u64,
+    /// The report's `builtin_retained_payload_bytes`, exact.
+    pub builtin_retained_payload_bytes: u64,
+    /// The report's `session_model_bytes`, exact: the model the graph is compiled from.
+    pub session_model_bytes: u64,
+    /// The report's `spectrum_capture_retained_bytes`, exact.
+    pub spectrum_capture_retained_bytes: u64,
+    /// The report's `effect_control_resources`, exact.
+    pub effect_control_resources: EffectControlResources,
+    /// A ceiling of the report's `route_control_resources.total_bytes`.
+    pub route_control_bytes: u64,
+    /// A ceiling of the report's `carry_program_retained_bytes`: the carry program's exact bytes
+    /// and, for a successor, every later carry section at its count bound.
+    pub carry_bytes: u64,
+    /// A ceiling of the report's `inventory_retained_bytes`.
+    pub inventory_bytes: u64,
+    /// The report's `control_retained_bytes`, exact: the source control table and ID arena.
+    pub control_retained_bytes: u64,
+    /// The report's `source_total_bytes`, exact.
+    pub source_total_bytes: u64,
+    /// The report's `source_overhead_bytes`, exact.
+    pub source_overhead_bytes: u64,
+    /// The heap the strip producers own beyond their table, exact: what the control plane charges
+    /// its strip producer table from ([`crate::strip_control_table_bytes`]).
+    pub strip_heap_bytes: u64,
+    /// The effect observation handles the plan's readers are, exact, and the slots their
+    /// producers' observation queues hold.
+    pub observation_handles: usize,
+    /// The observation slots of the effect producers' queues, exact.
+    pub observation_slots: usize,
+    /// The provider catalog's resources, exact ([`crate::ControlCatalog::project`]).
+    #[cfg(feature = "control-provider")]
+    pub catalog: crate::CatalogResources,
+}
+
+impl HostProjection {
+    /// What preparation admits against `maximum_graph_session_plus_plan_bytes`: the graph row,
+    /// the compiled model, the spectrum capture, the effect producers' table and payload, the send
+    /// lanes and the carry. `None` on overflow.
+    #[must_use]
+    pub fn admitted_graph_and_model(&self) -> Option<u64> {
+        self.graph_session_plus_plan_bytes
+            .checked_add(self.session_model_bytes)?
+            .checked_add(self.spectrum_capture_retained_bytes)?
+            .checked_add(self.effect_control_resources.total_bytes()?)?
+            .checked_add(self.route_control_bytes)?
+            .checked_add(self.carry_bytes)
+    }
+
+    /// Every engine-owned byte the prepared host retains, at most: the admitted rows, the
+    /// effect processors' boxes and undeclared heap beyond the graph's declared state, the state
+    /// inventory, the source control set and the sources. `None` on overflow.
+    #[must_use]
+    pub fn retained_bytes(&self) -> Option<u64> {
+        self.admitted_graph_and_model()?
+            .checked_add(self.effects.inline_bytes)?
+            .checked_add(self.effects.undeclared_heap_bytes)?
+            .checked_add(self.inventory_bytes)?
+            .checked_add(self.control_retained_bytes)?
+            .checked_add(self.source_total_bytes)
+    }
+}
+
+/// What a projection takes (issue #2199): the inputs of the preparation it projects.
+#[derive(Clone, Copy)]
+pub struct HostProjectionRequest<'a> {
+    /// The live-control request, or `None` for the plain entry, as for preparation.
+    pub live_controls: Option<&'a HostLiveControlRequest>,
+    /// The caller's meters, or `None` for the core's selection.
+    pub selected_meters: Option<&'a [HostMeterRequest]>,
+    /// The bank dispatch.
+    pub backend: Backend,
+    /// The spectrum preparation.
+    pub spectrum: Option<&'a SpectrumPreparation>,
+    /// The base the plan would succeed, or `None` for a first plan.
+    pub successor: Option<SuccessorBase<'a>>,
+    /// The live lanes the plan would attach.
+    pub lanes: HostLiveLanes,
+    /// The session's `live_values_superseded` count, or `None` for the preparation's own.
+    pub superseded: Option<&'a LiveValuesSuperseded>,
+}
+
+/// Project what preparing `compiled` under `caps` and `request` retains, before allocating any
+/// effect processor, effect bank, plan, source ring or live-control lane (issue #2199): the
+/// preparation itself, stopped at its projection. It prepares the builtins and builds the graph's
+/// front, as preparation does, and drops them.
+///
+/// # Errors
+///
+/// Every refusal preparation makes up to its projection, its admission included
+/// (`host.graph.resource.limit`).
+pub fn project_host_session(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    request: HostProjectionRequest<'_>,
+) -> Result<HostProjection, PrepareDiagnostics> {
+    match prepare_or_project(
+        compiled,
+        caps,
+        request.live_controls,
+        request.selected_meters,
+        request.backend,
+        request.spectrum,
+        request.successor,
+        request.lanes,
+        request.superseded,
+        PrepareMode::Project,
+    )? {
+        PrepareOutcome::Projected(projection) => Ok(*projection),
+        PrepareOutcome::Prepared(_) => Err(platform("host.graph.projection")),
+    }
+}
+
+/// A ceiling of what a successor's carry sections and fade arms retain (issue #2199, root ruling
+/// Q2): `carry_program_bytes` (its carry program and input moves, known before the compile) and
+/// every later section at its count bound, as though every owner carried: a strip move per strip
+/// stage, an effect move per instance with the largest declared state as scratch and every
+/// planned lane's carry slots, an observer move per meter and spectrum entry and a join per meter,
+/// a tap move per instance, a line move and a prime fill per compensation line, a strip-delay
+/// move and fill per strip delay, a send move per route, and a fade arm per strip, route and copy.
+fn successor_carry_bound(
+    model: &SessionModel,
+    projection: &graph_compiler::GraphProjection,
+    carry_program_bytes: u64,
+    meters: usize,
+    spectrum: bool,
+    route_copies: &[RouteCopy],
+) -> Option<u64> {
+    let strips = model.strips().count();
+    let entries = &projection.effects().entries;
+    let scratch = entries
+        .iter()
+        .map(|entry| entry.metadata.state_sizes.total())
+        .try_fold(0_u64, |largest, total| Some(largest.max(total?)))?;
+    let slots = entries
+        .iter()
+        .filter_map(|entry| entry.lane_layout())
+        .try_fold(0_u64, |total, lane| {
+            total.checked_add(lane.carry_slot_bytes)
+        })?;
+    let lines = projection.inserted_delays().len();
+    let strip_delays = projection.track_delays().len();
+    let routes = model.routes.len();
+    let arms = strips + routes + route_copies.len();
+    let spectrum = usize::from(spectrum);
+    [
+        Some(carry_program_bytes),
+        u64::try_from(
+            strips
+                .checked_mul(2)?
+                .checked_mul(size_of::<graph::GraphStripMove>())?,
+        )
+        .ok(),
+        graph::effect_carry_retained_bytes(entries.len(), scratch, slots),
+        graph::observer_carry_retained_bytes(meters + spectrum, meters, entries.len()),
+        graph::delay_carry_retained_bytes(lines),
+        graph::strip_delay_carry_retained_bytes(strip_delays),
+        graph::prime_carry_retained_bytes(strip_delays, lines),
+        graph::route_carry_retained_bytes(routes, routes),
+        graph::fade_arm_table_bytes(arms, arms),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, row| total.checked_add(row?))
+}
+
+/// Bytes of ID text a graph edge ID owns on the heap.
+fn graph_edge_heap_bytes(id: &graph::GraphEdgeId) -> usize {
+    match id {
+        graph::GraphEdgeId::TrackMain { target } => graph_node_heap_bytes(target),
+        graph::GraphEdgeId::RouteSource { route_id }
+        | graph::GraphEdgeId::RouteDestination { route_id } => route_id.as_str().len(),
+        graph::GraphEdgeId::EffectSidechain { effect, port } => {
+            effect.track_id.as_str().len() + effect.effect_id.as_str().len() + port.len()
+        }
+    }
+}
+
+/// A ceiling of the [`PlanStateInventory::retained_bytes`] of a plan of `model` whose graph is
+/// `projection` (issue #2199): every row at its count bound, sized as the inventory charges it.
+/// `meters`, `observations` and `spectrum` are the plan's meter requests, observation handles and
+/// spectrum entries; a successor's rows (restarts, fade arms and their watch, pairings) are
+/// charged at their bound, and `route_copies` are its fading copies.
+fn projected_inventory_bytes(
+    model: &SessionModel,
+    projection: &graph_compiler::GraphProjection,
+    meters: usize,
+    observations: usize,
+    spectrum: usize,
+    successor: bool,
+    route_copies: &[RouteCopy],
+) -> Option<u64> {
+    let strips = model.strips().count();
+    let strip_ids: usize = model.strips().map(|strip| strip.id.as_str().len()).sum();
+    let longest_strip_id = model
+        .strips()
+        .map(|strip| strip.id.as_str().len())
+        .max()
+        .unwrap_or(0);
+    let source_ids: usize = model
+        .sources
+        .iter()
+        .map(|source| source.id.as_str().len())
+        .sum();
+    let route_ids: usize = model
+        .routes
+        .iter()
+        .map(|route| route.id.as_str().len())
+        .sum();
+    let (effects, effect_ids) = model
+        .strips()
+        .fold((0_usize, 0_usize), |(count, ids), strip| {
+            let lowered = model.lower_strip(&strip);
+            lowered
+                .in_chain_order()
+                .iter()
+                .flat_map(|rack| rack.iter())
+                .fold((count, ids), |(count, ids), effect| {
+                    (
+                        count + 1,
+                        ids + strip.id.as_str().len() + effect.id.as_str().len(),
+                    )
+                })
+        });
+    let longest_node = projection
+        .nodes()
+        .iter()
+        .map(|node| graph_node_heap_bytes(&node.id))
+        .max()
+        .unwrap_or(0);
+    let delay_ids: usize = projection
+        .inserted_delays()
+        .iter()
+        .map(|delay| graph_edge_heap_bytes(&delay.edge_id) + 2 * longest_node)
+        .sum();
+    let arrivals: usize = projection
+        .input_arrivals()
+        .iter()
+        .chain(projection.raised_arrivals())
+        .map(|(node, _)| graph_node_heap_bytes(node))
+        .sum();
+    let copies = route_copies.len();
+    let copy_ids: usize = route_copies
+        .iter()
+        .map(|copy| {
+            let source = match &copy.route.source {
+                session::RouteSource::Track { track_id, .. } => track_id.as_str().len(),
+                session::RouteSource::Submix { submix_id, .. } => submix_id.as_str().len(),
+            };
+            let destination = match &copy.route.destination {
+                session::RouteDestination::SubmixInput { submix_id } => submix_id.as_str().len(),
+                session::RouteDestination::OutputInput { output_id } => output_id.as_str().len(),
+            };
+            copy.route.id.as_str().len() + source + destination
+        })
+        .sum();
+    // A successor's own rows: each strip restarted, a fade arm per strip, route and copy, the
+    // watch's flags, and the meter and spectrum pairings.
+    let (restarted, arms, pairings_meters, pairings_spectrum, restarted_ids, arm_ids) = if successor
+    {
+        (
+            strips,
+            strips + model.routes.len() + copies,
+            meters,
+            spectrum,
+            strip_ids,
+            strip_ids + route_ids,
+        )
+    } else {
+        (0, copies, 0, 0, 0, 0)
+    };
+    let watch = if arms == 0 {
+        0
+    } else {
+        arms * core::mem::size_of::<core::sync::atomic::AtomicU8>() + 2 * size_of::<usize>()
+    };
+    let rows = [
+        model
+            .sources
+            .len()
+            .checked_mul(size_of::<SourceInventoryRow>())?,
+        strips.checked_mul(size_of::<InputSectionInventoryRow>())?,
+        strips.checked_mul(2 * size_of::<StripStageInventoryRow>())?,
+        effects.checked_mul(size_of::<EffectLaneInventoryRow>())?,
+        meters.checked_mul(size_of::<MeterInventoryRow>())?,
+        observations.checked_mul(size_of::<ObservationInventoryRow>())?,
+        spectrum.checked_mul(size_of::<SpectrumInventoryRow>())?,
+        pairings_spectrum.checked_mul(size_of::<crate::spectrum::SpectrumPair>())?,
+        pairings_meters.checked_mul(size_of::<engine::realtime::ObserverCarry>())?,
+        projection
+            .inserted_delays()
+            .len()
+            .checked_mul(size_of::<graph::GraphDelayLine>())?,
+        projection
+            .track_delays()
+            .len()
+            .checked_mul(size_of::<graph::GraphStripDelayLine>())?,
+        model
+            .routes
+            .len()
+            .checked_mul(size_of::<graph::GraphLiveRoute>())?,
+        restarted.checked_mul(size_of::<Box<str>>())?,
+        arms.checked_mul(size_of::<FadeArmInventoryRow>())?,
+        copies.checked_mul(size_of::<RouteCopyRow>())?,
+        projection
+            .input_arrivals()
+            .len()
+            .checked_add(projection.raised_arrivals().len())?
+            .checked_mul(size_of::<(graph::GraphNodeId, u64)>())?,
+        PublishedGeneration::retained_bytes(),
+        // ID text: the sources', each strip's input and its two stages', each effect lane's, a
+        // meter's and a spectrum row's strip, the lines', the strip delays', every route's, a
+        // successor's restarts and arms, the copies' and the arrivals' nodes.
+        source_ids,
+        strip_ids.checked_mul(3)?,
+        effect_ids,
+        meters
+            .checked_add(spectrum)?
+            .checked_mul(longest_strip_id)?,
+        delay_ids,
+        projection
+            .track_delays()
+            .len()
+            .checked_mul(longest_strip_id)?,
+        route_ids,
+        restarted_ids,
+        arm_ids,
+        copy_ids,
+        arrivals,
+        watch,
+    ];
+    rows.into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .and_then(|bytes| u64::try_from(bytes).ok())
 }
 
 /// Total effect instances across every strip: one per console entry, since each lowers to one

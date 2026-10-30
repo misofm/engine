@@ -1015,6 +1015,19 @@ impl GraphCompiler {
         let banked: BTreeSet<&EffectNodeId> =
             banks.iter().flat_map(|bank| bank.members.iter()).collect();
         let mut diagnostics = Vec::new();
+        // The estimate charged each lane as the projection laid it out; a lane attached since
+        // must be that lane, or the plan's estimate is not its own.
+        if entries.iter().any(|entry| {
+            entry.planned_lane.is_some_and(|planned| {
+                entry
+                    .control
+                    .as_deref()
+                    .map(effect_contract::EffectControlLane::layout)
+                    != Some(planned)
+            })
+        }) {
+            diagnostics.push(diag("graph.effect.control_layout", "$.effects"));
+        }
         for (index, entry) in entries.iter().enumerate() {
             let per_node = effect_ids[index]
                 .as_ref()
@@ -1199,6 +1212,44 @@ impl GraphProjection {
     #[must_use]
     pub const fn resource_estimate(&self) -> &GraphResourceEstimate {
         &self.front.capped_estimate
+    }
+
+    /// The floored input arrival of every node at which it is nonzero, sorted by node ID: the
+    /// compiled plan's [`GraphCompileReport::input_arrivals`].
+    #[must_use]
+    pub fn input_arrivals(&self) -> &[(GraphNodeId, LatencySamples)] {
+        &self.front.timing.input_arrivals
+    }
+
+    /// The natural arrival of every node a floor raised: the compiled plan's
+    /// [`GraphCompileReport::raised_arrivals`].
+    #[must_use]
+    pub fn raised_arrivals(&self) -> &[(GraphNodeId, LatencySamples)] {
+        &self.front.timing.raised_arrivals
+    }
+
+    /// The compensation delays PDC inserts: the compiled plan's compensation lines.
+    #[must_use]
+    pub fn inserted_delays(&self) -> &[InsertedDelay] {
+        &self.front.timing.delays
+    }
+
+    /// The strips' input-side delay lines, declared delays and source-claim lines together.
+    #[must_use]
+    pub fn track_delays(&self) -> &[PreparedTrackDelay] {
+        &self.front.track_delays
+    }
+
+    /// The graph's nodes, before PDC's.
+    #[must_use]
+    pub fn nodes(&self) -> &[GraphNode] {
+        &self.front.nodes
+    }
+
+    /// The graph's prepared routes.
+    #[must_use]
+    pub fn routes(&self) -> &[PreparedRoute] {
+        &self.front.route_transforms
     }
 
     /// The projected effects, which travel into the compile.

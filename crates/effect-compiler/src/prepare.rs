@@ -1,10 +1,10 @@
 use effect_contract::{
-    EffectCellWriter, EffectControlLane, EffectControlRecord, EffectDescriptor, EffectLaneShape,
-    EffectLaneSpec, EffectQuality, EffectWriteRefusal, InitialParameterValue, LinkMode,
-    NativeEffectFactory, NativeEffectRegistry, ObservationLane, ObservePushError, ParameterChannel,
-    ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedEffect, PreparedEffectMetadata, PreparedNativeEffect, PreparedPorts,
-    PreparedSidechainPort, RegisteredTailBound, RegistryError, effect_control_lane,
+    EffectCellWriter, EffectControlLane, EffectControlRecord, EffectDescriptor, EffectLaneLayout,
+    EffectLaneShape, EffectLaneSpec, EffectQuality, EffectWriteRefusal, InitialParameterValue,
+    LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane, ObservePushError,
+    ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedEffect, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedPorts, PreparedSidechainPort, RegisteredTailBound, RegistryError, effect_control_lane,
     expected_prepared_metadata,
 };
 use engine::realtime::{LiveStamp, LiveValuesSuperseded, ObservationReader, observation_slot};
@@ -82,6 +82,21 @@ pub struct EffectProjectedEntry {
     /// `None` here, and the runtime turns that back into the byte-identical unobserved path: there
     /// is no lane, no slot and no vector anywhere in the compiled plan.
     pub observation: Option<Box<ObservationLane>>,
+    /// The layout of the live-control lane [`plan_projected_effect_live_controls`] planned for this
+    /// instance, before the lane is attached (issue #2199), or `None` when none was planned. The
+    /// graph's estimate charges it in place of [`Self::control`]; the lane attached afterwards must
+    /// have exactly this layout.
+    pub planned_lane: Option<EffectLaneLayout>,
+}
+
+impl EffectProjectedEntry {
+    /// The live-control lane the graph's estimate charges for this instance: the planned one when
+    /// a lane was planned, else the attached one's ([`EffectControlLane::layout`]), else none.
+    #[must_use]
+    pub fn lane_layout(&self) -> Option<EffectLaneLayout> {
+        self.planned_lane
+            .or_else(|| self.control.as_deref().map(EffectControlLane::layout))
+    }
 }
 
 /// One prepared native effect instance: its [`EffectProjectedEntry`] and its prepared processor.
@@ -760,6 +775,7 @@ fn project_with_console_eligibility(
                 .bypass
                 .then(|| Box::new(EffectControlLane::without_channel(true))),
             observation: None,
+            planned_lane: None,
         });
     });
     if diagnostics.is_empty() {
@@ -963,7 +979,7 @@ pub struct EffectControlProducer {
 }
 
 /// Checked native allocations retained by one effect-control producer table.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EffectControlResources {
     /// The actual backing allocation of the native producer `Vec`, using its capacity.
     pub producer_table_bytes: u64,
@@ -2021,61 +2037,27 @@ fn attach_live_controls<'e>(
     let mut producers = Vec::with_capacity(entries.len());
     let mut diagnostics = Vec::new();
     for entry in entries {
-        let path = format!("{}.effects[id={}]", entry.strip_path, entry.effect_id);
-        let descriptor = entry.factory.descriptor();
-        let target_capability = entry.factory.target_preparation();
-        let target_slots = target_capability.map_or(0, |capability| capability.target_slots());
-        let shape = EffectLaneShape::from_descriptor(descriptor, target_slots);
-        if (entry.metadata.automation_capacity as usize) < shape.parameter_cells() {
-            diagnostics.push(EffectDiagnostic {
-                code: "effect.control.capacity",
-                path,
-            });
-            continue;
-        }
-        let Some(&address) = declared.get(&(
-            entry.track_id.as_str(),
-            entry.rack,
-            entry.effect_id.as_str(),
-        )) else {
+        let (address, spec) = match live_lane_spec(entry, &declared, observation_taps) {
+            Ok(value) => value,
+            Err(diagnostic) => {
+                diagnostics.push(diagnostic);
+                continue;
+            }
+        };
+        let Some((writer, lane)) = effect_control_lane(spec, superseded) else {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.control.prepare",
-                path,
+                path: entry.path(),
             });
             continue;
         };
-        let observation_depth = if observation_taps == 0 {
-            0
-        } else {
-            descriptor.observations.len()
-        };
-        // Seeded from the session's bypass, not the prepared one: an effect whose bypass is
-        // lowered is prepared enabled (issue #1087), and this lane replaces the channel-less
-        // lane that carried the same bit.
-        // #1371 D6: the prepared link mode, which a plan-swap carry seats before a restore.
-        let link = shape.has_link().then_some(entry.metadata.link_mode);
-        let Some((writer, lane)) = effect_control_lane(
-            EffectLaneSpec {
-                shape,
-                bypass: entry.initial_bypass,
-                observation_depth,
-                link,
-            },
-            superseded,
-        ) else {
-            diagnostics.push(EffectDiagnostic {
-                code: "effect.control.prepare",
-                path,
-            });
-            continue;
-        };
-        let owner = if target_capability.is_some() {
+        let owner = if entry.factory.target_preparation().is_some() {
             match EffectControlOwner::new(Arc::clone(&entry.factory), &entry.bank_preparation) {
                 Ok(owner) => Some(Box::new(owner)),
                 Err(_) => {
                     diagnostics.push(EffectDiagnostic {
                         code: "effect.control.owner",
-                        path,
+                        path: entry.path(),
                     });
                     continue;
                 }
@@ -2087,7 +2069,7 @@ fn attach_live_controls<'e>(
             track_id: entry.track_id.as_str().into(),
             address,
             effect_id: entry.effect_id.as_str().into(),
-            descriptor,
+            descriptor: entry.factory.descriptor(),
             writer,
             owner,
         });
@@ -2098,6 +2080,170 @@ fn attach_live_controls<'e>(
     } else {
         Err(EffectDiagnosticSet::sorted(diagnostics))
     }
+}
+
+/// The address and the lane spec of `entry`'s live-control lane: the one derivation behind
+/// [`attach_live_controls`] and [`plan_projected_effect_live_controls`], with their per-entry
+/// refusals (`effect.control.capacity`, `effect.control.prepare`).
+fn live_lane_spec(
+    entry: &EffectProjectedEntry,
+    declared: &BTreeMap<(&str, EffectRack, &str), LiveEffectAddress>,
+    observation_taps: u32,
+) -> Result<(LiveEffectAddress, EffectLaneSpec), EffectDiagnostic> {
+    let descriptor = entry.factory.descriptor();
+    let target_slots = entry
+        .factory
+        .target_preparation()
+        .map_or(0, |capability| capability.target_slots());
+    let shape = EffectLaneShape::from_descriptor(descriptor, target_slots);
+    if (entry.metadata.automation_capacity as usize) < shape.parameter_cells() {
+        return Err(EffectDiagnostic {
+            code: "effect.control.capacity",
+            path: entry.path(),
+        });
+    }
+    let Some(&address) = declared.get(&(
+        entry.track_id.as_str(),
+        entry.rack,
+        entry.effect_id.as_str(),
+    )) else {
+        return Err(EffectDiagnostic {
+            code: "effect.control.prepare",
+            path: entry.path(),
+        });
+    };
+    let observation_depth = if observation_taps == 0 {
+        0
+    } else {
+        descriptor.observations.len()
+    };
+    // Seeded from the session's bypass, not the prepared one: an effect whose bypass is
+    // lowered is prepared enabled (issue #1087), and this lane replaces the channel-less
+    // lane that carried the same bit.
+    // #1371 D6: the prepared link mode, which a plan-swap carry seats before a restore.
+    let link = shape.has_link().then_some(entry.metadata.link_mode);
+    Ok((
+        address,
+        EffectLaneSpec {
+            shape,
+            bypass: entry.initial_bypass,
+            observation_depth,
+            link,
+        },
+    ))
+}
+
+/// Lay out the live-control lanes [`attach_projected_effect_live_controls`] would attach, without
+/// attaching any (issue #2199): every entry's [`EffectProjectedEntry::planned_lane`] is set to the
+/// layout of the lane it would get, and the producers' [`EffectControlResources`] are returned as
+/// [`effect_control_resources`] would walk them over the attached producers. A host projects a
+/// session's graph and control rows from these before it allocates a lane, and then attaches.
+///
+/// # Errors
+///
+/// The diagnostics [`attach_projected_effect_live_controls`] would return.
+pub fn plan_projected_effect_live_controls(
+    projected: &mut EffectProjectedSession,
+    observation_taps: u32,
+) -> Result<EffectControlResources, EffectDiagnosticSet> {
+    let declared = declared_live_addresses(&projected.session);
+    let arithmetic = || {
+        EffectDiagnosticSet::sorted(vec![EffectDiagnostic {
+            code: "effect.control.resource.arithmetic",
+            path: "$.effects".to_owned(),
+        }])
+    };
+    let mut diagnostics = Vec::new();
+    let mut owned_payload_bytes = 0_u64;
+    let mut largest_owned_allocation_bytes = 0_u64;
+    let mut factory_payload_bytes = 0_u64;
+    let mut charged_factories: Vec<&Arc<dyn NativeEffectFactory>> = Vec::new();
+    let mut planned = Vec::with_capacity(projected.entries.len());
+    for entry in &projected.entries {
+        let (_, spec) = match live_lane_spec(entry, &declared, observation_taps) {
+            Ok(value) => value,
+            Err(diagnostic) => {
+                diagnostics.push(diagnostic);
+                planned.push(None);
+                continue;
+            }
+        };
+        let Some(lane) = spec.project() else {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.control.prepare",
+                path: entry.path(),
+            });
+            planned.push(None);
+            continue;
+        };
+        if entry.factory.target_preparation().is_some() {
+            match EffectControlOwner::projected_resources(&entry.factory, &entry.bank_preparation) {
+                Ok(facts) => {
+                    let facts = facts.map_err(|_| arithmetic())?;
+                    owned_payload_bytes = owned_payload_bytes
+                        .checked_add(facts.owned_payload_bytes)
+                        .ok_or_else(arithmetic)?;
+                    largest_owned_allocation_bytes =
+                        largest_owned_allocation_bytes.max(facts.largest_owned_allocation_bytes);
+                    // #1469 Amendment 1: a factory the launch registry owns is process-level
+                    // memory the plan's clone does not allocate; any other is charged once.
+                    if !charged_factories
+                        .iter()
+                        .any(|charged| Arc::ptr_eq(charged, &entry.factory))
+                        && !launch_registry_owns_factory(&entry.factory)
+                    {
+                        charged_factories.push(&entry.factory);
+                        factory_payload_bytes = factory_payload_bytes
+                            .checked_add(facts.factory_allocation_bytes)
+                            .ok_or_else(arithmetic)?;
+                        largest_owned_allocation_bytes =
+                            largest_owned_allocation_bytes.max(facts.factory_allocation_bytes);
+                    }
+                }
+                Err(_) => {
+                    diagnostics.push(EffectDiagnostic {
+                        code: "effect.control.owner",
+                        path: entry.path(),
+                    });
+                    planned.push(None);
+                    continue;
+                }
+            }
+        }
+        for text in [&entry.track_id, &entry.effect_id] {
+            let bytes = u64::try_from(text.len()).map_err(|_| arithmetic())?;
+            owned_payload_bytes = owned_payload_bytes
+                .checked_add(bytes)
+                .ok_or_else(arithmetic)?;
+            largest_owned_allocation_bytes = largest_owned_allocation_bytes.max(bytes);
+        }
+        owned_payload_bytes = owned_payload_bytes
+            .checked_add(lane.writer.total_bytes)
+            .ok_or_else(arithmetic)?;
+        largest_owned_allocation_bytes =
+            largest_owned_allocation_bytes.max(lane.writer.largest_allocation_bytes);
+        planned.push(Some(lane.lane));
+    }
+    if !diagnostics.is_empty() {
+        return Err(EffectDiagnosticSet::sorted(diagnostics));
+    }
+    for (entry, lane) in projected.entries.iter_mut().zip(planned) {
+        entry.planned_lane = lane;
+    }
+    // The producer table is built at exactly one entry per instance (`attach_live_controls`).
+    let producer_table_bytes = projected
+        .entries
+        .len()
+        .checked_mul(core::mem::size_of::<EffectControlProducer>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(arithmetic)?;
+    Ok(EffectControlResources {
+        producer_table_bytes,
+        owned_payload_bytes: owned_payload_bytes
+            .checked_add(factory_payload_bytes)
+            .ok_or_else(arithmetic)?,
+        largest_owned_allocation_bytes,
+    })
 }
 
 /// The control-side reader half of one prepared effect instance's observation taps (issue #143).
