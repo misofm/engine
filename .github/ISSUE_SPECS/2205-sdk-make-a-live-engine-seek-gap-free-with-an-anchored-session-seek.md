@@ -207,3 +207,41 @@ Null sink, Chromium 151, 5 runs x 5 seeks per mode:
   console-workload release tests, the artifact build and `check-web-audioworklet.sh`,
   `test-web-audioworklet.mjs`, the SDK headless/types/generated/deletions/package checks, and the
   layout self-test.
+
+## Attempt 2, continued (root ruling 2026-10-29): close the stopped single-mode underrun
+
+The console seeks only while stopped, so this path matters.
+- **The fix:**
+  - **SDK, the existing machinery:** in its not-live branch with the context suspended,
+    `engine.seek(frame, { producers })` runs the documented suspended flow after the producers
+    repositioned (their ring seeks are published first, as the documented flow orders it). Each
+    feed linked to the engine (`linkFeedEngine`'s feed set; `FeedRetirement.prepareSeeks`) runs
+    its own `prepareSeek()`, so the stale shared slots free while suspended and the target's
+    chunks are queued before `play()`. A feed that cannot be prepared (a ring no producer moved:
+    `prepareSuperseded`, or `prepareState`) is skipped, because the engine has already accepted
+    the seek; any other feed failure rejects as it would on the app's own call.
+  - **Engine:** on the render instance, `session_prepare_seek` also prepares every consumer the
+    rendering plan holds (control-plane `for_each_rendering_session_frame`), as
+    `source_prepare_seek` does for one, so the refill always has room. Without it one run measured
+    0 as well, because that engine ring happened not to be full at resume.
+  - No new export. Worker mode keeps its result (0 underrun), and a stopped seek gains one feed
+    round trip there (not timed).
+- **Gate:** `pcm-feed-stopped-seek` is now gated at 0 underrun frames on Chromium, both modes.
+  On c3653e567 it is red in single mode: 7 of 10 seeks (2 runs) underran 128-3200 frames. The
+  earlier report there was 22 of 25.
+- **New host-web test:**
+  `session_seek::an_at_once_session_seek_frees_a_full_ring_for_the_target_before_the_next_block`.
+  It is red without the consumer prepare ("the full ring took the target": left 6, right 0).
+- **README:** a stopped `engine.seek` needs no separate `prepareSeek` call.
+- **A qualification artifact found on the way:** with an `sdk/dist` present, `run.mjs` bundles
+  that build output instead of the SDK source (CI bundles the source). The first runs of this
+  change bundled a stale `dist` from the previous package check. `dist` was then removed, and
+  every run below bundled the source ("CI's mode"). Earlier attempts' runs each followed a
+  package check of the same SDK.
+- **Runs (head `2738d9c40`, Chromium 151, null sink, 5 runs x 5 seeks per mode):** 0 of 25
+  underrun and 0 late or split landings in every row (per-source, transport and stopped, both
+  modes). Transport latency 13.3 / 24.0 / 34.7 ms (worker) and 48.0 / 48.0 / 50.7 ms (single).
+  WebKit, one run: 0 underrun in every row.
+- **Checks:** `--check-matrix --sdk-root` passes on Chromium and WebKit, both legs. The SDK
+  checks, both case tables, `check-web-audioworklet.sh`, the control-plane and host-web feature
+  tests, clippy, doc, fmt and the policies pass.
