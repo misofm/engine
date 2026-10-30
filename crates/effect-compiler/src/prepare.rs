@@ -29,15 +29,24 @@ pub struct EffectCompileCaps {
     /// Ceiling on the descriptor-derived per-instance capacity; never a requested window size.
     pub maximum_automation_spans_per_block: u32,
 }
-pub struct EffectPreparedEntry {
+/// One native effect instance of a session, resolved, validated and designed, with no processor
+/// prepared (issue #2199): what the graph compiler projects a session's graph from and plans its
+/// banks over. [`EffectPreparedEntry`] is this with the instance's prepared processor.
+pub struct EffectProjectedEntry {
     pub track_id: String,
     /// The owning strip's compiler path prefix (`StripRef::path_prefix`): `$.tracks[id=<id>]` for
     /// a track. Diagnostics about this instance are `"{strip_path}.effects[id={effect}]"`.
     pub strip_path: Box<str>,
     pub rack: EffectRack,
     pub effect_id: String,
-    pub processor: Box<dyn PreparedNativeEffect>,
+    /// The metadata the instance's request designs ([`expected_prepared_metadata`]): the prepared
+    /// processor's, which [`Self::prepare`] holds it to (`effect.metadata.mismatch`).
     pub metadata: PreparedEffectMetadata,
+    /// The factory's [`designed_channel_symmetry`](NativeEffectFactory::designed_channel_symmetry)
+    /// for [`Self::bank_preparation`]'s request: the `DESIGNED` term of the instance's pool class,
+    /// read before any processor exists (issue #2199). [`Self::prepare`] holds the prepared
+    /// processor's `channel_symmetry` to it.
+    pub designed_symmetry: bool,
     /// Factory retained only for transactional off-render bank binding.
     pub factory: Arc<dyn effect_contract::NativeEffectFactory>,
     /// Exact owned request inputs used to prepare the scalar processor.
@@ -73,6 +82,97 @@ pub struct EffectPreparedEntry {
     /// `None` here, and the runtime turns that back into the byte-identical unobserved path: there
     /// is no lane, no slot and no vector anywhere in the compiled plan.
     pub observation: Option<Box<ObservationLane>>,
+}
+
+/// One prepared native effect instance: its [`EffectProjectedEntry`] and its prepared processor.
+///
+/// It dereferences to the projected entry, so its identity, metadata, factory, request and lanes
+/// read and write as the projected entry's.
+pub struct EffectPreparedEntry {
+    pub projected: EffectProjectedEntry,
+    pub processor: Box<dyn PreparedNativeEffect>,
+}
+
+impl core::ops::Deref for EffectPreparedEntry {
+    type Target = EffectProjectedEntry;
+
+    fn deref(&self) -> &EffectProjectedEntry {
+        &self.projected
+    }
+}
+
+impl core::ops::DerefMut for EffectPreparedEntry {
+    fn deref_mut(&mut self) -> &mut EffectProjectedEntry {
+        &mut self.projected
+    }
+}
+
+impl EffectProjectedEntry {
+    /// The diagnostic path of this instance: `"{strip_path}.effects[id={effect}]"`.
+    #[must_use]
+    pub fn path(&self) -> String {
+        format!("{}.effects[id={}]", self.strip_path, self.effect_id)
+    }
+
+    /// Prepare this instance's processor from its request, off the render thread (issue #2199).
+    ///
+    /// The processor's metadata must be [`Self::metadata`], field by field, and its
+    /// `channel_symmetry` must be [`Self::designed_symmetry`]; either difference is
+    /// `effect.metadata.mismatch` at [`Self::path`], as is a factory refusal of a request its own
+    /// projection accepted (with the factory's code).
+    ///
+    /// # Errors
+    ///
+    /// The factory's refusal, or `effect.metadata.mismatch`, at this instance's path.
+    pub fn prepare(&self) -> Result<Box<dyn PreparedNativeEffect>, EffectDiagnostic> {
+        let PreparedEffect {
+            processor,
+            metadata,
+        } = self
+            .factory
+            .prepare(self.bank_preparation.request())
+            .map_err(|error| EffectDiagnostic {
+                code: error.code,
+                path: self.path(),
+            })?;
+        let expected = &self.metadata;
+        // Issue #1461: the prepare result carries the metadata beside the processor, which holds
+        // no copy of it; this compares that returned value, field by field.
+        if metadata.descriptor.id != expected.descriptor.id
+            || metadata.descriptor.contract_major != expected.descriptor.contract_major
+            || metadata.descriptor.state_layout_version != expected.descriptor.state_layout_version
+            || metadata.sample_rate != expected.sample_rate
+            || metadata.quantum != expected.quantum
+            || metadata.quality != expected.quality
+            || metadata.bypass != expected.bypass
+            || metadata.link_mode != expected.link_mode
+            || metadata.ports != expected.ports
+            || metadata.latency != expected.latency
+            || metadata.tail != expected.tail
+            || metadata.tail_every_peak != expected.tail_every_peak
+            || metadata.rest != expected.rest
+            || metadata.composition != expected.composition
+            || metadata.state_sizes != expected.state_sizes
+            || metadata.scratch_bytes != expected.scratch_bytes
+            || metadata.automation_capacity != expected.automation_capacity
+            || processor.channel_symmetry() != self.designed_symmetry
+        {
+            return Err(EffectDiagnostic {
+                code: "effect.metadata.mismatch",
+                path: self.path(),
+            });
+        }
+        Ok(processor)
+    }
+
+    /// This instance with `processor`, prepared from its request.
+    #[must_use]
+    pub fn with_processor(self, processor: Box<dyn PreparedNativeEffect>) -> EffectPreparedEntry {
+        EffectPreparedEntry {
+            projected: self,
+            processor,
+        }
+    }
 }
 
 /// Owned replayable portion of an accepted prepare request. It never crosses into render.
@@ -201,6 +301,58 @@ pub struct EffectPreparedSession {
     pub entries: Vec<EffectPreparedEntry>,
 }
 
+/// A session's native effect instances, projected and not prepared (issue #2199): the first half
+/// of [`prepare_native_session_effects`], in its entry order.
+pub struct EffectProjectedSession {
+    pub session: CompiledSession,
+    pub entries: Vec<EffectProjectedEntry>,
+}
+
+impl EffectProjectedSession {
+    /// Prepare every instance's processor ([`EffectProjectedEntry::prepare`]), in entry order.
+    ///
+    /// # Errors
+    ///
+    /// Every instance's preparation diagnostic, sorted.
+    pub fn prepare(self) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
+        let mut diagnostics = Vec::new();
+        let mut prepared = Vec::with_capacity(self.entries.len());
+        for entry in self.entries {
+            match entry.prepare() {
+                Ok(processor) => prepared.push(entry.with_processor(processor)),
+                Err(diagnostic) => diagnostics.push(diagnostic),
+            }
+        }
+        if diagnostics.is_empty() {
+            Ok(EffectPreparedSession {
+                session: self.session,
+                entries: prepared,
+            })
+        } else {
+            Err(EffectDiagnosticSet::sorted(diagnostics))
+        }
+    }
+}
+
+impl EffectPreparedSession {
+    /// The projected session and each entry's processor, in entry order (issue #2199).
+    #[must_use]
+    pub fn into_projected(self) -> (EffectProjectedSession, Vec<Box<dyn PreparedNativeEffect>>) {
+        let (entries, processors) = self
+            .entries
+            .into_iter()
+            .map(|entry| (entry.projected, entry.processor))
+            .unzip();
+        (
+            EffectProjectedSession {
+                session: self.session,
+                entries,
+            },
+            processors,
+        )
+    }
+}
+
 /// The launch native-effect registry, with its tail-bound table (issue #1469, root ruling R2).
 ///
 /// The registry is a process-lifetime, control-plane-only value: it is built once, on the first
@@ -304,7 +456,23 @@ pub fn prepare_native_session_effects(
     registry: &NativeEffectRegistry,
     caps: EffectCompileCaps,
 ) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
-    prepare_with_console_eligibility(session, registry, caps, &CONSOLE_ELIGIBLE_EFFECTS)
+    project_with_console_eligibility(session, registry, caps, &CONSOLE_ELIGIBLE_EFFECTS)?.prepare()
+}
+
+/// Resolve, validate and design `session`'s native effect instances without preparing any
+/// processor (issue #2199): [`prepare_native_session_effects`]' every refusal, in its order, and
+/// its entries less their processors. The graph compiler projects the session's graph from them
+/// and prepares a processor only for an instance its bank plan leaves per node.
+///
+/// # Errors
+///
+/// The diagnostics [`prepare_native_session_effects`] would return.
+pub fn project_native_session_effects(
+    session: &CompiledSession,
+    registry: &NativeEffectRegistry,
+    caps: EffectCompileCaps,
+) -> Result<EffectProjectedSession, EffectDiagnosticSet> {
+    project_with_console_eligibility(session, registry, caps, &CONSOLE_ELIGIBLE_EFFECTS)
 }
 
 /// [`prepare_native_session_effects`] with the console eligibility list supplied by the caller.
@@ -325,17 +493,30 @@ pub fn prepare_native_session_effects_with_console_eligibility(
     caps: EffectCompileCaps,
     console_eligible: &[&str],
 ) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
-    prepare_with_console_eligibility(session, registry, caps, console_eligible)
+    project_with_console_eligibility(session, registry, caps, console_eligible)?.prepare()
 }
 
-/// The one preparation behind both entries: the console slots whose native identity is not in
-/// `console_eligible` are refused, and everything else is prepared.
-fn prepare_with_console_eligibility(
+/// [`project_native_session_effects`] with the console eligibility list supplied by the caller,
+/// as [`prepare_native_session_effects_with_console_eligibility`] supplies it.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn project_native_session_effects_with_console_eligibility(
     session: &CompiledSession,
     registry: &NativeEffectRegistry,
     caps: EffectCompileCaps,
     console_eligible: &[&str],
-) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
+) -> Result<EffectProjectedSession, EffectDiagnosticSet> {
+    project_with_console_eligibility(session, registry, caps, console_eligible)
+}
+
+/// The one projection behind every entry: the console slots whose native identity is not in
+/// `console_eligible` are refused, and everything else is resolved, validated and designed.
+fn project_with_console_eligibility(
+    session: &CompiledSession,
+    registry: &NativeEffectRegistry,
+    caps: EffectCompileCaps,
+    console_eligible: &[&str],
+) -> Result<EffectProjectedSession, EffectDiagnosticSet> {
     let mut diagnostics = Vec::new();
     let mut entries = Vec::new();
     if caps.maximum_total_state_bytes == 0
@@ -542,7 +723,7 @@ fn prepare_with_console_eligibility(
             tail_bound,
         };
         let request = bank_preparation.request();
-        let expected = match expected_prepared_metadata(descriptor, request) {
+        let metadata = match expected_prepared_metadata(descriptor, request) {
             Ok(metadata) => metadata,
             Err(error) => {
                 diagnostics.push(EffectDiagnostic {
@@ -552,13 +733,11 @@ fn prepare_with_console_eligibility(
                 return;
             }
         };
-        // Issue #1461: the prepare result carries the metadata beside the processor,
-        // which holds no copy of it; this compares that returned value, field by field.
-        let PreparedEffect {
-            processor,
-            metadata,
-        } = match factory.prepare(request) {
-            Ok(value) => value,
+        // Issue #2199: the factory answers from the request what `prepare` would, refusing it
+        // with `prepare`'s own code, so a projected session is refused exactly where a prepared
+        // one was, and its pool class is known before any processor exists.
+        let designed_symmetry = match factory.designed_channel_symmetry(request) {
+            Ok(symmetric) => symmetric,
             Err(error) => {
                 diagnostics.push(EffectDiagnostic {
                     code: error.code,
@@ -567,37 +746,13 @@ fn prepare_with_console_eligibility(
                 return;
             }
         };
-        if metadata.descriptor.id != expected.descriptor.id
-            || metadata.descriptor.contract_major != expected.descriptor.contract_major
-            || metadata.descriptor.state_layout_version != expected.descriptor.state_layout_version
-            || metadata.sample_rate != expected.sample_rate
-            || metadata.quantum != expected.quantum
-            || metadata.quality != expected.quality
-            || metadata.bypass != expected.bypass
-            || metadata.link_mode != expected.link_mode
-            || metadata.ports != expected.ports
-            || metadata.latency != expected.latency
-            || metadata.tail != expected.tail
-            || metadata.tail_every_peak != expected.tail_every_peak
-            || metadata.rest != expected.rest
-            || metadata.composition != expected.composition
-            || metadata.state_sizes != expected.state_sizes
-            || metadata.scratch_bytes != expected.scratch_bytes
-            || metadata.automation_capacity != expected.automation_capacity
-        {
-            diagnostics.push(EffectDiagnostic {
-                code: "effect.metadata.mismatch",
-                path,
-            });
-            return;
-        }
-        entries.push(EffectPreparedEntry {
+        entries.push(EffectProjectedEntry {
             track_id: strip.id.as_str().to_owned(),
             strip_path: strip_path.into(),
             rack,
             effect_id: effect.id.as_str().to_owned(),
-            processor,
             metadata,
+            designed_symmetry,
             factory,
             bank_preparation,
             initial_bypass: effect.bypass,
@@ -611,7 +766,7 @@ fn prepare_with_console_eligibility(
         entries.sort_by(|a, b| {
             (&a.track_id, a.rack, &a.effect_id).cmp(&(&b.track_id, b.rack, &b.effect_id))
         });
-        Ok(EffectPreparedSession {
+        Ok(EffectProjectedSession {
             session: session.clone(),
             entries,
         })
@@ -1103,6 +1258,14 @@ mod metadata_mismatch_tests {
         fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
             0
         }
+        fn designed_channel_symmetry(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<bool, EffectPrepareError> {
+            self.prepare(request)
+                .map(|prepared| prepared.processor.channel_symmetry())
+        }
+
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
@@ -1816,10 +1979,48 @@ pub fn attach_effect_live_controls(
     superseded: &LiveValuesSuperseded,
     observation_taps: u32,
 ) -> Result<Vec<EffectControlProducer>, EffectDiagnosticSet> {
-    let declared = declared_live_addresses(&prepared.session);
-    let mut producers = Vec::with_capacity(prepared.entries.len());
+    attach_live_controls(
+        &prepared.session,
+        prepared
+            .entries
+            .iter_mut()
+            .map(|entry| &mut entry.projected),
+        superseded,
+        observation_taps,
+    )
+}
+
+/// [`attach_effect_live_controls`] on a projected session (issue #2199): the lanes attach to the
+/// instances before any processor is prepared, and travel with each into the graph compile.
+///
+/// # Errors
+///
+/// As [`attach_effect_live_controls`].
+pub fn attach_projected_effect_live_controls(
+    projected: &mut EffectProjectedSession,
+    superseded: &LiveValuesSuperseded,
+    observation_taps: u32,
+) -> Result<Vec<EffectControlProducer>, EffectDiagnosticSet> {
+    attach_live_controls(
+        &projected.session,
+        projected.entries.iter_mut(),
+        superseded,
+        observation_taps,
+    )
+}
+
+/// The one live-control attach behind [`attach_effect_live_controls`] and
+/// [`attach_projected_effect_live_controls`].
+fn attach_live_controls<'e>(
+    session: &CompiledSession,
+    entries: impl ExactSizeIterator<Item = &'e mut EffectProjectedEntry>,
+    superseded: &LiveValuesSuperseded,
+    observation_taps: u32,
+) -> Result<Vec<EffectControlProducer>, EffectDiagnosticSet> {
+    let declared = declared_live_addresses(session);
+    let mut producers = Vec::with_capacity(entries.len());
     let mut diagnostics = Vec::new();
-    for entry in &mut prepared.entries {
+    for entry in entries {
         let path = format!("{}.effects[id={}]", entry.strip_path, entry.effect_id);
         let descriptor = entry.factory.descriptor();
         let target_capability = entry.factory.target_preparation();
@@ -1970,7 +2171,48 @@ pub fn attach_effect_observation(
     window_blocks: u32,
     arms: &[ObservationArm<'_>],
 ) -> Result<Vec<EffectObservationHandle>, EffectDiagnosticSet> {
-    let declared = declared_live_addresses(&prepared.session);
+    attach_observation(
+        &prepared.session,
+        prepared
+            .entries
+            .iter_mut()
+            .map(|entry| &mut entry.projected),
+        maximum_taps,
+        window_blocks,
+        arms,
+    )
+}
+
+/// [`attach_effect_observation`] on a projected session (issue #2199).
+///
+/// # Errors
+///
+/// As [`attach_effect_observation`].
+pub fn attach_projected_effect_observation(
+    projected: &mut EffectProjectedSession,
+    maximum_taps: u32,
+    window_blocks: u32,
+    arms: &[ObservationArm<'_>],
+) -> Result<Vec<EffectObservationHandle>, EffectDiagnosticSet> {
+    attach_observation(
+        &projected.session,
+        projected.entries.iter_mut(),
+        maximum_taps,
+        window_blocks,
+        arms,
+    )
+}
+
+/// The one observation attach behind [`attach_effect_observation`] and
+/// [`attach_projected_effect_observation`].
+fn attach_observation<'e>(
+    session: &CompiledSession,
+    entries: impl Iterator<Item = &'e mut EffectProjectedEntry>,
+    maximum_taps: u32,
+    window_blocks: u32,
+    arms: &[ObservationArm<'_>],
+) -> Result<Vec<EffectObservationHandle>, EffectDiagnosticSet> {
+    let declared = declared_live_addresses(session);
     // The arms by instance, so each entry finds its own in one lookup.
     // (strip, console, instance ID) -> (tap ID, window blocks, arm tag) of each armed tap.
     type ArmedTaps<'a> = BTreeMap<(&'a str, bool, &'a str), Vec<(u32, u32, u64)>>;
@@ -1983,7 +2225,7 @@ pub fn attach_effect_observation(
     }
     let mut handles = Vec::new();
     let mut diagnostics = Vec::new();
-    for entry in &mut prepared.entries {
+    for entry in entries {
         let descriptor = entry.factory.descriptor();
         if descriptor.observations.is_empty() {
             continue;
@@ -2324,6 +2566,14 @@ mod tail_bound_count_tests {
         fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
             0
         }
+        fn designed_channel_symmetry(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<bool, EffectPrepareError> {
+            self.prepare(request)
+                .map(|prepared| prepared.processor.channel_symmetry())
+        }
+
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,

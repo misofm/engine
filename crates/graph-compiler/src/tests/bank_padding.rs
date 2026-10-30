@@ -73,6 +73,13 @@ impl NativeEffectFactory for PaddingDouble {
     fn prepared_undeclared_heap_bytes(&self, quality: &effect_contract::QualityDescriptor) -> u64 {
         self.delegate.prepared_undeclared_heap_bytes(quality)
     }
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        self.delegate.designed_channel_symmetry(request)
+    }
+
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,

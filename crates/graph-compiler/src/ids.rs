@@ -492,7 +492,14 @@ pub(crate) fn into_effects(
     let mut effects = Vec::with_capacity(entries.len());
     let mut controls = Vec::new();
     let mut observations = Vec::new();
-    for (index, entry) in entries.into_iter().enumerate() {
+    for (
+        index,
+        EffectPreparedEntry {
+            projected: entry,
+            processor,
+        },
+    ) in entries.into_iter().enumerate()
+    {
         let node = ids[index]
             .as_ref()
             .expect("prepared effect node assigned")
@@ -512,7 +519,7 @@ pub(crate) fn into_effects(
         effects.push(GraphPreparedEffect {
             id: node,
             metadata: entry.metadata,
-            processor: entry.processor,
+            processor,
             response_snapshot_declared: entry.factory.response_analysis().is_some(),
             native_id: entry.factory.descriptor().id.as_str(),
         });

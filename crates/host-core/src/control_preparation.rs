@@ -493,6 +493,14 @@ mod tests {
         ) -> u64 {
             ParametricEqFactory.prepared_undeclared_heap_bytes(quality)
         }
+        fn designed_channel_symmetry(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<bool, EffectPrepareError> {
+            self.prepare(request)
+                .map(|prepared| prepared.processor.channel_symmetry())
+        }
+
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,

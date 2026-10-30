@@ -12,7 +12,7 @@
 
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
-    EffectDescriptor, EffectLaneShape, InitialParameterValue, LinkMode, PortRole,
+    EffectDescriptor, EffectLaneShape, InitialParameterValue, LinkMode, ParameterChannel, PortRole,
     PrepareEffectLimits, PrepareEffectRequest, PreparedPorts, PreparedSidechainPort,
     decimal_to_f32, default_initial_values, parameter_lattice_points,
 };
@@ -156,5 +156,118 @@ fn every_prepared_launch_effect_fits_its_projected_bytes() {
     assert!(
         checked >= 11 * 4 * 4,
         "every launch effect at every launch rate and quantum ({checked})"
+    );
+}
+
+/// The defaults, then for each per-lane parameter and each of up to three of its lattice points
+/// (the first, the middle and the last) the defaults with only that parameter's left value moved
+/// there and, separately, both of its values moved there.
+fn channel_value_sets(descriptor: &'static EffectDescriptor) -> Vec<Vec<InitialParameterValue>> {
+    let defaults: Vec<_> = default_initial_values(descriptor).collect();
+    let mut sets = vec![defaults.clone()];
+    for (index, parameter) in descriptor.parameters.iter().enumerate() {
+        let per_lane = defaults.iter().any(|slot| {
+            slot.parameter_index as usize == index && slot.channel == ParameterChannel::Left
+        });
+        if !per_lane {
+            continue;
+        }
+        let points = parameter_lattice_points(parameter).expect("a lawful lattice");
+        let picks = [0, points.len() / 2, points.len().saturating_sub(1)];
+        for pick in picks.into_iter().collect::<std::collections::BTreeSet<_>>() {
+            let value = decimal_to_f32(&points[pick].canonical).expect("a convertible point");
+            for both in [false, true] {
+                let mut set = defaults.clone();
+                for slot in set.iter_mut().filter(|slot| {
+                    slot.parameter_index as usize == index
+                        && (both || slot.channel == ParameterChannel::Left)
+                }) {
+                    slot.value = value;
+                }
+                sets.push(set);
+            }
+        }
+    }
+    sets
+}
+
+/// Issue #2199: every launch factory answers `designed_channel_symmetry` for a request exactly as
+/// the processor it prepares from that request answers `channel_symmetry`, or refuses it with the
+/// code `prepare` refuses it with; at every declared quality and launch rate, with each sidechain
+/// variant, at the defaults and with one per-lane parameter moved on one channel or on both.
+///
+/// Test value: red when a factory's answer from the request differs from its processor's (a word
+/// its design leaves out, a comparison of the values where the processor compares designed words,
+/// as the EQ's disabled band shows, or a validation `prepare` runs and the answer skips). The graph
+/// compiler pools each track and plans its banks from this answer before any processor exists, so
+/// a wrong one would pool a track the prepared plan would not. No other test compares the two.
+#[test]
+fn every_launch_factory_designs_its_processors_channel_symmetry() {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let mut checked = [0_u32; 2];
+    let mut differ = Vec::new();
+    for descriptor in registry.descriptors() {
+        let id = descriptor.id.as_str();
+        let factory = registry.get_shared_ascii(id).expect("a registered factory");
+        let link_mode = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
+            .into_iter()
+            .find(|mode| descriptor.supported_link_modes.contains(*mode))
+            .expect("a supported link mode");
+        let automation = u32::try_from(EffectLaneShape::live_parameter_cells(descriptor))
+            .expect("a bounded cell count")
+            .max(1);
+        for quality in descriptor
+            .qualities
+            .iter()
+            .filter(|quality| LAUNCH_RATES.contains(&quality.sample_rate))
+        {
+            let tail_bound = registry
+                .tail_bound(descriptor.id, quality.sample_rate, quality.quality)
+                .expect("a declared row");
+            for ports in port_variants(descriptor) {
+                for values in channel_value_sets(descriptor) {
+                    let request = PrepareEffectRequest {
+                        sample_rate: quality.sample_rate,
+                        quantum: 128,
+                        quality: quality.quality,
+                        bypass: false,
+                        link_mode,
+                        ports,
+                        initial_values: &values,
+                        limits: PrepareEffectLimits {
+                            maximum_total_state_bytes: u64::MAX,
+                            maximum_scratch_bytes: u64::MAX,
+                            maximum_automation_spans_per_block: automation,
+                        },
+                        tail_bound,
+                    };
+                    let prepared = factory
+                        .prepare(request)
+                        .map(|prepared| prepared.processor.channel_symmetry())
+                        .map_err(|error| error.code);
+                    let designed = factory
+                        .designed_channel_symmetry(request)
+                        .map_err(|error| error.code);
+                    if prepared != designed {
+                        differ.push(format!(
+                            "{id} {:?} {} Hz, {:?}: prepared {prepared:?}, designed {designed:?}",
+                            quality.quality, quality.sample_rate, ports.sidechain
+                        ));
+                    }
+                    if let Ok(symmetric) = prepared {
+                        checked[usize::from(symmetric)] += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "the answers differ:\n{}",
+        differ.join("\n")
+    );
+    assert!(
+        checked[0] > 0 && checked[1] > 0,
+        "both answers are reached ({checked:?})"
     );
 }

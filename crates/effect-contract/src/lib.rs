@@ -2125,6 +2125,26 @@ pub trait NativeEffectFactory: Send + Sync {
         request: PrepareEffectRequest<'_>,
     ) -> Result<PreparedEffect, EffectPrepareError>;
 
+    /// What [`Self::prepare`] would answer for `request`, before any instance exists (issue
+    /// #2199): `Ok` with the prepared processor's
+    /// [`channel_symmetry`](PreparedNativeEffect::channel_symmetry), or the error `prepare`
+    /// would return.
+    ///
+    /// The graph compiler reads it to pool a track and plan its banks before it prepares any
+    /// processor, so a banked member never gets a per-instance processor. It is answered from the
+    /// request alone: an implementation designs the per-channel words from the request's rate,
+    /// quality and initial values as `prepare` does, and retains no instance and allocates none of
+    /// its state. `effect-compiler/tests/prepared_state_ceiling.rs` holds every launch effect's
+    /// answer to its prepared processor's.
+    ///
+    /// # Errors
+    ///
+    /// The error [`Self::prepare`] returns for `request`.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError>;
+
     /// The inline bytes of the processor [`Self::prepare`] boxes: `size_of` of its prepared
     /// type, or of the largest when it prepares more than one (issue #2194, root ruling R1).
     ///

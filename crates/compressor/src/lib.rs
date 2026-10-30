@@ -1241,6 +1241,18 @@ impl BankParts {
     }
 }
 
+/// The scalar instance [`CompressorFactory::prepare`] boxes, and its metadata.
+fn prepare_scalar(
+    request: PrepareEffectRequest<'_>,
+) -> Result<(PreparedCompressor, PreparedEffectMetadata), EffectPrepareError> {
+    let metadata = expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, request)?;
+    let (left_defaults, right_defaults) = initial_defaults(request.initial_values)?;
+    Ok((
+        PreparedCompressor::new(&metadata, left_defaults, right_defaults),
+        metadata,
+    ))
+}
+
 impl NativeEffectFactory for CompressorFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
         &COMPRESSOR_DESCRIPTOR
@@ -1258,16 +1270,20 @@ impl NativeEffectFactory for CompressorFactory {
         &self,
         request: PrepareEffectRequest<'_>,
     ) -> Result<PreparedEffect, EffectPrepareError> {
-        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
-        let (left_defaults, right_defaults) = initial_defaults(request.initial_values)?;
+        let (processor, metadata) = prepare_scalar(request)?;
         Ok(PreparedEffect {
-            processor: Box::new(PreparedCompressor::new(
-                &metadata,
-                left_defaults,
-                right_defaults,
-            )),
+            processor: Box::new(processor),
             metadata,
         })
+    }
+
+    /// Issue #2199: the scalar instance `prepare` boxes, built inline and asked. It holds no heap
+    /// (#1074), so the answer allocates nothing.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        prepare_scalar(request).map(|(processor, _)| processor.channel_symmetry())
     }
 
     /// Binds a full or a padded bank (issue #1090: the compressor accepts the padding contract on

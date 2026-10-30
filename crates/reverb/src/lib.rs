@@ -849,6 +849,16 @@ impl NativeEffectFactory for ReverbFactory {
         })
     }
 
+    /// Issue #2199: `false` by design, as the prepared processor answers (its two channels'
+    /// diffusers have different lengths), after the design `prepare` would refuse a request in.
+    /// The design holds the prime sieve, not the instance's rings.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        design_reverb(request).map(|_| false)
+    }
+
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
@@ -903,9 +913,19 @@ fn validate_inputs(
     Ok((metadata, targets))
 }
 
-fn prepare_reverb(
-    request: PrepareEffectRequest<'_>,
-) -> Result<(PreparedReverb, PreparedEffectMetadata), EffectPrepareError> {
+/// Everything [`prepare_reverb`] designs from a request before it allocates the instance's rings:
+/// every way preparation can refuse a request is here (issue #2199).
+struct ReverbDesign {
+    metadata: PreparedEffectMetadata,
+    targets: [f32; PARAMETER_COUNT],
+    geometry: Geometry,
+    sieve: Sieve,
+    min_lengths: [u32; LINES],
+    max_lengths: [u32; LINES],
+    design: Design,
+}
+
+fn design_reverb(request: PrepareEffectRequest<'_>) -> Result<ReverbDesign, EffectPrepareError> {
     let (metadata, targets) = validate_inputs(request)?;
     let sample_rate = metadata.sample_rate;
     let geometry = geometry(sample_rate);
@@ -924,6 +944,30 @@ fn prepare_reverb(
         return Err(resource_error());
     }
     let design = Design::new(&targets, sample_rate, &sieve).ok_or(initial_error())?;
+    Ok(ReverbDesign {
+        metadata,
+        targets,
+        geometry,
+        sieve,
+        min_lengths,
+        max_lengths,
+        design,
+    })
+}
+
+fn prepare_reverb(
+    request: PrepareEffectRequest<'_>,
+) -> Result<(PreparedReverb, PreparedEffectMetadata), EffectPrepareError> {
+    let ReverbDesign {
+        metadata,
+        targets,
+        geometry,
+        sieve,
+        min_lengths,
+        max_lengths,
+        design,
+    } = design_reverb(request)?;
+    let sample_rate = metadata.sample_rate;
     let mut processor = PreparedReverb {
         bypass: metadata.bypass,
         sample_rate,

@@ -1880,6 +1880,14 @@ mod tests {
         fn prepared_undeclared_heap_bytes(&self, _: &effect_contract::QualityDescriptor) -> u64 {
             0
         }
+        fn designed_channel_symmetry(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<bool, EffectPrepareError> {
+            self.prepare(request)
+                .map(|prepared| prepared.processor.channel_symmetry())
+        }
+
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
@@ -1914,6 +1922,13 @@ mod tests {
         ) -> u64 {
             self.delegate.prepared_undeclared_heap_bytes(quality)
         }
+        fn designed_channel_symmetry(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<bool, EffectPrepareError> {
+            self.delegate.designed_channel_symmetry(request)
+        }
+
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
@@ -9200,6 +9215,13 @@ mod tests {
         ) -> u64 {
             self.delegate.prepared_undeclared_heap_bytes(quality)
         }
+        fn designed_channel_symmetry(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<bool, EffectPrepareError> {
+            self.delegate.designed_channel_symmetry(request)
+        }
+
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,

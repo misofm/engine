@@ -1601,6 +1601,22 @@ impl NativeEffectFactory for SoftClipFactory {
         })
     }
 
+    /// Issue #2199: preparation seats every ramp fixed at its default and every state word at its
+    /// default (`Channel::new`), and those are all the words
+    /// `SoftClip::designed_channel_symmetry` compares, so the two channels agree exactly when
+    /// their defaults do, bit for bit. No instance is built.
+    fn designed_channel_symmetry(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<bool, EffectPrepareError> {
+        expected_prepared_metadata(self.descriptor(), request)?;
+        let (left, right) = initial_defaults(request.initial_values)?;
+        Ok(left
+            .iter()
+            .zip(&right)
+            .all(|(left, right)| left.to_bits() == right.to_bits()))
+    }
+
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
