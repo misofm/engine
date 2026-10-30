@@ -295,3 +295,39 @@ The console seeks only while stopped, so this path matters.
     - the artifact build and `check-web-audioworklet.sh`, `test-web-audioworklet.mjs`;
     - the SDK headless (710 tests), types, generated, deletions and package checks, and the
       layout self-test.
+
+## Attempt 4 (2026-10-29, verify of b25b0cb3a: FAIL, one MAJOR)
+
+- **M1, root ruling: `engine.seek` waits only for a pending suspend, never for a resume.**
+  b25b0cb3a awaited the newest transport step. Chrome holds `resume()` until a user gesture, so a
+  seek after a held `play()` was never sent, and a later `stop()` did not release it.
+  - **The fix:** the seek waits only for a `stop()` call's context step that is still in flight
+    (`pendingSuspend`), and only while the context still runs. The wait is raced against a signal
+    that every newer transport call and `close()` settles, the same takeover rule as
+    `wakeTransportWait`. A context that is not running needs no wait: the seek is sent `atOnce` at
+    once.
+  - **Call order:** seeks leave in call order through a FIFO gate. Each seek waits for the one
+    before it to post its request; a gate released at the post leaves the host's
+    one-unsettled-seek rule as it was.
+  - **Gate:** the verifier's probe is row 4 of the browser-evals test "#2205: seek waits for a
+    transport step, ...": a seek after a gesture-held `play()` is sent `atOnce` within 1 s, and so
+    is one after a later `stop()`. With b25b0cb3a's `engine.ts` the row is red: "a seek after a
+    held play() is sent", actual "still pending".
+- **MINOR 1:** the `SessionSeekProducerError` doc now says plainly that `producerIndex` equal to
+  the number of producers passed means that all producers moved and the feed preparation failed,
+  and that the caller retries `prepareSeek()` on the feed. No new field.
+- **MINOR 2:** control-parity row `the_at_once_session_seek_lands_alike_on_both_hosts`. The C
+  ABI's `miso_engine_v1_session_seek_at_once` and the browser's `session_prepare_seek` give equal
+  seek reports naming the next block for every source, and equal output bits.
+- **Results (head `04281bf1c`, SDK source bundle):**
+  - **Chromium, 3 runs x 5 seeks per mode:** 0 of 15 underrun and 0 late or split landings in
+    every row (per-source, transport, stopped; both modes). Transport latency 21.3 / 24.0 /
+    34.7 ms (worker) and 34.7 / 48.0 / 48.0 ms (single).
+  - **`--check-matrix --sdk-root`:** passes on Chromium worker and single, and on WebKit single.
+    WebKit worker failed once on the #2198 `sdk-protocol-lossy` flake and passed on its rerun.
+  - **Also passing:**
+    - SDK checks (headless 710 tests, types, generated, deletions, package) and browser-evals
+      alone (42 tests);
+    - control-parity (47 tests);
+    - `check-capi-abi.sh` and `--self-test`, the release audit C ABI leg (0 violations);
+    - fmt and clippy (`-D warnings`) on the touched crates.
