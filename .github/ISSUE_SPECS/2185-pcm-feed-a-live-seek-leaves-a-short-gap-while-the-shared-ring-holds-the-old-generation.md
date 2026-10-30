@@ -190,3 +190,58 @@ three options, together with #2205. Until then, the Chromium worker phase is rep
 - **Minor 2:** `sdk/README.md` now says that a live plain seek does not cut to silence only in
   single mode, and that worker mode is the open residual. It also says that the transport seek's
   ring seeks apply at once (#2205 still owns that path's gap).
+
+## Attempt 4 (2026-10-29): the worker residual through #2205's engine rule
+
+- **Decision.** Owner decision (2026-10-29) and root rulings 2-5 of the #2205 plan (recorded in
+  the #2205 spec). The engine holds a live plain seek until its runway is in the engine ring,
+  bounded by 50 ms, and then lands it in one cut at its target. That closes the render-side race
+  the Worker could not close (option 3 above, as a landing rule in `crates/source`). The JS
+  deferral is deleted in both consumers (`deferSharedSeek`, `sessionMovedSharedSeek`,
+  `seekDeferralBlocks`/`seekDeferralQuanta`); `sharedSlotAge`, the #1644 stale-refusal rule and
+  #1387's headroom admission stay.
+- **Root ruling 3: H = R.** The Worker's headroom is the engine's runway by the engine's formula
+  (`feedHeadroomQuanta`, from the ring the boot resolved), so the runway always fits in one pass.
+  Soundness against #1387's own bound (one Worker tick plus a 2048-frame render burst plus one
+  block): R meets it at 48 kHz (19 = 19), 88.2 kHz (35 > 20) and 96 kHz (38 > 20). At 44.1 kHz,
+  R is 18 quanta, one quantum below the conservative bound of 19, but above the measured burst
+  (13 quanta + tick + 1 = 16). Recorded for root.
+- **Deleted tests (the deferral they described is gone):** the case-table rows "#2185: a live
+  plain seek over a full ring of the old generation frees its slots and waits for its runway; the
+  bound applies it" and "#2185: after a session seek at g, a ring seek at g with one chunk
+  published submits it in the first pass"; the deferral phase of "#2185: a newer seek and its
+  chunk published after a pass's snapshot survive..." (its drain phase stays); the runway helper
+  `publish` and the adapters' `seekBound`. The Worker headroom rig's #2185 comments are gone; its
+  numbers follow H = R (38 at 48 kHz/64). The MSB1 table passes on both adapters.
+- **Qualification.** The Chromium worker live-seek phase is gated at 0 (the "reported, not gated:
+  open #2185 worker residual" label is gone). Null sink, Chromium 151, 10 runs x 5 seeks per mode:
+
+  | per-source live seek | 2b0a64d88 | this branch |
+  | --- | --- | --- |
+  | Chromium worker | 3 / 50 seeks underrun (128 frames each) | 0 / 50 |
+  | Chromium single | 0 / 50 | **46 / 50 (128-3200 frames): red** |
+  | WebKit worker (reported, 3 runs) | - | 0 / 15 |
+  | WebKit single (reported, 3 runs) | - | 3 / 15 (128 frames) |
+
+## Open after attempt 4: single mode regressed; root decision needed
+
+- **Cause.** In `single` mode, `AudioWorkletEngineHost::seek_source`
+  (`hosts/host-web/src/lib.rs`) prepares the plan's consumer at once (`prepare_source_seek`, a
+  `SeekClock::Hold` apply) whenever the render half is on the same instance. That is how the
+  suspended `prepare-seek` op (and the headless SDK's `seekSource`) frees a full engine ring, so
+  new PCM can enter before the first block. The prelude's live drain calls the same export
+  (`miso_engine_web_v1_source_seek`). So a live ring seek still drops the old audio at once, and
+  the engine's landing rule never sees it. The deleted prelude deferral was what kept single mode
+  at 0. Worker mode is not affected: its `source_seek` reaches the control instance, which has no
+  render half to prepare.
+- **No fix was made.** Every candidate goes against an instruction: the two callers are the same
+  export with the same arguments, so host-web cannot tell a live seek from a suspended one.
+  Options for root:
+  1. Split the browser export, as the C ABI already behaves: `miso_engine_web_v1_source_seek`
+     never prepares (the landing rule), and a new export prepares a suspended or headless seek.
+     This adds a browser ABI symbol (abi-layout, generated SDK, realtime-policy tables, check
+     lists).
+  2. Keep the prelude's deferral for `single` mode only (revert the prelude half of S3; the Worker
+     half stays deleted). No ABI change; single mode was 0 in 190 seeks with it (attempt 2).
+- Until root decides, the Chromium single per-source phase is red. The rest of that leg passes
+  with the phase ungated (one run). The transport phase and worker mode are met.
