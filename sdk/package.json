@@ -1,6 +1,6 @@
 {
   "name": "@misofm/engine",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "Typed Engine V1 SDK for agentic music production",
   "license": "FSL-1.1-ALv2",
   "type": "module",

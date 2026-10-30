@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.10.2
+npm install @misofm/engine@0.10.3
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -886,7 +886,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.10.2 release record](https://github.com/misofm/engine/issues/2210) contains the accepted artifact
+[0.10.3 release record](https://github.com/misofm/engine/issues/2215) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -912,6 +912,33 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.10.2
+
+0.10.3 removes no export. It adds two browser exports and one C ABI symbol.
+
+- Changed: a live seek keeps the old audio playing until the new position is ready, then cuts
+  once (issues #2205 and #2185; see "Play in the browser"). This applies to the transport seek
+  `engine.seek(frame, { producers })` and to a plain ring seek, in both `single` and `worker`
+  mode. The old position plays for about 50 ms at most, then the source plays the new position
+  from its first frame. A transport seek lands every source and the timeline in the same block.
+  In 0.10.2 a worker-mode ring seek could still lose one quantum.
+- Changed: a seek with no live audio to keep (the headless engine, or a browser engine that is
+  stopped or suspended) lands at once, at the next rendered block, so `play()` starts at the new
+  position. A stopped `engine.seek(frame, { producers })` runs each linked feed's `prepareSeek()`
+  itself. An app that called its own `prepareSeek` between a stopped `engine.seek` and `play()`
+  can remove that call.
+- Added: the browser exports `miso_engine_web_v1_source_prepare_seek` and
+  `miso_engine_web_v1_session_prepare_seek`, which apply a seek at once for the suspended flow.
+  `miso_engine_web_v1_source_seek` no longer prepares the consumer: it lands when ready, as a
+  live seek does. A host of its own that relied on `source_seek` to prepare a suspended seek must
+  call `source_prepare_seek`.
+- Added: the C ABI symbol `miso_engine_v1_session_seek_at_once`, announced by
+  `MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE` (bit 12) in the capability report. A mobile host
+  whose transport is stopped uses it, so the stop position never plays after a restart. No
+  struct, size or `ABI_VERSION` changes.
+- The SDK's own seek deferral of 0.10.2 is removed. The MSB1 seek epoch still steps by 2 per seek
+  (#2184).
 
 ## Upgrading from 0.10.1
 
