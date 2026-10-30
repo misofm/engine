@@ -830,9 +830,13 @@ const PROTOCOL_LOSSY_KINDS = new Set(["counterSnapshot", "diagnostic"]);
  * is the core's refusal, the same on both. Gate 3: the reliable events are the headless engine's,
  * in its order (the edit's `sessionCommitted`, then `transportState` playing). The browser reads its
  * events once per message and its lossy lane holds one event (root's tranche-b note), so a block's
- * lossy telemetry may be replaced before it is read: each lossy event that arrived must be the
- * headless engine's event of the same block, in the headless order, and only the last block's
- * three (which no later block replaces) are required: each kind's last received event carries the
+ * lossy telemetry may be replaced before it is read. Each lane keeps the engine's order, and the two
+ * kinds travel in different lanes (a diagnostic in the reliable lane, a counter snapshot in the lossy
+ * lane), which are read one after the other with a service step in each read: in `worker` mode render
+ * runs meanwhile on the worklet thread, so a later block's diagnostic can arrive before an earlier
+ * block's counter snapshot (#2198). The claim is therefore per kind: each lossy event that arrived is
+ * the headless engine's event of its kind and block, in the headless order of that kind, and the
+ * last block's (which no later block replaces) arrives: each kind's last received event carries the
  * headless engine's last sample.
  */
 function validateSdkProtocol(browserName, protocol) {
@@ -867,30 +871,31 @@ function validateSdkProtocol(browserName, protocol) {
     && reliable(events)[0].revision === browser.editRevision
     && reliable(events)[1].state === "playing",
   `the reliable events are not the headless engine's, in order: ${json({ browser: reliable(events), headless: reliable(reference) })}`);
-  // Each lossy event that arrived is one of the headless engine's, and they keep its order.
-  let at = 0;
+  // Per kind (#2198: the kinds travel in different lanes, which keep no order between them), each
+  // lossy event that arrived is one of the headless engine's events of that kind, in its order.
   const lossy = events.filter((event) => PROTOCOL_LOSSY_KINDS.has(event.kind));
-  const ordered = lossy.every((event) => {
-    while (at < reference.length && json(reference[at]) !== json(event)) at += 1;
-    if (at === reference.length) return false;
-    at += 1;
-    return true;
-  });
-  // The render's last block has no later block to replace its telemetry, so its diagnostic, meter
-  // batch and counter snapshot arrive: for each kind, the last one received is the headless
-  // engine's last (the last block's sample). A run that lacks a kind lost a lane, and one whose last
-  // is an earlier block's read a block's telemetry late or never.
+  const ofKind = (rows, kind) => rows.filter((event) => event.kind === kind);
+  const ordered = (received, expected) => {
+    let at = 0;
+    return received.every((event) => {
+      while (at < expected.length && json(expected[at]) !== json(event)) at += 1;
+      if (at === expected.length) return false;
+      at += 1;
+      return true;
+    });
+  };
+  // The render's last block has no later block to replace its telemetry, so its diagnostic and
+  // counter snapshot arrive: for each kind, the last one received is the headless engine's last
+  // (the last block's sample). A run that lacks a kind lost a lane, and one whose last is an
+  // earlier block's read a block's telemetry late or never.
   const sampleOf = (event) => event.kind === "diagnostic" ? event.diagnostic?.sampleTime : event.observedSample;
-  const lastOf = (rows, kind) => rows.filter((event) => event.kind === kind).at(-1);
-  gate(browserName, "sdk-protocol-lossy", ordered
-    && [...PROTOCOL_LOSSY_KINDS].every((kind) => {
-      const received = lastOf(lossy, kind);
-      const expected = lastOf(reference, kind);
-      return received !== undefined && expected !== undefined
-        && sampleOf(received) !== undefined && sampleOf(received) === sampleOf(expected);
-    })
-    && reference.filter((event) => PROTOCOL_LOSSY_KINDS.has(event.kind)).length === 2 * protocol.blocks,
-  `a lossy event is not the headless engine's event of its block, in order: ${json({ browser: lossy, headless: reference })}`);
+  gate(browserName, "sdk-protocol-lossy", [...PROTOCOL_LOSSY_KINDS].every((kind) => {
+    const received = ofKind(lossy, kind);
+    const expected = ofKind(reference, kind);
+    return ordered(received, expected) && received.length > 0 && expected.length === protocol.blocks
+      && sampleOf(received.at(-1)) !== undefined && sampleOf(received.at(-1)) === sampleOf(expected.at(-1));
+  }),
+  `a lossy event is not the headless engine's event of its kind and block, in order: ${json({ browser: lossy, headless: reference })}`);
 }
 
 function validateSdkResponse(browserName, response, leg) {
@@ -1995,7 +2000,9 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
     if (protocol?.browser !== undefined) {
       // #1571b: what the sdk-protocol gates just held, with the lossy events the browser received
       // (any number may be replaced before they are read, and that fails nothing).
-      const kinds = (events) => events.map((event) => event.kind).join(",");
+      const sample = (event) => event.kind === "diagnostic" ? event.diagnostic?.sampleTime : event.observedSample;
+      const kinds = (events) => events.map((event) => (sample(event) === undefined
+        ? event.kind : `${event.kind}@${sample(event)}`)).join(",");
       process.stdout.write(`${label}: sdk-protocol: browser events ${kinds(protocol.browser.events)}; headless events ${kinds(protocol.headless.events)}\n`);
     }
     process.stdout.write(`${label}: all qualification gates passed (${browser.version()})\n`);

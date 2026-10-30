@@ -393,13 +393,16 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   diagnostics(query?: DiagnosticsQuery): Promise<DiagnosticsPage>;
   /**
    * Subscribe to the protocol events, decoded (#1571 D4): `sessionCommitted`, `transportState`,
-   * `observationEnded`, `meterBatch`, `counterSnapshot` and `diagnostic`, in engine order. The
-   * events are the frames `host.onControlEvent` delivers, decoded with the headless engine's code.
-   * The worklet reads its events once per message it handles, and its lossy lane holds one event,
-   * so a reliable event (`sessionCommitted`, `transportState`, `observationEnded`) always arrives,
-   * while a block's lossy telemetry (`meterBatch`, `counterSnapshot`, `diagnostic`) can be replaced
-   * by a later block's before it is read. An event that arrives with no listener at all is dropped
-   * and counted in `host.discardedControlEvents`. A listener that throws, or a frame that does not
+   * `observationEnded`, `meterBatch`, `counterSnapshot` and `diagnostic`, each lane in engine
+   * order. The events are the frames `host.onControlEvent` delivers, decoded with the headless
+   * engine's code. The worklet reads its events once per message it handles, and its lossy lane
+   * holds one event, so a reliable event (`sessionCommitted`, `transportState`, `observationEnded`)
+   * always arrives, while a block's lossy telemetry (`meterBatch`, `counterSnapshot`, `diagnostic`)
+   * can be replaced by a later block's before it is read. The reliable lane (which carries
+   * `diagnostic`) is read before the lossy lane, and render can run meanwhile, so the two lanes
+   * keep no order between them: a later block's `diagnostic` can arrive before an earlier block's
+   * `counterSnapshot` (#2198). An event that arrives with no listener at all is dropped and
+   * counted in `host.discardedControlEvents`. A listener that throws, or a frame that does not
    * decode, is reported asynchronously and does not stop the other listeners. Returns the
    * unsubscribe function.
    */
