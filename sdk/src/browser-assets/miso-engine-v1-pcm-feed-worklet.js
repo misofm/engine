@@ -616,8 +616,12 @@ function wrapEngineProcessor(Base) {
     }
 
     /** Shared by render and the between-block control handler; never consumes PCM. The defaults
-     *  are the publication `readSharedSeek` read last; the caller reads it first. */
-    applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.publishedGeneration, frame = ring.seekFrame, anchor = ring.seekAnchor) {
+     *  are the publication `readSharedSeek` read last; the caller reads it first. Issue #2205:
+     *  the drain's live seek asks `source_seek`, which never prepares the consumer, so the engine
+     *  keeps the old generation playing until the new one has its runway; the suspended
+     *  `prepare-seek` passes `prepare` and asks `source_prepare_seek`, which applies the seek at
+     *  once and frees the engine's ring for the refill. */
+    applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.publishedGeneration, frame = ring.seekFrame, anchor = ring.seekAnchor, prepare = false) {
       const control = ring.control
       if (epoch !== ring.seenEpoch) {
         const requested = generation
@@ -642,7 +646,10 @@ function wrapEngineProcessor(Base) {
           return this.consumeSharedSeek(ring, epoch)
         }
         ring.idTarget.set(ring.idBytes)
-        let result = this.exports.miso_engine_web_v1_source_seek(
+        const seek = prepare
+          ? this.exports.miso_engine_web_v1_source_prepare_seek
+          : this.exports.miso_engine_web_v1_source_seek
+        let result = seek(
           this.handle,
           ring.idLength,
           requested,
@@ -752,7 +759,7 @@ function wrapEngineProcessor(Base) {
       for (let index = 0; index < rings.length; index += 1) {
         const ring = rings[index]
         if (!matches(ring, seeks[index])) return { kind: "superseded" }
-        const result = this.applySharedSeek(ring, seeks[index].epoch, seeks[index].generation, seeks[index].frame)
+        const result = this.applySharedSeek(ring, seeks[index].epoch, seeks[index].generation, seeks[index].frame, ring.seekAnchor, true)
         if (result !== RESULT_OK) return { kind: "refused", result }
         if (!this.releaseStaleSharedSlots(ring, seeks[index].generation)) return { kind: "refused", result: 1 }
       }

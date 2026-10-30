@@ -2735,6 +2735,12 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
       calls.seekIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
       return 0;
     },
+    // #2205: on the Worker's control instance the prepare form is the seek itself; the fake
+    // forwards to whatever `source_seek` a rig installs.
+    miso_engine_web_v1_source_prepare_seek: (...args) => {
+      calls.preparedSeeks = (calls.preparedSeeks ?? 0) + 1;
+      return exports.miso_engine_web_v1_source_seek(...args);
+    },
     miso_engine_web_v1_meter_lease: (_handle, enabled) => {
       calls.meterLease.push(enabled);
       return 0;
@@ -5046,8 +5052,9 @@ async function testControlWorker() {
     // Issue #1387 (root ruling 1, attempts 2-3): the headroom rule on the producer's real fill
     // (`source_fill`). The fake engine ring holds 80 chunks; render takes one a block unless the
     // source holds (an anchored seek before its anchor), drops a seek's stale chunks at the block
-    // that pops it and then reports the seek's generation in effect. 48 kHz and 64 frames: H is the
-    // engine's seek runway R (#2205), ceil(50 ms / 64 frames) = 38. Red on a drain that fills the ring to
+    // that pops it and then reports the seek's generation in effect. 48 kHz and 64 frames: H is
+    // max(R, B) (#2205): the engine's seek runway R = ceil(50 ms / 64 frames) = 38 and #1387's bound
+    // B = 3 + 32 + 1 = 36, so H = 38. Red on a drain that fills the ring to
     // capacity, on the attempt-1 drain that capped a guessed depth (during a hold the guess falls
     // below the real fill), and on attempt 2's (`befd51fbd`) admission that ended on room alone (a
     // seek into a short ring keeps the headroom filled for good, and the next seek finds none).

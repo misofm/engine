@@ -8,6 +8,7 @@
     {"name": "meter_header_ptr", "callers": [{"worklet": "engine", "handler": "syncMeterViews"}, {"worklet": "engine", "handler": "postMeterFrame"}], "wrapped": true},
     {"name": "source_submit", "callers": [{"worklet": "engine", "handler": "receiveSource"}, {"worklet": "feed", "handler": "drainSharedRing"}], "wrapped": true},
     {"name": "source_seek", "callers": [{"worklet": "engine", "handler": "receiveSeek"}, {"worklet": "feed", "handler": "applySharedSeek"}], "wrapped": true},
+    {"name": "source_prepare_seek", "callers": [{"worklet": "feed", "handler": "applySharedSeek"}], "wrapped": true},
     {"name": "host_adopt", "callers": [{"worklet": "engine", "handler": "adoptRenderHalf"}], "wrapped": true},
     {"name": "host_release", "callers": [{"worklet": "engine", "handler": "releaseRenderHalf"}], "wrapped": true},
     {"name": "instance_bind", "callers": [{"worklet": "engine", "handler": "adoptRenderHalf"}], "wrapped": true},

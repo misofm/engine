@@ -913,8 +913,13 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
     })
 }
 
-/// Queue one generation-tagged absolute seek for the staged source ID. A plain seek lands when its
-/// runway is queued, bounded by the deadline, as the C ABI's `miso_engine_v1_source_seek` (#2205).
+/// Queue one generation-tagged absolute seek for the staged source ID (#2205): the C ABI's
+/// `miso_engine_v1_source_seek`. It never prepares the plan's consumer, also in `single` mode
+/// where the render half is on this instance: render observes the seek at its next block and lands
+/// it when ready, keeping the old generation playing until the new one has its runway in the
+/// engine's ring (bounded by 50 ms). The live seeks call it: the PCM feed's drain and the
+/// worklet's `seekSource`. A seek with no live audio to keep calls
+/// [`miso_engine_web_v1_source_prepare_seek`] instead.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_seek(
     handle: u32,
@@ -923,24 +928,56 @@ pub extern "C" fn miso_engine_web_v1_source_seek(
     source_frame: u64,
 ) -> u32 {
     render_locked(|| {
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            if host.status().state != STATE_READY {
-                return host.seek_source(&[], 0, 0);
-            }
-            let id_count = source_id_bytes as usize;
-            let Some(ids) = host.source_id_mut() else {
-                return host.record_boundary_result(RESULT_INTERNAL);
-            };
-            let Some(source_id) = ids.get(..id_count) else {
-                let code = host.refuse_source_id();
-                return host.record_boundary_result(code);
-            };
-            let source_id_pointer = source_id.as_ptr();
-            // SAFETY: The checked ID prefix lies in stable staging and is only read during the
-            // synchronous safe-host lookup; the seek operation does not mutate staging.
-            let source_id = unsafe { slice::from_raw_parts(source_id_pointer, id_count) };
+        staged_source_seek(handle, source_id_bytes, |host, source_id| {
             host.seek_source(source_id, generation, source_frame)
         })
+    })
+}
+
+/// [`miso_engine_web_v1_source_seek`], then prepare the plan's consumer at once (#2205): the seek
+/// applies before the next block, the old generation's queued PCM is dropped and new PCM can enter
+/// even when the engine's ring was full. For a seek with no live audio to keep: the PCM feed's
+/// suspended `prepare-seek` and the headless engine's `seekSource`. With the render half on
+/// another thread (`worker` mode) there is no consumer here to prepare, and it is exactly
+/// [`miso_engine_web_v1_source_seek`]. Same arguments, results and thread rule.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_prepare_seek(
+    handle: u32,
+    source_id_bytes: u32,
+    generation: u64,
+    source_frame: u64,
+) -> u32 {
+    render_locked(|| {
+        staged_source_seek(handle, source_id_bytes, |host, source_id| {
+            host.prepare_source_seek(source_id, generation, source_frame)
+        })
+    })
+}
+
+/// The shared body of the two source-seek exports: a host that is not ready records its
+/// refusal through the seek itself; otherwise the staged ID prefix is checked and `seek` runs on it.
+fn staged_source_seek(
+    handle: u32,
+    source_id_bytes: u32,
+    seek: impl FnOnce(&mut AudioWorkletEngineHost, &[u8]) -> u32,
+) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        if host.status().state != STATE_READY {
+            return seek(host, &[]);
+        }
+        let id_count = source_id_bytes as usize;
+        let Some(ids) = host.source_id_mut() else {
+            return host.record_boundary_result(RESULT_INTERNAL);
+        };
+        let Some(source_id) = ids.get(..id_count) else {
+            let code = host.refuse_source_id();
+            return host.record_boundary_result(code);
+        };
+        let source_id_pointer = source_id.as_ptr();
+        // SAFETY: The checked ID prefix lies in stable staging and is only read during the
+        // synchronous safe-host lookup; the seek operation does not mutate staging.
+        let source_id = unsafe { slice::from_raw_parts(source_id_pointer, id_count) };
+        seek(host, source_id)
     })
 }
 

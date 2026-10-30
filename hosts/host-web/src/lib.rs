@@ -2445,18 +2445,48 @@ impl AudioWorkletEngineHost {
         self.record(code)
     }
 
-    /// Apply one strictly increasing generation-tagged source seek between render blocks.
-    ///
-    /// The seek goes through the control plane's source routing (#1381a D2). This host also owns
-    /// the render plan on its one thread, so a successful admission prepares the plan's consumer
-    /// too, and new PCM can enter even when old queues were full. A seek changes source-content
-    /// position while the absolute render clock stays continuous; it therefore neither resets
-    /// meter accumulators nor advances the meter publication epoch.
+    /// Queue one strictly increasing generation-tagged source seek (#2205): the C ABI's
+    /// `miso_engine_v1_source_seek`. It goes through the control plane's source routing (#1381a
+    /// D2) and never prepares the plan's consumer, also when the render half is on this instance:
+    /// the consumer observes the seek through its command queue and lands it when ready (the old
+    /// generation plays on until the new one has its runway, at most 50 ms). A live ring seek in
+    /// `single` mode takes this path. A seek changes source-content position while the absolute
+    /// render clock stays continuous; it therefore neither resets meter accumulators nor advances
+    /// the meter publication epoch.
+    pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
+        self.control_response = ControlResponse::None;
+        if !self.control_ready() {
+            return self.record(RESULT_WRONG_STATE);
+        }
+        let Some(control) = self.control.as_mut() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        let code = match control
+            .control
+            .seek_unserviced(source_id, generation, source_frame)
+        {
+            Ok(()) => RESULT_OK,
+            Err(failure) => self.refuse_source(failure),
+        };
+        self.record(code)
+    }
+
+    /// Apply one strictly increasing generation-tagged source seek between render blocks, and
+    /// prepare the plan's consumer at once (#2205): the suspended `prepare-seek` op's and the
+    /// headless engine's seek, which have no live audio to keep. The seek goes through the control
+    /// plane's source routing as [`Self::seek_source`]'s; this host also owns the render plan on its
+    /// one thread, so a successful admission prepares the plan's consumer too
+    /// (`SeekClock::Hold`: the seek applies now and the old generation's queued PCM is dropped), and
+    /// new PCM can enter even when old queues were full.
     ///
     /// With the render half on another thread (#1332 S5) the plan is not here to prepare: the
-    /// seek goes through the control plane's routing alone, as on the C ABI, and the consumer
-    /// observes it through its command queue.
-    pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
+    /// seek goes through the control plane's routing alone, exactly as [`Self::seek_source`].
+    pub fn prepare_source_seek(
+        &mut self,
+        source_id: &[u8],
+        generation: u64,
+        source_frame: u64,
+    ) -> u32 {
         self.control_response = ControlResponse::None;
         if !self.control_ready() {
             return self.record(RESULT_WRONG_STATE);

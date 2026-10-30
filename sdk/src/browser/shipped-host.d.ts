@@ -572,7 +572,10 @@ export interface MisoAudioWorkletHost {
   readonly instanceMode: MisoInstanceMode;
   submitSource(request: MisoSourceRequest): Promise<MisoAck>;
   /// Seeks source content while absolute render time remains continuous. Meter peak windows can
-  /// straddle this content discontinuity; the seek does not advance the meter generation.
+  /// straddle this content discontinuity; the seek does not advance the meter generation. It is a
+  /// live seek (`miso_engine_web_v1_source_seek`, issue 2205): render keeps the old position
+  /// playing until the new generation has its runway in the engine's ring (50 ms of audio), or
+  /// 50 ms after render observed it, then lands it at its frame.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
   /// @internal Seek one source at an anchor sample (issue 1297a); the worklet's message handler
   /// applies it, never `process()`. It resolves with the engine's result. It shares the per-source

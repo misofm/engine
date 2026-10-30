@@ -150,6 +150,7 @@ EXPORTS = [
     "miso_engine_web_v1_source_fill",
     "miso_engine_web_v1_source_frames",
     "miso_engine_web_v1_source_id",
+    "miso_engine_web_v1_source_prepare_seek",
     "miso_engine_web_v1_source_seek",
     "miso_engine_web_v1_source_seek_at",
     "miso_engine_web_v1_source_seek_report",

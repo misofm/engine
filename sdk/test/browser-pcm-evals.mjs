@@ -49,9 +49,12 @@ function recordFeedCalls(exports) {
   const prefix = renderThreadTable.prefix;
   return new Proxy(exports, {
     get(target, property, receiver) {
-      const value = Reflect.get(target, property, receiver);
+      let value = Reflect.get(target, property, receiver);
       if (typeof property !== "string" || !property.startsWith(prefix)) return value;
       const name = property.slice(prefix.length);
+      // #2205: the fakes model the prepare form as the seek itself; which export the prelude asks
+      // is recorded by name either way, so the table check still sees it.
+      if (value === undefined && name === "source_prepare_seek") value = Reflect.get(target, `${prefix}source_seek`, receiver);
       recordedFeedCalls.add(name);
       // An unlisted export that the fake does not define would stop the run with a bare TypeError
       // before the last test names it.

@@ -9516,6 +9516,51 @@ mod session_seek {
         rig
     }
 
+    /// #2205, the single-mode split: on an instance that holds the render half, the live seek
+    /// export (`source_seek`, the PCM feed's drain) leaves the old generation playing until the
+    /// new one has its runway, and the prepare form (`source_prepare_seek`, the suspended
+    /// `prepare-seek` and the headless engine) applies the seek before the next block.
+    ///
+    /// Test value: red if the live export prepares the consumer at once (the old audio is
+    /// dropped before any PCM of the new generation is queued, as before the split), or if the
+    /// prepare form waits for a runway (a suspended seek could not refill a full ring).
+    #[test]
+    fn a_live_source_seek_keeps_the_old_audio_and_the_prepared_form_applies_at_once() {
+        for prepared in [false, true] {
+            let mut rig = Rig::boot(&one_source(), &[LONG]);
+            // Two blocks of the old generation queued ahead of the seek.
+            for frame in [4 * Q, 5 * Q] {
+                assert_eq!(rig.submit(LONG, 1, frame), RESULT_OK);
+            }
+            rig.stage(LONG);
+            let seek = if prepared {
+                miso_engine_web_v1_source_prepare_seek
+            } else {
+                miso_engine_web_v1_source_seek
+            };
+            assert_eq!(seek(rig.handle, LONG.len() as u32, 2, 6_000), RESULT_OK);
+            let sample = rig.next();
+            rig.render();
+            if prepared {
+                assert_eq!(
+                    rig.landed(LONG),
+                    (2, sample, 6_000),
+                    "applied before the block"
+                );
+                continue;
+            }
+            assert_eq!(rig.landed(LONG).0, 1, "the old generation plays on");
+            rig.submit_runway(LONG, 2, 6_000);
+            let landed = rig.next();
+            rig.render();
+            assert_eq!(
+                rig.landed(LONG),
+                (2, landed, 6_000),
+                "lands with its runway"
+            );
+        }
+    }
+
     /// Gate 1, both forms move the timeline and every source in the one block.
     ///
     /// Test value: red if the export seeks the consumers in different blocks (for example through

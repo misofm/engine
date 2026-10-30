@@ -879,7 +879,11 @@ export class WasmBoundary {
     });
   }
 
-  /** Seek one streamed source. The new generation invalidates every earlier queued chunk. */
+  /**
+   * Seek one streamed source. The new generation invalidates every earlier queued chunk. The
+   * headless engine renders only when asked, so it has no live audio to keep: the seek is prepared
+   * at once (`source_prepare_seek`, #2205) and the next rendered block reads the new position.
+   */
   seekSource(request: {
     readonly sourceId: string;
     readonly generation: bigint;
@@ -893,7 +897,7 @@ export class WasmBoundary {
       throw new MisoUsageError("sourceFrame must be a non-negative bigint");
     }
     const idBytes = this.#stageSourceId(request.sourceId);
-    const result = Number(this.#exports.miso_engine_web_v1_source_seek(
+    const result = Number(this.#exports.miso_engine_web_v1_source_prepare_seek(
       handle,
       idBytes,
       request.generation,
