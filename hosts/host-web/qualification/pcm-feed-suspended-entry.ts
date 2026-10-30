@@ -148,6 +148,7 @@ async function livePlayback(instanceMode: "worker" | "single") {
         instanceMode: live.instanceMode, baselineUnderrunFrames: (baseline - start).toString(),
         seeksApplied: Atomics.load(control, MSB1_CONTROL.SEEKS_APPLIED),
         refused: Atomics.load(control, MSB1_CONTROL.REFUSED),
+        lastRefusal: Atomics.load(control, MSB1_CONTROL.LAST_RESULT),
         renderAllocations: await live.host.renderAllocationCount(),
       };
     };

@@ -82,7 +82,11 @@ export async function qualifyLiveSeek(browser, browserName, origin, mode, phase 
     const missing = result.seeks.filter((row) => row.underrunFrames !== "0");
     const split = result.seeks.filter((row) => row.timelineLandedSample !== undefined
       && (row.timelineLandedSample !== row.sourceLandedSample || row.timelineGeneration !== row.generation));
-    if (result.refused !== 0 || split.length !== 0
+    // A transport seek's chunks of the old generation that a drain submits after the session seek
+    // moved the source, and before the producer's ring seek, are refused as stale: expected, so
+    // reported, not an invariant. The per-source phase has no such window.
+    const refused = phase.run === "runLivePcmFeedSeek" && result.refused !== 0;
+    if (refused || split.length !== 0
         || result.seeksApplied !== result.seeks.length
         || result.renderAllocations.result !== 0 || result.renderAllocations.count !== 0
         || (gated && missing.length !== 0)) {
