@@ -291,7 +291,10 @@ jobs:
           set -euo pipefail
           evidence=target/npm-publish/evidence
           converged=0
-          for attempt in $(seq 1 12); do
+          # #2212: the registry served recent versions 97-311 s after the publish step returned; poll about 15 minutes.
+          attempts=60
+          interval_seconds=15
+          for attempt in $(seq 1 "$attempts"); do
             if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" --json > "$evidence/registry-version.json" 2> "$evidence/registry-version.err" \
               && npm access get status "$PACKAGE_NAME" --json > "$evidence/registry-access.json" 2> "$evidence/registry-access.err" \
               && npm view "$PACKAGE_NAME" dist-tags.latest --json > "$evidence/registry-latest.json" 2> "$evidence/registry-latest.err" \
@@ -311,8 +314,8 @@ jobs:
               converged=1
               break
             fi
-            [[ "$attempt" == 12 ]] && break
-            sleep 5
+            [[ "$attempt" == "$attempts" ]] && break
+            sleep "$interval_seconds"
           done
           [[ "$converged" == 1 ]] || {
             for file in "$evidence"/registry-*.err; do [[ -f "$file" ]] && cat "$file" >&2; done

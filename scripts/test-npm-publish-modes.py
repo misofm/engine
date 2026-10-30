@@ -209,6 +209,23 @@ def step_map(steps: Iterable[Step]) -> dict[str, Step]:
     return result
 
 
+REGISTRY_WINDOW_EDITS = (
+    ("""          converged=0
+          # #2212: the registry served recent versions 97-311 s after the publish step returned; poll about 15 minutes.
+          attempts=60
+          interval_seconds=15
+          for attempt in $(seq 1 "$attempts"); do
+""", """          converged=0
+          for attempt in $(seq 1 12); do
+"""),
+    ("""            [[ "$attempt" == "$attempts" ]] && break
+            sleep "$interval_seconds"
+""", """            [[ "$attempt" == 12 ]] && break
+            sleep 5
+"""),
+)
+
+
 def normalize_authorized_edits(text: str) -> str:
     require(len(BLAKE3_ENV.findall(text)) == 1, "expected one BLAKE3 release fingerprint")
     require(text.count(BLAKE3_PIN_CHECK) == 1, "expected one BLAKE3 source pin guard")
@@ -239,6 +256,10 @@ def normalize_authorized_edits(text: str) -> str:
     text = BROWSER_ENV.sub("", text).replace(BROWSER_INSTALL, "", 1)
     text = text.replace("Install the browser artifact toolchain and Rust 1.97.1",
                         "Install Rust 1.97.1 and the Wasm target", 1)
+    # #2212 lengthens the registry convergence window from 12 x 5 s to 60 x 15 s, and only that.
+    for window, baseline in REGISTRY_WINDOW_EDITS:
+        require(text.count(window) == 1, "expected the #2212 registry convergence window exactly once")
+        text = text.replace(window, baseline, 1)
     return text.replace(MODE_ENV, "", 1).replace(PUBLISH_GUARD, PUBLISH_DRY_RUN, 1)
 
 
@@ -850,7 +871,9 @@ def test_registry_mismatch(steps: list[Step]) -> None:
         result = run_step(by_name[REGISTRY_NAME], fixture, env, expect_success=False)
         require(result.returncode != 0, "registry mismatch unexpectedly converged")
         version_queries = args_matching(journal(fixture), ["view", f"{PACKAGE}@{VERSION}", "--json"])
-        require(len(version_queries) == 12, f"registry mismatch did not exhaust 12 bounded attempts: {len(version_queries)}")
+        require(len(version_queries) == 60, f"registry mismatch did not exhaust 60 bounded attempts: {len(version_queries)}")
+        sleeps = fixture.sleep_journal.read_text(encoding="utf-8").splitlines()
+        require(sleeps == ["15"] * 59, f"registry polling did not wait 15 s between its 60 attempts: {sleeps}")
         require(not fixture.import_marker.exists() and not fixture.audit_marker.exists(),
                 "registry mismatch reached the consumer or audit boundary")
     finally:
