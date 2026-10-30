@@ -585,8 +585,10 @@ export interface MisoAudioWorkletHost {
   /// (issue 1644 D1). A plain seek (no `anchorSample`) declares the discontinuity in the same
   /// call; an anchored one keeps continuity. Reposition the PCM producers only after a `0` result,
   /// so a ring seek at this generation is consumed without a second per-source seek. One may be
-  /// unsettled at a time; a second rejects locally with result `6`. The SDK's `engine.seek` is
-  /// the public surface.
+  /// unsettled at a time; a second rejects locally with result `6`. A plain seek lands for every
+  /// source and the timeline in one block, once every source that was playing has its runway in
+  /// the engine's ring (50 ms of audio), or 50 ms after render observed it (issue 2205); the old
+  /// position plays until then. The SDK's `engine.seek` is the public surface.
   seekSession(request: MisoSessionSeekRequest): Promise<MisoSessionSeekReply>;
   /// Reads the engine status. Concurrent calls share one read, and a reply reflects every request
   /// the host sent before the call: a call joins the in-flight read while no later request was

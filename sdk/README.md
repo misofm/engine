@@ -353,21 +353,21 @@ epoch that changed while it read, reads the seek again later. A writer of its ow
 the same way.
 
 A plain ring seek (`Msb1RingWriter.seek(generation, frame)`) while audio plays does not cut to
-silence in `single` mode. In `worker` mode it can still lose one quantum (128 frames) at the
-block where the seek lands, about once in 50 seeks (#2185 stays open for it). The drain frees the
-ring's chunks of the old generation at once, so the writer can write the new one, and the old
-position plays on from the engine's ring until the new generation has 50 ms of audio published
-(at most a ring, or up to a chunk that ends its region). Then the seek applies, a single cut. If
-that runway is not published within 50 ms of rendered audio (in `worker` mode, at most half the
-engine ring), the seek applies anyway and the source plays silence, counted as underruns, until
-its PCM arrives. Publish the new position in one burst, as the pump does. The engine reports the
-block where the seek applied in the source's seek report. A suspended seek with
-`feed.prepareSeek()` applies at once, as before.
+silence, in either mode (#2185, #2205). The drain frees the ring's chunks of the old generation
+at once and submits the new ones, and the engine keeps the old position playing until the new
+generation has its runway in the engine's ring: 50 ms of audio (at most half the engine ring), or
+up to a chunk that ends its region. Then the seek lands, a single cut, and the source plays the
+new position from its first frame. If that runway is not in the engine within 50 ms of rendered
+audio, the seek lands anyway and the source plays silence, counted as underruns, until its PCM
+arrives. Publish the new position in one burst, as the pump does. The engine reports the block
+where the seek landed in the source's seek report. A suspended seek with `feed.prepareSeek()`
+applies at once, as before.
 
-The transport seek, `engine.seek(frame, { producers })`, sends a session seek first: render then
-moves every source to the new generation and drops its old chunks. Each producer's ring seek at
-that generation applies at once and does not wait for a runway, because no old audio is left to
-play. The transport seek can therefore still go silent until the producers publish (#2205).
+The transport seek, `engine.seek(frame, { producers })`, lands the same way for every source and
+the timeline in one block: the first at which every source that was playing has its runway in the
+engine's ring, or 50 ms after render observed the seek. The old position plays until then, so the
+seek adds at most 50 ms of latency and no silence. A source that received no PCM before the seek
+does not hold it.
 
 Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
 is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.
@@ -413,8 +413,8 @@ The engine has one timeline playhead. `engine.position()` resolves with `{ frame
 atSample }`: `frame` is the timeline frame that the next rendered block starts at, and `atSample`
 is the absolute render sample of that block. The SDK reads the timeline's seek report and the
 host's next render sample, and calculates `frame = sourceFrame + (atSample - firstSample)`. After
-`engine.seek(f)`, `position()` gives `f` until the first block renders, and then `f` plus the
-frames rendered since. The frame does not move while the context is suspended. You do not need
+`engine.seek(f)`, `position()` gives `f` until the seek lands (at most 50 ms of audio later, see
+the transport seek above), and then `f` plus the frames rendered since. The frame does not move while the context is suspended. You do not need
 the meters to calculate a position.
 
 `engine.planLatency()` resolves with `{ samples, tailSamples }` on both engines: the output latency

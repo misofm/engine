@@ -5046,8 +5046,8 @@ async function testControlWorker() {
     // Issue #1387 (root ruling 1, attempts 2-3): the headroom rule on the producer's real fill
     // (`source_fill`). The fake engine ring holds 80 chunks; render takes one a block unless the
     // source holds (an anchored seek before its anchor), drops a seek's stale chunks at the block
-    // that pops it and then reports the seek's generation in effect. 48 kHz and 64 frames: a 4 ms
-    // tick is 3 quanta and a 2048-frame burst 32, so H = 36. Red on a drain that fills the ring to
+    // that pops it and then reports the seek's generation in effect. 48 kHz and 64 frames: H is the
+    // engine's seek runway R (#2205), ceil(50 ms / 64 frames) = 38. Red on a drain that fills the ring to
     // capacity, on the attempt-1 drain that capped a guessed depth (during a hold the guess falls
     // below the real fill), and on attempt 2's (`befd51fbd`) admission that ended on room alone (a
     // seek into a short ring keeps the headroom filled for good, and the next seek finds none).
@@ -5108,9 +5108,9 @@ async function testControlWorker() {
       const { send, tick, engine, room, render, fill, seek } = await headroomRig(128);
       fill();
       tick.callback();
-      assert.equal(engine.queued.length, 44, "the drain keeps H = 36 of the 80 free");
-      // An anchored start that holds 60 blocks: render takes nothing meanwhile. #2185: the ring
-      // publishes the anchored seek the message names (a plain one would now wait for its chunk).
+      assert.equal(engine.queued.length, 42, "the drain keeps H = 38 of the 80 free");
+      // An anchored start that holds 60 blocks: render takes nothing meanwhile; the ring publishes
+      // the anchored seek the message names.
       seek(2n, 0n, 640n);
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n, sourceFrame: 0n, anchorSample: 640n });
       engine.hold = 60;
@@ -5118,18 +5118,18 @@ async function testControlWorker() {
         render(3);
         fill();
         tick.callback();
-        assert.ok(room() >= 36, `pass ${pass}: the headroom stays free through the hold (room ${room()})`);
+        assert.ok(room() >= 38, `pass ${pass}: the headroom stays free through the hold (room ${room()})`);
       }
-      // A plain ring seek now: its new generation is admitted before the next block. #2185: the
-      // pass that finds none of its chunks frees the old generation's slots and defers the seek;
-      // the pass after the writer publishes applies it.
+      // A plain ring seek now: its new generation is admitted before the next block. The first
+      // pass applies it and frees the old generation's slots; the pass after the writer publishes
+      // submits its runway.
       seek(3n, 9600n);
       tick.callback();
       fill();
       tick.callback();
       assert.equal(engine.seek, 3n);
-      assert.equal(engine.queued.filter((value) => value === 3n).length, 36,
-        "the plain seek's new generation fills the headroom before the next block renders");
+      assert.equal(engine.queued.filter((value) => value === 3n).length, 38,
+        "the plain seek's new generation fills the headroom (its runway) before the next block renders");
       render(1);
       assert.equal(engine.queued[0], 3n, "the next block plays the new position");
     }
@@ -5150,12 +5150,12 @@ async function testControlWorker() {
         fill();
         tick.callback();
       }
-      assert.equal(room(), 36, "once render reports the seek in effect, the headroom is kept again");
+      assert.equal(room(), 38, "once render reports the seek in effect, the headroom is kept again");
       seek(3n, 9600n);
       tick.callback();
       fill();
       tick.callback();
-      assert.equal(engine.queued.filter((value) => value === 3n).length, 36, "the next seek is admitted");
+      assert.equal(engine.queued.filter((value) => value === 3n).length, 38, "the next seek is admitted");
     }
     // Issue #1387 (root ruling 2): a default ring request boots worker mode at 65 536 frames; an
     // explicit one is kept, however short (MINOR 3: the headroom then halves the ring instead).
@@ -5169,8 +5169,7 @@ async function testControlWorker() {
     // Issue #1387 (MAJOR-2): the shared MSB1 consumer case table over this Worker, at 4-frame
     // quanta (`sdk/test/msb1-consumer-cases.mjs`; the prelude runs it in browser-pcm-evals).
     for (const { name, run } of MSB1_CONSUMER_CASES) {
-      // #2185: an 8-quantum engine ring caps the deferral bound and runway at 4 quanta, the
-      // prelude adapter's too.
+      // An 8-quantum engine ring: the headroom (the engine's seek runway, #2205) is 4 quanta.
       const { send, fromWorklet } = await boot({}, 4, (engine) => { engine.calls.ringQuanta = 8; });
       const tick = intervals.at(-1);
       const replies = [];
@@ -5242,7 +5241,6 @@ async function testControlWorker() {
         port.onmessage({ data: structuredClone(data) });
         return replies.pop();
       };
-      Object.defineProperty(adapter, "seekBound", { get: () => worker.seekDeferralQuanta });
       Object.assign(adapter, {
         attach: async (rings) => { feed({ op: "attach", rings }); },
         // One pass: the drain, then one rendered block, then the drain that accounts it (the
