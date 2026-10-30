@@ -10186,8 +10186,10 @@ pub(crate) struct LaneMap {
     target: Box<[u32]>,
     /// The sort's scratch: a group's movable positions, ascending.
     movable: Box<[u32]>,
-    /// The sort's counters, one per pattern: [`PACK_PATTERNS`].
-    counts: Box<[u16]>,
+    /// The sort's counters, one per pattern: [`PACK_PATTERNS`]. Each holds a count of a group's
+    /// strips or a rank among them, so it is as wide as a position (issue #2173): a group of more
+    /// than 65,535 strips overflowed a `u16`.
+    counts: Box<[u32]>,
     /// Every group's ranked slots, `(row, slot)`, costliest first, from each group's
     /// `ranked_base` (issue #2135).
     ranked: Box<[(u32, u32)]>,
@@ -10492,6 +10494,8 @@ impl LaneMap {
                 group.chains as usize * group.rows as usize,
                 "a group lists rows units per chain"
             );
+            // Issue #2173: the sort counts a group's strips in `u32`, so its span must fit one.
+            u32::try_from(group.span()).expect("a group's span fits");
             local.extend(
                 (0..group.span()).map(|position| u32::try_from(position).expect("a position fits")),
             );
@@ -11936,7 +11940,7 @@ fn pack_sort<H: PackHost>(host: &mut H, pack: &PackGroup) {
         }
     }
     // Descending pattern order: each pattern's first rank among the movable positions.
-    let mut next = 0_u16;
+    let mut next = 0_u32;
     for count in counts.iter_mut().rev() {
         let here = *count;
         *count = next;
@@ -11950,7 +11954,7 @@ fn pack_sort<H: PackHost>(host: &mut H, pack: &PackGroup) {
         let Some(rank) = counts.get_mut(usize::from(value)) else {
             continue;
         };
-        let place = usize::from(*rank);
+        let place = *rank as usize;
         *rank += 1;
         if let Some(&to) = positions.get(place)
             && let Some(slot) = target.get_mut(to as usize)
@@ -17059,6 +17063,31 @@ mod tests {
                 "a padded lane never moves"
             );
         }
+    }
+
+    /// Issue #2173: one group of 16,385 four-lane chains (65,540 strips), every strip audible with
+    /// no running bit except the last home, which runs slot 1. The sort places that strip first
+    /// and every other strip after it in home order, so 65,539 strips share one pattern.
+    ///
+    /// Test value: red when a pattern count, its prefix sum or a rank is narrower than a group's
+    /// span: a `u16` panics in a debug build and wraps in a release one, where the packer then
+    /// writes wrong targets.
+    #[test]
+    fn the_pattern_sort_counts_more_strips_than_a_u16_holds() {
+        let mut host = FakePackHost::new(1, 16_385);
+        let pack = host.map.groups[0];
+        let span = pack.span();
+        assert_eq!(span, 65_540, "the group's span");
+        host.bits[span - 1] = SLOT_1;
+        pack_sort(&mut host, &pack);
+        let expected = std::iter::once(span - 1).chain(0..span - 1);
+        let wrong = host
+            .map
+            .target
+            .iter()
+            .zip(expected)
+            .position(|(&target, strip)| target as usize != strip);
+        assert_eq!(wrong, None, "the first position with a wrong target");
     }
 
     /// Issue #2135 gate 4: four dirty groups of three four-lane chains under the global budget
