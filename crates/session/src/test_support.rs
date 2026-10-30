@@ -3,6 +3,13 @@
 
 use crate::{RouteSource, SendTap, StableId, canonical_session_json, parse_session_json};
 
+/// The dense gates' track count (issue #2219): [`dense_document`] at 7,000 tracks is about 19.2 MB
+/// of JSON whose exact retained aggregate in the browser (627,576,439 bytes) is 16.9 % over the
+/// 512 MiB default budget, so a boot projection within 1 % of exact still refuses it; and whose
+/// parse transient (20 bytes per document byte, about 384 MB) stays under that budget. The 6,000
+/// tracks of issue #2199 were only 0.22 % over it.
+pub const DENSE_GATE_TRACKS: usize = 7_000;
+
 /// The dense console shape of issue #2191, as canonical JSON: `tracks` tracks on the nine-track
 /// fixture's second track, each with four full EQ inserts (the densest per-track declaration the
 /// schema accepts: a console entry is smaller than the effect it configures) and a post-pan route

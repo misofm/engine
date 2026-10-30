@@ -184,8 +184,8 @@ fn unlimited_caps() -> CompileCaps {
 /// The dense accepted shape (`session::test_support::dense_document`, issue #2219): `tracks`
 /// tracks, four EQ inserts per track, each with a post-pan route to the main output, followed by
 /// JSON whitespace to `pad_to` bytes when given (1 MiB, the staging ceiling before issue #2191).
-/// `examples/dense_document.rs` emits the same shape at 6,000 tracks for the wasm leg of the dense
-/// gate (`scripts/check-web-boot-budget.mjs`).
+/// `examples/dense_document.rs` emits the same shape at `DENSE_GATE_TRACKS` for the wasm leg of the
+/// dense gate (`scripts/check-web-boot-budget.mjs`).
 fn dense_document(tracks: usize, pad_to: Option<usize>) -> Vec<u8> {
     let mut document = session::test_support::dense_document(tracks);
     if let Some(maximum) = pad_to {
@@ -348,20 +348,23 @@ fn effect_state_the_budget_cannot_hold_is_refused_before_preparation() {
         .and_then(|(_, effect)| effect.split_once(",graph_bytes="))
         .and_then(|(effect, _)| effect.parse().ok())
         .unwrap_or_else(|| panic!("{diagnostic}"));
+    // The effect row keeps its `effect_state_bytes` name, though since issue #2219 it charges no
+    // processor for a banked member; no delay banks, so here it is every instance's.
     assert!(effect_state_bytes > declared, "{diagnostic}");
 }
 
-/// Issue #2199: the dense 6,000-track shape of #2191 (about 16.5 MB of JSON, four EQ inserts per
-/// track) at the default budget is refused by the boot's retained projection, whose graph,
-/// builtin and control rows are projected before they are allocated: the boot's peak stays inside
-/// the document's parse transient, under the budget.
+/// Issue #2199: the dense shape of #2191 at `DENSE_GATE_TRACKS` (7,000 tracks since issue #2219,
+/// about 19.2 MB of JSON, four EQ inserts per track, an exact aggregate 16.9 % over the budget) at
+/// the default budget is refused by the boot's retained projection, whose graph, builtin and
+/// control rows are projected before they are allocated: the boot's peak stays inside the
+/// document's parse transient, under the budget (measured 343,361,120 of 384,115,980).
 ///
 /// Test value: red when the boot projection leaves out the graph, builtin or control rows. The
-/// control plane then prepares every effect, binds every bank and compiles the plan (a peak of
-/// about 638 MB, over the 512 MiB budget) before the exact aggregate refuses the session.
+/// control plane then prepares every effect, binds every bank and compiles the plan, over the
+/// 512 MiB budget, before the exact aggregate refuses the session (`host.budget.retained_exact`).
 #[test]
 fn the_dense_shape_is_refused_before_its_rows_are_allocated() {
-    let document = dense_document(6_000, None);
+    let document = dense_document(session::test_support::DENSE_GATE_TRACKS, None);
     let (failure, peak) = measured_peak(|| {
         AudioWorkletEngineHost::boot(&document, WebBootOptions::default())
             .err()
