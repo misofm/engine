@@ -331,3 +331,16 @@ The console seeks only while stopped, so this path matters.
     - control-parity (47 tests);
     - `check-capi-abi.sh` and `--self-test`, the release audit C ABI leg (0 violations);
     - fmt and clippy (`-D warnings`) on the touched crates.
+
+## Attempt 4 PASS, folds (2026-10-29)
+
+- **MINOR 1:** the FIFO gate has a test now: row 5 of the #2205 browser-evals rows test. The first
+  seek waits on a `stop()` in flight; the suspend settles, and a second seek called in the same
+  turn needs no wait. They must be sent in call order. With `void previousSeek` in place of
+  `await previousSeek` the row is red: the order is `[10n, 9n]`.
+- **MINOR 2, accepted edge (no code change):** a `stop()` followed by `play()` before the suspend
+  lands makes the seek live. The newer call ends the wait, and the context still runs, so up to R
+  blocks of the old position can play after the resume. This is the accepted live artefact at a
+  rare edge. An app's own `context.suspend()` while the context runs behaves the same way: the SDK
+  does not see it, and the seek is live.
+- **MINOR 3:** row 4's comment typo is fixed.

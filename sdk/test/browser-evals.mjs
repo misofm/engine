@@ -773,8 +773,8 @@ describe("the browser open sequence", () => {
       await assert.rejects(engine.seek(0n, { producers }), (error) =>
         error instanceof SessionSeekProducerError && error.generation === 4n && error.producerIndex === 1
           && error.cause?.operation === "prepareRefused");
-      // Row 4: a play() whose resume the browser holds until a gesture: a seek is sent at once, at
-      // once, and a later stop() leaves no seek pending.
+      // Row 4: a play() whose resume the browser holds until a gesture: a seek is sent at once
+      // (atOnce), and a later stop() leaves no seek pending.
       log.splice(0);
       holdResume = true;
       void engine.play().catch(() => undefined);
@@ -787,6 +787,20 @@ describe("the browser open sequence", () => {
         ["host", { generation: 5n, frame: 1_440n, atOnce: true }],
         ["host", { generation: 6n, frame: 1_920n, atOnce: true }],
       ]);
+      // Row 5: seeks leave in call order. The first waits on a stop() in flight; the suspend
+      // settles (the context stops running before that seek's wait resumes), and a second seek
+      // called in the same turn needs no wait. It must still be sent after the first.
+      holdResume = false;
+      context.state = "running";
+      const stopping2 = engine.stop().catch(() => undefined);
+      const first = engine.seek(2_400n, { generation: 9n });
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+      assert.deepEqual(log, [], "the first seek waits for the stop's suspend");
+      settleSuspend();
+      const second = engine.seek(2_880n, { generation: 10n });
+      await Promise.all([first, second, stopping2]);
+      assert.deepEqual(log.splice(0).map(([, request]) => request.generation), [9n, 10n],
+        "seeks are sent in call order");
     } finally {
       feed.close();
       await engine.close();
