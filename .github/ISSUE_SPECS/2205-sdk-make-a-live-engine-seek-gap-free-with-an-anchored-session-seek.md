@@ -125,3 +125,85 @@ SDK. The Worker headroom is `max(R, #1387's bound)`. After the split, Chromium i
 seeks in all four live rows; the transport latency is 13.3-45.3 ms (median 24.0) in worker mode
 and 48.0-50.7 ms (median 48.0) in single mode. `--check-matrix` passes on both browsers and both
 legs.
+
+## Attempt 2 (2026-10-29, verify of 714a261e6: FAIL, one MAJOR)
+
+- **M1, root ruling: the owner decision covers live seeks only.** A seek with no live audio to
+  keep applies at once, as before: the headless engine, and a stopped or suspended browser
+  engine in either mode.
+  - **The fix:** `SessionSeek::land_at_once` names a plain session seek in a third session word
+    (`immediate`), and the source set lands that seek for every source and the timeline at the
+    first block that observes it, whatever its sources hold. The landing is decided by render at
+    that block, so it holds in worker mode too, with no consumer prepared across threads.
+  - **Plumbing:** host-core `seek_session_at_once`, control-plane `session_seek_at_once` (a
+    declared discontinuity, as the plain form is), and a new export
+    `miso_engine_web_v1_session_prepare_seek`. It is registered everywhere `source_prepare_seek`
+    is (export lists, ABI layout and generated SDK, the realtime-policy table as single-mode
+    control work in `receiveSessionSeek`, both harness fakes).
+  - **Routing:** the headless `OfflineEngine.seek` (`core/boundary.ts`) calls it. The browser
+    `engine.seek` sends `atOnce: true` on `miso.session-seek.v1` whenever the newest transport
+    request was `stop()` or the context is not running; the engine worklet and the Worker then
+    call it. The live path stays on `session_seek`.
+  - **Stale prose fixed:** headless `engine.ts` seek, `core/boundary.ts` `sessionSeek`, browser
+    `engine.ts` seek and position, the host `.d.ts` session seek, and capi `abi.rs`
+    `cumulative_held_frames` (held frames now also count while a live plain seek holds).
+- **M1 gates:**
+  - `crates/source` `a_session_seek_named_to_land_at_once_lands_at_the_next_block`: red on a
+    mutant that ignores the immediate word.
+  - SDK `capability-evals.mjs` "session seek calls the at-once session seek export alone and
+    lands in the next block": both engines are fed generation 1 first, so old PCM is queued at the
+    seek. It is red on the live export: "the next block is the target, not the old generation"
+    (a run with the export-name assertion removed), and the export-name assertion also turns red.
+    The B16-R9 headless test now expects `session_prepare_seek`.
+  - New qualification phase `runLiveStoppedSeek` (stop, `engine.seek(frame, { producers })`,
+    play). Chromium is gated on both modes: the source and the timeline land at the host's render
+    sample read between `stop()` and `play()`, so no block of the stopped position plays after
+    resume. On 714a261e6 (2 runs): single mode 10 of 10 landings late (the old position played
+    after resume), worker mode 0 of 10 (the Worker's headroom admits the runway while suspended).
+- **MINOR 1:** `seek_landing` runs at R = 3, so the runway lands a block before the deadline.
+  With `runway_queued` returning false, gates 1 and 2 are red (as are the never-fed and
+  no-more-PCM tests); the deadline test stays green, as it should.
+- **MINOR 2:** the never-fed rule is `crates/source`
+  `a_live_plain_seek_waits_only_on_a_ring_fed_before_it` (red when the waits bit is ignored).
+  The capi test is now one parity row, `a_plain_session_seek_waits_for_the_fed_sources_runway`.
+- **MINOR 3:** the header and the README state the real bound. A seek lands at the latest R
+  blocks after the first block that observes it; R quanta are 50 ms rounded up to a whole
+  quantum, plus the part of a block between the call and that block. The constant is unchanged.
+- **MINOR 4:** the engine reports no value of R, so the Worker's `seekRunwayQuanta` is a parallel
+  formula. The ABI layout's `sourceRing.seekRunwayQuanta` rows carry
+  `host_core::source_seek_runway_blocks` at the four launch rates (18, 19, 35, 38 at 128 frames;
+  the layout check pins them). The Worker harness pins the JS formula to them; it is red on a
+  `round` instead of `ceil` mutant ("the Worker's runway at 44100 Hz is the engine's"). The
+  host-core prose now says so.
+- **MINOR 5:** both case-table adapters record `source_prepare_seek` apart (`prepared`). The new
+  row "#2205: prepare-seek asks source_prepare_seek; a drain pass's live seek asks source_seek"
+  is red when the prelude's drain uses the prepare form and when the Worker's `prepare-seek` uses
+  the live form.
+
+## Evidence after attempt 2 (head `cc4fd7115` artifacts)
+
+Null sink, Chromium 151, 5 runs x 5 seeks per mode:
+
+| phase, mode | underrun seeks | late or split landings | added latency ms (min/median/max) |
+| --- | --- | --- | --- |
+| per-source, worker | 0 / 25 | 0 | - |
+| per-source, single | 0 / 25 | 0 | - |
+| transport, worker | 0 / 25 | 0 | 13.3 / 24.0 / 45.3 |
+| transport, single | 0 / 25 | 0 | 34.7 / 48.0 / 50.7 |
+| stopped, worker | 0 / 25 | 0 | - |
+| stopped, single | 22 / 25 (reported) | 0 | - |
+
+- **The stopped single-mode underrun** (128-3200 frames after `play()`): the prelude's drain does
+  not run while the context is suspended, so the shared ring's old slots are freed only at the
+  first drain after resume. The writer then publishes on its next tick. On 714a261e6 the same
+  blocks played the old position instead. The SDK's documented suspended flow, `feed.prepareSeek()`
+  before `play()`, frees those slots while suspended. This row reports the underrun and does not
+  gate it.
+- WebKit (reported, one run): 0 underrun in every live row; stopped single 5 of 5 underrun; no
+  late landings; transport latency 16.0-26.7 ms (worker), 37.3-45.3 ms (single).
+- `--check-matrix --sdk-root` passes on Chromium and WebKit, both legs; no #2198 rerun was needed.
+- The full check list passes again: fmt, clippy (`-D warnings`, all features), doc, the feature
+  test set (108 binaries), workspace and realtime policy, the release audit's C ABI leg, the
+  console-workload release tests, the artifact build and `check-web-audioworklet.sh`,
+  `test-web-audioworklet.mjs`, the SDK headless/types/generated/deletions/package checks, and the
+  layout self-test.

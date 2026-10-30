@@ -296,3 +296,14 @@ Null sink, Chromium 151, 10 runs x 5 seeks per mode (head `1d8f2ea76` artifacts)
 ## Status
 
 Met in both modes: a live plain ring seek during playback underruns 0 frames on Chromium.
+
+## Attempt 2 of the #2205 batch (2026-10-29)
+
+Root ruling: the landing rule covers live seeks only. The #2205 spec records the at-once session
+seek, `miso_engine_web_v1_session_prepare_seek` and its routing. For this issue:
+- **Routing assertion:** the case table's new row asserts the per-source routing, `prepare-seek`
+  to `source_prepare_seek` and the drain's live seek to `source_seek`, on both adapters.
+- **Never-fed rule:** it is now a `crates/source` test.
+- **Worker runway:** the formula is pinned to the engine's values at all four rates (MINOR 4).
+- **Per-source live seek, Chromium, 5 runs x 5 seeks per mode:** 0 of 25 underrun in both
+  worker and single mode.
