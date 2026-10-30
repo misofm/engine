@@ -1291,6 +1291,14 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) observation_rows: Box<[protocol::ObservationReadRow]>,
     pub(crate) shared: Arc<SharedPlanState<A::Row>>,
     pub(crate) observed_render_sequence: u64,
+    /// The render sample of [`Self::observed_render_sequence`].
+    pub(crate) observed_render_sample: u64,
+    /// The committed revision when [`Self::observed_render_sequence`] was observed.
+    pub(crate) observed_render_revision: protocol::SessionRevision,
+    /// The render sequence the newest staged render diagnostic carries, or that no diagnostic is
+    /// owed for (diagnostics off). A block observed while both diagnostic slots are full stays
+    /// owed: the next service step with a free slot stages the newest observed block (#2198).
+    pub(crate) diagnosed_render_sequence: u64,
     /// The render sequence at which the counter snapshot was last staged, or while no counter is
     /// configured the latest one the service step saw: the baseline of the configured period
     /// (#1351 D4).
@@ -3143,22 +3151,39 @@ where
                 self.counter_snapshot_sequence = sequence;
             }
         }
-        if sequence == self.observed_render_sequence {
+        if sequence != self.observed_render_sequence {
+            self.observed_render_sequence = sequence;
+            self.observed_render_sample = self.shared.render_sample.load(Ordering::Acquire);
+            let observed_sample = protocol::SampleTime(self.observed_render_sample);
+            let revision = self.controller.session().revision();
+            self.observed_render_revision = revision;
+            self.stage_meter_batches(revision);
+            self.stage_counter_snapshot(sequence, observed_sample, revision);
+        }
+        self.stage_render_diagnostic();
+    }
+
+    /// Stage the render-activity diagnostic of the newest observed block, if one is owed. The
+    /// lane is lossy and keeps the newest (#2198): blocks observed while both slots are full
+    /// coalesce into the one staged when a slot frees, which carries the newest block's sample,
+    /// so the last block's activity is never lost.
+    fn stage_render_diagnostic(&mut self) {
+        let sequence = self.observed_render_sequence;
+        if sequence == self.diagnosed_render_sequence {
             return;
         }
-        self.observed_render_sequence = sequence;
-        let sample = self.shared.render_sample.load(Ordering::Acquire);
-        let observed_sample = protocol::SampleTime(sample);
-        let revision = self.controller.session().revision();
-        self.stage_meter_batches(revision);
-        self.stage_counter_snapshot(sequence, observed_sample, revision);
         let diagnostics_enabled = {
             let configuration = self.controller.telemetry_configuration();
             configuration.diagnostics_enabled
                 && (protocol::DiagnosticSeverity::Info as u8)
                     >= (configuration.minimum_diagnostic_severity as u8)
         };
-        if !diagnostics_enabled || self.render_diagnostic_len == self.render_diagnostics.len() {
+        if !diagnostics_enabled {
+            // A block rendered while diagnostics are off owes none.
+            self.diagnosed_render_sequence = sequence;
+            return;
+        }
+        if self.render_diagnostic_len == self.render_diagnostics.len() {
             return;
         }
 
@@ -3174,12 +3199,14 @@ where
         let Ok(reservation) = self.controller.queues_mut().reserve_reliable_event() else {
             return;
         };
+        let sample = self.observed_render_sample;
+        let revision = self.observed_render_revision;
         let tail = (self.render_diagnostic_head + self.render_diagnostic_len)
             % self.render_diagnostics.len();
         let slot = &mut self.render_diagnostics[tail];
         debug_assert!(!slot.occupied);
         debug_assert!(slot.reservation.is_none());
-        slot.diagnostic.sample_time = Some(observed_sample.0);
+        slot.diagnostic.sample_time = Some(sample);
         slot.diagnostic.provider_sequence = Some(sequence);
         slot.revision = revision;
         slot.protocol_events_before = protocol_events_before;
@@ -3189,6 +3216,7 @@ where
             .provider_mut()
             .set_render_diagnostic(tail, sample, sequence, true);
         self.render_diagnostic_len += 1;
+        self.diagnosed_render_sequence = sequence;
     }
 
     /// `(revision, replay entries, current provider epoch, pending providers)`.
@@ -8964,6 +8992,56 @@ mod tests {
             assert!(producer.publish_frame(&reducing(0)));
             render(&mut children, 0);
             assert_eq!(batches(&mut children), vec![(0, vec![3.0])]);
+        }
+
+        /// #2198: three blocks observed by service steps with no reliable-lane read in between
+        /// (the browser's control Worker runs a service step in every `control_event` call, so
+        /// a lossy-lane drain observes blocks the worklet renders meanwhile) fill the two
+        /// render-diagnostic slots before the third block's diagnostic is staged. The lane is
+        /// lossy, but it keeps the newest: once a slot frees, the next service step stages the
+        /// newest observed block's diagnostic, so the last block's activity always arrives.
+        ///
+        /// Test value: red if a block observed while both slots are full is lost for good (the
+        /// browser's last diagnostic would carry an earlier block's sample, the #2198 flake).
+        #[test]
+        fn a_block_observed_while_the_diagnostic_slots_are_full_is_staged_when_one_frees() {
+            let mut children = boot(None, Vec::new());
+            command(
+                &mut children,
+                2,
+                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters: Vec::new(),
+                    meter_period_blocks: 0,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: true,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            );
+            for block in 0..3 {
+                render(&mut children, block);
+            }
+            let mut samples = Vec::new();
+            while let Some(length) = children
+                .session
+                .dequeue_event(EventLane::Reliable, 4_096)
+                .expect("an event")
+            {
+                let bytes = children.session.event_response(length).to_vec();
+                let mut fields = [0_u16; 64];
+                let decoded = ProtocolCodec::default()
+                    .decode_typed_event(&bytes, &mut protocol::DecodeScratch::new(&mut fields))
+                    .expect("a typed event");
+                if let protocol::DecodedEventPayload::Diagnostic(diagnostic) = decoded.payload {
+                    samples.push(diagnostic.diagnostic.sample_time);
+                }
+            }
+            assert_eq!(
+                samples,
+                vec![Some(QUANTUM), Some(2 * QUANTUM), Some(3 * QUANTUM)],
+                "the two staged blocks, then the newest"
+            );
         }
     }
 
