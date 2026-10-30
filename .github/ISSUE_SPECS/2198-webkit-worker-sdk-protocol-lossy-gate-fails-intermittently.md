@@ -73,9 +73,15 @@ drains, so it never interleaves.
    lossy read runs a service step while render runs). Now a block observed while both slots are full
    stays owed, and the next service step with a free slot stages the newest observed block's
    diagnostic (its sample, sequence and revision at observation). A refused reliable-event
-   reservation is also retried instead of lost. Not reproduced in the browser locally; the unit test
+   reservation is also retried instead of lost. The diagnostic rides the reliable lane; it coalesces
+   only through its two slots. Each owed block that a newer block replaces counts in the existing
+   `TELEMETRY_COALESCED` counter (5), beside the controller's own same-key telemetry coalescing, as
+   AGENTS.md requires for coalesced telemetry; no counter ID was added. Not reproduced in the browser
+   locally; the unit test
    `a_block_observed_while_the_diagnostic_slots_are_full_is_staged_when_one_frees`
-   (`crates/control-plane`) is red on the old code (`[128, 256]`, not `[128, 256, 384]`).
+   (`crates/control-plane`) renders four blocks and expects `[128, 256, 512]` and one coalesced
+   count. It is red on the old code (`[128, 256]`), on a mutant that keeps the first waiting block
+   (`[128, 256, 384]`) and on a mutant that moves no counter (`0`, not `1`).
 
 No retry was added. The Wasm module changes (the control-plane fix).
 

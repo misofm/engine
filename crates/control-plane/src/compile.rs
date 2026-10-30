@@ -2687,6 +2687,7 @@ where
         observed_render_sample: 0,
         observed_render_revision: protocol::SessionRevision(0),
         diagnosed_render_sequence: 0,
+        render_diagnostics_coalesced: 0,
         counter_snapshot_sequence: 0,
         render_diagnostics: prepare_render_diagnostic_slots()?,
         render_diagnostic_head: 0,

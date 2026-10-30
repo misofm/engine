@@ -1299,6 +1299,9 @@ pub struct SessionState<A: ControlAdapter> {
     /// owed for (diagnostics off). A block observed while both diagnostic slots are full stays
     /// owed: the next service step with a free slot stages the newest observed block (#2198).
     pub(crate) diagnosed_render_sequence: u64,
+    /// Owed render diagnostics a newer block's replaced (#2198), served in `TELEMETRY_COALESCED`
+    /// beside the controller's own telemetry coalescing.
+    pub(crate) render_diagnostics_coalesced: u64,
     /// The render sequence at which the counter snapshot was last staged, or while no counter is
     /// configured the latest one the service step saw: the baseline of the configured period
     /// (#1351 D4).
@@ -3152,6 +3155,11 @@ where
             }
         }
         if sequence != self.observed_render_sequence {
+            if self.observed_render_sequence != self.diagnosed_render_sequence {
+                // The owed block's diagnostic is replaced by this newer block's (#2198).
+                self.render_diagnostics_coalesced =
+                    self.render_diagnostics_coalesced.saturating_add(1);
+            }
             self.observed_render_sequence = sequence;
             self.observed_render_sample = self.shared.render_sample.load(Ordering::Acquire);
             let observed_sample = protocol::SampleTime(self.observed_render_sample);
@@ -3164,9 +3172,10 @@ where
     }
 
     /// Stage the render-activity diagnostic of the newest observed block, if one is owed. The
-    /// lane is lossy and keeps the newest (#2198): blocks observed while both slots are full
-    /// coalesce into the one staged when a slot frees, which carries the newest block's sample,
-    /// so the last block's activity is never lost.
+    /// diagnostic rides the reliable lane, but only through its two slots, which keep the newest
+    /// (#2198): blocks observed while both slots are full coalesce into the one staged when a
+    /// slot frees, which carries the newest block's sample, so the last block's activity is never
+    /// lost. Each replaced owed block counts in `TELEMETRY_COALESCED`.
     fn stage_render_diagnostic(&mut self) {
         let sequence = self.observed_render_sequence;
         if sequence == self.diagnosed_render_sequence {
@@ -4242,7 +4251,10 @@ where
     /// and `source_underrun_blocks` (#1537) mirrors.
     /// A counter added later joins this refresh, never a single control call.
     fn refresh_provider_counters(&mut self) {
-        let telemetry_counters = self.controller.queues().telemetry_counters();
+        let mut telemetry_counters = self.controller.queues().telemetry_counters();
+        telemetry_counters.telemetry_coalesced = telemetry_counters
+            .telemetry_coalesced
+            .saturating_add(self.render_diagnostics_coalesced);
         let superseded = self.live_values_superseded.get();
         let restarted = self.strips_restarted;
         let refusals = self.transition_reprepare_refusals;
@@ -8770,12 +8782,17 @@ mod tests {
 
         /// The `METER_WINDOWS_LOST` counter, through `COUNTERS_GET`.
         fn windows_lost(children: &mut CompiledChildren<Adapter>, request: u64) -> u64 {
+            counter(children, request, CounterId::MeterWindowsLost)
+        }
+
+        /// The counter `id`, through `COUNTERS_GET`.
+        fn counter(children: &mut CompiledChildren<Adapter>, request: u64, id: CounterId) -> u64 {
             let response = command(
                 children,
                 request,
                 CommandPayload::CountersGet(&protocol::CountersRequest {
                     all: false,
-                    ids: vec![CounterId::MeterWindowsLost as u32],
+                    ids: vec![id as u32],
                 }),
             );
             let mut fields = [0_u16; 64];
@@ -8994,15 +9011,17 @@ mod tests {
             assert_eq!(batches(&mut children), vec![(0, vec![3.0])]);
         }
 
-        /// #2198: three blocks observed by service steps with no reliable-lane read in between
+        /// #2198: four blocks observed by service steps with no reliable-lane read in between
         /// (the browser's control Worker runs a service step in every `control_event` call, so
         /// a lossy-lane drain observes blocks the worklet renders meanwhile) fill the two
-        /// render-diagnostic slots before the third block's diagnostic is staged. The lane is
-        /// lossy, but it keeps the newest: once a slot frees, the next service step stages the
-        /// newest observed block's diagnostic, so the last block's activity always arrives.
+        /// render-diagnostic slots, so the third block's diagnostic waits and the fourth's
+        /// replaces it. The two slots keep the newest: once a slot frees, the next service step
+        /// stages the newest observed block's diagnostic, so the last block's activity always
+        /// arrives, and the replaced block counts in `TELEMETRY_COALESCED`.
         ///
         /// Test value: red if a block observed while both slots are full is lost for good (the
-        /// browser's last diagnostic would carry an earlier block's sample, the #2198 flake).
+        /// browser's last diagnostic would carry an earlier block's sample, the #2198 flake), if
+        /// the first waiting block wins over the newest, or if the coalescing moves no counter.
         #[test]
         fn a_block_observed_while_the_diagnostic_slots_are_full_is_staged_when_one_frees() {
             let mut children = boot(None, Vec::new());
@@ -9019,7 +9038,7 @@ mod tests {
                     minimum_diagnostic_severity: DiagnosticSeverity::Info,
                 }),
             );
-            for block in 0..3 {
+            for block in 0..4 {
                 render(&mut children, block);
             }
             let mut samples = Vec::new();
@@ -9039,8 +9058,13 @@ mod tests {
             }
             assert_eq!(
                 samples,
-                vec![Some(QUANTUM), Some(2 * QUANTUM), Some(3 * QUANTUM)],
+                vec![Some(QUANTUM), Some(2 * QUANTUM), Some(4 * QUANTUM)],
                 "the two staged blocks, then the newest"
+            );
+            assert_eq!(
+                counter(&mut children, 3, CounterId::TelemetryCoalesced),
+                1,
+                "the third block's diagnostic was replaced"
             );
         }
     }
