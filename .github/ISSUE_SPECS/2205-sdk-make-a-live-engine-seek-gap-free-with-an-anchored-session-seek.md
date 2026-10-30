@@ -114,3 +114,14 @@ seek at once, the behaviour of 2b0a64d88); the browser phases were red on 2b0a64
 - **Met:** a live transport seek underruns 0 frames on Chromium in both modes; the added latency is
   reported above.
 - The per-source half (#2185) has one open item in single mode; see the #2185 spec.
+
+## Root ruling after attempt 1's report (2026-10-29): split the browser export
+
+The single-mode per-source regression (host-web's `source_seek` prepared the consumer at once) is
+fixed by splitting the export; see the #2185 spec's decision and evidence.
+`miso_engine_web_v1_source_seek` now lands when ready on every host. The new
+`miso_engine_web_v1_source_prepare_seek` serves the suspended `prepare-seek` and the headless
+SDK. The Worker headroom is `max(R, #1387's bound)`. After the split, Chromium is 0 / 50 underrun
+seeks in all four live rows; the transport latency is 13.3-45.3 ms (median 24.0) in worker mode
+and 48.0-50.7 ms (median 48.0) in single mode. `--check-matrix` passes on both browsers and both
+legs.

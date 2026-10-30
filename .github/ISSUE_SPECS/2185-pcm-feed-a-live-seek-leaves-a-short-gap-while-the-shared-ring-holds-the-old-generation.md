@@ -245,3 +245,54 @@ three options, together with #2205. Until then, the Chromium worker phase is rep
      half stays deleted). No ABI change; single mode was 0 in 190 seeks with it (attempt 2).
 - Until root decides, the Chromium single per-source phase is red. The rest of that leg passes
   with the phase ungated (one run). The transport phase and worker mode are met.
+
+## Decision (root ruling 2026-10-29, still attempt 1): option 1, split the browser export
+
+- **The split.** `miso_engine_web_v1_source_seek` never prepares the consumer, also in `single`
+  mode, so a live ring seek from the PCM feed's drain reaches the engine's landing rule. This is
+  the C ABI's behaviour. One new export, `miso_engine_web_v1_source_prepare_seek` (same arguments,
+  results and thread rule), seeks and prepares the consumer at once (`SeekClock::Hold`). The seek
+  applies before the next block and the full engine ring is freed for the refill. With the render
+  half on another thread it is exactly `source_seek`.
+- **Callers of the prepare export:** the suspended `prepare-seek` op (`applySharedSeek(...,
+  prepare = true)` in the prelude and in the Worker) and the headless SDK's `seekSource`
+  (`sdk/src/core/boundary.ts`). The live callers stay on `source_seek`: the drain, the engine
+  worklet's `seekSource` and the Worker's drain.
+- **Where it is listed:** documented beside `source_seek` (`hosts/host-web/src/ffi.rs`, host
+  `.d.ts`); in the export lists (`check-web-audioworklet.sh`, `check-abi-layout-v1.py`,
+  `parameter-metadata` `EXPORTS`, the layout self-test fixture); in the regenerated SDK layout
+  (`sdk/assets/...abi-layout.json`, `sdk/src/generated/abi.ts`); and in the realtime-policy
+  render-thread table (feed, `applySharedSeek`, wrapped in `render_locked`, as `source_seek` is).
+  `check-browser-expected-resources.py` pins no export set.
+- **Worker headroom (root ruling, replacing H = R):** `H = max(R, B)`, computed once in
+  `feedHeadroomQuanta`. `B` is #1387's proven bound (one tick plus a 2048-frame burst plus one
+  block). H is 19 at 44.1 kHz and 48 kHz, 38 at 48 kHz/64 in the headroom rig.
+- **The test (one claim):** host-web
+  `session_seek::a_live_source_seek_keeps_the_old_audio_and_the_prepared_form_applies_at_once`.
+  It is red on a mutant whose live export prepares at once (164ced262's behaviour: "the old
+  generation plays on", left 2, right 1). On 164ced262 itself the prepare export does not exist.
+  `boot_transient_budget`'s paused-seek row now calls the prepare form, since it is a paused seek.
+
+## Evidence after the split
+
+Null sink, Chromium 151, 10 runs x 5 seeks per mode (head `1d8f2ea76` artifacts):
+
+| phase, mode | underrun seeks | added latency ms (min/median/max) |
+| --- | --- | --- |
+| per-source, worker | 0 / 50 | - |
+| per-source, single | **0 / 50** (164ced262: 46 / 50) | - |
+| transport, worker | 0 / 50 | 13.3 / 24.0 / 45.3 |
+| transport, single | 0 / 50 | 48.0 / 48.0 / 50.7 |
+
+- WebKit (reported, one run): 0 underrun in all four rows; transport latency 18.7-26.7 ms
+  (worker) and 40.0-45.3 ms (single).
+- `--check-matrix --sdk-root` passes on Chromium worker and single, and on WebKit worker and
+  single. WebKit worker failed once on `sdk-protocol-lossy` (#2198) and passed on its rerun.
+- The full check list passes again: fmt, clippy (`-D warnings`, all features), doc, the feature
+  test set (105 binaries), workspace and realtime policy, the release audit's C ABI leg (0
+  violations), the artifact build and `check-web-audioworklet.sh`, `test-web-audioworklet.mjs`,
+  the SDK headless/types/generated/deletions/package checks, and the layout self-test.
+
+## Status
+
+Met in both modes: a live plain ring seek during playback underruns 0 frames on Chromium.
