@@ -68,6 +68,13 @@ can overflow for a strip or lane count:
 
 - Reproducer: the existing scale test above. It is red on base (the three runs above). It is green
   on head.
+- Fast reproducer: `runtime::tests::the_pattern_sort_counts_more_strips_than_a_u16_holds` in
+  `crates/graph`. It sorts one group of 65,540 strips with `FakePackHost` and checks every target.
+  It runs in about 10 ms, in the per-PR graph tests. The nightly scale test gates nothing, so it
+  hid the bug for three days. On the revert of `25319c852`, the test is red in a debug build
+  (`attempt to add with overflow` at the count) and in a release build
+  (`the first position with a wrong target`, `left: Some(1)`, `right: None`). It is green on head
+  in both builds.
 - No rendered bit moves for a group of 65,535 strips or fewer. Below the old limit, every `u16`
   value of the old code equals the `u32` value of the new code, so the targets and every move are
   the same.

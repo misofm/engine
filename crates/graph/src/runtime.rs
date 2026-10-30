@@ -17065,6 +17065,31 @@ mod tests {
         }
     }
 
+    /// Issue #2173: one group of 16,385 four-lane chains (65,540 strips), every strip audible with
+    /// no running bit except the last home, which runs slot 1. The sort places that strip first
+    /// and every other strip after it in home order, so 65,539 strips share one pattern.
+    ///
+    /// Test value: red when a pattern count, its prefix sum or a rank is narrower than a group's
+    /// span: a `u16` panics in a debug build and wraps in a release one, where the packer then
+    /// writes wrong targets.
+    #[test]
+    fn the_pattern_sort_counts_more_strips_than_a_u16_holds() {
+        let mut host = FakePackHost::new(1, 16_385);
+        let pack = host.map.groups[0];
+        let span = pack.span();
+        assert_eq!(span, 65_540, "the group's span");
+        host.bits[span - 1] = SLOT_1;
+        pack_sort(&mut host, &pack);
+        let expected = std::iter::once(span - 1).chain(0..span - 1);
+        let wrong = host
+            .map
+            .target
+            .iter()
+            .zip(expected)
+            .position(|(&target, strip)| target as usize != strip);
+        assert_eq!(wrong, None, "the first position with a wrong target");
+    }
+
     /// Issue #2135 gate 4: four dirty groups of three four-lane chains under the global budget
     /// (`B_total = 4` swaps and `A_total = 16` attempts per block across all groups), seeded
     /// patterns and five positions per group whose every trade refuses: no block exceeds either cap
