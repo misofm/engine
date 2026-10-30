@@ -265,6 +265,7 @@ printf '%s\n' \
     miso_engine_v1_engine_destroy \
     miso_engine_v1_last_error \
     miso_engine_v1_plan_destroy \
+    miso_engine_v1_plan_prepare_seek \
     miso_engine_v1_plan_resources \
     miso_engine_v1_plan_watermark \
     miso_engine_v1_query_capabilities \

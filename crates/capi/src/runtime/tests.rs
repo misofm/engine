@@ -6890,6 +6890,41 @@ mod session_seek {
             }
         }
 
+        /// Submits generation-1 quanta of `LONG` after the queued ones until the ring refuses
+        /// one: a host that filled its ring before it stopped.
+        fn fill_long(&self) {
+            let mut block = self.block + 1;
+            while self.submit_long(1, block * Q) == crate::RESULT_OK {
+                block += 1;
+            }
+        }
+
+        /// Submits one quantum of `LONG`'s generation `generation` from source frame `frame`;
+        /// the call's result.
+        fn submit_long(&self, generation: u64, frame: u64) -> u32 {
+            let (left, right) = continuity_block(frame / Q, 0);
+            let mut report = crate::SubmitReport {
+                struct_size: crate::SUBMIT_REPORT_SIZE,
+                reserved0: 0,
+                accepted_frames: 0,
+                cumulative_written_frames: 0,
+                active_generation: 0,
+            };
+            let planes = [left.as_ptr(), right.as_ptr()];
+            let chunk = crate::SourceChunk {
+                struct_size: crate::SOURCE_CHUNK_SIZE,
+                sample_rate_hz: 48_000,
+                generation,
+                start_frame: frame,
+                planes: planes.as_ptr(),
+                plane_count: 2,
+                frames: 128,
+                end_of_region: 0,
+                reserved0: 0,
+            };
+            crate::ffi::test_source_submit(self.session, LONG, &chunk, &mut report)
+        }
+
         /// One quantum of `LONG`'s generation `generation` from source frame `frame`.
         fn feed_long(&self, generation: u64, frame: u64) {
             let (left, right) = continuity_block(frame / Q, 0);
@@ -7172,35 +7207,7 @@ mod session_seek {
     #[test]
     fn an_at_once_session_seek_plays_no_old_block_after_a_stop() {
         let mut rig = Rig::new(&two_sources());
-        let mut block = rig.block + 1;
-        loop {
-            let (left, right) = continuity_block(block, 0);
-            let mut report = crate::SubmitReport {
-                struct_size: crate::SUBMIT_REPORT_SIZE,
-                reserved0: 0,
-                accepted_frames: 0,
-                cumulative_written_frames: 0,
-                active_generation: 0,
-            };
-            let planes = [left.as_ptr(), right.as_ptr()];
-            let chunk = crate::SourceChunk {
-                struct_size: crate::SOURCE_CHUNK_SIZE,
-                sample_rate_hz: 48_000,
-                generation: 1,
-                start_frame: block * Q,
-                planes: planes.as_ptr(),
-                plane_count: 2,
-                frames: 128,
-                end_of_region: 0,
-                reserved0: 0,
-            };
-            if crate::ffi::test_source_submit(rig.session, LONG, &chunk, &mut report)
-                != crate::RESULT_OK
-            {
-                break;
-            }
-            block += 1;
-        }
+        rig.fill_long();
         assert_eq!(
             crate::ffi::test_session_seek_at_once(rig.session, 2, 2_000),
             crate::RESULT_OK
@@ -7217,6 +7224,105 @@ mod session_seek {
             "no block of the stop position plays"
         );
         rig.feed_long_runway(2, 2_000);
+    }
+
+    /// #2213 gate (C ABI): a stopped host whose `LONG` ring is full of the old generation seeks
+    /// with `session_seek_at_once`, prepares the plan with `miso_engine_v1_plan_prepare_seek`,
+    /// submits the target's runway, restarts, and plays the target from its first sample with no
+    /// underrun: bit-identical to a fresh session's first block fed the same quantum.
+    ///
+    /// Test value: red when the prepare does not free the old generation's slots before the
+    /// restart (on base, with the export routed to a no-op: the target's submits return
+    /// `BACKPRESSURE` and the restart block underruns), or when it lands the seek apart from the
+    /// at-once landing of the timeline and the report.
+    #[test]
+    fn a_stopped_host_refills_a_full_ring_before_restart() {
+        let model = two_sources();
+        let mut rig = Rig::new(&model);
+        rig.fill_long();
+        assert_eq!(
+            crate::ffi::test_session_seek_at_once(rig.session, 2, 2_000),
+            crate::RESULT_OK
+        );
+        assert_eq!(
+            crate::ffi::test_plan_prepare_seek(rig.plan),
+            crate::RESULT_OK
+        );
+        for block in 0..runway_blocks() {
+            assert_eq!(
+                rig.submit_long(2, 2_000 + block * Q),
+                crate::RESULT_OK,
+                "the target's block {block} enters the freed ring"
+            );
+        }
+        let sample = rig.next();
+        let output = rig.render();
+        assert_eq!(rig.landed(LONG), (2, sample, 2_000));
+        assert_eq!(seek_report_c(rig.session, LONG).3, 0, "LONG never underran");
+        let document = session::canonical_session_json(&model).expect("canonical");
+        let (session, plan) = boxed_c_children(&document);
+        let (left, right) = continuity_block(2_000 / Q, 0);
+        submit_c_to(session, LONG, 1, 0, 48_000, &left, &right, false);
+        let reference = render_c(plan, 0);
+        crate::ffi::test_plan_destroy(plan);
+        crate::ffi::test_session_destroy(session);
+        assert!(
+            reference.iter().any(|value| *value != 0.0),
+            "the reference plays"
+        );
+        assert_eq!(
+            output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            reference
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "the restart block is the target's first quantum"
+        );
+    }
+
+    /// #2213: a render-side call made while another holds the plan is refused, not raced, and the
+    /// claim is released when the holder returns.
+    ///
+    /// Test value: red when the render-side guard does not exclude a second caller (the refused
+    /// call would form a second `&mut PlanState`), when either entry skips it, or when a call
+    /// never releases it (every later block is refused).
+    #[test]
+    fn a_render_side_call_during_render_is_refused_not_raced() {
+        let mut rig = Rig::new(&two_sources());
+        let busy = crate::ffi::test_plan_last_error;
+        let mut pcm = vec![0.0_f32; 256];
+        let output = crate::PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        crate::ffi::test_hold_render_claim(rig.plan, true);
+        assert_eq!(
+            crate::ffi::test_render(rig.plan, rig.next(), &output),
+            crate::RESULT_RENDER_REJECTED
+        );
+        assert_eq!(busy(rig.plan), b"render.busy");
+        assert_eq!(
+            crate::ffi::test_plan_prepare_seek(rig.plan),
+            crate::RESULT_RENDER_REJECTED
+        );
+        assert_eq!(busy(rig.plan), b"render.busy");
+        crate::ffi::test_hold_render_claim(rig.plan, false);
+        assert_eq!(
+            crate::ffi::test_plan_prepare_seek(rig.plan),
+            crate::RESULT_OK
+        );
+        submit_c_to_block(rig.session, LONG, rig.block + 1, rig.block + 1, 0);
+        rig.render();
+        rig.render();
+        assert_eq!(busy(rig.plan), b"");
     }
 
     /// Gate 5, a per-source seek leaves the timeline where it is.

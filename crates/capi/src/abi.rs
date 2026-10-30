@@ -85,6 +85,9 @@ pub const FEATURE_SESSION_REPLACE: u64 = 1 << 11;
 /// At-once session-seek capability: `miso_engine_v1_session_seek_at_once` (#2205), an in-place V1
 /// amendment. A host checks this bit before calling the symbol.
 pub const FEATURE_SESSION_SEEK_AT_ONCE: u64 = 1 << 12;
+/// Stopped-host seek preparation: `miso_engine_v1_plan_prepare_seek` (#2213), an in-place V1
+/// amendment. A host checks this bit before calling the symbol.
+pub const FEATURE_PLAN_PREPARE_SEEK: u64 = 1 << 13;
 /// All ABI V1 feature capability bits.
 pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_HOST_PLANAR_SOURCE
@@ -98,7 +101,8 @@ pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_SOURCE_SEEK_REPORT
     | FEATURE_SESSION_SEEK
     | FEATURE_SESSION_REPLACE
-    | FEATURE_SESSION_SEEK_AT_ONCE;
+    | FEATURE_SESSION_SEEK_AT_ONCE
+    | FEATURE_PLAN_PREPARE_SEEK;
 
 /// Watermark outcome flag: the covered revisions completed exactly as committed.
 pub const OUTCOME_EXACT: u64 = 1;
@@ -510,7 +514,8 @@ impl Session {
 ///
 /// Field ownership matches the "Thread ownership" block of `include/miso_engine_v1.h`:
 /// `header` and `queries` are immutable after construction, `last_error` is written by the render
-/// thread and read from any thread, and `state` is exclusive to the render thread. `ffi.rs` never
+/// side and read from any thread, `render_busy` is the render side's claim word (#2213), and
+/// `state` is exclusive to the render side: the one render-side call that holds `render_busy`. `ffi.rs` never
 /// forms a reference to the whole value; it projects the individual fields with `&raw const` and
 /// `&raw mut` so a concurrent query can never alias the render thread's `&mut PlanState`.
 #[repr(C)]
@@ -518,6 +523,11 @@ pub struct Plan {
     header: HandleHeader,
     pub(crate) queries: PlanQueries,
     pub(crate) last_error: AtomicU32,
+    /// `1` while a render-side call (`render_f32_planar` or `plan_prepare_seek`) holds the plan's
+    /// render state, else `0` (#2213). A call claims it with one compare-exchange on entry and
+    /// releases it with one store on every exit; a call that finds it held is refused, never
+    /// waits, and touches no state.
+    pub(crate) render_busy: AtomicU32,
     pub(crate) state: PlanState,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
@@ -528,6 +538,7 @@ impl Plan {
             header: HandleHeader::new(HANDLE_KIND_PLAN),
             queries: state.queries(),
             last_error: AtomicU32::new(plan_error::NONE),
+            render_busy: AtomicU32::new(0),
             state,
             not_sync: PhantomData,
         }
@@ -632,6 +643,7 @@ mod tests {
             FEATURE_SESSION_SEEK,
             FEATURE_SESSION_REPLACE,
             FEATURE_SESSION_SEEK_AT_ONCE,
+            FEATURE_PLAN_PREPARE_SEEK,
         ];
         assert!(features.iter().all(|feature| feature.count_ones() == 1));
         assert_eq!(
@@ -658,7 +670,9 @@ mod tests {
         assert_eq!(FEATURE_SESSION_REPLACE, 1 << 11);
         // #2205: the next free bit.
         assert_eq!(FEATURE_SESSION_SEEK_AT_ONCE, 1 << 12);
-        assert_eq!(FEATURE_MASK, 8191);
+        // #2213: the next free bit.
+        assert_eq!(FEATURE_PLAN_PREPARE_SEEK, 1 << 13);
+        assert_eq!(FEATURE_MASK, 16383);
         assert_eq!(
             [
                 OUTCOME_EXACT,

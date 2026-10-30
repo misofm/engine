@@ -27,6 +27,13 @@ extern "C" {
  *   plan         Split ownership.
  *                miso_engine_v1_render_f32_planar: render thread only, never concurrently with
  *                itself, and the exclusive owner of the plan's render state.
+ *                miso_engine_v1_plan_prepare_seek (issue 2213): render side, the second call
+ *                that owns the plan's render state. Call it on the render thread between blocks,
+ *                or on any thread while the host's render callback is stopped; never
+ *                concurrently with miso_engine_v1_render_f32_planar or with itself. Each of the
+ *                two calls claims the render state on entry with one atomic compare-exchange and
+ *                releases it on return; a call that finds it claimed does not wait, touches no
+ *                plan state, and returns MISO_ENGINE_V1_RENDER_REJECTED with "render.busy".
  *                miso_engine_v1_plan_resources, miso_engine_v1_plan_watermark and
  *                miso_engine_v1_last_error on a plan: any thread, at any time while the plan is
  *                live, including concurrently with a render call. They are pure with respect to
@@ -361,7 +368,8 @@ extern "C" {
  * miso_engine_v1_last_error on a plan returns a fixed diagnostic selected by the most recent render
  * call, one string per rule -- "render.output.unaligned", "render.output.platform",
  * "render.output.layout", "render.output.shape", "render.time.discontinuity",
- * "render.time.overflow", "render.plan.rejected" -- and is empty after a successful render; on a
+ * "render.time.overflow", "render.plan.rejected", "render.busy" (issue 2213) -- and is empty
+ * after a successful render or seek preparation; on a
  * session or engine it returns the most recent control-thread diagnostic. The counter
  * LIVE_BLOCK_ERRORS (protocol counter 19, read with COUNTERS_GET) counts the render calls that
  * returned MISO_ENGINE_V1_RENDER_REJECTED with "render.plan.rejected": blocks the plan refused
@@ -537,10 +545,17 @@ extern "C" {
  * host whose transport is stopped (issue 2205): same arguments, checks, results and declaration,
  * but every source and the timeline land at the first block rendered after the call, without
  * waiting for a runway, so the stop position never plays after the host restarts. Use it while
- * stopped. PCM of the old generation still queued in a source's ring is dropped at that block, so
- * a host that filled its rings before the stop and cannot drain them while stopped underruns at
- * restart until it has submitted generation g from each source's frame. A host checks
- * MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE before calling it. g must be above every generation the host
+ * stopped. PCM of the old generation still queued in a source's ring is dropped at that block.
+ * A host that filled its rings before the stop then calls miso_engine_v1_plan_prepare_seek(plan)
+ * while still stopped (issue 2213): every source of the plan applies its admitted plain seek now
+ * and drops the old generation's queued PCM, so the host submits generation g from each source's
+ * frame before it restarts and the first block plays it with no underrun. The timeline lands at
+ * that first block. An anchored seek stays held and is not prepared; a source with no admitted
+ * seek is unchanged; the call renders nothing and advances no clock. It serves any admitted plain
+ * seek, a per-source seek too, and its pairing with miso_engine_v1_session_seek_at_once is the
+ * host's to keep. Without it the host underruns at restart until it has submitted generation g. A
+ * host checks MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE before calling the seek and
+ * MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK before calling the preparation. g must be above every generation the host
  * has used on the session, on any source or session seek; one above the largest it has used is
  * always valid. The refusals, all MISO_ENGINE_V1_INVALID_ARGUMENT unless named: g = 0
  * ("source.generation.zero"), g not above every generation the session has used
@@ -724,7 +739,8 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_SESSION_SEEK UINT64_C(1024)
 #define MISO_ENGINE_V1_FEATURE_SESSION_REPLACE UINT64_C(2048)
 #define MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE UINT64_C(4096)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(8191)
+#define MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK UINT64_C(8192)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(16383)
 
 #define MISO_ENGINE_V1_OUTCOME_EXACT UINT64_C(1)
 #define MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK UINT64_C(2)
@@ -979,6 +995,7 @@ uint32_t miso_engine_v1_declare_discontinuity(miso_engine_v1_session *session);
 uint32_t miso_engine_v1_render_f32_planar(miso_engine_v1_plan *plan,
                                           uint64_t absolute_sample,
                                           const miso_engine_v1_planar_output *output);
+uint32_t miso_engine_v1_plan_prepare_seek(miso_engine_v1_plan *plan);
 uint32_t miso_engine_v1_plan_resources(const miso_engine_v1_plan *plan,
                                        miso_engine_v1_plan_resource_report *out);
 uint32_t miso_engine_v1_plan_watermark(const miso_engine_v1_plan *plan,
