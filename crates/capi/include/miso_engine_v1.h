@@ -502,8 +502,11 @@ extern "C" {
  * 48 kHz and 128 frames with the default ring. The seek also lands as soon as a block of g that
  * ends the region is queued, at once when F is the region's end, and at once when the source had
  * received no PCM before the call (an empty boot or a stem still loading waits for nothing). It
- * lands at the latest R blocks after the first block that observed it (50 ms): blocks of g with
- * no PCM queued then render silence and count as underrun frames. Old audio that runs out before
+ * lands at the latest R blocks after the first block that observed it, which is the first block
+ * that begins after the call: R quanta are 50 ms rounded up to a whole quantum, so the old
+ * position plays for less than 50 ms plus one quantum after that block, plus the part of a block
+ * between the call and it. Blocks of g with no PCM queued then render silence and count as
+ * underrun frames. Old audio that runs out before
  * the seek lands renders silence counted as held frames, not underrun. So a host submits g from
  * F at once after the call; the seek report tells where it landed. The refusals,
  * all MISO_ENGINE_V1_INVALID_ARGUMENT: g not above the source's generation

@@ -250,3 +250,62 @@ export async function runLiveTransportSeek(instanceMode: "worker" | "single", se
     await live.close();
   }
 }
+
+/** One stopped seek's measurement (#2205). */
+export interface StoppedSeekRow {
+  readonly generation: string;
+  /** The engine's underrun frames for the source over the seek (reported). */
+  readonly underrunFrames: string;
+  /** The host's next render sample after `stop()` and before `play()`: the first block after resume. */
+  readonly resumeSample: string;
+  /** The first sample of the block the source and the timeline landed in (their seek reports). */
+  readonly sourceLandedSample: string;
+  readonly timelineLandedSample: string;
+  readonly timelineGeneration: string;
+}
+
+/**
+ * #2205: seeks with no live audio to keep. While audio plays, `stop()`, then
+ * `engine.seek(frame, { producers })` (the producer publishes 20 ms after the seek), then
+ * `play()`. The seek must land at the first block rendered after resume, every source and the
+ * timeline together, so no block of the stopped position plays after resume: the source's and the
+ * timeline's landing sample is the render sample the host reported between `stop()` and `play()`.
+ */
+export async function runLiveStoppedSeek(instanceMode: "worker" | "single", seeks = 5) {
+  const live = await livePlayback(instanceMode);
+  try {
+    const producer = {
+      seek: async (frame: number, generation: bigint) => {
+        live.pen.generation = generation;
+        live.pen.next = BigInt(frame);
+        live.writer.seek(generation, BigInt(frame));
+        live.pen.pausedUntil = performance.now() + 20;
+      },
+    };
+    const rows: StoppedSeekRow[] = [];
+    for (let seek = 0; seek < seeks; seek += 1) {
+      const before = await live.underrun();
+      await live.engine.stop();
+      const frame = BigInt(seek + 1) * 480_000n;
+      const { generation } = await live.engine.seek(frame, { producers: [producer] });
+      await wait(50);
+      const resume = (await live.engine.host.status()).nextAbsoluteSample;
+      await live.engine.play();
+      await wait(300);
+      const source = await live.report(live.sourceId);
+      const timeline = await live.report("$timeline");
+      if (source.generation !== generation) throw new Error(`the source did not land seek ${generation}`);
+      rows.push({
+        generation: generation.toString(),
+        underrunFrames: (source.cumulativeUnderrunFrames - before).toString(),
+        resumeSample: resume.toString(),
+        sourceLandedSample: source.firstSample.toString(),
+        timelineLandedSample: timeline.firstSample.toString(),
+        timelineGeneration: timeline.generation.toString(),
+      });
+    }
+    return { ...(await live.counters()), seeks: rows };
+  } finally {
+    await live.close();
+  }
+}

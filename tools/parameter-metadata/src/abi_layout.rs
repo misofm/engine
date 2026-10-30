@@ -121,7 +121,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 59] = [
+pub const EXPORTS: [&str; 60] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_command_ptr",
@@ -164,6 +164,7 @@ pub const EXPORTS: [&str; 59] = [
     "miso_engine_web_v1_response_frame_reply_ptr",
     "miso_engine_web_v1_response_frame_submit",
     "miso_engine_web_v1_service",
+    "miso_engine_web_v1_session_prepare_seek",
     "miso_engine_web_v1_session_seek",
     "miso_engine_web_v1_session_seek_at",
     "miso_engine_web_v1_source_channels",
@@ -720,6 +721,18 @@ pub fn render() -> String {
                         samples: source_ring_prime_latency_samples(rate.0),
                     })
                     .collect(),
+                seek_runway_quanta: LAUNCH_SAMPLE_RATES
+                    .iter()
+                    .map(|rate| SeekRunway {
+                        sample_rate_hz: rate.0,
+                        quantum_frames: SEEK_RUNWAY_QUANTUM_FRAMES,
+                        quanta: host_core::source_seek_runway_blocks(
+                            rate.0,
+                            SEEK_RUNWAY_QUANTUM_FRAMES,
+                            u32::MAX,
+                        ),
+                    })
+                    .collect(),
             },
         },
         memory: Memory {
@@ -782,6 +795,23 @@ struct SourceRing {
     prime_reserve_quanta: u32,
     /// One row per launch rate, in [`LAUNCH_SAMPLE_RATES`] order.
     prime_latency_samples: Vec<PrimeLatency>,
+    /// #2205: the engine's seek runway `R` at each launch rate, in [`LAUNCH_SAMPLE_RATES`] order,
+    /// at a 128-frame quantum and a ring too long to cap it. The control Worker computes its own
+    /// `R` with a parallel formula (it has no engine value to read), and its harness pins the two
+    /// equal through these rows.
+    seek_runway_quanta: Vec<SeekRunway>,
+}
+
+/// The quantum the `sourceRing.seekRunwayQuanta` rows are computed at.
+const SEEK_RUNWAY_QUANTUM_FRAMES: u32 = 128;
+
+/// One `sourceRing.seekRunwayQuanta` row: `R` at one launch rate (#2205).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SeekRunway {
+    sample_rate_hz: u32,
+    quantum_frames: u32,
+    quanta: u32,
 }
 
 /// One `sourceRing.primeLatencySamples` row: `L_max(fs)` at one launch rate.

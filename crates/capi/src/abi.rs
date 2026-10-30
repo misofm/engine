@@ -394,7 +394,9 @@ pub struct SourceSeekReport {
     pub source_frame: u64,
     /// Saturating cumulative missing in-region frames (true underruns).
     pub cumulative_underrun_frames: u64,
-    /// Saturating cumulative in-region frames held while an anchored seek waited.
+    /// Saturating cumulative in-region frames held while a seek waited: an anchored seek before
+    /// its anchor, or a live plain seek before its runway (#2205), once the old generation's
+    /// queued PCM ran out.
     pub cumulative_held_frames: u64,
     /// Must be zero in ABI V1.
     pub reserved: [u64; 2],

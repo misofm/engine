@@ -101,7 +101,8 @@ const TIMER_CLAMP_MS = 4;
 const RENDER_BURST_FRAMES = 2048;
 // Issue #2205 (root rulings 2 and 3): the engine's seek runway `R`, in milliseconds of audio: a
 // live plain seek lands once `R` blocks of its generation are in the engine's ring, and `R` is
-// `min(ceil(50 ms / quantum), ring blocks / 2)` (`source::seek_runway_blocks`).
+// `min(ceil(50 ms / quantum), ring blocks / 2)` (`source::seek_runway_blocks`; this Worker's
+// parallel formula is `seekRunwayQuanta`).
 const SEEK_RUNWAY_MS = 50;
 
 const BOOT_FIELDS = [
@@ -116,7 +117,7 @@ const SOURCE_FIELDS = [
   "endOfRegion",
 ];
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
-const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample"];
+const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample", "atOnce"];
 const SEEK_AT_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame", "anchorSample"];
 const SEEK_REPORT_FIELDS = ["tag", "requestId", "sourceId"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
@@ -705,12 +706,18 @@ class ControlWorker {
   receiveSessionSeek(message) {
     if (!bounded64(message.generation, 1n) || !bounded64(message.sourceFrame, 0n)
         || typeof message.anchorSample !== "bigint" || message.anchorSample < -1n
-        || message.anchorSample > 0xffffffffffffffffn) {
+        || message.anchorSample > 0xffffffffffffffffn
+        || typeof message.atOnce !== "boolean" || (message.atOnce && message.anchorSample !== -1n)) {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
       return;
     }
+    // #2205: `atOnce` (a stopped transport) lands at the next block: the landing is decided by
+    // render at that block, so it holds with the render half in the worklet.
+    const plain = message.atOnce
+      ? this.exports.miso_engine_web_v1_session_prepare_seek
+      : this.exports.miso_engine_web_v1_session_seek;
     const result = message.anchorSample === -1n
-      ? this.exports.miso_engine_web_v1_session_seek(this.handle, message.generation, message.sourceFrame)
+      ? plain(this.handle, message.generation, message.sourceFrame)
       : this.exports.miso_engine_web_v1_session_seek_at(
         this.handle, message.generation, message.sourceFrame, message.anchorSample,
       );
@@ -1019,6 +1026,15 @@ class ControlWorker {
     };
   }
 
+  /// Issue #2205: the engine's seek runway `R` in quanta, `min(ceil(50 ms / quantum), ring / 2)`.
+  /// A parallel formula: the engine reports no value of it, so this re-derives
+  /// `source::seek_runway_blocks`; the harness pins the two equal at every launch rate through the
+  /// ABI layout's `sourceRing.seekRunwayQuanta`, which the engine's own function generates.
+  seekRunwayQuanta(ringQuanta) {
+    return Math.min(Math.ceil((SEEK_RUNWAY_MS * this.sampleRateHz) / (1000 * this.quantumFrames)),
+      Math.floor(ringQuanta / 2));
+  }
+
   /// Issue #1387 (root ruling 1), #2205 (root ruling 3): the headroom `H`, in chunks, the drain
   /// keeps free in each source's engine ring, read from the producer's real occupancy
   /// (`source_fill`). It is computed here and nowhere else. A seek's new generation is admitted
@@ -1034,7 +1050,7 @@ class ControlWorker {
   /// 48 kHz both are 19. #1387 MINOR 3: a ring shorter than twice that (the qualification corpus
   /// boots rings down to one quantum) keeps half of itself free instead, as the engine caps `R`.
   feedHeadroomQuanta(ringQuanta) {
-    const runway = Math.ceil((SEEK_RUNWAY_MS * this.sampleRateHz) / (1000 * this.quantumFrames));
+    const runway = this.seekRunwayQuanta(ringQuanta);
     const tickMs = Math.max(TIMER_CLAMP_MS, Math.round((1000 * this.quantumFrames) / this.sampleRateHz));
     const perTick = Math.ceil((tickMs * this.sampleRateHz) / (1000 * this.quantumFrames));
     const admission = perTick + Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames) + 1;

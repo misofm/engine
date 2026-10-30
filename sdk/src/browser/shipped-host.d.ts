@@ -474,6 +474,10 @@ export interface MisoSessionSeekRequest {
   generation: bigint;
   frame: bigint;
   anchorSample?: bigint;
+  /// Issue 2205: `true` for a plain seek with no live audio to keep (a stopped transport): it
+  /// lands at the next rendered block instead of waiting for the sources' runway. Not with
+  /// `anchorSample`.
+  atOnce?: true;
 }
 
 /// @internal The reply to one session seek (issue 1644 D1): the engine's result and the generation
@@ -574,8 +578,9 @@ export interface MisoAudioWorkletHost {
   /// Seeks source content while absolute render time remains continuous. Meter peak windows can
   /// straddle this content discontinuity; the seek does not advance the meter generation. It is a
   /// live seek (`miso_engine_web_v1_source_seek`, issue 2205): render keeps the old position
-  /// playing until the new generation has its runway in the engine's ring (50 ms of audio), or
-  /// 50 ms after render observed it, then lands it at its frame.
+  /// playing until the new generation has its runway in the engine's ring (R blocks,
+  /// `ceil(50 ms / quantum)`), or at the latest R blocks after the block that observed it, then
+  /// lands it at its frame.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
   /// @internal Seek one source at an anchor sample (issue 1297a); the worklet's message handler
   /// applies it, never `process()`. It resolves with the engine's result. It shares the per-source
@@ -588,10 +593,12 @@ export interface MisoAudioWorkletHost {
   /// (issue 1644 D1). A plain seek (no `anchorSample`) declares the discontinuity in the same
   /// call; an anchored one keeps continuity. Reposition the PCM producers only after a `0` result,
   /// so a ring seek at this generation is consumed without a second per-source seek. One may be
-  /// unsettled at a time; a second rejects locally with result `6`. A plain seek lands for every
-  /// source and the timeline in one block, once every source that was playing has its runway in
-  /// the engine's ring (50 ms of audio), or 50 ms after render observed it (issue 2205); the old
-  /// position plays until then. The SDK's `engine.seek` is the public surface.
+  /// unsettled at a time; a second rejects locally with result `6`. A plain seek is live (issue
+  /// 2205): it lands for every source and the timeline in one block, once every source that was
+  /// playing has its runway in the engine's ring (R blocks, `ceil(50 ms / quantum)`), or at the
+  /// latest R blocks after the block that observed it, so up to 50 ms plus one quantum; the old
+  /// position plays until then. With `atOnce` it lands at the next rendered block. The SDK's
+  /// `engine.seek` is the public surface.
   seekSession(request: MisoSessionSeekRequest): Promise<MisoSessionSeekReply>;
   /// Reads the engine status. Concurrent calls share one read, and a reply reflects every request
   /// the host sent before the call: a call joins the in-flight read while no later request was

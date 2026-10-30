@@ -7144,33 +7144,22 @@ mod session_seek {
         assert_eq!(rig.timeline(swap), 3_000);
     }
 
-    /// #2205 gate (C ABI): a plain session seek during playback, with `LONG` fed and `SHORT`
-    /// never fed, waits while `LONG`'s producer is late (its old audio plays on), then lands
-    /// `LONG`, `SHORT` and the timeline in one block, the first at which `LONG`'s runway is
-    /// queued, with no underrun on `LONG`.
+    /// #2205 parity row (C ABI): a plain session seek during playback waits while `LONG`'s
+    /// producer is late (its old audio plays on), then lands once its runway is queued, with no
+    /// underrun. The landing rules are `crates/source`'s tests.
     ///
-    /// Test value: red if the seek lands before `LONG` has PCM of its generation (today: at the
-    /// next block, `LONG` underruns a quantum), if the never-fed source holds the seek, or if
-    /// the sources and the timeline land in different blocks.
+    /// Test value: red if the C ABI's session seek lands before the fed source has PCM of its
+    /// generation (today: at the next block, `LONG` underruns a quantum).
     #[test]
-    fn a_plain_session_seek_lands_every_source_once_the_fed_one_has_its_runway() {
+    fn a_plain_session_seek_waits_for_the_fed_sources_runway() {
         let mut rig = Rig::new(&two_sources());
         assert_eq!(rig.seek(2, 2_000), crate::RESULT_OK);
-        let held = rig.next();
         rig.render();
         assert_eq!(rig.landed(LONG).0, 1, "held: LONG's producer is late");
-        assert_eq!(rig.landed(SHORT).0, 1, "held with LONG");
-        assert_eq!(rig.timeline(held), held as i64, "the timeline runs on");
         rig.feed_long_runway(2, 2_000);
         let sample = rig.next();
         rig.render();
         assert_eq!(rig.landed(LONG), (2, sample, 2_000));
-        assert_eq!(
-            rig.landed(SHORT),
-            (2, sample, 2_000),
-            "the never-fed source"
-        );
-        assert_eq!(rig.timeline(sample), 2_000);
         assert_eq!(seek_report_c(rig.session, LONG).3, 0, "LONG never underran");
     }
 

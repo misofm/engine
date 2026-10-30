@@ -72,7 +72,7 @@ const SOURCE_FIELDS = [
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
 // Issue #1644 D1 (root R1): one session seek message for both exports. `anchorSample` is always
 // present; `-1n` is a plain seek, any other value the absolute render sample of the anchored form.
-const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample"];
+const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample", "atOnce"];
 // Issue #1297a: the anchored source seek and the seek report, both control work of the handler.
 const SEEK_AT_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame", "anchorSample"];
 const SEEK_REPORT_FIELDS = ["tag", "requestId", "sourceId"];
@@ -1415,22 +1415,26 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// Issue #1644 D1, `single` mode: seek the timeline and every source under one generation, all
   /// or nothing, in the message handler and never in `process()`. A plain seek (`anchorSample`
   /// `-1n`) calls `session_seek`, which declares the discontinuity in the same call; an anchored
-  /// one calls `session_seek_at` once. A refusal is the reply's result and is not sticky; an OK
-  /// records the generation for the feed drain (D2) before the reply.
+  /// one calls `session_seek_at` once. #2205: a plain seek with `atOnce` (a stopped transport)
+  /// calls `session_prepare_seek`, which lands at the next block. A refusal is the reply's result
+  /// and is not sticky; an OK records the generation for the feed drain (D2) before the reply.
   receiveSessionSeek(message) {
     if (typeof message.generation !== "bigint" || message.generation <= 0n
         || message.generation > 0xffffffffffffffffn
         || typeof message.sourceFrame !== "bigint" || message.sourceFrame < 0n
         || message.sourceFrame > 0xffffffffffffffffn
         || typeof message.anchorSample !== "bigint" || message.anchorSample < -1n
-        || message.anchorSample > 0xffffffffffffffffn) {
+        || message.anchorSample > 0xffffffffffffffffn
+        || typeof message.atOnce !== "boolean"
+        || (message.atOnce && message.anchorSample !== -1n)) {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
       return;
     }
+    const plain = message.atOnce
+      ? this.exports.miso_engine_web_v1_session_prepare_seek
+      : this.exports.miso_engine_web_v1_session_seek;
     const result = message.anchorSample === -1n
-      ? this.exports.miso_engine_web_v1_session_seek(
-        this.handle, message.generation, message.sourceFrame,
-      )
+      ? plain(this.handle, message.generation, message.sourceFrame)
       : this.exports.miso_engine_web_v1_session_seek_at(
         this.handle, message.generation, message.sourceFrame, message.anchorSample,
       );

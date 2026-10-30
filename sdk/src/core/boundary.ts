@@ -927,10 +927,11 @@ export class WasmBoundary {
   /**
    * Seek the timeline and every source to `frame` under one new `generation`, all or nothing.
    * A plain session seek is a declared discontinuity: the engine declares it in the same call, and
-   * a refused seek declares nothing, so this makes no separate declaration. The seek does not
-   * prepare the consumers: each applies it at the next block, and the caller then submits every
-   * source's PCM from its clamped frame under the same generation. Control work, never
-   * `process()`.
+   * a refused seek declares nothing, so this makes no separate declaration. The headless engine
+   * renders only when asked, so it has no live audio to keep: the seek lands for every source and
+   * the timeline at the next rendered block (`session_prepare_seek`, #2205), without waiting for a
+   * runway, and the caller submits every source's PCM from its clamped frame under the same
+   * generation before that block. Control work, never `process()`.
    */
   sessionSeek(request: {
     readonly generation: bigint;
@@ -943,7 +944,7 @@ export class WasmBoundary {
     if (typeof request.frame !== "bigint" || request.frame < 0n) {
       throw new MisoUsageError("session seek frame must be a non-negative bigint");
     }
-    const result = Number(this.#exports.miso_engine_web_v1_session_seek(
+    const result = Number(this.#exports.miso_engine_web_v1_session_prepare_seek(
       handle,
       request.generation,
       request.frame,

@@ -1067,13 +1067,20 @@ impl ControlHalf {
         generation: u64,
         timeline_frame: u64,
         anchor_sample: Option<u64>,
+        at_once: bool,
     ) -> Result<(), SessionSeekFailure> {
         if anchor_sample.is_some() {
             return self
                 .control
                 .session_seek(generation, timeline_frame, anchor_sample);
         }
-        self.run_control(|control| control.session_seek(generation, timeline_frame, None))
+        self.run_control(|control| {
+            if at_once {
+                control.session_seek_at_once(generation, timeline_frame)
+            } else {
+                control.session_seek(generation, timeline_frame, None)
+            }
+        })
     }
 
     /// Run one control-plane call that may publish a replacement plan (#1290a, #1323), then
@@ -2449,7 +2456,8 @@ impl AudioWorkletEngineHost {
     /// `miso_engine_v1_source_seek`. It goes through the control plane's source routing (#1381a
     /// D2) and never prepares the plan's consumer, also when the render half is on this instance:
     /// the consumer observes the seek through its command queue and lands it when ready (the old
-    /// generation plays on until the new one has its runway, at most 50 ms). A live ring seek in
+    /// generation plays on until the new one has its runway, at most R blocks after the block that
+    /// observed it). A live ring seek in
     /// `single` mode takes this path. A seek changes source-content position while the absolute
     /// render clock stays continuous; it therefore neither resets meter accumulators nor advances
     /// the meter publication epoch.
@@ -2589,6 +2597,26 @@ impl AudioWorkletEngineHost {
         timeline_frame: u64,
         anchor_sample: Option<u64>,
     ) -> u32 {
+        self.session_seek_landing(generation, timeline_frame, anchor_sample, false)
+    }
+
+    /// [`Self::session_seek`]'s plain form for a seek with no live audio to keep (#2205): the
+    /// headless engine's `seek`, or a browser engine whose transport is not playing. It lands for
+    /// every source and the timeline at the first block that observes it, without waiting for a
+    /// runway (`SessionState::session_seek_at_once`), in either instance mode: the landing is
+    /// decided at that block, so a render half on another thread lands it the same way. Same
+    /// results, declaration and thread rule as the plain form.
+    pub fn session_prepare_seek(&mut self, generation: u64, timeline_frame: u64) -> u32 {
+        self.session_seek_landing(generation, timeline_frame, None, true)
+    }
+
+    fn session_seek_landing(
+        &mut self,
+        generation: u64,
+        timeline_frame: u64,
+        anchor_sample: Option<u64>,
+        at_once: bool,
+    ) -> u32 {
         self.control_response = ControlResponse::None;
         if !self.control_ready() {
             return self.record(RESULT_REFUSED_LIFECYCLE);
@@ -2596,7 +2624,7 @@ impl AudioWorkletEngineHost {
         let Some(control) = self.control.as_mut() else {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         };
-        let result = control.session_seek(generation, timeline_frame, anchor_sample);
+        let result = control.session_seek(generation, timeline_frame, anchor_sample, at_once);
         self.publish_words_here();
         match result {
             Ok(()) => self.record(RESULT_OK),

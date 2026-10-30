@@ -44,6 +44,9 @@ export async function qualifySuspendedPcmFeed(browserName, engine, origin) {
 export const LIVE_PHASES = [
   { name: "pcm-feed-live-seek", run: "runLivePcmFeedSeek" },
   { name: "pcm-feed-transport-seek", run: "runLiveTransportSeek" },
+  // #2205: a seek with no live audio to keep (stop, seek, play) lands at the first block after
+  // resume. Gated on that landing; its underrun frames are reported.
+  { name: "pcm-feed-stopped-seek", run: "runLiveStoppedSeek" },
 ];
 
 /**
@@ -79,17 +82,23 @@ export async function qualifyLiveSeek(browser, browserName, origin, mode, phase 
       .map((row) => (Number(row.addedLatencySamples) / 48).toFixed(1));
     const latency = latencies.length === 0 ? "" : ` added latency ms [${latencies.join(", ")}]`;
     process.stdout.write(`${browserName}: ${phase.name} ${mode}${label}:${latency} ${JSON.stringify(result)}\n`);
-    const missing = result.seeks.filter((row) => row.underrunFrames !== "0");
+    const stopped = phase.run === "runLiveStoppedSeek";
+    const missing = stopped ? [] : result.seeks.filter((row) => row.underrunFrames !== "0");
+    // A stopped seek lands at the first block after resume: no block of the stopped position
+    // plays after `play()`, for the source and the timeline.
+    const late = result.seeks.filter((row) => row.resumeSample !== undefined
+      && row.sourceLandedSample !== row.resumeSample);
     const split = result.seeks.filter((row) => row.timelineLandedSample !== undefined
       && (row.timelineLandedSample !== row.sourceLandedSample || row.timelineGeneration !== row.generation));
     // A transport seek's chunks of the old generation that a drain submits after the session seek
     // moved the source, and before the producer's ring seek, are refused as stale: expected, so
     // reported, not an invariant. The per-source phase has no such window.
     const refused = phase.run === "runLivePcmFeedSeek" && result.refused !== 0;
+    // The stopped phase's added latency is the play, not the seek; its landing is the gate.
     if (refused || split.length !== 0
         || result.seeksApplied !== result.seeks.length
         || result.renderAllocations.result !== 0 || result.renderAllocations.count !== 0
-        || (gated && missing.length !== 0)) {
+        || (gated && (missing.length !== 0 || late.length !== 0))) {
       throw new Error(`${phase.name} ${mode} invariant failed: ${JSON.stringify(result)}`);
     }
     return result;

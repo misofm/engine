@@ -357,17 +357,21 @@ silence, in either mode (#2185, #2205). The drain frees the ring's chunks of the
 at once and submits the new ones, and the engine keeps the old position playing until the new
 generation has its runway in the engine's ring: 50 ms of audio (at most half the engine ring), or
 up to a chunk that ends its region. Then the seek lands, a single cut, and the source plays the
-new position from its first frame. If that runway is not in the engine within 50 ms of rendered
-audio, the seek lands anyway and the source plays silence, counted as underruns, until its PCM
-arrives. Publish the new position in one burst, as the pump does. The engine reports the block
+new position from its first frame. If that runway is not in the engine within its deadline, the
+seek lands anyway and the source plays silence, counted as underruns, until its PCM arrives. The
+deadline is R blocks after the block that observed the seek, R = `ceil(50 ms / quantum)` (at most
+half the engine ring): the old position plays for less than 50 ms plus one quantum after that
+block, plus the part of a block between the seek and it. Publish the new position in one burst, as the pump does. The engine reports the block
 where the seek landed in the source's seek report. A suspended seek with `feed.prepareSeek()`
 applies at once, as before.
 
 The transport seek, `engine.seek(frame, { producers })`, lands the same way for every source and
 the timeline in one block: the first at which every source that was playing has its runway in the
-engine's ring, or 50 ms after render observed the seek. The old position plays until then, so the
-seek adds at most 50 ms of latency and no silence. A source that received no PCM before the seek
-does not hold it.
+engine's ring, or the deadline above. The old position plays until then, so the seek adds that
+much latency at most and no silence. A source that received no PCM before the seek does not hold
+it. A seek while the engine is not playing (`stop()` asked, or the context not running) has no
+live audio to keep: it lands at the next rendered block, so `play()` starts at the new position.
+The headless engine's `seek` lands at the next rendered block too.
 
 Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
 is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.
@@ -413,8 +417,8 @@ The engine has one timeline playhead. `engine.position()` resolves with `{ frame
 atSample }`: `frame` is the timeline frame that the next rendered block starts at, and `atSample`
 is the absolute render sample of that block. The SDK reads the timeline's seek report and the
 host's next render sample, and calculates `frame = sourceFrame + (atSample - firstSample)`. After
-`engine.seek(f)`, `position()` gives `f` until the seek lands (at most 50 ms of audio later, see
-the transport seek above), and then `f` plus the frames rendered since. The frame does not move while the context is suspended. You do not need
+`engine.seek(f)`, `position()` gives `f` until the seek lands (by the transport seek's deadline
+above), and then `f` plus the frames rendered since. The frame does not move while the context is suspended. You do not need
 the meters to calculate a position.
 
 `engine.planLatency()` resolves with `{ samples, tailSamples }` on both engines: the output latency

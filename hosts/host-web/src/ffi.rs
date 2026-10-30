@@ -917,7 +917,7 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
 /// `miso_engine_v1_source_seek`. It never prepares the plan's consumer, also in `single` mode
 /// where the render half is on this instance: render observes the seek at its next block and lands
 /// it when ready, keeping the old generation playing until the new one has its runway in the
-/// engine's ring (bounded by 50 ms). The live seeks call it: the PCM feed's drain and the
+/// engine's ring (at most R blocks, `ceil(50 ms / quantum)`, after the block that observes it). The live seeks call it: the PCM feed's drain and the
 /// worklet's `seekSource`. A seek with no live audio to keep calls
 /// [`miso_engine_web_v1_source_prepare_seek`] instead.
 #[unsafe(no_mangle)]
@@ -1043,7 +1043,8 @@ pub extern "C" fn miso_engine_web_v1_source_seek_at(
 /// worklet's message handler) calls it, never `process()`: it runs the service step. It never
 /// prepares the plan's consumer; every consumer observes the seek at the next block, and the plain
 /// form lands for every source and the timeline in one block once every source that waits has its
-/// runway queued, or at the deadline (#2205, as the C ABI's). It is a
+/// runway queued, or at the deadline (#2205, as the C ABI's): a live seek. A seek with no live
+/// audio to keep calls [`miso_engine_web_v1_session_prepare_seek`]. It is a
 /// declared discontinuity (root ruling B16-R9): after every check and before any push it declares
 /// it as [`miso_engine_web_v1_declare_discontinuity`] does, and a plan that publishes is counted as
 /// a blocking rebuild; a refused seek declares nothing, so the page never declares before it.
@@ -1059,6 +1060,23 @@ pub extern "C" fn miso_engine_web_v1_source_seek_at(
 pub extern "C" fn miso_engine_web_v1_session_seek(handle: u32, generation: u64, frame: u64) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
         host.session_seek(generation, frame, None)
+    })
+}
+
+/// [`miso_engine_web_v1_session_seek`] for a seek with no live audio to keep (#2205): the
+/// headless engine's `seek`, and a browser engine's `seek` while its transport is not playing.
+/// It lands for every source and the timeline at the first block that observes it, as the plain
+/// session seek did before #2205, without waiting for a runway, in either instance mode. The host
+/// submits each source's PCM from its frame before that block. Same arguments, results,
+/// declaration (root ruling B16-R9) and thread rule as [`miso_engine_web_v1_session_seek`].
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_session_prepare_seek(
+    handle: u32,
+    generation: u64,
+    frame: u64,
+) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.session_prepare_seek(generation, frame)
     })
 }
 

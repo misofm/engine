@@ -435,10 +435,36 @@ impl SourceControlSet {
         timeline_sample: u64,
         anchor_sample: Option<u64>,
     ) -> Result<(), SourceControlError> {
+        self.seek_session_landing(generation, timeline_sample, anchor_sample, false)
+    }
+
+    /// [`Self::seek_session`]'s plain form for a seek with no live audio to keep (#2205): an
+    /// engine that renders only when asked, or a stopped transport. It lands for every source and
+    /// the timeline at the first block that observes it, as a plain session seek did before
+    /// #2205, without waiting for a runway; the host submits each source's PCM before that block.
+    /// Every rule and refusal is [`Self::seek_session`]'s.
+    pub fn seek_session_at_once(
+        &mut self,
+        generation: u64,
+        timeline_sample: u64,
+    ) -> Result<(), SourceControlError> {
+        self.seek_session_landing(generation, timeline_sample, None, true)
+    }
+
+    fn seek_session_landing(
+        &mut self,
+        generation: u64,
+        timeline_sample: u64,
+        anchor_sample: Option<u64>,
+        at_once: bool,
+    ) -> Result<(), SourceControlError> {
         let mut seek = self
             .published
             .session_seek(generation, anchor_sample)
             .map_err(session_refusal)?;
+        if at_once {
+            seek.land_at_once();
+        }
         check_session_producers(
             &seek,
             self.timeline.as_ref(),

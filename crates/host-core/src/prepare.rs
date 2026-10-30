@@ -113,9 +113,11 @@ pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32
 
 /// The seek runway and deadline `R = D` of a source ring of `ring_frames` at `sample_rate_hz` and
 /// `quantum_frames` (#2205, root ruling 2): `min(ceil(50 ms / quantum), ring blocks / 2)` blocks,
-/// [`source::seek_runway_blocks`]. Every host prepares it; the browser's control Worker reads it
-/// to size its admission headroom (root ruling 3), so the two cannot drift. A zero quantum
-/// returns zero.
+/// [`source::seek_runway_blocks`]. Every host prepares it. The browser's control Worker sizes its
+/// admission headroom from the same `R` (root ruling 3) with a parallel JS formula, since the
+/// engine reports no value of it; the ABI layout's `sourceRing.seekRunwayQuanta` rows carry this
+/// function's values at every launch rate, and the Worker harness pins its formula to them. A zero
+/// quantum returns zero.
 #[must_use]
 pub const fn source_seek_runway_blocks(
     sample_rate_hz: u32,

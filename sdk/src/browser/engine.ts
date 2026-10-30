@@ -407,7 +407,11 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   /**
    * Seek the timeline and every source to `frame` under one new generation, all or nothing (issue
    * #1644 D3), and resolve with the generation used. The engine declares the discontinuity in the
-   * same call. The generation is `options.generation`, else one above the largest this object has
+   * same call. While the audio plays the seek is live (#2205): the old position plays on until
+   * every producer's runway is in the engine, at most `ceil(50 ms / quantum)` blocks after the
+   * block that observed it, then every source and the timeline land in one block. While it does
+   * not play (`stop()` asked, or the context not running) the seek lands at the next rendered
+   * block, so `play()` starts at `frame`. The generation is `options.generation`, else one above the largest this object has
    * used for a seek (the first is `2n`; every source starts at `1n`). Only after the engine
    * accepted the seek are `options.producers` repositioned, in order, to `frame` under that
    * generation; the feed then consumes their ring seeks without seeking the sources again. An app
@@ -424,7 +428,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   /**
    * The timeline playhead (#2100), read from the host: the timeline's seek report and the next
    * render sample, so `frame = sourceFrame + (atSample - firstSample)`. A seek that this engine
-   * sent and that no block has rendered yet is in effect at the next block, so it reports the
+   * sent and that has not landed yet (a live seek waits for its producers' runway, #2205) is
+   * reported as in effect at the next block, so it reports the
    * seek's frame and generation. The host's status is read before the report, so a block that
    * renders between the two reads cannot mix an old anchor with a new sample. The frame does not
    * move while the context is suspended. A report that stays busy rejects with `MisoEngineError`
@@ -905,6 +910,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     // context step. A newer call or `close()` wakes it, so a `resume()` the browser holds until a
     // user gesture never blocks a later call.
     let transportCalls = 0;
+    // #2205: the newest transport request, set when `play()` or `stop()` is called. A seek is live
+    // only while the audio plays: neither a stop asked nor a context that is not running.
+    let transportTarget: "playing" | "stopped" | undefined;
+    const audioIsLive = () => transportTarget !== "stopped" && context.state === "running";
     let wakeTransportWait: (() => void) | undefined;
     const transportClosed = () => new MisoUsageError("the browser engine is closed");
     const transportCall = (target: "playing" | "stopped"): Promise<TransportSnapshot> => {
@@ -916,6 +925,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       const before = context.state;
       const call = (transportCalls += 1);
+      transportTarget = target;
       // The context step starts at once, outside the chain: the context orders its own calls.
       let contextStep: Promise<void>;
       try {
@@ -1625,7 +1635,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           });
         let reply: Awaited<ReturnType<MisoAudioWorkletHost["seekSession"]>>;
         try {
-          reply = await host.seekSession({ generation, frame });
+          // #2205: a live seek keeps the old position playing until every producer's runway is in
+          // the engine; with no live audio to keep (stopped, or the context not running) the seek
+          // lands at the next rendered block.
+          reply = await host.seekSession(audioIsLive() ? { generation, frame } : { generation, frame, atOnce: true });
         } catch (error) {
           // The host rejects a local refusal (a second unsettled seek: `backpressure`) and a
           // sticky failure with its numeric record; keep the result in the SDK's vocabulary.

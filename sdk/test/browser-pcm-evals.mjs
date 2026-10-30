@@ -657,7 +657,7 @@ function anchoredPrelude(source) {
 function preludeConsumer(source) {
   const { sandbox, registrations } = preludeHarness(source);
   const adapter = {
-    submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null, onSnapshot: null,
+    submissions: [], seeks: [], prepared: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null, onSnapshot: null,
   };
   const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
   class Engine {
@@ -674,6 +674,11 @@ function preludeConsumer(source) {
           this.diagnosticView.fill(0);
           if (adapter.seekResult !== 0 && adapter.seekStale) this.diagnosticView.set(stale);
           return adapter.seekResult;
+        },
+        // #2205: the prepare form records apart, then answers as the seek does.
+        miso_engine_web_v1_source_prepare_seek: (handle, id, generation, frame) => {
+          adapter.prepared.push([generation, frame]);
+          return this.exports.miso_engine_web_v1_source_seek(handle, id, generation, frame);
         },
         miso_engine_web_v1_source_submit: (_h, idLength, generation, start, channels, frames, end) => {
           adapter.submissions.push({ id: new TextDecoder().decode(new Uint8Array(this.memoryBuffer, 0, idLength)), generation, start, channels, frames, end, pcm: [...this.sourcePcm] });

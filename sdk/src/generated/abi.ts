@@ -73,6 +73,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_response_frame_reply_ptr",
     "miso_engine_web_v1_response_frame_submit",
     "miso_engine_web_v1_service",
+    "miso_engine_web_v1_session_prepare_seek",
     "miso_engine_web_v1_session_seek",
     "miso_engine_web_v1_session_seek_at",
     "miso_engine_web_v1_source_channels",
@@ -763,6 +764,28 @@ export const ABI_LAYOUT = deepFreeze(
         {
           "sampleRateHz": 96000,
           "samples": 966
+        }
+      ],
+      "seekRunwayQuanta": [
+        {
+          "sampleRateHz": 44100,
+          "quantumFrames": 128,
+          "quanta": 18
+        },
+        {
+          "sampleRateHz": 48000,
+          "quantumFrames": 128,
+          "quanta": 19
+        },
+        {
+          "sampleRateHz": 88200,
+          "quantumFrames": 128,
+          "quanta": 35
+        },
+        {
+          "sampleRateHz": 96000,
+          "quantumFrames": 128,
+          "quanta": 38
         }
       ]
     }

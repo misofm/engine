@@ -21,7 +21,8 @@
 //   onApply                   a hook called when prepare-seek applies a captured seek, before the
 //                             apply reads anything (the race window between check and apply)
 //   submissions               [{ id, generation, start, channels, frames, end, pcm }]
-//   seeks                     [[generation, frame]] of every `source_seek` call
+//   seeks                     [[generation, frame]] of every seek call, either export
+//   prepared                  [[generation, frame]] of the `source_prepare_seek` calls alone (#2205)
 // The prelude submits at most two chunks a pass and the Worker as many as the engine takes, so a
 // case passes until the ring is drained (`drain`) wherever counts matter.
 
@@ -304,6 +305,25 @@ export const MSB1_CONSUMER_CASES = [
       assert.equal(reply.kind, "confirmed");
       assert.deepEqual(consumer.seeks, [[2n, 12n], [3n, 16n]]);
       assert.equal(count(fed.shared, "DRAIN_BLOCKS"), 0, "preparation renders and counts no block");
+    },
+  },
+  {
+    // #2205: red when the consumers swap the two exports: a live seek through the prepare form
+    // drops the old audio at once in single mode, and a suspended seek through the plain form
+    // cannot refill a full engine ring before the first block.
+    name: "#2205: prepare-seek asks source_prepare_seek; a drain pass's live seek asks source_seek",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.writer.seek(2n, 12n);
+      const reply = await consumer.prepareSeek([{ epoch: epochOf(fed.shared), generation: 2n, frame: 12n }]);
+      assert.equal(reply.kind, "confirmed");
+      assert.deepEqual(consumer.prepared, [[2n, 12n]], "the suspended seek is prepared");
+      fed.writer.seek(3n, 16n);
+      fed.write(3n, 16n);
+      await consumer.pass();
+      assert.deepEqual(consumer.seeks, [[2n, 12n], [3n, 16n]]);
+      assert.deepEqual(consumer.prepared, [[2n, 12n]], "a live seek never prepares");
     },
   },
   {
