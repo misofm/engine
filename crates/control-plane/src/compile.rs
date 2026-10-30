@@ -1524,53 +1524,89 @@ pub(crate) fn validate_replacement_peak(
     }
 }
 
-/// The replacement admission before preparation (issue #2194): may a candidate whose effect
-/// bytes are `effects` be prepared beside every plan and model the control plane holds?
-///
-/// The candidate is not prepared yet, so its rows are its compiled model's (in `compiled_models`)
-/// and its effect projection's, which bounds what preparing its instances allocates; its graph,
-/// builtin and source rows are not known before preparation (#2199) and count zero here. Each
-/// held term is [`replacement_peak_fits`]'s: the held plans' graph rows plus every model plus the
-/// candidate's projected effect bytes, with the held plans' source totals (a carried ring counted
-/// once), against [`ControlLimits::maximum_replacement_peak_bytes`]
-/// (`control.resource.replacement_peak`); the held effect state and scratch plus the candidate's
-/// against their caps (`effect.resource.limit`). [`validate_replacement_peak`] still checks the
-/// exact rows after preparation. The projection charges every instance's processor, also for a
-/// banking effect, whose bank the exact admission charges in place of its members: the graph
-/// compiler holds every per-instance processor alive while it binds the banks, so the transient
-/// really holds them. This pre-check can therefore be stricter than the exact admission for
-/// banking effects, deliberately; for the other rows it refuses nothing the exact admission
-/// would admit except by the projection's ceiling margin.
-///
-/// Nothing is prepared or committed on a refusal.
-pub(crate) fn validate_prospective_projection(
-    held: &[LiveEpochResources],
-    effects: host_core::EffectStateProjection,
-    compiled_models: CompiledModelAdmission,
+/// A candidate's plan as the replacement admission reads it, from its preparation's projection
+/// (issue #2199), before it is prepared: the plan row its preparation will report, with the graph
+/// row's carry program (a successor's later carry sections are charged by the admission after the
+/// candidate is prepared), the sources (the carried rings and timeline apart, as
+/// the prepared plan's carry splits them), the effect state and scratch, the builtins, and the
+/// control plane's rows ([`projected_capi_resources`]). The rows the admission does not read are
+/// zero; the largest-allocation term is the prepared candidate's to meet.
+pub(crate) fn projected_plan<A: ControlAdapter>(
+    compiled: &CompiledSession,
+    projection: &host_core::HostProjection,
     limits: ControlLimits,
-) -> Result<(), CompileFailure> {
+    observation_slots_high_water: usize,
+    capture_owners_high_water: usize,
+    spectrum: bool,
+) -> Result<ProspectivePlan, CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
-    let peak = held_peak_bytes(held, compiled_models.retained_bytes)?
-        .checked_add(effects.retained_bytes().ok_or_else(arithmetic)?)
-        .ok_or_else(arithmetic)?;
-    if peak > limits.maximum_replacement_peak_bytes {
-        return Err(diagnostic("control.resource.replacement_peak"));
-    }
-    let sum = |field: fn(&PlanResources) -> u64, candidate: u64| {
-        held.iter()
-            .try_fold(candidate, |total, epoch| {
-                total.checked_add(field(&epoch.report))
-            })
-            .ok_or_else(arithmetic)
+    // The ceiling rows (the state inventory and the send lanes) are the admission after
+    // preparation's to charge, exactly: this admission charges the exact rows only, so it never
+    // refuses a candidate that the exact admission admits.
+    let first = host_core::HostProjection {
+        inventory_bytes: 0,
+        route_controls: host_core::RouteControlResources::default(),
+        ..*projection
     };
-    if sum(|row| row.effect_scalar_state_bytes, effects.state_bytes)?
-        > limits.maximum_effect_state_bytes
-        || sum(|row| row.effect_scalar_scratch_bytes, effects.scratch_bytes)?
-            > limits.maximum_effect_scratch_bytes
-    {
-        return Err(diagnostic("effect.resource.limit"));
-    }
-    Ok(())
+    let capi = projected_capi_resources::<A>(
+        compiled,
+        &first,
+        limits,
+        observation_slots_high_water,
+        capture_owners_high_water,
+        spectrum,
+    )?;
+    let carried = CarriedSourceBytes {
+        total: projection.carried_source_total_bytes,
+        overhead: projection.carried_source_overhead_bytes,
+    };
+    let source_total = projection
+        .source_total_bytes
+        .checked_add(carried.total)
+        .ok_or_else(arithmetic)?;
+    let source_overhead = projection
+        .source_overhead_bytes
+        .checked_add(carried.overhead)
+        .ok_or_else(arithmetic)?;
+    Ok(ProspectivePlan {
+        resources: PlanResources {
+            sample_rate_hz: compiled.sample_rate().0,
+            quantum_frames: compiled.quantum().0,
+            source_count: u64::try_from(compiled.source_count()).map_err(|_| arithmetic())?,
+            track_count: u64::try_from(compiled.normalized_model().tracks.len())
+                .map_err(|_| arithmetic())?,
+            latency_samples: 0,
+            output_tail_every_peak: effect_contract::TailSamples::Finite(0),
+            // The carry program, exact; a successor's later sections are the admission after
+            // bind's to charge (`HostProjection::admitted_graph_and_model`).
+            graph_session_plus_plan_bytes: projection
+                .graph_session_plus_plan_bytes
+                .checked_add(projection.carry_program_bytes)
+                .ok_or_else(arithmetic)?,
+            graph_incremental_plan_bytes: 0,
+            graph_metadata_bytes: 0,
+            graph_delay_bytes: 0,
+            effect_bank_scratch_bytes: 0,
+            effect_bank_runtime_buffer_bytes: 0,
+            effect_bank_metadata_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            source_pcm_payload_bytes: source_total
+                .checked_sub(source_overhead)
+                .ok_or_else(arithmetic)?,
+            source_overhead_bytes: source_overhead,
+            source_total_bytes: source_total,
+            effect_scalar_state_bytes: projection.effects.state_bytes,
+            effect_scalar_scratch_bytes: projection.effects.scratch_bytes,
+            builtin_processor_payload_bytes: 0,
+            builtin_meter_payload_bytes: 0,
+            builtin_retained_payload_bytes: projection.builtin_retained_payload_bytes,
+            control_retained_bytes: capi.active_retained,
+            largest_named_allocation_bytes: 0,
+        },
+        carried,
+        capi,
+    })
 }
 
 /// The replacement peak's held terms (#1290a D3, issue #2194): every held plan's graph row, the
@@ -2025,6 +2061,45 @@ pub trait RuntimePreparer: Send {
         ),
         PrepareDiagnostics,
     >;
+
+    /// What [`Self::prepare`] would retain for the same arguments, projected before anything of the
+    /// plan is prepared (issue #2199): host-core's [`host_core::project_host_session`] of the same
+    /// preparation. The replacement admission admits a candidate on it before preparing it.
+    ///
+    /// The default projects host-core's live-lanes preparation with the default live-control
+    /// request at [`Self::meter_window_blocks`], which is what a preparer that prepares with that
+    /// entry prepares; a preparer that prepares with another request or entry projects with it.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal the preparation makes up to its projection.
+    fn project(
+        &self,
+        compiled: &CompiledSession,
+        caps: &HostPrepareCaps,
+        lanes: HostLiveLanes,
+        spectrum: Option<&host_core::SpectrumPreparation>,
+        successor: Option<SuccessorBase<'_>>,
+        superseded: &host_core::LiveValuesSuperseded,
+    ) -> Result<host_core::HostProjection, PrepareDiagnostics> {
+        let live = host_core::HostLiveControlRequest {
+            meter_window_blocks: self.meter_window_blocks(),
+            ..host_core::HostLiveControlRequest::default()
+        };
+        host_core::project_host_session(
+            compiled,
+            caps,
+            host_core::HostProjectionRequest {
+                live_controls: Some(&live),
+                selected_meters: None,
+                backend: lane::Backend::current(),
+                spectrum,
+                successor,
+                lanes,
+                superseded: Some(superseded),
+            },
+        )
+    }
 
     /// The meter window, in blocks, this adapter prepares its plans' strip meters with (#1581 D2):
     /// `0`, the default, is host-core's [`host_core::default_meter_window_blocks`]. The session's

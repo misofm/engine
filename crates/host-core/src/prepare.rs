@@ -4308,6 +4308,34 @@ fn prepare_or_project(
             &mappings,
         )
         .map_err(|_| graph_failure("host.source.graph.prepare"))?;
+        // A carried timeline's command queue and seek report join the carried rings' bytes, as
+        // the preparation below counts them (#1641 D3, #1704 D4).
+        let carried_timeline = if timeline_carries {
+            let report = SourceTimeline::resource_report(compiled.quantum(), history_blocks)
+                .map_err(|_| resource("host.source.prepare"))?;
+            report
+                .command_queue_bytes
+                .checked_add(report.seek_report_bytes)
+                .ok_or_else(arithmetic)?
+        } else {
+            0
+        };
+        let inventory = |successor: bool| {
+            projected_inventory_bytes(
+                model,
+                &graph_projection,
+                meter_requests.len(),
+                effect_observations.len(),
+                match spectrum_request {
+                    None => 0,
+                    Some(SpectrumPreparation::Single(_)) => 1,
+                    Some(SpectrumPreparation::Collection(request)) => request.entries.len(),
+                },
+                successor,
+                &route_copies,
+            )
+            .ok_or_else(arithmetic)
+        };
         let carry_bytes = match successor {
             None => carry_program_bytes,
             Some(_) => successor_carry_bound(
@@ -4333,23 +4361,17 @@ fn prepare_or_project(
             effect_control_resources: projected_effect_controls,
             route_controls: routes,
             carry_bytes,
-            inventory_bytes: projected_inventory_bytes(
-                model,
-                &graph_projection,
-                meter_requests.len(),
-                effect_observations.len(),
-                match spectrum_request {
-                    None => 0,
-                    Some(SpectrumPreparation::Single(_)) => 1,
-                    Some(SpectrumPreparation::Collection(request)) => request.entries.len(),
-                },
-                successor.is_some(),
-                &route_copies,
-            )
-            .ok_or_else(arithmetic)?,
+            carry_program_bytes,
+            inventory_bytes: inventory(successor.is_some())?,
             control_retained_bytes: sources.retained_bytes().ok_or_else(arithmetic)?,
             source_total_bytes: source_report.total_engine_owned_bytes,
             source_overhead_bytes: source_report.overhead_bytes,
+            carried_source_total_bytes: carried_total_bytes
+                .checked_add(carried_timeline)
+                .ok_or_else(arithmetic)?,
+            carried_source_overhead_bytes: carried_overhead_bytes
+                .checked_add(carried_timeline)
+                .ok_or_else(arithmetic)?,
             strip_heap_bytes: builtins.track_control_heap_bytes(),
             strips: model.strips().count(),
             strip_id_bytes: u64::try_from(
@@ -5822,6 +5844,8 @@ fn prepare_or_project(
     if native_effect_control_resources != host_projection.effect_control_resources
         || source_resources.total_engine_owned_bytes != host_projection.source_total_bytes
         || source_resources.overhead_bytes != host_projection.source_overhead_bytes
+        || carried_total_bytes != host_projection.carried_source_total_bytes
+        || carried_overhead_bytes != host_projection.carried_source_overhead_bytes
         || control_retained_bytes != host_projection.control_retained_bytes
     {
         return Err(platform("host.graph.projection"));
@@ -10005,8 +10029,12 @@ pub struct HostProjection {
     /// allocation).
     pub route_controls: graph::RouteControlResources,
     /// A ceiling of the report's `carry_program_retained_bytes`: the carry program's exact bytes
-    /// and, for a successor, every later carry section at its count bound.
+    /// and, for a successor, every later carry section at its count bound (root ruling Q2).
     pub carry_bytes: u64,
+    /// The carry program's own bytes, exact: the part of [`Self::carry_bytes`] known before the
+    /// plan is bound. The admissions before preparation charge it; the later sections are
+    /// resolved against the bound plan's lanes and charged exactly by the admission after bind.
+    pub carry_program_bytes: u64,
     /// A ceiling of the report's `inventory_retained_bytes`.
     pub inventory_bytes: u64,
     /// The report's `control_retained_bytes`, exact: the source control table and ID arena.
@@ -10015,6 +10043,11 @@ pub struct HostProjection {
     pub source_total_bytes: u64,
     /// The report's `source_overhead_bytes`, exact.
     pub source_overhead_bytes: u64,
+    /// The report's `carried_source_total_bytes`, exact: the rings and timeline a successor
+    /// carries from its predecessor (issue #1272 D4), outside the three source rows.
+    pub carried_source_total_bytes: u64,
+    /// The report's `carried_source_overhead_bytes`, exact.
+    pub carried_source_overhead_bytes: u64,
     /// The heap the strip producers own beyond their table, exact: what the control plane charges
     /// its strip producer table from ([`crate::strip_control_table_bytes`]).
     pub strip_heap_bytes: u64,
@@ -10044,25 +10077,30 @@ pub struct HostProjection {
 }
 
 impl HostProjection {
-    /// What preparation admits against `maximum_graph_session_plus_plan_bytes`: the graph row,
-    /// the compiled model, the spectrum capture, the effect producers' table and payload, the send
-    /// lanes and the carry. `None` on overflow.
+    /// What preparation admits against `maximum_graph_session_plus_plan_bytes` before it prepares
+    /// anything: the exact rows of the admission after bind, which are the graph row, the
+    /// compiled model, the spectrum capture, the effect producers' table and payload and the carry
+    /// program. The ceiling rows (the send lanes, and a successor's later carry sections) are not
+    /// in it: the admission after bind charges them exactly, so this admission never refuses a
+    /// session that the exact one admits. `None` on overflow.
     #[must_use]
     pub fn admitted_graph_and_model(&self) -> Option<u64> {
         self.graph_session_plus_plan_bytes
             .checked_add(self.session_model_bytes)?
             .checked_add(self.spectrum_capture_retained_bytes)?
             .checked_add(self.effect_control_resources.total_bytes()?)?
-            .checked_add(self.route_controls.total_bytes)?
-            .checked_add(self.carry_bytes)
+            .checked_add(self.carry_program_bytes)
     }
 
-    /// Every engine-owned byte the prepared host retains, at most: the admitted rows, the
-    /// effect processors' boxes and undeclared heap beyond the graph's declared state, the state
-    /// inventory, the source control set and the sources. `None` on overflow.
+    /// Every engine-owned byte the prepared host retains, at most: the admitted rows, the send
+    /// lanes and a successor's later carry sections at their bound, the effect processors' boxes
+    /// and undeclared heap beyond the graph's declared state, the state inventory, the source
+    /// control set and the sources. `None` on overflow.
     #[must_use]
     pub fn retained_bytes(&self) -> Option<u64> {
         self.admitted_graph_and_model()?
+            .checked_add(self.route_controls.total_bytes)?
+            .checked_add(self.carry_bytes.checked_sub(self.carry_program_bytes)?)?
             .checked_add(self.effects.inline_bytes)?
             .checked_add(self.effects.undeclared_heap_bytes)?
             .checked_add(self.inventory_bytes)?

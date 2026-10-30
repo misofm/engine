@@ -997,10 +997,14 @@ struct ControlHalf {
     /// The result code of the last control call this half ran (#1332 S4). The single instance
     /// also publishes it in the status word, unchanged.
     last_result: u32,
-    /// The bytes the bridge retains for the session's lifetime outside the control plane's held
-    /// plans and models (issue #2194): the boot report's bridge rows less the boot model, which
-    /// the control plane holds and counts itself. A replacement's parse projection adds them to
-    /// [`SessionState::held_retained_bytes`].
+    /// The bytes the bridge retains for the session's lifetime outside what the control plane
+    /// holds and counts itself (issues #2194, #2199): the boot report's bridge rows less the boot
+    /// model, less the boot plan's control rows (the control plane reports the newest plan's,
+    /// [`SessionState::held_control_bytes`]) and less the boot document's staging (the staging is
+    /// freed by the first control command and a replacement's document is its parse transient's).
+    /// The boot plan's shape tables stay: a ceiling once that plan is reclaimed. A replacement's
+    /// parse projection adds them to [`SessionState::held_retained_bytes`] and
+    /// [`SessionState::held_control_bytes`].
     bridge_fixed_bytes: u64,
 }
 
@@ -1496,7 +1500,17 @@ impl AudioWorkletEngineHost {
             }
             Err(_) => return Some(arithmetic()),
         };
-        let Some(live_retained) = held.checked_add(control.bridge_fixed_bytes) else {
+        let held_control = match control.control.held_control_bytes() {
+            Ok(held) => held,
+            Err(control_plane::CommandError::Internal) => {
+                return Some(b"web.internal.retained\t$\n".to_vec());
+            }
+            Err(_) => return Some(arithmetic()),
+        };
+        let Some(live_retained) = held
+            .checked_add(held_control)
+            .and_then(|live| live.checked_add(control.bridge_fixed_bytes))
+        else {
             return Some(arithmetic());
         };
         let Some(projection) =
@@ -4053,15 +4067,17 @@ fn projected_retained_bytes(
         })?
         .retained_bytes()
         .ok_or_else(arithmetic)?;
-    let live_controls = live_control_request(options, compiled.quantum().0)
-        .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_OPTIONS, "web.live_controls.config"))?;
-    // The lanes the control plane chooses, with the effect lanes on whenever taps are asked for,
-    // as [`WebRuntimePreparer`] attaches them.
-    let lanes: HostLiveLanes = controls::live_lanes(compiled.normalized_model()).into();
-    let lanes = HostLiveLanes {
-        effects: lanes.effects || live_controls.observation_taps != 0,
-        ..lanes
-    };
+    // The lanes the control plane chooses, and the request and lanes [`WebRuntimePreparer`]
+    // attaches over them.
+    let (live_controls, lanes) = WebRuntimePreparer::new(options)
+        .request(
+            compiled,
+            controls::live_lanes(compiled.normalized_model()).into(),
+        )
+        .map_err(|failure| BootFailure {
+            result: RESULT_REFUSED_OPTIONS,
+            diagnostic: failure.as_bytes().to_vec(),
+        })?;
     // The budget is this projection's to check, as one aggregate: the preparation's own byte
     // ceilings, each the whole budget, would refuse a row before the projection names them all.
     let unbounded = HostPrepareCaps {
@@ -4132,11 +4148,28 @@ fn projected_retained_bytes(
     })
 }
 
-/// The bridge rows of the boot plan's [`PlanShape`] ([`PlanShape::bridge_rows`]) and the session's
-/// cross-thread words ([`cross_thread_bytes`]), from the boot preparation's projection, before
-/// either exists (issue #2199): the dense instance table and the producers' IDs it copies, the
-/// meter tables and frame, the plan words and the retired-shape ring.
+/// The bridge rows of the boot plan's [`PlanShape`] ([`PlanShape::bridge_rows`]), the plan's
+/// [`RenderCompanions`] ([`RenderCompanions::retained_bytes`], which its preparer charges to the
+/// plan's graph row) and the session's cross-thread words ([`cross_thread_bytes`]), from the boot
+/// preparation's projection, before any exists (issue #2199): the dense instance table and the
+/// producers' IDs it copies, the meter tables and frame, the plan words, the companions' shell,
+/// meter consumers, observation handles and carried readers, and the retired-shape ring. The
+/// observation handles' vector grows by pushes, so its capacity is charged at its growth bound.
 fn projected_shape_bytes(host: &host_core::HostProjection) -> Option<u64> {
+    let handles = host.observation_handles;
+    let handle_capacity = if handles == 0 {
+        0
+    } else {
+        handles.checked_next_power_of_two()?.max(4)
+    };
+    let companions = size_of::<RenderCompanions>()
+        .checked_add(host.meters.checked_mul(size_of::<MeterConsumer>())?)?
+        .checked_add(handle_capacity.checked_mul(size_of::<EffectObservationHandle>())?)?
+        .checked_add(
+            host.meters
+                .checked_add(handles)?
+                .checked_mul(size_of::<CarriedReader>())?,
+        )?;
     let instance_table = u64::try_from(host.effect_instances)
         .ok()?
         .checked_mul((size_of::<Option<EffectInstance>>() + size_of::<u32>()) as u64)?;
@@ -4158,6 +4191,7 @@ fn projected_shape_bytes(host: &host_core::HostProjection) -> Option<u64> {
         .checked_add(u64::try_from(meter_tables).ok()?)?
         .checked_add(u64::try_from(frame).ok()?)?
         .checked_add(u64::try_from(words).ok()?)?
+        .checked_add(u64::try_from(companions).ok()?)?
         .checked_add(shared)
 }
 
@@ -4638,6 +4672,27 @@ pub struct WebRuntimePreparer {
 }
 
 impl WebRuntimePreparer {
+    /// The live-control request and the lanes every plan of this preparer attaches over the
+    /// control plane's `lanes`: the boot word's meter window, every declared observation tap
+    /// (#1590 D5) and the effect lanes they ride (#1254 D2), so the effect lanes are always on,
+    /// as on the C ABI, whatever the session's live rows chose; a session with no effect to
+    /// observe still boots.
+    fn request(
+        &self,
+        compiled: &CompiledSession,
+        lanes: HostLiveLanes,
+    ) -> Result<(HostLiveControlRequest, HostLiveLanes), PrepareDiagnostics> {
+        let live_controls =
+            live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
+                PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
+            })?;
+        let lanes = HostLiveLanes {
+            effects: lanes.effects || live_controls.observation_taps != 0,
+            ..lanes
+        };
+        Ok((live_controls, lanes))
+    }
+
     /// A preparer for a session booted with `options`. The spectrum request is the session's
     /// (#1593 D3): every call takes it as an argument.
     #[must_use]
@@ -4682,6 +4737,32 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
             record.rejection = Some(failure.kind());
         }
         prepared
+    }
+
+    /// Issue #2199: the same preparation, projected.
+    fn project(
+        &self,
+        compiled: &CompiledSession,
+        caps: &HostPrepareCaps,
+        lanes: HostLiveLanes,
+        spectrum: Option<&host_core::SpectrumPreparation>,
+        successor: Option<SuccessorBase<'_>>,
+        superseded: &host_core::LiveValuesSuperseded,
+    ) -> Result<host_core::HostProjection, PrepareDiagnostics> {
+        let (live_controls, lanes) = self.request(compiled, lanes)?;
+        host_core::project_host_session(
+            compiled,
+            caps,
+            host_core::HostProjectionRequest {
+                live_controls: Some(&live_controls),
+                selected_meters: None,
+                backend: host_core::Backend::current(),
+                spectrum,
+                successor,
+                lanes,
+                superseded: Some(superseded),
+            },
+        )
     }
 
     /// The boot word (#1581 T2 obligation), so the session's output meter closes its windows on
@@ -4793,17 +4874,7 @@ impl WebRuntimePreparer {
         PrepareDiagnostics,
     > {
         let boot = successor.is_none();
-        let live_controls =
-            live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
-                PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
-            })?;
-        // Observation taps ride the effect lanes (#1254 D2): every plan binds every declared tap
-        // (#1590 D5), so the effect lanes are always on, as on the C ABI, whatever the session's
-        // live rows chose; a session with no effect to observe still boots.
-        let lanes = HostLiveLanes {
-            effects: lanes.effects || live_controls.observation_taps != 0,
-            ..lanes
-        };
+        let (live_controls, lanes) = self.request(compiled, lanes)?;
         let (mut host, mut handles, spectrum_captures) =
             host_core::prepare_host_runtime_with_live_lanes_and_spectrum(
                 compiled,
@@ -5450,6 +5521,8 @@ fn compile_ready(
     let bridge_fixed_bytes = report
         .bridge_retained_bytes
         .checked_sub(engine.session_model_bytes)
+        .and_then(|bytes| bytes.checked_sub(resources.control_retained_bytes))
+        .and_then(|bytes| bytes.checked_sub(report.session_document_bytes))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let control = ControlHalf {
         control,

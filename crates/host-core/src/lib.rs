@@ -157,6 +157,9 @@ pub use engine::realtime::{
 /// A following route's seven-word cell (#1652 D1): what a host writes a [`SendRecord::Following`]
 /// with (#1653).
 pub use graph::{FollowRouteControlRecord, GraphFollowRouteControlProducer, RouteFollowFlags};
+/// The bank dispatch a preparation or a projection is planned for ([`HostProjectionRequest::backend`]):
+/// re-exported so a host names it without a `lane` dependency of its own.
+pub use graph_compiler::Backend;
 #[cfg(feature = "control-provider")]
 pub use live_delta::{
     LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, automation_jump_row,

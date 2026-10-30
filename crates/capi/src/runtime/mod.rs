@@ -116,26 +116,60 @@ impl control_plane::RuntimePreparer for CapiPreparer {
         ),
         host_core::PrepareDiagnostics,
     > {
-        // #1584 D7: an observation queue slot for every declared tap of every effect, so an
-        // `Observe` edit always has a queue. Observation rides the effect lanes (#1254 D2), so a
-        // session whose live rows chose none gets them, as the browser's does.
-        // #1587a: the strip meters' queues are as deep as the output meter's, so a service step
-        // that lags the render by up to that many windows still pairs every strip window with
-        // its output window.
-        let live = host_core::HostLiveControlRequest {
-            meter_queue_depth: core::num::NonZeroUsize::new(host_core::METER_QUEUE_DEPTH)
-                .unwrap_or(core::num::NonZeroUsize::MIN),
-            observation_taps: host_core::launch_maximum_observation_taps(),
-            ..host_core::HostLiveControlRequest::default()
-        };
-        let lanes = host_core::HostLiveLanes {
-            effects: lanes.effects || live.observation_taps != 0,
-            ..lanes
-        };
+        let (live, lanes) = capi_request(lanes);
         host_core::prepare_host_runtime_with_live_lanes_and_spectrum(
             compiled, caps, &live, lanes, spectrum, successor, superseded,
         )
     }
+
+    /// Issue #2199: the same preparation, projected.
+    fn project(
+        &self,
+        compiled: &host_core::CompiledSession,
+        caps: &host_core::HostPrepareCaps,
+        lanes: host_core::HostLiveLanes,
+        spectrum: Option<&host_core::SpectrumPreparation>,
+        successor: Option<host_core::SuccessorBase<'_>>,
+        superseded: &host_core::LiveValuesSuperseded,
+    ) -> Result<host_core::HostProjection, host_core::PrepareDiagnostics> {
+        let (live, lanes) = capi_request(lanes);
+        host_core::project_host_session(
+            compiled,
+            caps,
+            host_core::HostProjectionRequest {
+                live_controls: Some(&live),
+                selected_meters: None,
+                backend: lane::Backend::current(),
+                spectrum,
+                successor,
+                lanes,
+                superseded: Some(superseded),
+            },
+        )
+    }
+}
+
+/// capi's live-control request and the lanes it attaches over the control plane's `lanes`.
+fn capi_request(
+    lanes: host_core::HostLiveLanes,
+) -> (host_core::HostLiveControlRequest, host_core::HostLiveLanes) {
+    // #1584 D7: an observation queue slot for every declared tap of every effect, so an
+    // `Observe` edit always has a queue. Observation rides the effect lanes (#1254 D2), so a
+    // session whose live rows chose none gets them, as the browser's does.
+    // #1587a: the strip meters' queues are as deep as the output meter's, so a service step
+    // that lags the render by up to that many windows still pairs every strip window with
+    // its output window.
+    let live = host_core::HostLiveControlRequest {
+        meter_queue_depth: core::num::NonZeroUsize::new(host_core::METER_QUEUE_DEPTH)
+            .unwrap_or(core::num::NonZeroUsize::MIN),
+        observation_taps: host_core::launch_maximum_observation_taps(),
+        ..host_core::HostLiveControlRequest::default()
+    };
+    let lanes = host_core::HostLiveLanes {
+        effects: lanes.effects || live.observation_taps != 0,
+        ..lanes
+    };
+    (live, lanes)
 }
 
 /// The control-protocol session capi's `Session` handle owns.

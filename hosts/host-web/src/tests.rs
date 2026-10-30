@@ -1362,9 +1362,10 @@ fn retained_projection_budget_diagnostic_names_projected_bytes() {
 /// about 8%, so a projector that grows a row past what the plan holds is an explicit re-pin. An
 /// undershoot of any size is red: the boot admits on the projection before anything is
 /// allocated, so a projection under the exact aggregate admits a session the budget cannot hold.
-/// Pinned at: identity 1,824 / 1,120,159 = 1.63, nine-track 17,120 / 1,491,315 = 11.48, console
-/// 368,368 / 5,314,578 = 69.31, each plus about 8% and rounded up (the console's margin is the
-/// effect row's processor boxes, which a banked member no longer has).
+/// Pinned at: identity 2,016 / 1,120,351 = 1.80, nine-track 18,144 / 1,492,339 = 12.16, console
+/// 381,256 / 5,327,466 = 71.56, each plus about 8% and rounded up (the console's margin is mostly
+/// the effect row's processor boxes, which a banked member no longer has, and the observation
+/// handles' vector at its growth bound).
 ///
 /// Test value: red when the projection leaves out a row the booted host retains (the graph, a
 /// control-plane row, a shape table) or charges one below its exact bytes, which the old form of
@@ -1385,7 +1386,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "parametric-eq-nine-track",
-            13_u64,
+            14_u64,
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1394,7 +1395,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "console-sixty-four-track",
-            75_u64,
+            78_u64,
             include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -7111,8 +7112,11 @@ mod structural_apply {
     #[test]
     fn a_transaction_over_the_memory_budget_is_refused_and_changes_nothing() {
         let model = gate_model();
+        // The boot admits on its projection (issue #2199), a ceiling of the exact total.
+        let document = canonical_session_json(&model).expect("canonical session");
         let fits_one_plan =
-            exact_retained_report_total(Rig::boot(&model, options()).host.resources());
+            exact_retained_report_total(Rig::boot(&model, options()).host.resources())
+                .max(retained_projection(document.as_bytes(), options()).total);
         let tight = WebBootOptions {
             maximum_memory_bytes: fits_one_plan,
             ..options()
@@ -10185,4 +10189,85 @@ mod configured_frame {
             );
         }
     }
+}
+
+/// The live session's retained bytes a replacement's parse projection names
+/// (`host.budget.parse_projection`'s `live_retained_bytes`), read from the refusal of a staging at
+/// the boot's document limit.
+fn staged_live_retained(handle: u32, options: WebBootOptions) -> u64 {
+    let limit = maximum_document_bytes(&options) as usize;
+    assert!(!crate::ffi::test_replace_document(
+        handle,
+        &vec![b' '; limit]
+    ));
+    let diagnostic = String::from_utf8(crate::ffi::test_diagnostic(handle)).expect("UTF-8");
+    diagnostic
+        .strip_suffix("]\n")
+        .and_then(|rest| rest.rsplit_once(",live_retained_bytes="))
+        .and_then(|(_, live)| live.parse().ok())
+        .unwrap_or_else(|| panic!("{diagnostic}"))
+}
+
+/// Issue #2199 (the #2194 residual (a)): after a `SESSION_REPLACE` from the one-track boot to the
+/// 64-track console, the live retained bytes a replacement's parse projection names are those of
+/// the console session: at least what a boot of the console retains less its document staging
+/// (the console's control rows included, not the boot plan's), and over it by at most its pin.
+/// Measured on 09f978bb4: 4,242,900, under the console's 4,737,924.
+///
+/// Test value: red when the live term keeps the boot plan's control rows in the bridge's fixed
+/// bytes: after the replace it then names the one-track session's control rows beside the
+/// console's plan, under what the console session retains, so a replacement's parse is admitted
+/// beside a session larger than the projection says.
+#[test]
+fn a_replace_parse_projects_the_replaced_sessions_control_rows() {
+    use protocol::{
+        CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionReplaceRequest,
+        SessionRevision, TypedCommandFrame,
+    };
+    use sha2::{Digest, Sha256};
+    let options = boot_options(128);
+    let console =
+        include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").as_bytes();
+    let handle = crate::ffi::test_boot(one_track_session(128).as_bytes(), options);
+    assert_ne!(handle, 0);
+    let booted = staged_live_retained(handle, options);
+    assert!(crate::ffi::test_replace_document(handle, console));
+    let revision = crate::ffi::miso_engine_web_v1_control_revision(handle);
+    let mut frame = vec![0_u8; 4_096];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(1).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::SessionReplace(SessionReplaceRequest {
+                    document_bytes: u32::try_from(console.len()).expect("a small document"),
+                    document_sha256: Sha256::digest(console).into(),
+                }),
+            },
+            &mut frame,
+        )
+        .expect("a command frame");
+    frame.truncate(length);
+    let (result, reply) =
+        ffi::native_staging::control_command(handle, &frame).expect("a live handle");
+    assert_eq!(result, RESULT_OK, "{}", String::from_utf8_lossy(&reply));
+    // The console plan is adopted and the boot plan reclaimed: render a block, then service.
+    assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+    assert_eq!(crate::ffi::miso_engine_web_v1_service(handle), RESULT_OK);
+    let replaced = staged_live_retained(handle, options);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    let fresh = AudioWorkletEngineHost::boot(console, options).expect("the console boots");
+    let console_retained =
+        exact_retained_report_total(fresh.resources()) - fresh.resources().session_document_bytes;
+    assert!(replaced > booted);
+    assert!(
+        replaced >= console_retained,
+        "the replaced session's live term {replaced} is under the {console_retained} bytes it retains"
+    );
+    // Measured 189,136 over 4,737,924 (39.9 permille), plus about 8%: the boot plan's shape
+    // tables and the held models' kept bases.
+    assert!(
+        replaced - console_retained <= console_retained * 44 / 1_000,
+        "the live term {replaced} over-projects the console's {console_retained} past its bound"
+    );
 }
