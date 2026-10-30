@@ -705,13 +705,15 @@ describe("the browser open sequence", () => {
   test("#2205: seek waits for a transport step, then is live or at once, and a stopped seek prepares the feeds", async () => {
     // Red if a seek issued while stop() is in flight is sent before that step settles (it lands in
     // the tail blocks, so play() starts late), if a live seek runs the feeds' prepareSeek or a
-    // stopped one does not, or if a preparation failure escapes unwrapped after the seek applied.
+    // stopped one does not, if a preparation failure escapes unwrapped after the seek applied, or
+    // if a seek waits on a resume the browser holds until a gesture (it would never be sent).
     const log = [];
     let settleSuspend;
+    let holdResume = false;
     const context = {
       sampleRate: 48_000, renderQuantumSize: 128, state: "running",
       close: async () => {},
-      resume: async () => { context.state = "running"; },
+      resume: () => (holdResume ? new Promise(() => {}) : Promise.resolve().then(() => { context.state = "running"; })),
       suspend: () => new Promise((resolve) => { settleSuspend = () => { context.state = "suspended"; resolve(); }; }),
       audioWorklet: { addModule: async () => {} },
     };
@@ -771,6 +773,20 @@ describe("the browser open sequence", () => {
       await assert.rejects(engine.seek(0n, { producers }), (error) =>
         error instanceof SessionSeekProducerError && error.generation === 4n && error.producerIndex === 1
           && error.cause?.operation === "prepareRefused");
+      // Row 4: a play() whose resume the browser holds until a gesture: a seek is sent at once, at
+      // once, and a later stop() leaves no seek pending.
+      log.splice(0);
+      holdResume = true;
+      void engine.play().catch(() => undefined);
+      const bound = (promise) => Promise.race([promise.then(() => "sent"),
+        new Promise((resolve) => setTimeout(() => resolve("still pending"), 1_000))]);
+      assert.equal(await bound(engine.seek(1_440n)), "sent", "a seek after a held play() is sent");
+      void engine.stop().catch(() => undefined);
+      assert.equal(await bound(engine.seek(1_920n)), "sent", "a later stop() leaves no seek pending");
+      assert.deepEqual(log.splice(0), [
+        ["host", { generation: 5n, frame: 1_440n, atOnce: true }],
+        ["host", { generation: 6n, frame: 1_920n, atOnce: true }],
+      ]);
     } finally {
       feed.close();
       await engine.close();

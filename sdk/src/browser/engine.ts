@@ -914,9 +914,24 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     // #2205: the newest transport request, set when `play()` or `stop()` is called. A seek is live
     // only while the audio plays: neither a stop asked nor a context that is not running.
     let transportTarget: "playing" | "stopped" | undefined;
-    // The newest transport call's context step (`resume()` or `suspend()`), settled or not: a seek
-    // waits for it before it chooses its form, so it never reads a state a step is changing.
-    let transportStep: Promise<unknown> = Promise.resolve();
+    // #2205: the newest `stop()` call's context step while it is in flight, else `undefined`. A seek
+    // waits for it before it chooses its form, so it never sends a live seek into a stop's tail
+    // blocks. A seek never waits for a resume: a browser may hold `resume()` until a user gesture.
+    let pendingSuspend: Promise<unknown> | undefined;
+    // Settled by every newer transport call and by `close()`, so a seek waiting on a stop step ends
+    // when a later `play()` or `stop()` takes over, as `wakeTransportWait` ends a transport wait.
+    const newSignal = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((settle) => { resolve = settle; });
+      return { promise, resolve };
+    };
+    let transportCallSignal = newSignal();
+    const signalTransportCall = (): void => {
+      transportCallSignal.resolve();
+      transportCallSignal = newSignal();
+    };
+    // Seeks leave in call order: each waits for the one before it to post its request.
+    let seekOrder: Promise<void> = Promise.resolve();
     const audioIsLive = () => transportTarget !== "stopped" && context.state === "running";
     // An iOS "interrupted" context renders nothing, as a suspended one.
     const contextSuspended = () => context.state === "suspended" || (context.state as string) === "interrupted";
@@ -948,7 +963,14 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         () => { stepSettled = true; return "done" as const; },
         (error: unknown) => { stepSettled = true; throw error; },
       );
-      transportStep = stepDone.catch(() => undefined);
+      signalTransportCall();
+      if (target === "stopped") {
+        const step = stepDone.catch(() => undefined);
+        pendingSuspend = step;
+        void step.then(() => { if (pendingSuspend === step) pendingSuspend = undefined; });
+      } else {
+        pendingSuspend = undefined;
+      }
       // An abandoned step's rejection is not this call's failure once a later call took over.
       stepDone.catch(() => undefined);
       const previousWake = wakeTransportWait;
@@ -1642,15 +1664,25 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             result,
           });
         let reply: Awaited<ReturnType<MisoAudioWorkletHost["seekSession"]>>;
+        const previousSeek = seekOrder;
+        let posted!: () => void;
+        seekOrder = new Promise<void>((resolve) => { posted = resolve; });
         try {
+          await previousSeek;
           // #2205: a live seek keeps the old position playing until every producer's runway is in
           // the engine; with no live audio to keep (stopped, or the context not running) the seek
-          // lands at the next rendered block.
-          // #2205: a transport step in flight decides the form: wait for it to settle first.
-          await transportStep;
+          // lands at the next rendered block. While the context still runs, a `stop()` step in
+          // flight decides the form, so the seek waits for it, or for a newer transport call.
+          const suspending = pendingSuspend;
+          if (suspending !== undefined && context.state === "running") {
+            await Promise.race([suspending, transportCallSignal.promise]);
+          }
           live = audioIsLive();
-          reply = await host.seekSession(live ? { generation, frame } : { generation, frame, atOnce: true });
+          const sending = host.seekSession(live ? { generation, frame } : { generation, frame, atOnce: true });
+          posted();
+          reply = await sending;
         } catch (error) {
+          posted();
           // The host rejects a local refusal (a second unsettled seek: `backpressure`) and a
           // sticky failure with its numeric record; keep the result in the SDK's vocabulary.
           const result = (error as { readonly result?: unknown }).result;
@@ -1760,6 +1792,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       close: () => {
         closed = true;
         wakeTransportWait?.();
+        signalTransportCall();
         stopWatermark();
         appliedLedger.rejectAll(new MisoUsageError("the browser engine is closed"));
         editQueue?.close();

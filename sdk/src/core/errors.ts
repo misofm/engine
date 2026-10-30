@@ -178,9 +178,12 @@ export class MisoUsageError extends Error {
  * A producer failed after the engine had accepted the session seek (issue #1644 D3): the engine's
  * timeline and every source are at `generation`, the producers before `producerIndex` were
  * repositioned, and that one and the ones after it were not. `cause` is the producer's error.
- * Reposition the rest under `generation`; the seek is not to be sent again. #2205: when every
- * producer was repositioned and the feeds' suspended preparation (a stopped seek's `prepareSeek`)
- * failed, `producerIndex` is the producers' count and `cause` is the feed's `PcmFeedError`.
+ * Reposition the rest under `generation`; the seek is not to be sent again.
+ *
+ * #2205: `producerIndex` equal to the number of producers passed means that all producers moved
+ * and the feed preparation failed: a stopped seek runs each linked feed's `prepareSeek()` after the
+ * producers, and one of those failed. `cause` is the feed's `PcmFeedError`. The caller retries
+ * `prepareSeek()` on the feed; the seek is not to be sent again.
  */
 export class SessionSeekProducerError extends Error {
   readonly generation: bigint;
