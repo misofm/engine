@@ -235,7 +235,8 @@ impl Rig {
         }
     }
 
-    /// A plain session seek to timeline sample `timeline` (#1641).
+    /// A plain session seek to timeline sample `timeline` (#1641), with its runway submitted at
+    /// once (#2205), so it lands at the next block; `block` keeps the runway queued ahead.
     fn seek(&mut self, timeline: u64) {
         self.generation += 1;
         self.prepared
@@ -243,6 +244,31 @@ impl Rig {
             .seek_session(self.generation, timeline, None)
             .expect("the seek is admitted");
         self.frame = timeline;
+        let quantum = self.quantum as u32;
+        for _ in 0..host_core::source_seek_runway_blocks(RATE, quantum, 32 * quantum) {
+            self.submit_one();
+        }
+    }
+
+    /// Submit the source's next block of DC `1.0`.
+    fn submit_one(&mut self) {
+        let quantum = self.quantum;
+        let plane = vec![1.0_f32; quantum];
+        self.prepared
+            .sources
+            .submit(
+                NINE_SOURCE,
+                SourceSubmission {
+                    generation: self.generation,
+                    start_frame: self.frame,
+                    sample_rate_hz: RATE,
+                    planes: &[&plane, &plane],
+                    frames: quantum as u32,
+                    end_of_region: false,
+                },
+            )
+            .expect("source block");
+        self.frame += quantum as u64;
     }
 
     /// Write a live `Mute` record on track 0's both lanes over `window`, applied at the next
@@ -291,22 +317,7 @@ impl Rig {
     /// Render one block; returns its first render sample.
     fn block(&mut self) -> u64 {
         let quantum = self.quantum;
-        let plane = vec![1.0_f32; quantum];
-        self.prepared
-            .sources
-            .submit(
-                NINE_SOURCE,
-                SourceSubmission {
-                    generation: self.generation,
-                    start_frame: self.frame,
-                    sample_rate_hz: RATE,
-                    planes: &[&plane, &plane],
-                    frames: quantum as u32,
-                    end_of_region: false,
-                },
-            )
-            .expect("source block");
-        self.frame += quantum as u64;
+        self.submit_one();
         let mut samples = vec![0.0_f32; quantum * 2];
         let output =
             PlanarBufferMut::try_new(&mut samples, 2, quantum, quantum).expect("output planes");

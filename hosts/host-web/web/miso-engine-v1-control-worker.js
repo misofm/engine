@@ -99,9 +99,11 @@ const TIMER_CLAMP_MS = 4;
 // Worker cannot refill, in frames. A resume renders its output buffer ahead: 13 quanta measured on
 // Chromium 151 (headroom 8 underran 5 of them, 12 and more none), so 2048 frames bounds it.
 const RENDER_BURST_FRAMES = 2048;
-// Issue #2185 (root ruling 2): the longest a live plain seek waits for its first new-generation
-// chunk, in milliseconds of rendered audio (capped at half the engine ring, `seekDeferralQuanta`).
-const SEEK_DEFERRAL_MS = 50;
+// Issue #2205 (root rulings 2 and 3): the engine's seek runway `R`, in milliseconds of audio: a
+// live plain seek lands once `R` blocks of its generation are in the engine's ring, and `R` is
+// `min(ceil(50 ms / quantum), ring blocks / 2)` (`source::seek_runway_blocks`; this Worker's
+// parallel formula is `seekRunwayQuanta`).
+const SEEK_RUNWAY_MS = 50;
 
 const BOOT_FIELDS = [
   "tag", "module", "memory", "document", "options", "sampleRateHz", "quantumFrames", "workletPort",
@@ -115,7 +117,7 @@ const SOURCE_FIELDS = [
   "endOfRegion",
 ];
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
-const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample"];
+const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample", "atOnce"];
 const SEEK_AT_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame", "anchorSample"];
 const SEEK_REPORT_FIELDS = ["tag", "requestId", "sourceId"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
@@ -400,7 +402,6 @@ class ControlWorker {
     if (!u32(sourceRingFrames) || sourceRingFrames === 0
         || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
     this.feedHeadroom = this.feedHeadroomQuanta(sourceRingFrames / this.quantumFrames);
-    this.seekDeferralQuanta = this.seekDeferralQuantaFor(sourceRingFrames / this.quantumFrames);
     // Issue #2191: the control frame the boot resolved, which a zero word leaves to the engine.
     const controlFrameBytes = e.miso_engine_web_v1_control_frame_bytes(this.handle);
     if (!u32(controlFrameBytes) || controlFrameBytes === 0) return RESULT_INTERNAL;
@@ -705,12 +706,18 @@ class ControlWorker {
   receiveSessionSeek(message) {
     if (!bounded64(message.generation, 1n) || !bounded64(message.sourceFrame, 0n)
         || typeof message.anchorSample !== "bigint" || message.anchorSample < -1n
-        || message.anchorSample > 0xffffffffffffffffn) {
+        || message.anchorSample > 0xffffffffffffffffn
+        || typeof message.atOnce !== "boolean" || (message.atOnce && message.anchorSample !== -1n)) {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
       return;
     }
+    // #2205: `atOnce` (a stopped transport) lands at the next block: the landing is decided by
+    // render at that block, so it holds with the render half in the worklet.
+    const plain = message.atOnce
+      ? this.exports.miso_engine_web_v1_session_prepare_seek
+      : this.exports.miso_engine_web_v1_session_seek;
     const result = message.anchorSample === -1n
-      ? this.exports.miso_engine_web_v1_session_seek(this.handle, message.generation, message.sourceFrame)
+      ? plain(this.handle, message.generation, message.sourceFrame)
       : this.exports.miso_engine_web_v1_session_seek_at(
         this.handle, message.generation, message.sourceFrame, message.anchorSample,
       );
@@ -998,9 +1005,6 @@ class ControlWorker {
       seekFrame: 0n,
       seekAnchor: NO_ANCHOR,
       seekWrite: 0,
-      // #2185: whether the ring's live plain seek is deferred, and the quanta rendered since.
-      deferring: false,
-      deferredQuanta: 0,
       anchoredGeneration: 0n,
       anchoredFrame: 0n,
       anchoredSample: NO_ANCHOR,
@@ -1022,28 +1026,35 @@ class ControlWorker {
     };
   }
 
-  /// Issue #1387 (root ruling 1, attempt 2): the headroom `H`, in chunks, the drain keeps free in
-  /// each source's engine ring, read from the producer's real occupancy (`source_fill`). A seek's
-  /// new generation is admitted only into free slots (the stale chunks stay queued until render
-  /// pops the seek and drops them by tag), so a ring seek's pass submits up to `H` chunks at the
-  /// new position at once, and they must last until the next pass refills: `H` covers the quanta
-  /// render consumes in one Worker tick (a tick is at least `TIMER_CLAMP_MS`) plus a render burst
-  /// (`RENDER_BURST_FRAMES`) plus the block whose render pops the seek. At 48 kHz and 128 frames:
-  /// 2 + 16 + 1 = 19. #1387 MINOR 3: an explicit ring shorter than twice that (the
-  /// qualification corpus boots rings down to one quantum) keeps half of itself free instead, so
-  /// such a ring trades seek headroom for depth; the default ring (512 quanta) is far above it.
-  feedHeadroomQuanta(ringQuanta) {
-    const tickMs = Math.max(TIMER_CLAMP_MS, Math.round((1000 * this.quantumFrames) / this.sampleRateHz));
-    const perTick = Math.ceil((tickMs * this.sampleRateHz) / (1000 * this.quantumFrames));
-    return Math.min(perTick + Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames) + 1, Math.floor(ringQuanta / 2));
+  /// Issue #2205: the engine's seek runway `R` in quanta, `min(ceil(50 ms / quantum), ring / 2)`.
+  /// A parallel formula: the engine reports no value of it, so this re-derives
+  /// `source::seek_runway_blocks`; the harness pins the two equal at every launch rate through the
+  /// ABI layout's `sourceRing.seekRunwayQuanta`, which the engine's own function generates.
+  seekRunwayQuanta(ringQuanta) {
+    return Math.min(Math.ceil((SEEK_RUNWAY_MS * this.sampleRateHz) / (1000 * this.quantumFrames)),
+      Math.floor(ringQuanta / 2));
   }
 
-  /// Issue #2185 (root ruling 2): the deferral bound in quanta, 50 ms of rendered audio, capped at
-  /// half the engine ring (#1387 MINOR 3's rule for the headroom): a short ring holds less old
-  /// audio to play on. At 48 kHz and 128 frames: 19.
-  seekDeferralQuantaFor(ringQuanta) {
-    return Math.min(Math.ceil((SEEK_DEFERRAL_MS * this.sampleRateHz) / (1000 * this.quantumFrames)),
-      Math.floor(ringQuanta / 2));
+  /// Issue #1387 (root ruling 1), #2205 (root ruling 3): the headroom `H`, in chunks, the drain
+  /// keeps free in each source's engine ring, read from the producer's real occupancy
+  /// (`source_fill`). It is computed here and nowhere else. A seek's new generation is admitted
+  /// only into free slots (the old chunks stay queued and play until render lands the seek and
+  /// drops them), so a ring seek's pass submits up to `H` chunks at the new position at once.
+  /// `H = max(R, B)`:
+  /// - `R` is the engine's seek runway, by the engine's own formula from the ring the boot
+  ///   resolved, so the runway the engine waits for always fits in one pass;
+  /// - `B` is #1387's proven admission bound: the chunks must last from the seek's landing until
+  ///   the next pass refills, which is the quanta render consumes in one Worker tick (at least
+  ///   `TIMER_CLAMP_MS`), plus a render burst (`RENDER_BURST_FRAMES`), plus the landing block.
+  /// `H` never drops below `B`: at 44.1 kHz and 128 frames `R` is 18 and `B` 19, so `H` is 19; at
+  /// 48 kHz both are 19. #1387 MINOR 3: a ring shorter than twice that (the qualification corpus
+  /// boots rings down to one quantum) keeps half of itself free instead, as the engine caps `R`.
+  feedHeadroomQuanta(ringQuanta) {
+    const runway = this.seekRunwayQuanta(ringQuanta);
+    const tickMs = Math.max(TIMER_CLAMP_MS, Math.round((1000 * this.quantumFrames) / this.sampleRateHz));
+    const perTick = Math.ceil((tickMs * this.sampleRateHz) / (1000 * this.quantumFrames));
+    const admission = perTick + Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames) + 1;
+    return Math.min(Math.max(runway, admission), Math.floor(ringQuanta / 2));
   }
 
   /// The ring's source as render last published it (its seek report): the generation in effect
@@ -1105,19 +1116,15 @@ class ControlWorker {
       ring.pendingElapsed = 0;
       return;
     }
-    const deferred = this.deferSharedSeek(ring, elapsed);
-    if (!deferred && this.applySharedSeek(ring) !== RESULT_OK) {
+    // #2205: a live plain seek applies at once; the engine keeps the old generation playing until
+    // the new one has its runway in the engine's ring, so this pass submits it.
+    if (this.applySharedSeek(ring) !== RESULT_OK) {
       ring.pendingElapsed = 0;
       return;
     }
     const report = this.readSourceReport(ring);
     const before = this.readFill(ring);
     this.accountBlocks(ring, elapsed, report, before);
-    if (deferred) {
-      // The old generation keeps playing from the engine's ring meanwhile.
-      control[RING.DEPTH] = before === null ? 0 : before.queued;
-      return;
-    }
     // Root ruling 1: the headroom stays free, except for the chunks of a plain seek's new
     // generation, admitted until render shows that seek in effect.
     let allowed = before === null ? ring.capacity
@@ -1260,61 +1267,13 @@ class ControlWorker {
     return 0;
   }
 
-  /// The prelude's `deferSharedSeek` (#2185): until a live plain seek's generation has its runway
-  /// published (`seekDeferralQuanta` chunks, at most a ring, or a chunk that ends its region),
-  /// free every slot of an older one, ask no seek and submit nothing (a newer one stops the scan);
-  /// the runway, or `seekDeferralQuanta` rendered quanta (counted from the pass after the first
-  /// deferral, `elapsed` being the quanta rendered since the last pass), applies it. A newer seek
-  /// replaces the deferred one and inherits its count; an anchored seek is never deferred.
-  deferSharedSeek(ring, elapsed) {
-    if (ring.seekEpoch === ring.seenEpoch || ring.seekAnchor !== NO_ANCHOR) return false;
-    if (ring.deferring) ring.deferredQuanta += elapsed;
-    if (ring.deferredQuanta >= this.seekDeferralQuanta) return false;
-    // #2185 attempt 3: after a session seek at this generation (the transport seek) the engine
-    // holds no old audio of the source, so a deferral would only add silence: apply at once.
-    if (this.lastSessionSeekGeneration !== undefined
-        && BigInt.asUintN(64, ring.publishedGeneration) === this.lastSessionSeekGeneration) return false;
-    const control = ring.control;
-    const write = ring.seekWrite;
-    // #2185 attempt 2: the new generation's runway, as the prelude's: the bound, at most a ring.
-    const runway = Math.min(this.seekDeferralQuanta, ring.capacity);
-    let read = control[RING.READ_INDEX];
-    let current = 0;
-    let ended = false;
-    for (let index = read, remaining = ring.capacity; index !== write && remaining > 0; remaining -= 1) {
-      const word = (index & (ring.capacity - 1)) * (SLOT_HEADER_BYTES / 4);
-      if (ring.headers[word] !== index) {
-        control[RING.TORN] += 1;
-        break;
-      }
-      const age = this.sharedSlotAge(ring, word);
-      if (age > 0) break;
-      if (age < 0) {
-        if (current !== 0) break;
-        index = (index + 1) & SAB_WRAP_MASK;
-        read = index;
-        control[RING.STALE] += 1;
-        continue;
-      }
-      current += 1;
-      if ((ring.headers[word + 3] & SLOT_FLAG_END_OF_REGION) !== 0) {
-        ended = true;
-        break;
-      }
-      if (current >= runway) break;
-      index = (index + 1) & SAB_WRAP_MASK;
-    }
-    Atomics.store(control, RING.READ_INDEX, read);
-    if (current >= runway || ended) return false;
-    ring.deferring = true;
-    return true;
-  }
-
   /// The prelude's seek rule: a published plain seek is applied through `source_seek` before any
   /// slot is read; an anchored one only once `source_seek_at` answered OK for the same tuple. The
-  /// defaults are the publication `readSharedSeek` read last.
+  /// defaults are the publication `readSharedSeek` read last. #2205: `prepare` (the suspended
+  /// `prepare-seek`) asks `source_prepare_seek`, as the prelude does; this control instance holds
+  /// no render half, so the engine treats it exactly as `source_seek`.
   applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.publishedGeneration, frame = ring.seekFrame,
-    anchor = ring.seekAnchor) {
+    anchor = ring.seekAnchor, prepare = false) {
     const control = ring.control;
     if (epoch === ring.seenEpoch) return RESULT_OK;
     const requested = generation;
@@ -1328,7 +1287,8 @@ class ControlWorker {
       return this.consumeSharedSeek(ring, epoch, requested, false);
     }
     this.stageRingId(ring);
-    let result = this.exports.miso_engine_web_v1_source_seek(this.handle, ring.idLength, requested, requestedFrame);
+    const seek = prepare ? this.exports.miso_engine_web_v1_source_prepare_seek : this.exports.miso_engine_web_v1_source_seek;
+    let result = seek(this.handle, ring.idLength, requested, requestedFrame);
     // #1644 D2: a session seek at this generation already moved the source, so its own seek is
     // refused as stale; that one refusal is the seek applied.
     if (result === RESULT_INVALID_ARGUMENT && BigInt.asUintN(64, requested) === this.lastSessionSeekGeneration
@@ -1344,14 +1304,12 @@ class ControlWorker {
     return this.consumeSharedSeek(ring, epoch, requested, true);
   }
 
-  /// `plain`: a plain seek, whose stale chunks render drops at its next block, so its new
-  /// generation may fill the headroom; an anchored seek's old generation keeps playing until its
+  /// `plain`: a plain seek, whose old chunks render drops when it lands (once its runway is
+  /// queued, #2205), so its new generation may fill the headroom; an anchored seek's old generation keeps playing until its
   /// anchor, so its new chunks queue behind it within the headroom rule.
   consumeSharedSeek(ring, epoch, generation, plain) {
     const control = ring.control;
     ring.seenEpoch = epoch;
-    ring.deferring = false;
-    ring.deferredQuanta = 0;
     control[RING.SEEKS_APPLIED] += 1;
     // Root ruling 1: a plain seek's new generation may fill the headroom until render reports
     // this generation in effect (`accountBlocks`).
@@ -1398,7 +1356,8 @@ class ControlWorker {
     for (let index = 0; index < rings.length; index += 1) {
       const ring = rings[index];
       if (!matches(ring, seeks[index])) return { kind: "superseded" };
-      const result = this.applySharedSeek(ring, seeks[index].epoch, seeks[index].generation, seeks[index].frame);
+      const result = this.applySharedSeek(ring, seeks[index].epoch, seeks[index].generation, seeks[index].frame,
+        ring.seekAnchor, true);
       if (result !== RESULT_OK) return { kind: "refused", result };
       if (!this.releaseStaleSharedSlots(ring, seeks[index].generation)) return { kind: "refused", result: RESULT_INVALID_ARGUMENT };
     }

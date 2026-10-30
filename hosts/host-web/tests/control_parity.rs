@@ -5033,6 +5033,46 @@ fn same_session_reports(
     ["src-t1", "src-t2", "src-t3"].map(|name| same_seek_report(browser, c_abi, name, label))
 }
 
+/// #2205 parity row: the at-once session seek, the C ABI's `miso_engine_v1_session_seek_at_once`
+/// and the browser's `session_prepare_seek`, lands at the next block on both hosts: equal seek
+/// reports naming that block, and equal output bits.
+///
+/// Test value: red if one host's at-once form waits for a runway (its report keeps generation 1
+/// at the block) or lands at another block than the other's.
+#[cfg(feature = "test-support")]
+#[test]
+fn the_at_once_session_seek_lands_alike_on_both_hosts() {
+    let quantum = u64::from(QUANTUM);
+    let model = model_at(48_000);
+    let mut browser = Rig::new(&model);
+    let mut c_abi = CAbi::new(&model);
+    for block in 0..4 {
+        session_block(
+            &mut browser,
+            &mut c_abi,
+            block,
+            [Some((1, block)); 3],
+            "boot",
+        );
+    }
+    let frame = 40 * quantum;
+    assert_eq!(
+        browser.host.session_prepare_seek(2, frame),
+        host_web::RESULT_OK
+    );
+    // SAFETY: The session is live and used by this thread alone.
+    let code = unsafe { capi::miso_engine_v1_session_seek_at_once(c_abi.session, 2, frame) };
+    assert_eq!(code, C_RESULT_OK, "C ABI at-once session seek");
+    session_block(&mut browser, &mut c_abi, 4, [Some((2, 40)); 3], "at once");
+    let reports = same_session_reports(&mut browser, &c_abi, "at once");
+    assert!(
+        reports
+            .iter()
+            .all(|report| report.0 == 2 && report.1 == 4 * quantum),
+        "every source lands at the next block on both hosts: {reports:?}"
+    );
+}
+
 /// #1643 gate 6: a plain session seek and a late anchored session seek, on both hosts at 48 and
 /// 96 kHz, over sources of different lengths (`src-t2` is shorter than the other two and clamps
 /// to its end). At the call, after every block through the applying one and after, the browser's

@@ -36,7 +36,7 @@ import {
   workletBootOptions,
 } from "../src/browser/index.ts";
 import { toWebBootOptions } from "../src/browser/host-mirror.ts";
-import { MSB1_CONTROL, MSB1_CONTROL_BYTES } from "../src/browser/pcm-ring.ts";
+import { MSB1_CONTROL, MSB1_CONTROL_BYTES, Msb1RingWriter } from "../src/browser/pcm-ring.ts";
 import { onEndpointIds } from "./control-support.mjs";
 import { effectEntry, moduleBytes, sessionDocument } from "./support.mjs";
 
@@ -700,6 +700,111 @@ describe("the browser open sequence", () => {
     await engine.close();
     await assert.rejects(engine.seek(0n), MisoUsageError);
     assert.deepEqual(log, [], "a closed engine posts nothing");
+  });
+
+  test("#2205: seek waits for a transport step, then is live or at once, and a stopped seek prepares the feeds", async () => {
+    // Red if a seek issued while stop() is in flight is sent before that step settles (it lands in
+    // the tail blocks, so play() starts late), if a live seek runs the feeds' prepareSeek or a
+    // stopped one does not, if a preparation failure escapes unwrapped after the seek applied, or
+    // if a seek waits on a resume the browser holds until a gesture (it would never be sent).
+    const log = [];
+    let settleSuspend;
+    let holdResume = false;
+    const context = {
+      sampleRate: 48_000, renderQuantumSize: 128, state: "running",
+      close: async () => {},
+      resume: () => (holdResume ? new Promise(() => {}) : Promise.resolve().then(() => { context.state = "running"; })),
+      suspend: () => new Promise((resolve) => { settleSuspend = () => { context.state = "suspended"; resolve(); }; }),
+      audioWorklet: { addModule: async () => {} },
+    };
+    const engine = await createEngine({
+      document: sessionDocument(),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: () => context,
+      createHost: async () => ({
+        seekSession: async (request) => {
+          log.push(["host", request]);
+          return { tag: "miso.session-seek.v1", requestId: 1, result: 0, generation: request.generation };
+        },
+        dispose: async () => {},
+      }),
+    });
+    let prepareReply = "confirmed";
+    const node = {
+      port: {
+        onmessage: null,
+        postMessage(data) {
+          const message = structuredClone(data);
+          if (message.op !== "prepare-seek") return;
+          log.push(["prepare"]);
+          node.port.onmessage?.({ data: { op: "seek-prepared", requestId: message.requestId, kind: prepareReply, seeks: message.seeks, result: 1 } });
+        },
+      },
+      disconnect() {},
+    };
+    const feed = attachEngineFeed({ context, sources: [{ sourceId: "s", channels: 2 }], quantumFrames: 128, engine, createNode: () => node });
+    Atomics.store(new Int32Array(feed.rings[0], 0, MSB1_CONTROL_BYTES / 4), MSB1_CONTROL.ATTACHED, 1);
+    // Every call of the feed's own prepareSeek is logged, whether or not it posts.
+    const prepareSeek = feed.prepareSeek.bind(feed);
+    feed.prepareSeek = (...settings) => { log.push(["prepareSeek"]); return prepareSeek(...settings); };
+    const writer = new Msb1RingWriter(feed.rings[0]);
+    writer.engage(1n);
+    const producers = [{ seek: async (frame, generation) => { log.push(["producer", frame]); writer.seek(generation, BigInt(frame)); } }];
+    try {
+      // Row 1: the audio plays: a live seek, and no feed preparation.
+      await engine.seek(480n, { producers });
+      assert.deepEqual(log.splice(0), [["host", { generation: 2n, frame: 480n }], ["producer", 480]]);
+      // Row 2: a seek during an in-flight stop() waits for the suspend, then is sent at once and
+      // prepares the feed after its producers.
+      const stopping = engine.stop().catch(() => undefined);
+      const seeking = engine.seek(960n, { producers });
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+      assert.deepEqual(log, [], "nothing is sent while stop()'s context step is in flight");
+      settleSuspend();
+      await seeking;
+      await stopping;
+      assert.deepEqual(log.splice(0), [
+        ["host", { generation: 3n, frame: 960n, atOnce: true }], ["producer", 960], ["prepareSeek"], ["prepare"],
+      ]);
+      // Row 3: a preparation the feed refuses, after the seek applied, is the producer error.
+      prepareReply = "refused";
+      await assert.rejects(engine.seek(0n, { producers }), (error) =>
+        error instanceof SessionSeekProducerError && error.generation === 4n && error.producerIndex === 1
+          && error.cause?.operation === "prepareRefused");
+      // Row 4: a play() whose resume the browser holds until a gesture: a seek is sent at once
+      // (atOnce), and a later stop() leaves no seek pending.
+      log.splice(0);
+      holdResume = true;
+      void engine.play().catch(() => undefined);
+      const bound = (promise) => Promise.race([promise.then(() => "sent"),
+        new Promise((resolve) => setTimeout(() => resolve("still pending"), 1_000))]);
+      assert.equal(await bound(engine.seek(1_440n)), "sent", "a seek after a held play() is sent");
+      void engine.stop().catch(() => undefined);
+      assert.equal(await bound(engine.seek(1_920n)), "sent", "a later stop() leaves no seek pending");
+      assert.deepEqual(log.splice(0), [
+        ["host", { generation: 5n, frame: 1_440n, atOnce: true }],
+        ["host", { generation: 6n, frame: 1_920n, atOnce: true }],
+      ]);
+      // Row 5: seeks leave in call order. The first waits on a stop() in flight; the suspend
+      // settles (the context stops running before that seek's wait resumes), and a second seek
+      // called in the same turn needs no wait. It must still be sent after the first.
+      holdResume = false;
+      context.state = "running";
+      const stopping2 = engine.stop().catch(() => undefined);
+      const first = engine.seek(2_400n, { generation: 9n });
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+      assert.deepEqual(log, [], "the first seek waits for the stop's suspend");
+      settleSuspend();
+      const second = engine.seek(2_880n, { generation: 10n });
+      await Promise.all([first, second, stopping2]);
+      assert.deepEqual(log.splice(0).map(([, request]) => request.generation), [9n, 10n],
+        "seeks are sent in call order");
+    } finally {
+      feed.close();
+      await engine.close();
+    }
   });
 
   test("close still releases the AudioContext when host disposal rejects", async () => {

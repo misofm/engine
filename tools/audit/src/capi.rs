@@ -21,8 +21,8 @@
 //! After the call at the anchor (#1642 D6), the audit session-seeks the timeline and the source
 //! to generation 3 at [`SESSION_SEEK_SAMPLE`], which declares the discontinuity in the same call
 //! (root ruling B16-R9), then submits the generation-3 quantum for that frame, all outside the
-//! render scope; the next audited call applies the seek at the timeline and the source in one
-//! block.
+//! render scope, then the rest of the seek's runway (#2205); the next audited call applies the
+//! seek at the timeline and the source in one block.
 
 #![allow(unsafe_code)]
 
@@ -52,6 +52,8 @@ const LIVE_EDIT_PERIOD: u64 = 64;
 /// The fixture's committed revision.
 const INITIAL_REVISION: u64 = 42;
 const SAMPLE_RATE_HZ: u32 = 48_000;
+/// The audit session's source ring.
+const AUDIT_SOURCE_RING_FRAMES: u32 = 1_024;
 const QUANTUM_FRAMES: usize = 128;
 const FIXTURE_JSON: &str =
     include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -258,8 +260,8 @@ impl AuditHandles {
 
 impl AuditHandles {
     /// Session-seeks the timeline and the source to generation [`SESSION_SEEK_GENERATION`] at
-    /// [`SESSION_SEEK_SAMPLE`], and submits that generation's quantum from the frame (#1642 D6),
-    /// each asserted `RESULT_OK`. The plain session seek declares the discontinuity itself
+    /// [`SESSION_SEEK_SAMPLE`], and submits that generation's runway from the frame (#1642 D6,
+    /// #2205), each asserted `RESULT_OK`. The plain session seek declares the discontinuity itself
     /// (B16-R9), so the audit makes no separate declaration; the declaration publishes nothing
     /// here: no audit plan has a raised floor or a source-read offset. Control work, run outside
     /// every render scope.
@@ -271,11 +273,21 @@ impl AuditHandles {
         if seeked != RESULT_OK {
             return Err(seeked);
         }
-        match submit_source_chunk(self.session, SESSION_SEEK_GENERATION, SESSION_SEEK_SAMPLE) {
-            (RESULT_OK, accepted) if accepted == QUANTUM_FRAMES as u64 => Ok(()),
-            (RESULT_OK, _) => Err(RESULT_INTERNAL),
-            (refused, _) => Err(refused),
+        // #2205: the seek's runway, so the next audited call lands it.
+        let runway = source::seek_runway_blocks(
+            SAMPLE_RATE_HZ,
+            QUANTUM_FRAMES as u32,
+            u64::from(AUDIT_SOURCE_RING_FRAMES) / QUANTUM_FRAMES as u64,
+        );
+        for block in 0..u64::from(runway) {
+            let frame = SESSION_SEEK_SAMPLE + block * QUANTUM_FRAMES as u64;
+            match submit_source_chunk(self.session, SESSION_SEEK_GENERATION, frame) {
+                (RESULT_OK, accepted) if accepted == QUANTUM_FRAMES as u64 => {}
+                (RESULT_OK, _) => return Err(RESULT_INTERNAL),
+                (refused, _) => return Err(refused),
+            }
         }
+        Ok(())
     }
 }
 
@@ -678,7 +690,7 @@ impl AuditEvidence {
 const fn audit_limits() -> CompileLimits {
     CompileLimits {
         struct_size: COMPILE_LIMITS_SIZE,
-        source_ring_frames: 1_024,
+        source_ring_frames: AUDIT_SOURCE_RING_FRAMES,
         reserved1: 0,
         reserved0: 0,
         maximum_document_bytes: 1_000_000,

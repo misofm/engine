@@ -273,7 +273,8 @@ reclaims the plans render has retired and brings the provider epochs up to rende
 provider's counters (the controller's telemetry counters today), stages the render observation,
 and refreshes the counters again so a record that staging coalesced or dropped is counted in the
 same call. Every other session control call (`source_submit_planar_f32`, `source_seek`,
-`source_seek_at`, `session_seek` and `session_seek_at` (#1642), `submit_command`, `dequeue_event`)
+`source_seek_at`, `session_seek` and `session_seek_at` (#1642), `session_seek_at_once` (#2205),
+`submit_command`, `dequeue_event`)
 that passes its argument checks runs the same
 step first, in place of the parts each ran before; a call refused for its arguments (a null
 `source_id`, a bad struct size, an invalid lane, an empty request) returns before the step. Before
@@ -349,6 +350,20 @@ published generation or a consumer's (`source.generation.stale`), an unaligned a
 holds a seek; the source seek's mapping otherwise (`INVALID_ARGUMENT` with `source.ring.vacated`,
 `INTERNAL` with `source.epoch` or `source.internal`). The anchored form takes the anchor of
 `miso_engine_v1_source_seek_at`. A per-source seek leaves the timeline where it is.
+
+A plain session seek is live (#2205): every source plays its old generation on until each source
+that waits has its runway queued, or the deadline, then all land in one block.
+`miso_engine_v1_session_seek_at_once(session, g, T)` (#2205) is the same seek for a host whose
+transport is stopped, an in-place V1 amendment: one new exported symbol, announced by
+`MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE` (bit 12, 4096) in the capability report, whose
+feature mask grows to 8191; no struct, size or `ABI_VERSION` changes. Same arguments, checks,
+results and declaration as the plain form, through `control_plane::SessionState::session_seek_at_once`,
+but every source and the timeline land at the first block rendered after the call, without waiting
+for a runway, so the stop position never plays after the host restarts. Old-generation PCM still
+queued in a ring is dropped at that block; a host that filled its rings before the stop and cannot
+drain them while stopped underruns at restart until it submits generation `g` (a mobile successor
+names that refill). `capi` test
+`session_seek::an_at_once_session_seek_plays_no_old_block_after_a_stop` holds it.
 
 A plain session seek is a declared discontinuity; the engine declares it in the same call, and a
 refused seek declares nothing (root ruling B16-R9). `control_plane::SessionState::session_seek`,

@@ -1576,13 +1576,17 @@ async function testMainRealm() {
       generation: 3n, frame: 0n, anchorSample: 128n,
     })).result, 1, "a refused session seek resolves with the engine's result");
     sessionSeekResult = 0;
+    // #2205: the at-once form (a stopped transport) posts `atOnce: true`; it takes no anchor.
+    assert.equal((await pipelineHost.seekSession({ generation: 5n, frame: 64n, atOnce: true })).result, 0);
+    await localErrorResult(pipelineHost.seekSession({ generation: 6n, frame: 0n, atOnce: false }), 1);
     sessionSeekGenerationOffset = 1n;
     await errorResult(pipelineHost.seekSession({ generation: 4n, frame: 0n }), 255);
     sessionSeekGenerationOffset = 0n;
     sessionSeekMessages.pop();
     assert.deepEqual(sessionSeekMessages, [
-      { tag: "miso.session-seek.v1", generation: 2n, sourceFrame: 480n, anchorSample: -1n, requestId: 8 },
-      { tag: "miso.session-seek.v1", generation: 3n, sourceFrame: 0n, anchorSample: 128n, requestId: 9 },
+      { tag: "miso.session-seek.v1", generation: 2n, sourceFrame: 480n, anchorSample: -1n, atOnce: false, requestId: 8 },
+      { tag: "miso.session-seek.v1", generation: 3n, sourceFrame: 0n, anchorSample: 128n, atOnce: false, requestId: 9 },
+      { tag: "miso.session-seek.v1", generation: 5n, sourceFrame: 64n, anchorSample: -1n, atOnce: true, requestId: 10 },
     ]);
     await pipelineHost.dispose();
 
@@ -2532,7 +2536,7 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
   // report's four reserved words, so offset 192 is a real row and 200..216 stay required zero.
   for (let index = 0; index < 21; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
   const calls = {
-    render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0, disposeHandles: [],
+    render: [], source: [], sourceIdBytes: [], seek: [], preparedSeek: [], seekIdBytes: [], dispose: 0, disposeHandles: [],
     sessionSeek: [], sessionSeekResult: 0,
     sourceResult: 0, sourceQueued: 0, bootResult: 0, boot: [],
     // Issue #1381a: the service step's handles and result, and the control counter's value.
@@ -2704,6 +2708,10 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
       calls.sessionSeek.push(["session_seek", ...args]);
       return calls.sessionSeekResult;
     },
+    miso_engine_web_v1_session_prepare_seek: (...args) => {
+      calls.sessionSeek.push(["session_prepare_seek", ...args]);
+      return calls.sessionSeekResult;
+    },
     miso_engine_web_v1_session_seek_at: (...args) => {
       calls.sessionSeek.push(["session_seek_at", ...args]);
       return calls.sessionSeekResult;
@@ -2734,6 +2742,12 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
       calls.seek.push(args);
       calls.seekIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
       return 0;
+    },
+    // #2205: on the Worker's control instance the prepare form is the seek itself; the fake
+    // records it apart and forwards to whatever `source_seek` a rig installs.
+    miso_engine_web_v1_source_prepare_seek: (...args) => {
+      calls.preparedSeek.push(args);
+      return exports.miso_engine_web_v1_source_seek(...args);
     },
     miso_engine_web_v1_meter_lease: (_handle, enabled) => {
       calls.meterLease.push(enabled);
@@ -4060,9 +4074,9 @@ async function testProcessor() {
       // is not sticky, and a malformed message calls no export.
       const { processor, fake } = makeProcessor();
       const handle = processor.handle;
-      const seek = (requestId, generation, sourceFrame, anchorSample) => {
+      const seek = (requestId, generation, sourceFrame, anchorSample, atOnce = false) => {
         processor.receive({
-          tag: "miso.session-seek.v1", requestId, generation, sourceFrame, anchorSample,
+          tag: "miso.session-seek.v1", requestId, generation, sourceFrame, anchorSample, atOnce,
         });
         return processor.port.posts.at(-1).message;
       };
@@ -4082,15 +4096,19 @@ async function testProcessor() {
         tag: "miso.session-seek.v1", requestId: 3, result: 1, generation: 4n,
       });
       assert.equal(processor.lastSessionSeekGeneration, 3n, "a refused seek records nothing");
+      fake.calls.sessionSeekResult = 0;
+      // #2205: `atOnce` (a stopped transport) calls the at-once form.
+      assert.equal(seek(5, 5n, 64n, -1n, true).result, 0);
       assert.deepEqual(fake.calls.sessionSeek, [
         ["session_seek", handle, 2n, 480n],
         ["session_seek_at", handle, 3n, 0n, 128n],
         ["session_seek", handle, 4n, 0n],
+        ["session_prepare_seek", handle, 5n, 64n],
       ]);
       assert.equal(processor.stickyResult, 0, "a refused session seek is not sticky");
-      seek(4, 0n, 0n, -1n);
+      seek(6, 0n, 0n, -1n);
       assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
-      assert.equal(fake.calls.sessionSeek.length, 3, "a malformed session seek calls no export");
+      assert.equal(fake.calls.sessionSeek.length, 4, "a malformed session seek calls no export");
     }
 
     {
@@ -5046,8 +5064,9 @@ async function testControlWorker() {
     // Issue #1387 (root ruling 1, attempts 2-3): the headroom rule on the producer's real fill
     // (`source_fill`). The fake engine ring holds 80 chunks; render takes one a block unless the
     // source holds (an anchored seek before its anchor), drops a seek's stale chunks at the block
-    // that pops it and then reports the seek's generation in effect. 48 kHz and 64 frames: a 4 ms
-    // tick is 3 quanta and a 2048-frame burst 32, so H = 36. Red on a drain that fills the ring to
+    // that pops it and then reports the seek's generation in effect. 48 kHz and 64 frames: H is
+    // max(R, B) (#2205): the engine's seek runway R = ceil(50 ms / 64 frames) = 38 and #1387's bound
+    // B = 3 + 32 + 1 = 36, so H = 38. Red on a drain that fills the ring to
     // capacity, on the attempt-1 drain that capped a guessed depth (during a hold the guess falls
     // below the real fill), and on attempt 2's (`befd51fbd`) admission that ended on room alone (a
     // seek into a short ring keeps the headroom filled for good, and the next seek finds none).
@@ -5108,9 +5127,9 @@ async function testControlWorker() {
       const { send, tick, engine, room, render, fill, seek } = await headroomRig(128);
       fill();
       tick.callback();
-      assert.equal(engine.queued.length, 44, "the drain keeps H = 36 of the 80 free");
-      // An anchored start that holds 60 blocks: render takes nothing meanwhile. #2185: the ring
-      // publishes the anchored seek the message names (a plain one would now wait for its chunk).
+      assert.equal(engine.queued.length, 42, "the drain keeps H = 38 of the 80 free");
+      // An anchored start that holds 60 blocks: render takes nothing meanwhile; the ring publishes
+      // the anchored seek the message names.
       seek(2n, 0n, 640n);
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n, sourceFrame: 0n, anchorSample: 640n });
       engine.hold = 60;
@@ -5118,18 +5137,18 @@ async function testControlWorker() {
         render(3);
         fill();
         tick.callback();
-        assert.ok(room() >= 36, `pass ${pass}: the headroom stays free through the hold (room ${room()})`);
+        assert.ok(room() >= 38, `pass ${pass}: the headroom stays free through the hold (room ${room()})`);
       }
-      // A plain ring seek now: its new generation is admitted before the next block. #2185: the
-      // pass that finds none of its chunks frees the old generation's slots and defers the seek;
-      // the pass after the writer publishes applies it.
+      // A plain ring seek now: its new generation is admitted before the next block. The first
+      // pass applies it and frees the old generation's slots; the pass after the writer publishes
+      // submits its runway.
       seek(3n, 9600n);
       tick.callback();
       fill();
       tick.callback();
       assert.equal(engine.seek, 3n);
-      assert.equal(engine.queued.filter((value) => value === 3n).length, 36,
-        "the plain seek's new generation fills the headroom before the next block renders");
+      assert.equal(engine.queued.filter((value) => value === 3n).length, 38,
+        "the plain seek's new generation fills the headroom (its runway) before the next block renders");
       render(1);
       assert.equal(engine.queued[0], 3n, "the next block plays the new position");
     }
@@ -5150,12 +5169,28 @@ async function testControlWorker() {
         fill();
         tick.callback();
       }
-      assert.equal(room(), 36, "once render reports the seek in effect, the headroom is kept again");
+      assert.equal(room(), 38, "once render reports the seek in effect, the headroom is kept again");
       seek(3n, 9600n);
       tick.callback();
       fill();
       tick.callback();
-      assert.equal(engine.queued.filter((value) => value === 3n).length, 36, "the next seek is admitted");
+      assert.equal(engine.queued.filter((value) => value === 3n).length, 38, "the next seek is admitted");
+    }
+    // Issue #2205: the Worker's runway is a parallel formula; it equals the engine's
+    // `source::seek_runway_blocks` at every launch rate, whose values the ABI layout's
+    // `sourceRing.seekRunwayQuanta` rows carry (generated by the engine). Red if the two drift.
+    {
+      const layout = JSON.parse(await readFile(
+        new URL("../sdk/assets/miso-engine-v1-abi-layout.json", import.meta.url), "utf8",
+      ));
+      const rows = layout.constants.sourceRing.seekRunwayQuanta;
+      assert.deepEqual(rows.map((row) => row.sampleRateHz), [44100, 48000, 88200, 96000]);
+      const { seekRunwayQuanta } = Object.getPrototypeOf(globalThis.__controlWorker);
+      for (const row of rows) {
+        const shape = { sampleRateHz: row.sampleRateHz, quantumFrames: row.quantumFrames };
+        assert.equal(seekRunwayQuanta.call(shape, 1 << 20), row.quanta,
+          `the Worker's runway at ${row.sampleRateHz} Hz is the engine's`);
+      }
     }
     // Issue #1387 (root ruling 2): a default ring request boots worker mode at 65 536 frames; an
     // explicit one is kept, however short (MINOR 3: the headroom then halves the ring instead).
@@ -5169,15 +5204,14 @@ async function testControlWorker() {
     // Issue #1387 (MAJOR-2): the shared MSB1 consumer case table over this Worker, at 4-frame
     // quanta (`sdk/test/msb1-consumer-cases.mjs`; the prelude runs it in browser-pcm-evals).
     for (const { name, run } of MSB1_CONSUMER_CASES) {
-      // #2185: an 8-quantum engine ring caps the deferral bound and runway at 4 quanta, the
-      // prelude adapter's too.
+      // An 8-quantum engine ring: the headroom (the engine's seek runway, #2205) is 4 quanta.
       const { send, fromWorklet } = await boot({}, 4, (engine) => { engine.calls.ringQuanta = 8; });
       const tick = intervals.at(-1);
       const replies = [];
       const port = { onmessage: null, postMessage: (data) => replies.push(structuredClone(data)), close() {} };
       send({ tag: "miso.feed-port.v1", port });
       fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
-      const adapter = { submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null, onSnapshot: null };
+      const adapter = { submissions: [], seeks: [], prepared: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null, onSnapshot: null };
       const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
       const memory = () => fake.memory.buffer;
       // The fake engine ring: render takes one chunk a block, drops a seek's stale chunks at the
@@ -5187,6 +5221,11 @@ async function testControlWorker() {
       const report = () => { fake.calls.seekReportWords = [engine.generation, 0n, 0n, engine.underrun, 0n]; };
       report();
       fake.exports.miso_engine_web_v1_source_fill = () => (BigInt(engine.queue.length) << 32n) | 4096n;
+      // #2205: the prepare form records apart, then answers as the seek does.
+      fake.exports.miso_engine_web_v1_source_prepare_seek = (handle, id, generation, frame) => {
+        adapter.prepared.push([generation, frame]);
+        return fake.exports.miso_engine_web_v1_source_seek(handle, id, generation, frame);
+      };
       fake.exports.miso_engine_web_v1_source_seek = (_handle, _id, generation, frame) => {
         adapter.seeks.push([generation, frame]);
         adapter.onSeek?.(generation, frame);
@@ -5242,7 +5281,6 @@ async function testControlWorker() {
         port.onmessage({ data: structuredClone(data) });
         return replies.pop();
       };
-      Object.defineProperty(adapter, "seekBound", { get: () => worker.seekDeferralQuanta });
       Object.assign(adapter, {
         attach: async (rings) => { feed({ op: "attach", rings }); },
         // One pass: the drain, then one rendered block, then the drain that accounts it (the
@@ -5259,7 +5297,7 @@ async function testControlWorker() {
           send({ tag: "miso.seek-at.v1", requestId: (requestId += 1), ...message });
         },
         sessionSeek: async (generation) => {
-          send({ tag: "miso.session-seek.v1", requestId: (requestId += 1), generation, sourceFrame: 0n, anchorSample: -1n });
+          send({ tag: "miso.session-seek.v1", requestId: (requestId += 1), generation, sourceFrame: 0n, anchorSample: -1n, atOnce: false });
         },
         prepareSeek: async (seeks) => feed({ op: "prepare-seek", requestId: (requestId += 1), seeks }),
         detachSource: async (index) => feed({ op: "detach-source", requestId: (requestId += 1), index }),

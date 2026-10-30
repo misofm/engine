@@ -666,7 +666,8 @@ impl Rig {
     }
 
     /// A plain session seek to timeline sample `timeline` (#1641): the source's next PCM is the
-    /// new generation's, from that frame.
+    /// new generation's, from that frame. The rig submits the seek's runway at once (#2205), so
+    /// the seek lands at the next block, and keeps it queued ahead.
     fn seek(&mut self, timeline: u64) {
         self.generation += 1;
         self.prepared
@@ -674,10 +675,14 @@ impl Rig {
             .seek_session(self.generation, timeline, None)
             .expect("the seek is admitted");
         self.frame = timeline;
+        let runway = source::seek_runway_blocks(RATE, self.quantum as u32, 32);
+        for _ in 0..runway {
+            self.submit_one();
+        }
     }
 
-    /// Render one block; returns its first render sample.
-    fn block(&mut self) -> u64 {
+    /// Submit the source's next block of DC `1.0`.
+    fn submit_one(&mut self) {
         let quantum = self.quantum;
         let plane = vec![1.0_f32; quantum];
         self.prepared
@@ -695,6 +700,12 @@ impl Rig {
             )
             .expect("source block");
         self.frame += quantum as u64;
+    }
+
+    /// Render one block; returns its first render sample.
+    fn block(&mut self) -> u64 {
+        let quantum = self.quantum;
+        self.submit_one();
         let mut samples = vec![0.0_f32; quantum * 2];
         let output =
             PlanarBufferMut::try_new(&mut samples, 2, quantum, quantum).expect("output planes");

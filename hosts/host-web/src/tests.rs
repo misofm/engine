@@ -9446,6 +9446,14 @@ mod session_seek {
             }
         }
 
+        /// `id`'s runway of generation `generation` from source frame `frame` (#2205): the
+        /// blocks a live plain seek of a fed source waits for, on the rig's 512-frame ring.
+        fn submit_runway(&self, id: &[u8], generation: u64, frame: u64) {
+            for block in 0..u64::from(host_core::source_seek_runway_blocks(48_000, Q as u32, 512)) {
+                assert_eq!(self.submit(id, generation, frame + block * Q), RESULT_OK);
+            }
+        }
+
         fn render(&mut self) -> Vec<u32> {
             assert_eq!(miso_engine_web_v1_render(self.handle, Q as u32), RESULT_OK);
             self.block += 1;
@@ -9496,15 +9504,96 @@ mod session_seek {
             miso_engine_web_v1_session_seek(rig.handle, 2, 6_000),
             RESULT_OK
         );
-        // The long source's PCM from the sought frame. The short source clamps to its end, 4,000,
-        // where it has no frame to submit: its seek report still names that frame.
-        assert_eq!(rig.submit(LONG, 2, 6_000), RESULT_OK);
+        // The long source's runway from the sought frame (#2205). The short source clamps to its
+        // end, 4,000, where it has no frame to submit: its seek report still names that frame,
+        // and it waits for nothing.
+        rig.submit_runway(LONG, 2, 6_000);
         let sample = rig.next();
         rig.render();
         assert_eq!(rig.landed(LONG), (2, sample, 6_000));
         assert_eq!(rig.landed(SHORT), (2, sample, 4_000), "clamped to its end");
         assert_eq!(rig.timeline(sample), 6_000);
         rig
+    }
+
+    /// #2205, the single-mode split: on an instance that holds the render half, the live seek
+    /// export (`source_seek`, the PCM feed's drain) leaves the old generation playing until the
+    /// new one has its runway, and the prepare form (`source_prepare_seek`, the suspended
+    /// `prepare-seek` and the headless engine) applies the seek before the next block.
+    ///
+    /// Test value: red if the live export prepares the consumer at once (the old audio is
+    /// dropped before any PCM of the new generation is queued, as before the split), or if the
+    /// prepare form waits for a runway (a suspended seek could not refill a full ring).
+    #[test]
+    fn a_live_source_seek_keeps_the_old_audio_and_the_prepared_form_applies_at_once() {
+        for prepared in [false, true] {
+            let mut rig = Rig::boot(&one_source(), &[LONG]);
+            // Two blocks of the old generation queued ahead of the seek.
+            for frame in [4 * Q, 5 * Q] {
+                assert_eq!(rig.submit(LONG, 1, frame), RESULT_OK);
+            }
+            rig.stage(LONG);
+            let seek = if prepared {
+                miso_engine_web_v1_source_prepare_seek
+            } else {
+                miso_engine_web_v1_source_seek
+            };
+            assert_eq!(seek(rig.handle, LONG.len() as u32, 2, 6_000), RESULT_OK);
+            let sample = rig.next();
+            rig.render();
+            if prepared {
+                assert_eq!(
+                    rig.landed(LONG),
+                    (2, sample, 6_000),
+                    "applied before the block"
+                );
+                continue;
+            }
+            assert_eq!(rig.landed(LONG).0, 1, "the old generation plays on");
+            rig.submit_runway(LONG, 2, 6_000);
+            let landed = rig.next();
+            rig.render();
+            assert_eq!(
+                rig.landed(LONG),
+                (2, landed, 6_000),
+                "lands with its runway"
+            );
+        }
+    }
+
+    /// #2205: on an instance that holds the render half, the at-once session seek
+    /// (`session_prepare_seek`, a stopped transport) prepares every consumer at once, as
+    /// `source_prepare_seek` does for one: a ring full of the old generation takes the target's
+    /// PCM before the next block, and that block plays it.
+    ///
+    /// Test value: red if the at-once form leaves the consumers unprepared (the full ring refuses
+    /// the target's PCM until render lands the seek, so a suspended feed cannot refill before
+    /// `play()`), or if it does not land at the next block.
+    #[test]
+    fn an_at_once_session_seek_frees_a_full_ring_for_the_target_before_the_next_block() {
+        let mut rig = Rig::boot(&one_source(), &[LONG]);
+        let mut frame = 4 * Q;
+        while rig.submit(LONG, 1, frame) == RESULT_OK {
+            frame += Q;
+        }
+        assert_eq!(
+            rig.submit(LONG, 2, 0),
+            RESULT_INVALID_ARGUMENT,
+            "not sought yet"
+        );
+        assert_eq!(
+            miso_engine_web_v1_session_prepare_seek(rig.handle, 2, 3_000),
+            RESULT_OK
+        );
+        assert_eq!(
+            rig.submit(LONG, 2, 3_000),
+            RESULT_OK,
+            "the full ring took the target"
+        );
+        let sample = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(LONG), (2, sample, 3_000));
+        assert_eq!(rig.timeline(sample), 3_000);
     }
 
     /// Gate 1, both forms move the timeline and every source in the one block.
@@ -9595,7 +9684,7 @@ mod session_seek {
             miso_engine_web_v1_session_seek(rig.handle, 2, 3_000),
             RESULT_OK
         );
-        assert_eq!(rig.submit(LONG, 2, 3_000), RESULT_OK);
+        rig.submit_runway(LONG, 2, 3_000);
         let sample = rig.next();
         rig.render();
         let landed = rig.landed(LONG);
@@ -9684,7 +9773,7 @@ mod session_seek {
             miso_engine_web_v1_session_seek(rig.handle, 2, 3_000),
             RESULT_OK
         );
-        assert_eq!(rig.submit(LONG, 2, 3_000), RESULT_OK);
+        rig.submit_runway(LONG, 2, 3_000);
         let swap = rig.next();
         rig.render();
         assert_eq!(

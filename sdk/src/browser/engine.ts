@@ -407,7 +407,12 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   /**
    * Seek the timeline and every source to `frame` under one new generation, all or nothing (issue
    * #1644 D3), and resolve with the generation used. The engine declares the discontinuity in the
-   * same call. The generation is `options.generation`, else one above the largest this object has
+   * same call. While the audio plays the seek is live (#2205): the old position plays on until
+   * every producer's runway is in the engine, at most `ceil(50 ms / quantum)` blocks after the
+   * block that observed it, then every source and the timeline land in one block. While it does
+   * not play (`stop()` asked, or the context not running) the seek lands at the next rendered
+   * block, so `play()` starts at `frame`; with the context suspended it then runs every linked
+   * feed's `prepareSeek()` after the producers repositioned, so no separate call is needed. The generation is `options.generation`, else one above the largest this object has
    * used for a seek (the first is `2n`; every source starts at `1n`). Only after the engine
    * accepted the seek are `options.producers` repositioned, in order, to `frame` under that
    * generation; the feed then consumes their ring seeks without seeking the sources again. An app
@@ -424,7 +429,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   /**
    * The timeline playhead (#2100), read from the host: the timeline's seek report and the next
    * render sample, so `frame = sourceFrame + (atSample - firstSample)`. A seek that this engine
-   * sent and that no block has rendered yet is in effect at the next block, so it reports the
+   * sent and that has not landed yet (a live seek waits for its producers' runway, #2205) is
+   * reported as in effect at the next block, so it reports the
    * seek's frame and generation. The host's status is read before the report, so a block that
    * renders between the two reads cannot mix an old anchor with a new sample. The frame does not
    * move while the context is suspended. A report that stays busy rejects with `MisoEngineError`
@@ -905,6 +911,30 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     // context step. A newer call or `close()` wakes it, so a `resume()` the browser holds until a
     // user gesture never blocks a later call.
     let transportCalls = 0;
+    // #2205: the newest transport request, set when `play()` or `stop()` is called. A seek is live
+    // only while the audio plays: neither a stop asked nor a context that is not running.
+    let transportTarget: "playing" | "stopped" | undefined;
+    // #2205: the newest `stop()` call's context step while it is in flight, else `undefined`. A seek
+    // waits for it before it chooses its form, so it never sends a live seek into a stop's tail
+    // blocks. A seek never waits for a resume: a browser may hold `resume()` until a user gesture.
+    let pendingSuspend: Promise<unknown> | undefined;
+    // Settled by every newer transport call and by `close()`, so a seek waiting on a stop step ends
+    // when a later `play()` or `stop()` takes over, as `wakeTransportWait` ends a transport wait.
+    const newSignal = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((settle) => { resolve = settle; });
+      return { promise, resolve };
+    };
+    let transportCallSignal = newSignal();
+    const signalTransportCall = (): void => {
+      transportCallSignal.resolve();
+      transportCallSignal = newSignal();
+    };
+    // Seeks leave in call order: each waits for the one before it to post its request.
+    let seekOrder: Promise<void> = Promise.resolve();
+    const audioIsLive = () => transportTarget !== "stopped" && context.state === "running";
+    // An iOS "interrupted" context renders nothing, as a suspended one.
+    const contextSuspended = () => context.state === "suspended" || (context.state as string) === "interrupted";
     let wakeTransportWait: (() => void) | undefined;
     const transportClosed = () => new MisoUsageError("the browser engine is closed");
     const transportCall = (target: "playing" | "stopped"): Promise<TransportSnapshot> => {
@@ -916,6 +946,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       const before = context.state;
       const call = (transportCalls += 1);
+      transportTarget = target;
       // The context step starts at once, outside the chain: the context orders its own calls.
       let contextStep: Promise<void>;
       try {
@@ -932,6 +963,14 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         () => { stepSettled = true; return "done" as const; },
         (error: unknown) => { stepSettled = true; throw error; },
       );
+      signalTransportCall();
+      if (target === "stopped") {
+        const step = stepDone.catch(() => undefined);
+        pendingSuspend = step;
+        void step.then(() => { if (pendingSuspend === step) pendingSuspend = undefined; });
+      } else {
+        pendingSuspend = undefined;
+      }
       // An abandoned step's rejection is not this call's failure once a later call took over.
       stepDone.catch(() => undefined);
       const previousWake = wakeTransportWait;
@@ -1610,6 +1649,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           throw new MisoUsageError("seek frame must be a non-negative bigint at most Number.MAX_SAFE_INTEGER");
         }
         const generation = options?.generation ?? highestSeekGeneration + 1n;
+        let live = true;
         if (typeof generation !== "bigint" || generation <= 0n) {
           throw new MisoUsageError("seek generation must be a positive bigint");
         }
@@ -1624,9 +1664,25 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             result,
           });
         let reply: Awaited<ReturnType<MisoAudioWorkletHost["seekSession"]>>;
+        const previousSeek = seekOrder;
+        let posted!: () => void;
+        seekOrder = new Promise<void>((resolve) => { posted = resolve; });
         try {
-          reply = await host.seekSession({ generation, frame });
+          await previousSeek;
+          // #2205: a live seek keeps the old position playing until every producer's runway is in
+          // the engine; with no live audio to keep (stopped, or the context not running) the seek
+          // lands at the next rendered block. While the context still runs, a `stop()` step in
+          // flight decides the form, so the seek waits for it, or for a newer transport call.
+          const suspending = pendingSuspend;
+          if (suspending !== undefined && context.state === "running") {
+            await Promise.race([suspending, transportCallSignal.promise]);
+          }
+          live = audioIsLive();
+          const sending = host.seekSession(live ? { generation, frame } : { generation, frame, atOnce: true });
+          posted();
+          reply = await sending;
         } catch (error) {
+          posted();
           // The host rejects a local refusal (a second unsettled seek: `backpressure`) and a
           // sticky failure with its numeric record; keep the result in the SDK's vocabulary.
           const result = (error as { readonly result?: unknown }).result;
@@ -1643,6 +1699,17 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             await producer.seek(Number(frame), generation);
           } catch (error) {
             throw new SessionSeekProducerError(generation, index, error);
+          }
+        }
+        // #2205: with no live audio to keep and the context suspended, run the feeds' documented
+        // suspended flow now that the producers published their seeks: each linked feed's
+        // `prepareSeek()` frees its stale shared slots and the engine's ring, so the target is
+        // queued before `play()`. The app makes no separate `prepareSeek` call.
+        if (!live && producers.length !== 0 && contextSuspended()) {
+          try {
+            await feedRetirement.prepareSeeks();
+          } catch (error) {
+            throw new SessionSeekProducerError(generation, producers.length, error);
           }
         }
         return Object.freeze({ generation });
@@ -1725,6 +1792,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       close: () => {
         closed = true;
         wakeTransportWait?.();
+        signalTransportCall();
         stopWatermark();
         appliedLedger.rejectAll(new MisoUsageError("the browser engine is closed"));
         editQueue?.close();

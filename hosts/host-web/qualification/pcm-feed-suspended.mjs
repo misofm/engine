@@ -20,10 +20,12 @@ export async function qualifySuspendedPcmFeed(browserName, engine, origin) {
     ]).finally(() => clearTimeout(deadline));
     if (errors.length > 0) throw new Error(errors.join("; "));
     process.stdout.write(`${browserName}: pcm-feed-suspended: ${JSON.stringify(result)} (${browser.version()})\n`);
-    // Both modes run before either fails, so a red run reports both.
+    // Both modes and both phases run before any fails, so a red run reports every one.
     const failures = [];
-    for (const mode of ["worker", "single"]) {
-      await qualifyLiveSeek(browser, browserName, origin, mode).catch((error) => failures.push(error.message));
+    for (const phase of LIVE_PHASES) {
+      for (const mode of ["worker", "single"]) {
+        await qualifyLiveSeek(browser, browserName, origin, mode, phase).catch((error) => failures.push(error.message));
+      }
     }
     if (failures.length !== 0) throw new Error(failures.join("; "));
     return result;
@@ -35,45 +37,72 @@ export async function qualifySuspendedPcmFeed(browserName, engine, origin) {
 }
 
 /**
- * #2185: the live plain seek phase, in one instance mode on a fresh isolated page. Chromium single
- * mode gates every seek at 0 underrun frames. Chromium worker mode is reported only: it is the open
- * #2185 worker residual. WebKit's headless sink renders in bursts (#1387), so its rows are reported,
- * not gated.
+ * The live seek phases: #2185's plain ring seek (`runLivePcmFeedSeek`) and #2205's transport seek
+ * (`runLiveTransportSeek`, `engine.seek(frame, { producers })` with a producer that publishes 20 ms
+ * after the seek).
  */
-async function qualifyLiveSeek(browser, browserName, origin, mode) {
+export const LIVE_PHASES = [
+  { name: "pcm-feed-live-seek", run: "runLivePcmFeedSeek" },
+  { name: "pcm-feed-transport-seek", run: "runLiveTransportSeek" },
+  // #2205: a seek with no live audio to keep (stop, seek, play) lands at the first block after
+  // resume, with the target queued (the SDK runs the feeds' suspended prepareSeek): gated on that
+  // landing and on 0 underrun frames.
+  { name: "pcm-feed-stopped-seek", run: "runLiveStoppedSeek" },
+];
+
+/**
+ * One live seek phase in one instance mode on a fresh isolated page. Chromium gates every seek at
+ * 0 underrun frames in both modes (#2185, #2205): the engine keeps the old position playing until
+ * the new one has its runway. WebKit's headless sink renders in bursts (#1387), so its rows are
+ * reported, not gated. A transport row also holds the source and the timeline to one landing block,
+ * and the phase reports the latency the landing adds (landed sample minus the render sample at
+ * accept).
+ */
+export async function qualifyLiveSeek(browser, browserName, origin, mode, phase = LIVE_PHASES[0]) {
   const page = await browser.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
   try {
     await page.goto(`${origin}/qualification/index.html`);
     let deadline;
-    const running = page.evaluate(async (instanceMode) => {
-      const { runLivePcmFeedSeek } = await import("/sdk/pcm-feed-suspended-client.js");
-      return runLivePcmFeedSeek(instanceMode);
-    }, mode);
+    const running = page.evaluate(async ({ instanceMode, run }) => {
+      const client = await import("/sdk/pcm-feed-suspended-client.js");
+      return client[run](instanceMode);
+    }, { instanceMode: mode, run: phase.run });
     const clicked = page.click(`[data-live-seek-resume="${mode}"]`, { timeout: 30_000 });
     const result = await Promise.race([
       Promise.all([running, clicked]).then(([value]) => value),
       new Promise((_, reject) => {
-        deadline = setTimeout(() => reject(new Error("live seek row exceeded 30 s")), 30_000);
+        deadline = setTimeout(() => reject(new Error(`${phase.name} row exceeded 30 s`)), 30_000);
       }),
     ]).finally(() => clearTimeout(deadline));
     if (errors.length > 0) throw new Error(errors.join("; "));
-    // Root ruling (#2185 attempt 2): Chromium single mode is gated at 0 frames. Worker mode is the
-    // open #2185 residual (render can pop the Worker's `source_seek` before its first submit), so
-    // it is reported, never declared met.
-    const gated = browserName === "chromium" && mode === "single";
-    const label = gated ? "" : mode === "worker"
-      ? " (reported, not gated: open #2185 worker residual)" : " (reported, not gated)";
-    process.stdout.write(`${browserName}: pcm-feed-live-seek ${mode}${label}: ${JSON.stringify(result)}\n`);
+    const gated = browserName === "chromium";
+    const label = gated ? "" : " (reported, not gated)";
+    const latencies = result.seeks.filter((row) => row.addedLatencySamples !== undefined)
+      .map((row) => (Number(row.addedLatencySamples) / 48).toFixed(1));
+    const latency = latencies.length === 0 ? "" : ` added latency ms [${latencies.join(", ")}]`;
+    process.stdout.write(`${browserName}: ${phase.name} ${mode}${label}:${latency} ${JSON.stringify(result)}\n`);
     const missing = result.seeks.filter((row) => row.underrunFrames !== "0");
-    if (result.seeksApplied !== result.seeks.length || result.refused !== 0
+    // A stopped seek lands at the first block after resume: no block of the stopped position
+    // plays after `play()`, for the source and the timeline.
+    const late = result.seeks.filter((row) => row.resumeSample !== undefined
+      && row.sourceLandedSample !== row.resumeSample);
+    const split = result.seeks.filter((row) => row.timelineLandedSample !== undefined
+      && (row.timelineLandedSample !== row.sourceLandedSample || row.timelineGeneration !== row.generation));
+    // A transport seek's chunks of the old generation that a drain submits after the session seek
+    // moved the source, and before the producer's ring seek, are refused as stale: expected, so
+    // reported, not an invariant. The per-source phase has no such window.
+    const refused = phase.run === "runLivePcmFeedSeek" && result.refused !== 0;
+    if (refused || split.length !== 0
+        || result.seeksApplied !== result.seeks.length
         || result.renderAllocations.result !== 0 || result.renderAllocations.count !== 0
-        || (gated && missing.length !== 0)) {
-      throw new Error(`live seek ${mode} invariant failed: ${JSON.stringify(result)}`);
+        || (gated && (missing.length !== 0 || late.length !== 0))) {
+      throw new Error(`${phase.name} ${mode} invariant failed: ${JSON.stringify(result)}`);
     }
+    return result;
   } catch (error) {
-    throw new Error(`${browserName}: pcm-feed-live-seek ${mode}: ${error.message}`, { cause: error });
+    throw new Error(`${browserName}: ${phase.name} ${mode}: ${error.message}`, { cause: error });
   } finally {
     await page.close();
   }

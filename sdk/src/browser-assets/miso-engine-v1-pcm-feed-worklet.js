@@ -150,9 +150,6 @@ const SLOT_GENERATION_LOW = 4
 const SLOT_GENERATION_HIGH = 5
 const FLAG_END_OF_REGION = 1
 
-// Issue #2185 (root ruling 2): the longest a live plain seek waits for its first new-generation
-// chunk, in milliseconds of rendered audio; past it the seek applies as it did before #2185.
-const SEEK_DEFERRAL_MS = 50
 
 const RESULT_OK = 0
 const RESULT_INVALID_ARGUMENT = 1
@@ -296,8 +293,6 @@ function bindRing(shared, quantumFrames, maximumChannels) {
     seekFrame: 0n,
     seekAnchor: NO_ANCHOR,
     seekWrite: 0,
-    /** Issue #2185: the blocks rendered since the ring's live plain seek was first deferred, or 0. */
-    deferredBlocks: 0,
     /** Issue #1297b: the anchored seek `(generation, frame, anchor)` the engine's message handler
      *  applied for this ring's source (`source_seek_at` answered OK), not yet consumed by the
      *  drain; `anchoredSample` -1 is none. Written only by the handler, between blocks. */
@@ -356,11 +351,6 @@ function wrapEngineProcessor(Base) {
       // engine's host instead.
       if (!Array.isArray(rings) || this.workerMode === true) return
       this.rebindMemoryViews()
-      // Issue #2185: the deferral bound in blocks, computed here, off the render path.
-      const rate = this.sampleRateHz ?? globalThis.sampleRate
-      const blocks = Math.ceil((SEEK_DEFERRAL_MS * rate) / (1000 * this.quantumFrames))
-      // A scope with no rate defers nothing: every seek applies as before #2185.
-      this.seekDeferralBlocks = Number.isSafeInteger(blocks) && blocks > 0 ? blocks : 0
       const bound = []
       const incoming = []
       for (let index = 0; index < rings.length; index += 1) {
@@ -462,11 +452,9 @@ function wrapEngineProcessor(Base) {
       // Issue #2184: a pass reads the seek publication whole or not at all. A publication in
       // flight skips the pass, as a backpressured seek does; the next block reads it whole.
       if (!this.readSharedSeek(ring)) return
-      if (this.deferSharedSeek(ring)) {
-        // The old generation keeps playing from the engine's ring meanwhile.
-        this.countSharedBlock(ring)
-        return
-      }
+      // Issue #2205: a live plain seek applies at once. The engine keeps the old generation
+      // playing until the new one has its runway in the engine's ring (bounded by 50 ms), so the
+      // drain frees the stale slots and submits the new chunks in this same pass.
       if (this.applySharedSeek(ring) !== RESULT_OK) return
 
       const write = ring.seekWrite
@@ -627,82 +615,13 @@ function wrapEngineProcessor(Base) {
       return 0
     }
 
-    /**
-     * Issue #2185: whether this block defers the ring's published live plain seek. The writer
-     * seeks while the shared ring is full of the old generation, and it can publish the new one
-     * only into slots the drain frees; applied at once, the seek makes render drop the old chunks
-     * the engine holds before any new chunk exists, which is a gap. So, until the seek's
-     * generation has a runway published -- `seekDeferralBlocks` chunks (at most a ring), or a
-     * chunk that ends its region -- the drain frees every slot of an older generation (counted as
-     * STALE), asks no seek and submits nothing, and the old generation plays on from the engine's
-     * ring. A seek at the generation of the last accepted session seek (the transport seek) is
-     * never deferred: that session seek already dropped the old chunks, so waiting would only add
-     * silence (`sessionMovedSharedSeek`, attempt 3). The first pass that finds the runway applies the seek, then drains from its first
-     * chunk; a slot of a newer generation stops the scan. A seek applied at its first chunk alone
-     * left a gap whenever the writer's next chunks came a writer tick later (attempt 2). A newer
-     * seek published meanwhile replaces the deferred one (the skipped generation never reaches the
-     * engine) and inherits its count. A writer that publishes nothing for `seekDeferralBlocks`
-     * (50 ms of rendered audio) gets the seek applied as before #2185. An anchored seek is never
-     * deferred: the engine holds its old generation until the anchor. Root decision (#2185): up to
-     * 50 ms of old-position audio is the smaller artefact than a silence insert, which is two cuts
-     * and a hole; the deferral is one cut, at most 50 ms late. The prelude does not know the
-     * engine ring's size, so this bound is not capped at half of it as the Worker's is.
-     */
-    deferSharedSeek(ring) {
-      if (ring.seekEpoch === ring.seenEpoch || ring.seekAnchor !== NO_ANCHOR) return false
-      if (ring.deferredBlocks >= this.seekDeferralBlocks) return false
-      // #2185 attempt 3: a session seek at this generation (the transport seek) already moved the
-      // source and dropped its old chunks, so there is no old audio to play on: apply at once.
-      if (this.sessionMovedSharedSeek(ring)) return false
-      const control = ring.control
-      const write = ring.seekWrite
-      // #2185 attempt 2: the runway the new generation must have published before the seek
-      // applies -- as much audio as the bound would have played of the old one, at most a ring.
-      const runway = Math.min(this.seekDeferralBlocks, ring.capacity)
-      let read = control[CONTROL_READ_INDEX]
-      let current = 0
-      let ended = false
-      for (let index = read, remaining = ring.capacity; index !== write && remaining > 0; remaining -= 1) {
-        const word = (index & (ring.capacity - 1)) * (SLOT_HEADER_BYTES / 4)
-        if (ring.headers[word + SLOT_SEQUENCE] !== index) {
-          control[CONTROL_TORN] += 1
-          break
-        }
-        const age = this.sharedSlotAge(ring, word)
-        // A newer seek's chunk stays; the next pass defers or applies that seek instead.
-        if (age > 0) break
-        if (age < 0) {
-          // Only the older chunks ahead of the seek's first one are freed.
-          if (current !== 0) break
-          index = (index + 1) & SAB_WRAP_MASK
-          read = index
-          control[CONTROL_STALE] += 1
-          continue
-        }
-        current += 1
-        if ((ring.headers[word + SLOT_FLAGS] & FLAG_END_OF_REGION) !== 0) {
-          ended = true
-          break
-        }
-        if (current >= runway) break
-        index = (index + 1) & SAB_WRAP_MASK
-      }
-      Atomics.store(control, CONTROL_READ_INDEX, read)
-      if (current >= runway || ended) return false
-      ring.deferredBlocks += 1
-      return true
-    }
-
-    /** #2185 attempt 3: whether the ring's published seek is at the generation of the last
-     *  session seek the engine accepted (#1644's rule), so the engine holds no old audio of it. */
-    sessionMovedSharedSeek(ring) {
-      return this.lastSessionSeekGeneration !== undefined &&
-        BigInt.asUintN(64, ring.publishedGeneration) === this.lastSessionSeekGeneration
-    }
-
     /** Shared by render and the between-block control handler; never consumes PCM. The defaults
-     *  are the publication `readSharedSeek` read last; the caller reads it first. */
-    applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.publishedGeneration, frame = ring.seekFrame, anchor = ring.seekAnchor) {
+     *  are the publication `readSharedSeek` read last; the caller reads it first. Issue #2205:
+     *  the drain's live seek asks `source_seek`, which never prepares the consumer, so the engine
+     *  keeps the old generation playing until the new one has its runway; the suspended
+     *  `prepare-seek` passes `prepare` and asks `source_prepare_seek`, which applies the seek at
+     *  once and frees the engine's ring for the refill. */
+    applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.publishedGeneration, frame = ring.seekFrame, anchor = ring.seekAnchor, prepare = false) {
       const control = ring.control
       if (epoch !== ring.seenEpoch) {
         const requested = generation
@@ -727,7 +646,10 @@ function wrapEngineProcessor(Base) {
           return this.consumeSharedSeek(ring, epoch)
         }
         ring.idTarget.set(ring.idBytes)
-        let result = this.exports.miso_engine_web_v1_source_seek(
+        const seek = prepare
+          ? this.exports.miso_engine_web_v1_source_prepare_seek
+          : this.exports.miso_engine_web_v1_source_seek
+        let result = seek(
           this.handle,
           ring.idLength,
           requested,
@@ -771,7 +693,6 @@ function wrapEngineProcessor(Base) {
     consumeSharedSeek(ring, epoch) {
       const control = ring.control
       ring.seenEpoch = epoch
-      ring.deferredBlocks = 0
       control[CONTROL_SEEKS_APPLIED] += 1
       ring.depth = 0
       ring.finished = false
@@ -838,7 +759,7 @@ function wrapEngineProcessor(Base) {
       for (let index = 0; index < rings.length; index += 1) {
         const ring = rings[index]
         if (!matches(ring, seeks[index])) return { kind: "superseded" }
-        const result = this.applySharedSeek(ring, seeks[index].epoch, seeks[index].generation, seeks[index].frame)
+        const result = this.applySharedSeek(ring, seeks[index].epoch, seeks[index].generation, seeks[index].frame, ring.seekAnchor, true)
         if (result !== RESULT_OK) return { kind: "refused", result }
         if (!this.releaseStaleSharedSlots(ring, seeks[index].generation)) return { kind: "refused", result: 1 }
       }

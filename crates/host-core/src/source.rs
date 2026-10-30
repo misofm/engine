@@ -357,6 +357,13 @@ impl SourceControlSet {
     }
 
     /// Queue one strictly increasing, generation-tagged absolute seek on the named source.
+    ///
+    /// It lands when its PCM is ready (#2205, owner decision 2026-10-29): the playing generation
+    /// plays on until the seek's runway, `R` blocks of `generation`, is queued
+    /// ([`crate::source_seek_runway_blocks`], 50 ms capped at half the ring), or a block that
+    /// ends the region is, then lands in one cut at `frame`, from its first sample. A seek to the
+    /// region's end, or on a source that had no PCM before it, lands at the next block. It lands
+    /// at the latest `R` blocks after render observed it; a source with no PCM then underruns.
     pub fn seek(
         &mut self,
         id: &[u8],
@@ -417,6 +424,10 @@ impl SourceControlSet {
     ///    invariant, [`HostChunkError::InternalInvariant`] (the pushed commands are published, so
     ///    none stays held in its slot).
     ///
+    /// The plain form lands as [`Self::seek`] does, for every source and the timeline in one
+    /// block (#2205): the first at which every source that waits has its runway queued, or the
+    /// deadline. It never lands the sources one by one.
+    ///
     /// Acknowledged only when every consumer holds the seek in its slot: no ack precedes a drop.
     pub fn seek_session(
         &mut self,
@@ -424,10 +435,36 @@ impl SourceControlSet {
         timeline_sample: u64,
         anchor_sample: Option<u64>,
     ) -> Result<(), SourceControlError> {
+        self.seek_session_landing(generation, timeline_sample, anchor_sample, false)
+    }
+
+    /// [`Self::seek_session`]'s plain form for a seek with no live audio to keep (#2205): an
+    /// engine that renders only when asked, or a stopped transport. It lands for every source and
+    /// the timeline at the first block that observes it, as a plain session seek did before
+    /// #2205, without waiting for a runway; the host submits each source's PCM before that block.
+    /// Every rule and refusal is [`Self::seek_session`]'s.
+    pub fn seek_session_at_once(
+        &mut self,
+        generation: u64,
+        timeline_sample: u64,
+    ) -> Result<(), SourceControlError> {
+        self.seek_session_landing(generation, timeline_sample, None, true)
+    }
+
+    fn seek_session_landing(
+        &mut self,
+        generation: u64,
+        timeline_sample: u64,
+        anchor_sample: Option<u64>,
+        at_once: bool,
+    ) -> Result<(), SourceControlError> {
         let mut seek = self
             .published
             .session_seek(generation, anchor_sample)
             .map_err(session_refusal)?;
+        if at_once {
+            seek.land_at_once();
+        }
         check_session_producers(
             &seek,
             self.timeline.as_ref(),
@@ -489,7 +526,8 @@ impl SourceControlSet {
     /// source frame that block started at, plus the ring's cumulative underrun and held frames.
     /// Generation `0` means the ring has not rendered a block yet.
     ///
-    /// A plain seek lands at the first block that begins after it is queued; an anchored one at
+    /// A plain seek lands at the first block at which its runway is queued, at the latest `R`
+    /// blocks after render observed it, at its frame (#2205, [`Self::seek`]); an anchored one at
     /// its anchor block, at `frame` plus the lateness if render reached it late. So a host that
     /// reads `(g, s, f)` here knows the source plays frame `f + (t - s)` at source-read sample `t`.
     ///
@@ -702,8 +740,12 @@ impl ControlSourceBuilder {
         channel_count: u32,
         region_start: u64,
         region_end: u64,
-        provider: Option<HostChunkProvider>,
+        mut provider: Option<HostChunkProvider>,
     ) {
+        if let Some(provider) = provider.as_mut() {
+            // #2205: a live plain seek to the region's end has no PCM to wait for.
+            provider.set_region_end(SourceFrame(region_end));
+        }
         let id_offset = self.ids.len();
         self.ids.extend_from_slice(id.as_bytes());
         self.sources.push(ControlSource {
@@ -1086,6 +1128,7 @@ mod tests {
                 quantum_frames: QuantumFrames(Q),
                 frame_capacity: 16,
                 initial_generation: SourceGeneration(1),
+                seek_runway_blocks: 0,
             };
             let mut builder = ControlSourceBuilder::with_capacity(9, 2).expect("builder");
             let mut consumers = Vec::new();

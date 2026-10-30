@@ -161,7 +161,7 @@ fn paused_seek_recycles_without_allocating_or_freeing() {
         let clock = host.status().next_absolute_sample;
         let rendered = host.status().rendered_quanta;
         let (result, peak) = measured_peak(|| {
-            host.seek_source(b"fixture-source", generation + 1, generation * 10_000)
+            host.prepare_source_seek(b"fixture-source", generation + 1, generation * 10_000)
         });
         assert_eq!(result, RESULT_OK);
         assert_eq!(peak, 0);

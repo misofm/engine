@@ -174,6 +174,8 @@ interface LinkedFeed {
   /** Issue 1297c: `sourceId` is in the feed's start list and its anchored start is not published yet. */
   startPending(sourceId: string): boolean;
   detachSource(sourceId: string): Promise<void>;
+  /** Issue 2205: the feed's own `prepareSeek()`, for a seek `createEngine` sends while suspended. */
+  prepareSeek(): Promise<void>;
 }
 /** Keyed by the engine's host object, which `FeedEngine.host` names. */
 const feedLinks = new WeakMap<object, FeedLink>();
@@ -184,6 +186,12 @@ export interface FeedRetirement {
   retire(sourceIds: readonly string[], applied: () => Promise<unknown>): void;
   /** After a replace: `committedSources` reads the committed session's source IDs; detach the rest. */
   retireAbsent(committedSources: () => Promise<ReadonlySet<string>>, applied: () => Promise<unknown>): void;
+  /**
+   * Issue 2205: after a seek the engine sent while suspended and its producers repositioned, run
+   * the documented suspended flow on every linked feed that delivers a ring: its `prepareSeek()`,
+   * in turn, so the stale shared slots free and the target's chunks are queued before `play()`.
+   */
+  prepareSeeks(): Promise<void>;
 }
 
 /**
@@ -217,6 +225,20 @@ export function linkFeedEngine(
   return {
     retire(sourceIds, applied) {
       detachAfter(owners((sourceId) => sourceIds.includes(sourceId)), applied);
+    },
+    async prepareSeeks() {
+      for (const feed of [...link.feeds]) {
+        if (feed.sourceIds().length === 0) continue;
+        try {
+          await feed.prepareSeek();
+        } catch (error) {
+          // A feed with a ring no producer repositioned (its seek unpublished or changing), or
+          // one that is no longer suspended and attached, is not prepared: the engine's seek is
+          // accepted and lands at the next block anyway. Any other failure is the feed's own.
+          if (!(error instanceof PcmFeedError)
+              || (error.operation !== "prepareSuperseded" && error.operation !== "prepareState")) throw error;
+        }
+      }
     },
     retireAbsent(committedSources, applied) {
       if (link.feeds.size === 0) return;
@@ -486,7 +508,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       return;
     }
     if (data?.op !== "seek-prepared" || data.requestId !== pending?.id || pending === undefined) return;
-    if (options.context.state !== "suspended") {
+    if (options.context.state !== "suspended" && (options.context.state as string) !== "interrupted") {
       pending.finish(new PcmFeedError("prepareState", "AudioContext resumed during seek preparation"));
     } else if (data.kind === "superseded" || !sameSeeks(rings, pending.seeks)) {
       pending.finish(new PcmFeedError("prepareSuperseded", "PCM seek changed during preparation"));
@@ -501,6 +523,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     ring: (sourceId) => live.get(sourceId)?.ring,
     startPending: (sourceId) => pendingStarts.has(sourceId),
     detachSource: (sourceId) => feed.detachSource(sourceId),
+    prepareSeek: () => feed.prepareSeek(),
   };
   const close = (): void => {
     if (state === "closed") return;
@@ -612,7 +635,9 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     },
     async prepareSeek(settings = {}): Promise<void> {
       if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
-      if (options.context.state !== "suspended" || !rings.every(attached)) throw new PcmFeedError("prepareState", "PCM seek preparation requires an attached feed and suspended context");
+      // An iOS "interrupted" context renders nothing, as a suspended one (#2205).
+      const suspended = options.context.state === "suspended" || (options.context.state as string) === "interrupted";
+      if (!suspended || !rings.every(attached)) throw new PcmFeedError("prepareState", "PCM seek preparation requires an attached feed and suspended context");
       if (pending !== undefined) throw new PcmFeedError("prepareBusy", "PCM seek preparation is already pending");
       const timeoutMs = settings.timeoutMs ?? 2_000;
       if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new MisoUsageError("prepareSeek timeoutMs must be finite and positive");

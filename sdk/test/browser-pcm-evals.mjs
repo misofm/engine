@@ -49,9 +49,12 @@ function recordFeedCalls(exports) {
   const prefix = renderThreadTable.prefix;
   return new Proxy(exports, {
     get(target, property, receiver) {
-      const value = Reflect.get(target, property, receiver);
+      let value = Reflect.get(target, property, receiver);
       if (typeof property !== "string" || !property.startsWith(prefix)) return value;
       const name = property.slice(prefix.length);
+      // #2205: the fakes model the prepare form as the seek itself; which export the prelude asks
+      // is recorded by name either way, so the table check still sees it.
+      if (value === undefined && name === "source_prepare_seek") value = Reflect.get(target, `${prefix}source_seek`, receiver);
       recordedFeedCalls.add(name);
       // An unlisted export that the fake does not define would stop the run with a bare TypeError
       // before the last test names it.
@@ -654,7 +657,7 @@ function anchoredPrelude(source) {
 function preludeConsumer(source) {
   const { sandbox, registrations } = preludeHarness(source);
   const adapter = {
-    submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null, onSnapshot: null,
+    submissions: [], seeks: [], prepared: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null, onSnapshot: null,
   };
   const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
   class Engine {
@@ -662,9 +665,6 @@ function preludeConsumer(source) {
       this.quantumFrames = 4; this.maximumSourceChannels = 2; this.memoryBuffer = new ArrayBuffer(65_536);
       this.sourceIdPointer = 0; this.sourceIdCapacity = 128; this.sourcePcm = new sandbox.Float32Array(this.memoryBuffer, 1024, 8);
       this.diagnosticView = new sandbox.Uint8Array(this.memoryBuffer, 4096, 256);
-      // #2185: a rate that makes the deferral bound and runway 4 blocks at 4-frame quanta, the
-      // Worker adapter's too, so a case can publish a runway within its 8-slot rings.
-      this.sampleRateHz = 320;
       this.handle = 1; this.ready = true; this.disposed = false; this.stickyResult = 0;
       this.exports = recordFeedCalls({
         memory: { buffer: this.memoryBuffer },
@@ -674,6 +674,11 @@ function preludeConsumer(source) {
           this.diagnosticView.fill(0);
           if (adapter.seekResult !== 0 && adapter.seekStale) this.diagnosticView.set(stale);
           return adapter.seekResult;
+        },
+        // #2205: the prepare form records apart, then answers as the seek does.
+        miso_engine_web_v1_source_prepare_seek: (handle, id, generation, frame) => {
+          adapter.prepared.push([generation, frame]);
+          return this.exports.miso_engine_web_v1_source_seek(handle, id, generation, frame);
         },
         miso_engine_web_v1_source_submit: (_h, idLength, generation, start, channels, frames, end) => {
           adapter.submissions.push({ id: new TextDecoder().decode(new Uint8Array(this.memoryBuffer, 0, idLength)), generation, start, channels, frames, end, pcm: [...this.sourcePcm] });
@@ -704,7 +709,6 @@ function preludeConsumer(source) {
   attach.port.postMessage = (data) => replies.push(structuredClone(data));
   const send = (data) => { attach.port.onmessage({ data: structuredClone(data) }); return replies.pop(); };
   let requestId = 0;
-  Object.defineProperty(adapter, "seekBound", { get: () => engine.seekDeferralBlocks });
   return Object.assign(adapter, {
     attach: async (rings) => { send({ op: "attach", rings }); },
     pass: async () => { engine.process([], []); },

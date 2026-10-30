@@ -21,7 +21,8 @@ extern "C" {
  *                miso_engine_v1_submit_command, miso_engine_v1_submit_document_command,
  *                miso_engine_v1_dequeue_event,
  *                miso_engine_v1_service, miso_engine_v1_declare_discontinuity,
- *                miso_engine_v1_session_seek, miso_engine_v1_session_seek_at, or
+ *                miso_engine_v1_session_seek, miso_engine_v1_session_seek_at,
+ *                miso_engine_v1_session_seek_at_once, or
  *                miso_engine_v1_last_error on the session; they are serialized with each other.
  *   plan         Split ownership.
  *                miso_engine_v1_render_f32_planar: render thread only, never concurrently with
@@ -492,12 +493,23 @@ extern "C" {
  * "render.time.discontinuity". A plan that a structural transaction swaps in continues the clock
  * of the plan it replaces, so an anchor stays valid across a swap.
  *
- * Seek. miso_engine_v1_source_seek(id, g, F) makes generation g play from source frame F. It
- * takes effect no later than the first block that begins after the call returns; the PCM of the
- * earlier generations that is still queued is discarded, not played. The call switches the source
- * to g at once: from then on the host submits generation g in order from F, and a chunk of any
- * other generation is refused as "source.generation.stale". Submit it before the block renders;
- * a block of g with no PCM queued renders silence and counts as underrun frames. The refusals,
+ * Seek. miso_engine_v1_source_seek(id, g, F) makes generation g play from source frame F. The
+ * call switches the source to g at once: from then on the host submits generation g in order from
+ * F, and a chunk of any other generation is refused as "source.generation.stale". A plain seek
+ * lands when its PCM is ready (issue 2205): the PCM of the playing generation that is still queued
+ * plays on until the seek's runway of R blocks of g is queued, then the seek lands in one cut and
+ * g plays from F, its first frame; the earlier generations' queued PCM is discarded, not played.
+ * R is min(ceil(50 ms / quantum), ring blocks / 2), fixed when the plan is prepared: 19 blocks at
+ * 48 kHz and 128 frames with the default ring. The seek also lands as soon as a block of g that
+ * ends the region is queued, at once when F is the region's end, and at once when the source had
+ * received no PCM before the call (an empty boot or a stem still loading waits for nothing). It
+ * lands at the latest R blocks after the first block that observed it, which is the first block
+ * that begins after the call: R quanta are 50 ms rounded up to a whole quantum, so the old
+ * position plays for less than 50 ms plus one quantum after that block, plus the part of a block
+ * between the call and it. Blocks of g with no PCM queued then render silence and count as
+ * underrun frames. Old audio that runs out before
+ * the seek lands renders silence counted as held frames, not underrun. So a host submits g from
+ * F at once after the call; the seek report tells where it landed. The refusals,
  * all MISO_ENGINE_V1_INVALID_ARGUMENT: g not above the source's generation
  * ("source.generation.stale"), g = 0 ("source.generation.zero"), F outside the source's region
  * ("source.region.outside"), an unknown source ("source.id.unknown"). Where the seek landed is
@@ -517,7 +529,18 @@ extern "C" {
  * g, T) moves it and every source of the newest committed session in one step, all or nothing:
  * the timeline goes to T and each source to min(T, its frames); every one of them takes the seek
  * in the same render block, or the call changes nothing and returns a refusal. The host then
- * submits generation g of each source from its frame. g must be above every generation the host
+ * submits generation g of each source from its frame. A plain session seek lands as a plain seek
+ * does, for every source and the timeline in one block (issue 2205): the first block at which
+ * every source that waits has its runway queued, or the deadline R blocks after the block that
+ * observed it; until then every source plays its old generation on, and the timeline runs on.
+ * That is a live seek. miso_engine_v1_session_seek_at_once(session, g, T) is the same seek for a
+ * host whose transport is stopped (issue 2205): same arguments, checks, results and declaration,
+ * but every source and the timeline land at the first block rendered after the call, without
+ * waiting for a runway, so the stop position never plays after the host restarts. Use it while
+ * stopped. PCM of the old generation still queued in a source's ring is dropped at that block, so
+ * a host that filled its rings before the stop and cannot drain them while stopped underruns at
+ * restart until it has submitted generation g from each source's frame. A host checks
+ * MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE before calling it. g must be above every generation the host
  * has used on the session, on any source or session seek; one above the largest it has used is
  * always valid. The refusals, all MISO_ENGINE_V1_INVALID_ARGUMENT unless named: g = 0
  * ("source.generation.zero"), g not above every generation the session has used
@@ -587,8 +610,8 @@ extern "C" {
  * planned wait is not starvation. A block without PCM while no seek is held is an underrun.
  *
  * Replacement. A newer seek, plain or anchored, replaces a held one: the held seek never applies,
- * and the PCM already submitted for its generation is discarded. A plain seek applies as above;
- * an anchored one holds in its place with its own anchor.
+ * and the PCM already submitted for its generation is discarded. A plain seek holds in its place
+ * until it is ready, as above; an anchored one holds in its place with its own anchor.
  *
  * One seek in flight. A source's command queue holds one seek. A seek call that arrives before
  * render has popped the previous one, which happens when render begins a block, returns
@@ -700,7 +723,8 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT UINT64_C(512)
 #define MISO_ENGINE_V1_FEATURE_SESSION_SEEK UINT64_C(1024)
 #define MISO_ENGINE_V1_FEATURE_SESSION_REPLACE UINT64_C(2048)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(4095)
+#define MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE UINT64_C(4096)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(8191)
 
 #define MISO_ENGINE_V1_OUTCOME_EXACT UINT64_C(1)
 #define MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK UINT64_C(2)
@@ -934,6 +958,9 @@ uint32_t miso_engine_v1_session_seek_at(miso_engine_v1_session *session,
                                         uint64_t generation,
                                         uint64_t timeline_sample,
                                         uint64_t anchor_sample);
+uint32_t miso_engine_v1_session_seek_at_once(miso_engine_v1_session *session,
+                                             uint64_t generation,
+                                             uint64_t timeline_sample);
 uint32_t miso_engine_v1_submit_command(miso_engine_v1_session *session,
                                        const uint8_t *request,
                                        uint64_t request_bytes,

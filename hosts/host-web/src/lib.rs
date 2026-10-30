@@ -1067,13 +1067,20 @@ impl ControlHalf {
         generation: u64,
         timeline_frame: u64,
         anchor_sample: Option<u64>,
+        at_once: bool,
     ) -> Result<(), SessionSeekFailure> {
         if anchor_sample.is_some() {
             return self
                 .control
                 .session_seek(generation, timeline_frame, anchor_sample);
         }
-        self.run_control(|control| control.session_seek(generation, timeline_frame, None))
+        self.run_control(|control| {
+            if at_once {
+                control.session_seek_at_once(generation, timeline_frame)
+            } else {
+                control.session_seek(generation, timeline_frame, None)
+            }
+        })
     }
 
     /// Run one control-plane call that may publish a replacement plan (#1290a, #1323), then
@@ -2445,18 +2452,49 @@ impl AudioWorkletEngineHost {
         self.record(code)
     }
 
-    /// Apply one strictly increasing generation-tagged source seek between render blocks.
-    ///
-    /// The seek goes through the control plane's source routing (#1381a D2). This host also owns
-    /// the render plan on its one thread, so a successful admission prepares the plan's consumer
-    /// too, and new PCM can enter even when old queues were full. A seek changes source-content
-    /// position while the absolute render clock stays continuous; it therefore neither resets
-    /// meter accumulators nor advances the meter publication epoch.
+    /// Queue one strictly increasing generation-tagged source seek (#2205): the C ABI's
+    /// `miso_engine_v1_source_seek`. It goes through the control plane's source routing (#1381a
+    /// D2) and never prepares the plan's consumer, also when the render half is on this instance:
+    /// the consumer observes the seek through its command queue and lands it when ready (the old
+    /// generation plays on until the new one has its runway, at most R blocks after the block that
+    /// observed it). A live ring seek in
+    /// `single` mode takes this path. A seek changes source-content position while the absolute
+    /// render clock stays continuous; it therefore neither resets meter accumulators nor advances
+    /// the meter publication epoch.
+    pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
+        self.control_response = ControlResponse::None;
+        if !self.control_ready() {
+            return self.record(RESULT_WRONG_STATE);
+        }
+        let Some(control) = self.control.as_mut() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        let code = match control
+            .control
+            .seek_unserviced(source_id, generation, source_frame)
+        {
+            Ok(()) => RESULT_OK,
+            Err(failure) => self.refuse_source(failure),
+        };
+        self.record(code)
+    }
+
+    /// Apply one strictly increasing generation-tagged source seek between render blocks, and
+    /// prepare the plan's consumer at once (#2205): the suspended `prepare-seek` op's and the
+    /// headless engine's seek, which have no live audio to keep. The seek goes through the control
+    /// plane's source routing as [`Self::seek_source`]'s; this host also owns the render plan on its
+    /// one thread, so a successful admission prepares the plan's consumer too
+    /// (`SeekClock::Hold`: the seek applies now and the old generation's queued PCM is dropped), and
+    /// new PCM can enter even when old queues were full.
     ///
     /// With the render half on another thread (#1332 S5) the plan is not here to prepare: the
-    /// seek goes through the control plane's routing alone, as on the C ABI, and the consumer
-    /// observes it through its command queue.
-    pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
+    /// seek goes through the control plane's routing alone, exactly as [`Self::seek_source`].
+    pub fn prepare_source_seek(
+        &mut self,
+        source_id: &[u8],
+        generation: u64,
+        source_frame: u64,
+    ) -> u32 {
         self.control_response = ControlResponse::None;
         if !self.control_ready() {
             return self.record(RESULT_WRONG_STATE);
@@ -2544,7 +2582,9 @@ impl AudioWorkletEngineHost {
     /// a control-side call (the message handler, never `process()`). With `anchor_sample`, every
     /// consumer applies the seek in the block that starts there. This adapter holds no seek
     /// logic, and it never prepares the plan's consumer: every consumer observes the seek through
-    /// its command queue at the next block, the timeline included. A host that is not ready
+    /// its command queue at the next block, the timeline included, and a plain seek lands for all
+    /// of them in one block once every source that waits has its runway, or at the deadline
+    /// (#2205). A host that is not ready
     /// refuses with [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map
     /// through `refuse_source` (a stale generation or an anchor that is not a quantum
     /// multiple is [`RESULT_INVALID_ARGUMENT`], one full slot [`RESULT_BACKPRESSURE`]). The plain
@@ -2557,6 +2597,49 @@ impl AudioWorkletEngineHost {
         timeline_frame: u64,
         anchor_sample: Option<u64>,
     ) -> u32 {
+        self.session_seek_landing(generation, timeline_frame, anchor_sample, false)
+    }
+
+    /// [`Self::session_seek`]'s plain form for a seek with no live audio to keep (#2205): the
+    /// headless engine's `seek`, or a browser engine whose transport is not playing. It lands for
+    /// every source and the timeline at the first block that observes it, without waiting for a
+    /// runway (`SessionState::session_seek_at_once`), in either instance mode: the landing is
+    /// decided at that block, so a render half on another thread lands it the same way. Same
+    /// results, declaration and thread rule as the plain form.
+    pub fn session_prepare_seek(&mut self, generation: u64, timeline_frame: u64) -> u32 {
+        let code = self.session_seek_landing(generation, timeline_frame, None, true);
+        if code != RESULT_OK {
+            return code;
+        }
+        // With the render half on this instance (`single` mode), prepare every consumer the
+        // rendering plan holds now, as `prepare_source_seek` does for one source: each applies the
+        // seek before the next block and drops the old generation's queued PCM, so a suspended
+        // feed can refill the engine's ring before `play()`. A consumer whose ring did not get
+        // this seek (a fresh ring of a pending candidate) is not ready and stays as it is; the
+        // at-once landing still moves it at its next block.
+        let (Some(control), Some(ready)) = (self.control.as_ref(), self.render.ready.as_mut())
+        else {
+            return code;
+        };
+        let plan = &mut ready.plan;
+        let epoch = plan.owner().active_epoch().0;
+        control
+            .control
+            .for_each_rendering_session_frame(epoch, timeline_frame, |index, frame| {
+                if plan.can_prepare_source_seek(index) {
+                    let _ready = plan.prepare_source_seek(index, generation, frame);
+                }
+            });
+        code
+    }
+
+    fn session_seek_landing(
+        &mut self,
+        generation: u64,
+        timeline_frame: u64,
+        anchor_sample: Option<u64>,
+        at_once: bool,
+    ) -> u32 {
         self.control_response = ControlResponse::None;
         if !self.control_ready() {
             return self.record(RESULT_REFUSED_LIFECYCLE);
@@ -2564,7 +2647,7 @@ impl AudioWorkletEngineHost {
         let Some(control) = self.control.as_mut() else {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         };
-        let result = control.session_seek(generation, timeline_frame, anchor_sample);
+        let result = control.session_seek(generation, timeline_frame, anchor_sample, at_once);
         self.publish_words_here();
         match result {
             Ok(()) => self.record(RESULT_OK),

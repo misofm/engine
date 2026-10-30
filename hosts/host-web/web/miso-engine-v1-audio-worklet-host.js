@@ -97,6 +97,8 @@ const SEEK_FIELDS = ["sourceId", "generation", "sourceFrame"];
 // Issue #1644 D1: a session seek names its generation and frame, and optionally its anchor.
 const SESSION_SEEK_FIELDS = ["generation", "frame"];
 const ANCHORED_SESSION_SEEK_FIELDS = ["generation", "frame", "anchorSample"];
+// #2205: a plain session seek with no live audio to keep (a stopped transport) lands at once.
+const AT_ONCE_SESSION_SEEK_FIELDS = ["generation", "frame", "atOnce"];
 // Issue #1297a: an anchored source seek, a seek report request, and the report's words.
 const SEEK_AT_FIELDS = ["sourceId", "generation", "sourceFrame", "anchorSample"];
 // Issue #2116: the plan latency reply's words, as the C ABI's plan resource report carries them.
@@ -1154,12 +1156,16 @@ class MisoAudioWorkletHost {
   /// the generation; a refusal changes nothing. Reposition the PCM producers only after an OK: a
   /// ring seek at this generation is then consumed without a second per-source seek. One session
   /// seek may be unsettled at a time; a second is refused locally with `RESULT_BACKPRESSURE`. The
-  /// SDK's `engine.seek` is the public surface.
+  /// SDK's `engine.seek` is the public surface. A plain seek is live: render keeps the old position
+  /// playing until every source has its runway (issue #2205). `atOnce: true` is the plain seek
+  /// with no live audio to keep (a stopped transport): it lands at the next rendered block.
   seekSession(request) {
     const anchored = hasExactFields(request, ANCHORED_SESSION_SEEK_FIELDS);
-    if ((!anchored && !hasExactFields(request, SESSION_SEEK_FIELDS))
+    const atOnce = hasExactFields(request, AT_ONCE_SESSION_SEEK_FIELDS);
+    if ((!anchored && !atOnce && !hasExactFields(request, SESSION_SEEK_FIELDS))
         || !validU64(request.generation, true) || !validU64(request.frame)
-        || (anchored && !validU64(request.anchorSample))) {
+        || (anchored && !validU64(request.anchorSample))
+        || (atOnce && request.atOnce !== true)) {
       return Promise.reject(webError(1));
     }
     return this.#request(
@@ -1168,6 +1174,7 @@ class MisoAudioWorkletHost {
         generation: request.generation,
         sourceFrame: request.frame,
         anchorSample: anchored ? request.anchorSample : -1n,
+        atOnce,
       },
       [],
       "sessionSeek",

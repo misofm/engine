@@ -723,9 +723,10 @@ export class OfflineEngine {
 
   /**
    * Seek the timeline and every source to `frame` under one new generation, all or nothing, and
-   * resolve with the generation used. Every consumer applies the seek at the next block; the
-   * caller then submits each source's PCM from `min(frame, source frames)` under that generation.
-   * Until it does, a source underruns. The generation is `options.generation`, else one above the
+   * resolve with the generation used. The headless engine has no live audio to keep, so every
+   * consumer lands the seek at the next rendered block (#2205: no runway wait, no old audio after
+   * it); the caller submits each source's PCM from `min(frame, source frames)` under that
+   * generation before that block. Until it does, a source underruns. The generation is `options.generation`, else one above the
    * largest this object has passed through `seek`, `seekSource` or `submitSource`. A stale
    * generation is refused (`source.generation.stale`, result `invalidArgument`) and nothing
    * changes. The engine declares the discontinuity in the same call (the floors a rebuild kept

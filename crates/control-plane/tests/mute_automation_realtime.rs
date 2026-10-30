@@ -192,6 +192,20 @@ impl Rig {
 
     /// Feed and render one block; the allocator events of the render call alone.
     fn block(&mut self) -> bench_support::alloc::Counters {
+        self.feed();
+        let mut samples = [0.0_f32; QUANTUM * 2];
+        let output = engine::realtime::PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM)
+            .expect("output planes");
+        let mark = bench_support::alloc::current_thread_counters();
+        self.plan.render(self.at, output).expect("a rendered block");
+        let used = bench_support::alloc::current_thread_delta_since(mark);
+        self.last = samples.iter().map(|sample| sample.to_bits()).collect();
+        self.at += QUANTUM as u64;
+        used
+    }
+
+    /// Submit the source's next block.
+    fn feed(&mut self) {
         let start = self.start;
         // Negative pairs in every fourth stretch of 300 frames.
         let plane: Vec<f32> = (0..QUANTUM as u64)
@@ -217,16 +231,7 @@ impl Rig {
                 },
             )
             .expect("source block");
-        let mut samples = [0.0_f32; QUANTUM * 2];
-        let output = engine::realtime::PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM)
-            .expect("output planes");
-        let mark = bench_support::alloc::current_thread_counters();
-        self.plan.render(self.at, output).expect("a rendered block");
-        let used = bench_support::alloc::current_thread_delta_since(mark);
-        self.last = samples.iter().map(|sample| sample.to_bits()).collect();
-        self.at += QUANTUM as u64;
         self.start += QUANTUM as u64;
-        used
     }
 
     /// Commit `value` at `address` live (the session's ramp).
@@ -293,7 +298,8 @@ impl Rig {
         {}
     }
 
-    /// A plain session seek to `timeline` (declared: a successor at the next block).
+    /// A plain session seek to `timeline` with its runway (declared: a successor at the next
+    /// block).
     fn seek(&mut self, timeline: u64) {
         self.generation += 1;
         self.session
@@ -301,6 +307,10 @@ impl Rig {
             .expect("a session seek");
         self.drain();
         self.start = timeline;
+        // #2205: the seek's runway, so it lands at the next block; `block` keeps it ahead.
+        for _ in 0..host_core::source_seek_runway_blocks(48_000, QUANTUM as u32, 1_024) {
+            self.feed();
+        }
     }
 }
 

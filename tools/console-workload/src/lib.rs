@@ -3657,6 +3657,7 @@ impl LiveFeed {
             quantum_frames: QuantumFrames(QUANTUM as u32),
             frame_capacity: LIVE_RING_FRAMES,
             initial_generation: SourceGeneration(1),
+            seek_runway_blocks: 0,
         };
         let mut providers = Vec::with_capacity(claims.len());
         let mut blocks = Vec::with_capacity(claims.len());

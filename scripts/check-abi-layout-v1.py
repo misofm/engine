@@ -143,6 +143,7 @@ EXPORTS = [
     "miso_engine_web_v1_response_frame_reply_ptr",
     "miso_engine_web_v1_response_frame_submit",
     "miso_engine_web_v1_service",
+    "miso_engine_web_v1_session_prepare_seek",
     "miso_engine_web_v1_session_seek",
     "miso_engine_web_v1_session_seek_at",
     "miso_engine_web_v1_source_channels",
@@ -150,6 +151,7 @@ EXPORTS = [
     "miso_engine_web_v1_source_fill",
     "miso_engine_web_v1_source_frames",
     "miso_engine_web_v1_source_id",
+    "miso_engine_web_v1_source_prepare_seek",
     "miso_engine_web_v1_source_seek",
     "miso_engine_web_v1_source_seek_at",
     "miso_engine_web_v1_source_seek_report",
@@ -406,8 +408,8 @@ def validate(document: object) -> None:
     ring = constants["sourceRing"]
     require(isinstance(ring, dict) and set(ring) == {
         "stallToleranceMs", "reserveQuanta", "primeGrowths", "primeReserveQuanta",
-        "primeLatencySamples",
-    }, "sourceRing carries exactly its five inputs")
+        "primeLatencySamples", "seekRunwayQuanta",
+    }, "sourceRing carries exactly its five inputs and the seek runway rows")
     require(ring["stallToleranceMs"] == 100, "the stall tolerance is 100 ms")
     require(ring["reserveQuanta"] == 2, "the ring reserves two quanta")
     require(ring["primeGrowths"] == 4, "the ring holds a prime for four growths")
@@ -419,6 +421,13 @@ def validate(document: object) -> None:
         {"sampleRateHz": 88200, "samples": 888},
         {"sampleRateHz": 96000, "samples": 966},
     ], "primeLatencySamples is L_max at each launch rate")
+    # #2205: `R = ceil(ceil(50 ms * fs) / 128)` at each launch rate, uncapped by the ring.
+    require(ring["seekRunwayQuanta"] == [
+        {"sampleRateHz": 44100, "quantumFrames": 128, "quanta": 18},
+        {"sampleRateHz": 48000, "quantumFrames": 128, "quanta": 19},
+        {"sampleRateHz": 88200, "quantumFrames": 128, "quanta": 35},
+        {"sampleRateHz": 96000, "quantumFrames": 128, "quanta": 38},
+    ], "seekRunwayQuanta is the engine's seek runway at each launch rate")
 
 
 def self_test() -> int:

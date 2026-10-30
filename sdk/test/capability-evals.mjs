@@ -225,19 +225,21 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     }
   });
 
-  test("session seek calls the session seek export alone and moves the sources in the next block", async () => {
-    // Issue #1643 gate 2. Red if `seek` does not call the session seek export (the generation-2
-    // PCM is then refused, the twin comparison below fails), if it declares the discontinuity
+  test("session seek calls the at-once session seek export alone and lands in the next block", async () => {
+    // Issue #1643 gate 2, #2205. Red if `seek` does not call the at-once session seek export: the
+    // live form keeps the fed source's old generation playing for its runway (the headless engine
+    // has no live audio to keep), so the next block is not the twin's target; if it calls no
+    // session seek (the generation-2 PCM is then refused); if it declares the discontinuity
     // itself before the seek (root ruling B16-R9 retired B15-R7's order: the plain session seek
     // declares in the same call, so a separate declaration first would reset the floors even
-    // when the seek is refused), or if it picks a stale generation.
+    // when the seek is refused); or if it picks a stale generation.
     const calls = [];
     const instantiate = asset.instantiate.bind(asset);
     asset.instantiate = async () => {
       const instance = await instantiate();
       const exports = {};
       for (const [name, value] of Object.entries(instance.exports)) {
-        exports[name] = typeof value === "function" && /declare_discontinuity$|session_seek$/.test(name)
+        exports[name] = typeof value === "function" && /declare_discontinuity$|session_seek$|session_prepare_seek$/.test(name)
           ? (...args) => { calls.push(name.replace("miso_engine_web_v1_", "")); return value(...args); }
           : value;
       }
@@ -262,9 +264,15 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       );
       assert.deepEqual(calls, [], "a usage error reaches no export");
 
+      // Both play generation 1 first, with old PCM still queued at the seek (#2205).
+      for (const subject of [engine, twin]) {
+        const q = BigInt(subject.shape().quantumFrames);
+        for (let block = 0n; block < 4n; block += 1n) feed(subject, 1n, block * q, 5);
+        subject.render();
+      }
       const seek = engine.seek(4_096n);
       assert.deepEqual(seek, { generation: 2n, ok: true, result: 0, code: "ok" });
-      assert.deepEqual(calls, ["session_seek"], "no separate declaration before the seek");
+      assert.deepEqual(calls, ["session_prepare_seek"], "the at-once form; no separate declaration");
       feed(engine, 2n, 4_096n, 17);
       const block = engine.render();
 
@@ -274,7 +282,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       feed(twin, 2n, 4_096n, 17);
       const expected = twin.render();
       assert.ok(block.left.some((sample) => sample !== 0), "the sought frame renders audio");
-      assert.deepEqual(block.left, expected.left);
+      assert.deepEqual(block.left, expected.left, "the next block is the target, not the old generation");
       assert.deepEqual(block.right, expected.right);
 
       // The default generation is one above the largest passed, and a stale one changes nothing.
@@ -318,7 +326,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       const instance = await instantiate();
       exports = {};
       for (const [name, value] of Object.entries(instance.exports)) {
-        exports[name] = typeof value === "function" && /declare_discontinuity$|session_seek$|_render$/.test(name)
+        exports[name] = typeof value === "function" && /declare_discontinuity$|session_seek$|session_prepare_seek$|_render$/.test(name)
           ? (...args) => {
             handle = args[0];
             if (!name.endsWith("_render")) calls.push(name.replace("miso_engine_web_v1_", ""));
@@ -369,7 +377,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       assert.equal(accepted.ok, true, accepted.code);
       play(2n, block, 2n, 0n);
       assert.ok(latency() < boot, "an accepted plain seek declares: the floors reset");
-      assert.deepEqual(calls, ["session_seek", "session_seek"], "the SDK makes no separate declaration");
+      assert.deepEqual(calls, ["session_prepare_seek", "session_prepare_seek"], "the SDK makes no separate declaration");
     } finally {
       engine.dispose();
     }

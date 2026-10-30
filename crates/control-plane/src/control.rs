@@ -7608,6 +7608,34 @@ where
             .map(|row| row.index as usize)
     }
 
+    /// Visit each source the plan of `epoch` renders (#2205): its index in that plan's source set
+    /// and the frame a session seek to `timeline_sample` sends it, the sample clamped to the
+    /// newest session's region of the source. A source the newest session does not hold is
+    /// skipped. Control thread; it allocates nothing.
+    pub fn for_each_rendering_session_frame(
+        &self,
+        epoch: u64,
+        timeline_sample: u64,
+        mut visit: impl FnMut(usize, u64),
+    ) {
+        let Some(rendering) = core::iter::once(&self.providers)
+            .chain(&self.pending_providers)
+            .chain(&self.retired_providers)
+            .find(|provider| provider.epoch == epoch)
+        else {
+            return;
+        };
+        let sources = &self.newest_providers().sources;
+        for row in rendering.inventory.sources() {
+            if let Some(region) = sources.region(row.id.as_bytes()) {
+                visit(
+                    row.index as usize,
+                    timeline_sample.min(region.end).max(region.start),
+                );
+            }
+        }
+    }
+
     /// Sets the replacement peak ceiling ([`ControlLimits::maximum_replacement_peak_bytes`]) once
     /// the adapter knows its own fixed bytes exactly (#1290a D3): they are known only after the
     /// first plan is prepared, and the limits the session was built with are a plain value.
@@ -8314,6 +8342,32 @@ where
         timeline_sample: u64,
         anchor_sample: Option<u64>,
     ) -> Result<(), SessionSeekFailure> {
+        self.session_seek_landing(generation, timeline_sample, anchor_sample, false)
+    }
+
+    /// [`Self::session_seek`]'s plain form for a seek with no live audio to keep (#2205): a
+    /// headless engine or a stopped transport. It is a declared discontinuity as the plain form
+    /// is, and lands at the first block that observes it, without waiting for a runway
+    /// ([`host_core::SourceControlSet::seek_session_at_once`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::session_seek`]'s plain form.
+    pub fn session_seek_at_once(
+        &mut self,
+        generation: u64,
+        timeline_sample: u64,
+    ) -> Result<(), SessionSeekFailure> {
+        self.session_seek_landing(generation, timeline_sample, None, true)
+    }
+
+    fn session_seek_landing(
+        &mut self,
+        generation: u64,
+        timeline_sample: u64,
+        anchor_sample: Option<u64>,
+        at_once: bool,
+    ) -> Result<(), SessionSeekFailure> {
         self.service()
             .map_err(|_| SessionSeekFailure::Seek(SourceFailure::Internal))?;
         if anchor_sample.is_none() {
@@ -8331,16 +8385,18 @@ where
             // `adopt_persisting` for the persisting producers and the timeline), so no command
             // was pushed in between and the check's verdict still holds. `seek_session` checks
             // again; a refusal there is that invariant broken.
-            return self
-                .newest_providers_mut()
-                .sources
-                .seek_session(generation, timeline_sample, None)
-                .map_err(|_| {
-                    debug_assert!(false, "a checked session seek holds across its declaration");
-                    SessionSeekFailure::Seek(SourceFailure::Control(SourceControlError::Chunk(
-                        source::HostChunkError::InternalInvariant,
-                    )))
-                });
+            let sources = &mut self.newest_providers_mut().sources;
+            let pushed = if at_once {
+                sources.seek_session_at_once(generation, timeline_sample)
+            } else {
+                sources.seek_session(generation, timeline_sample, None)
+            };
+            return pushed.map_err(|_| {
+                debug_assert!(false, "a checked session seek holds across its declaration");
+                SessionSeekFailure::Seek(SourceFailure::Control(SourceControlError::Chunk(
+                    source::HostChunkError::InternalInvariant,
+                )))
+            });
         }
         self.newest_providers_mut()
             .sources

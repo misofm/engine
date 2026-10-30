@@ -190,3 +190,129 @@ three options, together with #2205. Until then, the Chromium worker phase is rep
 - **Minor 2:** `sdk/README.md` now says that a live plain seek does not cut to silence only in
   single mode, and that worker mode is the open residual. It also says that the transport seek's
   ring seeks apply at once (#2205 still owns that path's gap).
+
+## Attempt 4 (2026-10-29): the worker residual through #2205's engine rule
+
+- **Decision.** Owner decision (2026-10-29) and root rulings 2-5 of the #2205 plan (recorded in
+  the #2205 spec). The engine holds a live plain seek until its runway is in the engine ring,
+  bounded by 50 ms, and then lands it in one cut at its target. That closes the render-side race
+  the Worker could not close (option 3 above, as a landing rule in `crates/source`). The JS
+  deferral is deleted in both consumers (`deferSharedSeek`, `sessionMovedSharedSeek`,
+  `seekDeferralBlocks`/`seekDeferralQuanta`); `sharedSlotAge`, the #1644 stale-refusal rule and
+  #1387's headroom admission stay.
+- **Root ruling 3: H = R.** The Worker's headroom is the engine's runway by the engine's formula
+  (`feedHeadroomQuanta`, from the ring the boot resolved), so the runway always fits in one pass.
+  Soundness against #1387's own bound (one Worker tick plus a 2048-frame render burst plus one
+  block): R meets it at 48 kHz (19 = 19), 88.2 kHz (35 > 20) and 96 kHz (38 > 20). At 44.1 kHz,
+  R is 18 quanta, one quantum below the conservative bound of 19, but above the measured burst
+  (13 quanta + tick + 1 = 16). Recorded for root.
+- **Deleted tests (the deferral they described is gone):** the case-table rows "#2185: a live
+  plain seek over a full ring of the old generation frees its slots and waits for its runway; the
+  bound applies it" and "#2185: after a session seek at g, a ring seek at g with one chunk
+  published submits it in the first pass"; the deferral phase of "#2185: a newer seek and its
+  chunk published after a pass's snapshot survive..." (its drain phase stays); the runway helper
+  `publish` and the adapters' `seekBound`. The Worker headroom rig's #2185 comments are gone; its
+  numbers follow H = R (38 at 48 kHz/64). The MSB1 table passes on both adapters.
+- **Qualification.** The Chromium worker live-seek phase is gated at 0 (the "reported, not gated:
+  open #2185 worker residual" label is gone). Null sink, Chromium 151, 10 runs x 5 seeks per mode:
+
+  | per-source live seek | 2b0a64d88 | this branch |
+  | --- | --- | --- |
+  | Chromium worker | 3 / 50 seeks underrun (128 frames each) | 0 / 50 |
+  | Chromium single | 0 / 50 | **46 / 50 (128-3200 frames): red** |
+  | WebKit worker (reported, 3 runs) | - | 0 / 15 |
+  | WebKit single (reported, 3 runs) | - | 3 / 15 (128 frames) |
+
+## Open after attempt 4: single mode regressed; root decision needed
+
+- **Cause.** In `single` mode, `AudioWorkletEngineHost::seek_source`
+  (`hosts/host-web/src/lib.rs`) prepares the plan's consumer at once (`prepare_source_seek`, a
+  `SeekClock::Hold` apply) whenever the render half is on the same instance. That is how the
+  suspended `prepare-seek` op (and the headless SDK's `seekSource`) frees a full engine ring, so
+  new PCM can enter before the first block. The prelude's live drain calls the same export
+  (`miso_engine_web_v1_source_seek`). So a live ring seek still drops the old audio at once, and
+  the engine's landing rule never sees it. The deleted prelude deferral was what kept single mode
+  at 0. Worker mode is not affected: its `source_seek` reaches the control instance, which has no
+  render half to prepare.
+- **No fix was made.** Every candidate goes against an instruction: the two callers are the same
+  export with the same arguments, so host-web cannot tell a live seek from a suspended one.
+  Options for root:
+  1. Split the browser export, as the C ABI already behaves: `miso_engine_web_v1_source_seek`
+     never prepares (the landing rule), and a new export prepares a suspended or headless seek.
+     This adds a browser ABI symbol (abi-layout, generated SDK, realtime-policy tables, check
+     lists).
+  2. Keep the prelude's deferral for `single` mode only (revert the prelude half of S3; the Worker
+     half stays deleted). No ABI change; single mode was 0 in 190 seeks with it (attempt 2).
+- Until root decides, the Chromium single per-source phase is red. The rest of that leg passes
+  with the phase ungated (one run). The transport phase and worker mode are met.
+
+## Decision (root ruling 2026-10-29, still attempt 1): option 1, split the browser export
+
+- **The split.** `miso_engine_web_v1_source_seek` never prepares the consumer, also in `single`
+  mode, so a live ring seek from the PCM feed's drain reaches the engine's landing rule. This is
+  the C ABI's behaviour. One new export, `miso_engine_web_v1_source_prepare_seek` (same arguments,
+  results and thread rule), seeks and prepares the consumer at once (`SeekClock::Hold`). The seek
+  applies before the next block and the full engine ring is freed for the refill. With the render
+  half on another thread it is exactly `source_seek`.
+- **Callers of the prepare export:** the suspended `prepare-seek` op (`applySharedSeek(...,
+  prepare = true)` in the prelude and in the Worker) and the headless SDK's `seekSource`
+  (`sdk/src/core/boundary.ts`). The live callers stay on `source_seek`: the drain, the engine
+  worklet's `seekSource` and the Worker's drain.
+- **Where it is listed:** documented beside `source_seek` (`hosts/host-web/src/ffi.rs`, host
+  `.d.ts`); in the export lists (`check-web-audioworklet.sh`, `check-abi-layout-v1.py`,
+  `parameter-metadata` `EXPORTS`, the layout self-test fixture); in the regenerated SDK layout
+  (`sdk/assets/...abi-layout.json`, `sdk/src/generated/abi.ts`); and in the realtime-policy
+  render-thread table (feed, `applySharedSeek`, wrapped in `render_locked`, as `source_seek` is).
+  `check-browser-expected-resources.py` pins no export set.
+- **Worker headroom (root ruling, replacing H = R):** `H = max(R, B)`, computed once in
+  `feedHeadroomQuanta`. `B` is #1387's proven bound (one tick plus a 2048-frame burst plus one
+  block). H is 19 at 44.1 kHz and 48 kHz, 38 at 48 kHz/64 in the headroom rig.
+- **The test (one claim):** host-web
+  `session_seek::a_live_source_seek_keeps_the_old_audio_and_the_prepared_form_applies_at_once`.
+  It is red on a mutant whose live export prepares at once (164ced262's behaviour: "the old
+  generation plays on", left 2, right 1). On 164ced262 itself the prepare export does not exist.
+  `boot_transient_budget`'s paused-seek row now calls the prepare form, since it is a paused seek.
+
+## Evidence after the split
+
+Null sink, Chromium 151, 10 runs x 5 seeks per mode (head `1d8f2ea76` artifacts):
+
+| phase, mode | underrun seeks | added latency ms (min/median/max) |
+| --- | --- | --- |
+| per-source, worker | 0 / 50 | - |
+| per-source, single | **0 / 50** (164ced262: 46 / 50) | - |
+| transport, worker | 0 / 50 | 13.3 / 24.0 / 45.3 |
+| transport, single | 0 / 50 | 48.0 / 48.0 / 50.7 |
+
+- WebKit (reported, one run): 0 underrun in all four rows; transport latency 18.7-26.7 ms
+  (worker) and 40.0-45.3 ms (single).
+- `--check-matrix --sdk-root` passes on Chromium worker and single, and on WebKit worker and
+  single. WebKit worker failed once on `sdk-protocol-lossy` (#2198) and passed on its rerun.
+- The full check list passes again: fmt, clippy (`-D warnings`, all features), doc, the feature
+  test set (105 binaries), workspace and realtime policy, the release audit's C ABI leg (0
+  violations), the artifact build and `check-web-audioworklet.sh`, `test-web-audioworklet.mjs`,
+  the SDK headless/types/generated/deletions/package checks, and the layout self-test.
+
+## Status
+
+Met in both modes: a live plain ring seek during playback underruns 0 frames on Chromium.
+
+## Attempt 2 of the #2205 batch (2026-10-29)
+
+Root ruling: the landing rule covers live seeks only. The #2205 spec records the at-once session
+seek, `miso_engine_web_v1_session_prepare_seek` and its routing. For this issue:
+- **Routing assertion:** the case table's new row asserts the per-source routing, `prepare-seek`
+  to `source_prepare_seek` and the drain's live seek to `source_seek`, on both adapters.
+- **Never-fed rule:** it is now a `crates/source` test.
+- **Worker runway:** the formula is pinned to the engine's values at all four rates (MINOR 4).
+- **Per-source live seek, Chromium, 5 runs x 5 seeks per mode:** 0 of 25 underrun in both
+  worker and single mode.
+
+## Attempt 3 of the #2205 batch (2026-10-29)
+
+Root ruling: the C ABI is in scope. `miso_engine_v1_session_seek_at_once` gives a stopped mobile
+host the at-once landing (see the #2205 spec). The per-source live seek is unchanged on the C ABI:
+it lands when ready, which is this issue's rule. A per-source seek while stopped has no at-once
+form there; the restart-refill gap (rings filled before the stop) is root's mobile successor, a
+residual of this batch. Chromium per-source live seek, 3 runs x 5 seeks per mode: 0 of 15
+underrun in both modes.
