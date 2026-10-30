@@ -254,7 +254,7 @@ export async function runLiveTransportSeek(instanceMode: "worker" | "single", se
 /** One stopped seek's measurement (#2205). */
 export interface StoppedSeekRow {
   readonly generation: string;
-  /** The engine's underrun frames for the source over the seek (reported). */
+  /** The engine's underrun frames for the source over the seek. */
   readonly underrunFrames: string;
   /** The host's next render sample after `stop()` and before `play()`: the first block after resume. */
   readonly resumeSample: string;
@@ -267,9 +267,11 @@ export interface StoppedSeekRow {
 /**
  * #2205: seeks with no live audio to keep. While audio plays, `stop()`, then
  * `engine.seek(frame, { producers })` (the producer publishes 20 ms after the seek), then
- * `play()`. The seek must land at the first block rendered after resume, every source and the
- * timeline together, so no block of the stopped position plays after resume: the source's and the
- * timeline's landing sample is the render sample the host reported between `stop()` and `play()`.
+ * `play()`, with no separate `feed.prepareSeek()`: the SDK runs it. The seek must land at the
+ * first block rendered after resume, every source and the timeline together, so no block of the
+ * stopped position plays after resume: the source's and the timeline's landing sample is the
+ * render sample the host reported between `stop()` and `play()`; and the target is queued then,
+ * so the source underruns no frame.
  */
 export async function runLiveStoppedSeek(instanceMode: "worker" | "single", seeks = 5) {
   const live = await livePlayback(instanceMode);

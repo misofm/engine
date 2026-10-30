@@ -7608,6 +7608,34 @@ where
             .map(|row| row.index as usize)
     }
 
+    /// Visit each source the plan of `epoch` renders (#2205): its index in that plan's source set
+    /// and the frame a session seek to `timeline_sample` sends it, the sample clamped to the
+    /// newest session's region of the source. A source the newest session does not hold is
+    /// skipped. Control thread; it allocates nothing.
+    pub fn for_each_rendering_session_frame(
+        &self,
+        epoch: u64,
+        timeline_sample: u64,
+        mut visit: impl FnMut(usize, u64),
+    ) {
+        let Some(rendering) = core::iter::once(&self.providers)
+            .chain(&self.pending_providers)
+            .chain(&self.retired_providers)
+            .find(|provider| provider.epoch == epoch)
+        else {
+            return;
+        };
+        let sources = &self.newest_providers().sources;
+        for row in rendering.inventory.sources() {
+            if let Some(region) = sources.region(row.id.as_bytes()) {
+                visit(
+                    row.index as usize,
+                    timeline_sample.min(region.end).max(region.start),
+                );
+            }
+        }
+    }
+
     /// Sets the replacement peak ceiling ([`ControlLimits::maximum_replacement_peak_bytes`]) once
     /// the adapter knows its own fixed bytes exactly (#1290a D3): they are known only after the
     /// first plan is prepared, and the limits the session was built with are a plain value.

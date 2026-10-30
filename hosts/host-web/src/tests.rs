@@ -9561,6 +9561,41 @@ mod session_seek {
         }
     }
 
+    /// #2205: on an instance that holds the render half, the at-once session seek
+    /// (`session_prepare_seek`, a stopped transport) prepares every consumer at once, as
+    /// `source_prepare_seek` does for one: a ring full of the old generation takes the target's
+    /// PCM before the next block, and that block plays it.
+    ///
+    /// Test value: red if the at-once form leaves the consumers unprepared (the full ring refuses
+    /// the target's PCM until render lands the seek, so a suspended feed cannot refill before
+    /// `play()`), or if it does not land at the next block.
+    #[test]
+    fn an_at_once_session_seek_frees_a_full_ring_for_the_target_before_the_next_block() {
+        let mut rig = Rig::boot(&one_source(), &[LONG]);
+        let mut frame = 4 * Q;
+        while rig.submit(LONG, 1, frame) == RESULT_OK {
+            frame += Q;
+        }
+        assert_eq!(
+            rig.submit(LONG, 2, 0),
+            RESULT_INVALID_ARGUMENT,
+            "not sought yet"
+        );
+        assert_eq!(
+            miso_engine_web_v1_session_prepare_seek(rig.handle, 2, 3_000),
+            RESULT_OK
+        );
+        assert_eq!(
+            rig.submit(LONG, 2, 3_000),
+            RESULT_OK,
+            "the full ring took the target"
+        );
+        let sample = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(LONG), (2, sample, 3_000));
+        assert_eq!(rig.timeline(sample), 3_000);
+    }
+
     /// Gate 1, both forms move the timeline and every source in the one block.
     ///
     /// Test value: red if the export seeks the consumers in different blocks (for example through

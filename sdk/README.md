@@ -371,7 +371,10 @@ engine's ring, or the deadline above. The old position plays until then, so the 
 much latency at most and no silence. A source that received no PCM before the seek does not hold
 it. A seek while the engine is not playing (`stop()` asked, or the context not running) has no
 live audio to keep: it lands at the next rendered block, so `play()` starts at the new position.
-The headless engine's `seek` lands at the next rendered block too.
+When the context is suspended, `engine.seek(frame, { producers })` also runs the feeds' suspended
+flow itself once the producers have repositioned (each linked feed's `prepareSeek()`), so the
+target's PCM is queued before `play()`: a stopped seek needs no separate `prepareSeek` call. The
+headless engine's `seek` lands at the next rendered block too.
 
 Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
 is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.

@@ -411,7 +411,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * every producer's runway is in the engine, at most `ceil(50 ms / quantum)` blocks after the
    * block that observed it, then every source and the timeline land in one block. While it does
    * not play (`stop()` asked, or the context not running) the seek lands at the next rendered
-   * block, so `play()` starts at `frame`. The generation is `options.generation`, else one above the largest this object has
+   * block, so `play()` starts at `frame`; with the context suspended it then runs every linked
+   * feed's `prepareSeek()` after the producers repositioned, so no separate call is needed. The generation is `options.generation`, else one above the largest this object has
    * used for a seek (the first is `2n`; every source starts at `1n`). Only after the engine
    * accepted the seek are `options.producers` repositioned, in order, to `frame` under that
    * generation; the feed then consumes their ring seeks without seeking the sources again. An app
@@ -1620,6 +1621,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           throw new MisoUsageError("seek frame must be a non-negative bigint at most Number.MAX_SAFE_INTEGER");
         }
         const generation = options?.generation ?? highestSeekGeneration + 1n;
+        let live = true;
         if (typeof generation !== "bigint" || generation <= 0n) {
           throw new MisoUsageError("seek generation must be a positive bigint");
         }
@@ -1638,7 +1640,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           // #2205: a live seek keeps the old position playing until every producer's runway is in
           // the engine; with no live audio to keep (stopped, or the context not running) the seek
           // lands at the next rendered block.
-          reply = await host.seekSession(audioIsLive() ? { generation, frame } : { generation, frame, atOnce: true });
+          live = audioIsLive();
+          reply = await host.seekSession(live ? { generation, frame } : { generation, frame, atOnce: true });
         } catch (error) {
           // The host rejects a local refusal (a second unsettled seek: `backpressure`) and a
           // sticky failure with its numeric record; keep the result in the SDK's vocabulary.
@@ -1657,6 +1660,13 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           } catch (error) {
             throw new SessionSeekProducerError(generation, index, error);
           }
+        }
+        // #2205: with no live audio to keep and the context suspended, run the feeds' documented
+        // suspended flow now that the producers published their seeks: each linked feed's
+        // `prepareSeek()` frees its stale shared slots and the engine's ring, so the target is
+        // queued before `play()`. The app makes no separate `prepareSeek` call.
+        if (!live && producers.length !== 0 && context.state === "suspended") {
+          await feedRetirement.prepareSeeks();
         }
         return Object.freeze({ generation });
       },

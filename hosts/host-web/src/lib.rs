@@ -2607,7 +2607,30 @@ impl AudioWorkletEngineHost {
     /// decided at that block, so a render half on another thread lands it the same way. Same
     /// results, declaration and thread rule as the plain form.
     pub fn session_prepare_seek(&mut self, generation: u64, timeline_frame: u64) -> u32 {
-        self.session_seek_landing(generation, timeline_frame, None, true)
+        let code = self.session_seek_landing(generation, timeline_frame, None, true);
+        if code != RESULT_OK {
+            return code;
+        }
+        // With the render half on this instance (`single` mode), prepare every consumer the
+        // rendering plan holds now, as `prepare_source_seek` does for one source: each applies the
+        // seek before the next block and drops the old generation's queued PCM, so a suspended
+        // feed can refill the engine's ring before `play()`. A consumer whose ring did not get
+        // this seek (a fresh ring of a pending candidate) is not ready and stays as it is; the
+        // at-once landing still moves it at its next block.
+        let (Some(control), Some(ready)) = (self.control.as_ref(), self.render.ready.as_mut())
+        else {
+            return code;
+        };
+        let plan = &mut ready.plan;
+        let epoch = plan.owner().active_epoch().0;
+        control
+            .control
+            .for_each_rendering_session_frame(epoch, timeline_frame, |index, frame| {
+                if plan.can_prepare_source_seek(index) {
+                    let _ready = plan.prepare_source_seek(index, generation, frame);
+                }
+            });
+        code
     }
 
     fn session_seek_landing(
