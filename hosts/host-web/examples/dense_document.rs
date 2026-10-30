@@ -4,7 +4,7 @@
 //! requires the boot's retained projection to refuse it before the linear memory grows past the
 //! budget plus one page (issue #2199).
 //!
-//! `tests/boot_transient_budget.rs` includes [`document`] for its native twin of that gate and its
+//! `tests/boot_transient_budget.rs` builds the same shape for its native twin of that gate and its
 //! parse-transient cases.
 
 use std::io::{self, Write as _};
@@ -15,7 +15,7 @@ const TRACKS: usize = 6_000;
 
 /// The dense accepted shape: `tracks` tracks, four effect declarations per track, each with a
 /// post-pan route to the main output.
-pub(crate) fn document(tracks: usize) -> Vec<u8> {
+fn document(tracks: usize) -> Vec<u8> {
     let mut model = parse_session_json(include_str!(
         "../../../fixtures/session/v1/parametric-eq-nine-track.json"
     ))
