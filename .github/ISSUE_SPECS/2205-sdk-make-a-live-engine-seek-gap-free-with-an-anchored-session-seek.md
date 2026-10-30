@@ -245,3 +245,53 @@ The console seeks only while stopped, so this path matters.
 - **Checks:** `--check-matrix --sdk-root` passes on Chromium and WebKit, both legs. The SDK
   checks, both case tables, `check-web-audioworklet.sh`, the control-plane and host-web feature
   tests, clippy, doc, fmt and the policies pass.
+
+## Attempt 3 (2026-10-29, verify of cf83aa7bd: FAIL, one MAJOR)
+
+- **M1, root ruling: the C ABI is in scope; mobile hosts are live scope.** New symbol
+  `miso_engine_v1_session_seek_at_once(session, g, T)`, with the same signature and results as
+  `miso_engine_v1_session_seek`, over `SessionState::session_seek_at_once`. It is announced by
+  `MISO_ENGINE_V1_FEATURE_SESSION_SEEK_AT_ONCE` (bit 12, 4096; the mask is now 8191), an in-place
+  V1 amendment: no struct, size or `ABI_VERSION` change.
+  - **Registered in:** the header (declaration, bit, thread list, and the prose beside
+    `session_seek`: use it while stopped; the old audio never plays after restart; a ring the host
+    filled before the stop and cannot drain while stopped underruns at restart until refilled), the
+    ffi, `abi.rs` and its frozen-mask test, both C fixtures (`abi_smoke.c`, `header_smoke.cpp`),
+    `check-capi-abi.sh`'s frozen symbol set (the check and its mutation self-test pass), and
+    `docs/C_ABI_V1_QUALIFICATION.md`. The realtime-policy C ABI scan (`whole_plan.rs`, the unsafe
+    file allowlist) needs no entry for a control-thread symbol in `ffi.rs`; the tool passes.
+  - **Test:** capi `session_seek::an_at_once_session_seek_plays_no_old_block_after_a_stop`. A fed
+    source's ring is filled to backpressure, then the at-once seek; the next render lands
+    `(2, sample, 2000)` and outputs no sample of the old generation. On cf83aa7bd the symbol does
+    not exist. Routed to the live form, it is red: "landed at the next render", left (1, 0, 0).
+  - **Residual (root files it as a mobile successor; not built here):** a mobile host that
+    filled its rings before the stop and cannot drain them while stopped underruns at restart
+    until it submits the target. The engine drops the old PCM at the landing block, but no C ABI
+    path frees the ring while stopped, as the browser feed's `prepareSeek` does.
+- **MINOR 1:** `engine.seek` awaits the newest transport call's context step (`resume()` or
+  `suspend()`, the SDK's existing step promise) before it chooses live or at-once. An iOS
+  `"interrupted"` context counts as suspended for the feeds' `prepareSeek` (in `engine.seek` and in
+  the feed's own check and reply).
+- **MINOR 2:** a feed preparation failure after the seek applied (`prepareBusy`,
+  `prepareTimeout`, `prepareRefused`, ...) rejects as `SessionSeekProducerError` with the
+  generation; `producerIndex` is the producers' count. `prepareSuperseded` and `prepareState` are
+  still skipped.
+- **MINOR 3:** one browser-evals test with rows, "#2205: seek waits for a transport step, then is
+  live or at once, and a stopped seek prepares the feeds". It uses a fake host and context and a
+  linked feed over a fake node. It is red on a seek that does not wait ("nothing is sent while
+  stop()'s context step is in flight", which is cf83aa7bd's behaviour), on a live branch that runs
+  `prepareSeek`, and on an unwrapped preparation error.
+- **Evidence (head `1663aeb29` artifacts, SDK source bundle):**
+  - **Chromium, 3 runs x 5 seeks per mode:** 0 of 15 underrun and 0 late or split landings in
+    every row (per-source, transport, stopped; both modes). Transport latency 13.3 / 24.0 /
+    34.7 ms (worker) and 48.0 / 48.0 / 50.7 ms (single).
+  - **WebKit, one run:** 0 underrun in every row.
+  - **`--check-matrix --sdk-root`:** passes on Chromium and WebKit, both legs.
+  - **The full gate list passes:**
+    - fmt, clippy (`-D warnings`, all features), doc;
+    - the feature test set (108 binaries) and the full capi test set;
+    - `check-capi-abi.sh` and `--self-test`, the release audit C ABI leg (0 violations);
+    - the realtime and workspace policy;
+    - the artifact build and `check-web-audioworklet.sh`, `test-web-audioworklet.mjs`;
+    - the SDK headless (710 tests), types, generated, deletions and package checks, and the
+      layout self-test.

@@ -307,3 +307,12 @@ seek, `miso_engine_web_v1_session_prepare_seek` and its routing. For this issue:
 - **Worker runway:** the formula is pinned to the engine's values at all four rates (MINOR 4).
 - **Per-source live seek, Chromium, 5 runs x 5 seeks per mode:** 0 of 25 underrun in both
   worker and single mode.
+
+## Attempt 3 of the #2205 batch (2026-10-29)
+
+Root ruling: the C ABI is in scope. `miso_engine_v1_session_seek_at_once` gives a stopped mobile
+host the at-once landing (see the #2205 spec). The per-source live seek is unchanged on the C ABI:
+it lands when ready, which is this issue's rule. A per-source seek while stopped has no at-once
+form there; the restart-refill gap (rings filled before the stop) is root's mobile successor, a
+residual of this batch. Chromium per-source live seek, 3 runs x 5 seeks per mode: 0 of 15
+underrun in both modes.
