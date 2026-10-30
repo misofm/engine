@@ -1258,6 +1258,24 @@ impl GraphProjection {
         &self.effects
     }
 
+    /// For each entry of [`Self::effects`], in entry order, whether the bank plan leaves it per
+    /// node (issue #2219): exactly the entries [`GraphCompiler::compile_projected`] prepares a
+    /// processor for, since it binds these planned banks with their members unchanged. A banked
+    /// member renders in its bank and never gets a processor, so a host charges processor bytes
+    /// only where this is `true`.
+    pub fn per_node_entries(&self) -> impl ExactSizeIterator<Item = bool> + '_ {
+        let banked: BTreeSet<&EffectNodeId> = self
+            .front
+            .banks
+            .iter()
+            .flat_map(|bank| bank.members.iter())
+            .collect();
+        self.front
+            .effect_ids
+            .iter()
+            .map(move |node| node.as_ref().is_none_or(|node| !banked.contains(node)))
+    }
+
     /// The projected effects, for a caller that attaches each instance's live-control and
     /// observation lanes before the compile.
     ///

@@ -1358,26 +1358,28 @@ fn retained_projection_budget_diagnostic_names_projected_bytes() {
 
 /// Issue #2199: the boot's retained projection is a ceiling of the exact aggregate the booted
 /// host reports, for the three shipped representatives, and over-projects each by at most its
-/// bound in thousandths of the projection: the measured `(projection - exact) / projection` plus
+/// bound in millionths of the projection: the measured `(projection - exact) / projection` plus
 /// about 8%, so a projector that grows a row past what the plan holds is an explicit re-pin. An
 /// undershoot of any size is red: the boot admits on the projection before anything is
 /// allocated, so a projection under the exact aggregate admits a session the budget cannot hold.
-/// Pinned at: identity 2,016 / 1,120,351 = 1.80, nine-track 18,144 / 1,492,339 = 12.16, console
-/// 381,256 / 5,327,466 = 71.56, each plus about 8% and rounded up (the console's margin is mostly
-/// the effect row's processor boxes, which a banked member no longer has, and the observation
-/// handles' vector at its growth bound).
+/// Pinned at (issue #2219, which charges no processor for a banked member): identity 32 /
+/// 1,118,367 = 28.6, nine-track 288 / 1,474,483 = 195.3, console 7,496 / 4,953,706 = 1,513.2, each
+/// plus about 8% and rounded up. The residual slack is the ceiling rows': the state inventory's
+/// route rows for every route (a route the plan gives no live op is charged its row and ID text),
+/// its meter ID text at the longest strip ID, and the observation handles' vector at its growth
+/// bound.
 ///
 /// Test value: red when the projection leaves out a row the booted host retains (the graph, a
 /// control-plane row, a shape table) or charges one below its exact bytes, which the old form of
 /// this test (an undershoot bound) admitted by design, and red when a row is over-charged past its
-/// pin.
+/// pin, as the effect row was when it charged every banked member a processor (#2219).
 #[test]
 fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() {
     let defaults = boot_options(128);
     let representatives = [
         (
             "identity-one-track",
-            2_u64,
+            31_u64,
             one_track_session(128),
             WebBootOptions {
                 source_ring_frames: 128,
@@ -1386,7 +1388,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "parametric-eq-nine-track",
-            14_u64,
+            211_u64,
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1395,7 +1397,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "console-sixty-four-track",
-            78_u64,
+            1_635_u64,
             include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1405,7 +1407,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
     ];
 
-    for (name, bound_permille, document, options) in representatives {
+    for (name, bound_per_million, document, options) in representatives {
         let projection = retained_projection(document.as_bytes(), options).total;
         let host =
             AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
@@ -1416,9 +1418,9 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
             panic!("{name}: projection {projection} is under the exact retained aggregate {exact}")
         });
         let maximum_over = projection
-            .checked_mul(bound_permille)
+            .checked_mul(bound_per_million)
             .expect("bounded representative projection")
-            / 1_000;
+            / 1_000_000;
         assert!(
             over <= maximum_over,
             "{name}: over-projection {over} exceeds its bound {maximum_over} (projection \

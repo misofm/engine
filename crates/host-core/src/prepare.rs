@@ -4238,6 +4238,18 @@ fn prepare_or_project(
     let mut host_projection = {
         let arithmetic = || resource("host.resource.arithmetic");
         let estimate = graph_projection.resource_estimate();
+        // Issue #2219: a processor for every entry the bank plan leaves per node, and none for a
+        // banked member, as the compile prepares them.
+        let (per_node_effects, per_node_processor_bytes) = graph_projection
+            .effects()
+            .entries
+            .iter()
+            .zip(graph_projection.per_node_entries())
+            .filter(|(_, per_node)| *per_node)
+            .try_fold((0_usize, 0_u64), |(count, bytes), (entry, _)| {
+                Some((count + 1, bytes.checked_add(entry.processor_bytes()?)?))
+            })
+            .ok_or_else(arithmetic)?;
         // The send lanes the attach below gives: every live route that does not follow when the
         // plan attaches six-word lanes, and every following route; a successor's transition
         // routes at their bound, every route of the model and every fading copy.
@@ -4383,6 +4395,8 @@ fn prepare_or_project(
             .map_err(|_| arithmetic())?,
             meters: meter_requests.len(),
             effect_instances: graph_projection.effects().entries.len(),
+            per_node_effects,
+            per_node_processor_bytes,
             effect_producers: if attach_effect_lanes {
                 graph_projection.effects().entries.len()
             } else {
@@ -4496,6 +4510,13 @@ fn prepare_or_project(
     );
     let mut artifact = GraphCompiler::compile_projected(graph_projection, builtins)
         .map_err(|failure| graph_diagnostics(&failure.diagnostics))?;
+    // Issue #2219: the plan holds a processor for exactly the entries the projection charged one.
+    let banked_members: usize = artifact.graph().effect_bank_members().map(<[_]>::len).sum();
+    if host_projection.effect_instances.checked_sub(banked_members)
+        != Some(host_projection.per_node_effects)
+    {
+        return Err(platform("host.graph.projection"));
+    }
     // #1354 D4: the warm successor re-checks C1 against its own compile, and counts its prime
     // over its own source-claim lines (D3).
     let warm_prime_bytes = match (successor, warm, &warm_restart, &warm_predecessor) {
@@ -10009,7 +10030,8 @@ pub fn check_effect_projection(
 /// holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostProjection {
-    /// The effect state, scratch and processor bytes (issue #2194), from the descriptors.
+    /// The declared effect state and scratch of every instance (issue #2194), from the
+    /// descriptors.
     pub effects: EffectStateProjection,
     /// The report's `graph_session_plus_plan_bytes`, exact: the graph's capped estimate, which
     /// holds the declared effect state and scratch and the builtins' banks and owners, and the
@@ -10059,6 +10081,13 @@ pub struct HostProjection {
     pub meters: usize,
     /// The plan's effect instances, exact.
     pub effect_instances: usize,
+    /// The instances the bank plan leaves per node, exact (issue #2219): the processors the plan
+    /// prepares. A banked member renders in its bank and has none.
+    pub per_node_effects: usize,
+    /// A ceiling of those processors' bytes beyond their declared state and scratch: each one's
+    /// box and its undeclared heap ([`effect_compiler::EffectProjectedEntry::processor_bytes`]),
+    /// for the per-node instances only (issue #2219).
+    pub per_node_processor_bytes: u64,
     /// The effect producers the plan attaches (one per instance with a lane), exact.
     pub effect_producers: usize,
     /// Their strip and effect ID text, exact.
@@ -10093,16 +10122,16 @@ impl HostProjection {
     }
 
     /// Every engine-owned byte the prepared host retains, at most: the admitted rows, the send
-    /// lanes and a successor's later carry sections at their bound, the effect processors' boxes
-    /// and undeclared heap beyond the graph's declared state, the state inventory, the source
-    /// control set and the sources. `None` on overflow.
+    /// lanes and a successor's later carry sections at their bound, the per-node effect
+    /// processors' boxes and undeclared heap beyond the graph's declared state (none for a banked
+    /// member, issue #2219), the state inventory, the source control set and the sources. `None`
+    /// on overflow.
     #[must_use]
     pub fn retained_bytes(&self) -> Option<u64> {
         self.admitted_graph_and_model()?
             .checked_add(self.route_controls.total_bytes)?
             .checked_add(self.carry_bytes.checked_sub(self.carry_program_bytes)?)?
-            .checked_add(self.effects.inline_bytes)?
-            .checked_add(self.effects.undeclared_heap_bytes)?
+            .checked_add(self.per_node_processor_bytes)?
             .checked_add(self.inventory_bytes)?
             .checked_add(self.control_retained_bytes)?
             .checked_add(self.source_total_bytes)
