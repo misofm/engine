@@ -111,6 +111,27 @@ pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32
     }
 }
 
+/// The seek runway and deadline `R = D` of a source ring of `ring_frames` at `sample_rate_hz` and
+/// `quantum_frames` (#2205, root ruling 2): `min(ceil(50 ms / quantum), ring blocks / 2)` blocks,
+/// [`source::seek_runway_blocks`]. Every host prepares it; the browser's control Worker reads it
+/// to size its admission headroom (root ruling 3), so the two cannot drift. A zero quantum
+/// returns zero.
+#[must_use]
+pub const fn source_seek_runway_blocks(
+    sample_rate_hz: u32,
+    quantum_frames: u32,
+    ring_frames: u32,
+) -> u32 {
+    if quantum_frames == 0 {
+        return 0;
+    }
+    source::seek_runway_blocks(
+        sample_rate_hz,
+        quantum_frames,
+        ring_frames as u64 / quantum_frames as u64,
+    )
+}
+
 /// The ring that hides one producer stall (#1354 D1): `ceil(100 ms * fs / quantum)` quanta plus
 /// one quantum held by the consumer and one in the recycle path, a whole number of quanta.
 ///
@@ -2261,7 +2282,12 @@ fn source_ring_config(
         quantum_frames: compiled.quantum(),
         frame_capacity: u64::from(caps.source_ring_frames),
         initial_generation: SourceGeneration(1),
-        seek_runway_blocks: 0,
+        // #2205, root ruling 2: the one runway and deadline, fixed at prepare.
+        seek_runway_blocks: source_seek_runway_blocks(
+            compiled.sample_rate().0,
+            compiled.quantum().0,
+            caps.source_ring_frames,
+        ),
     }
 }
 

@@ -545,7 +545,12 @@ pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
     })
 }
 
-/// Queue one generation-tagged source seek for the next render block.
+/// Queue one generation-tagged source seek. It lands when its PCM is ready (#2205): the playing
+/// generation plays on until `R` blocks of `generation` are queued (or the region's end, or the
+/// source had no PCM before the call), at the latest `R` blocks after render observed it, and then
+/// plays `source_frame` from its first sample; `R` is
+/// `host_core::source_seek_runway_blocks` of the plan's rate, quantum and source ring (50 ms,
+/// capped at half the ring). See the header's "Seek".
 /// A null, empty, non-UTF-8 or over-long source ID is `RESULT_INVALID_ARGUMENT` with
 /// `source.id.invalid`.
 ///
@@ -662,7 +667,9 @@ unsafe fn source_seek_entry(
 ///
 /// The timeline goes to `timeline_sample`; each source to `min(timeline_sample, its frames)`.
 /// Every consumer takes the seek in the same render block, or none does. The host then submits
-/// generation `generation` of each source from its frame. `generation` must be above every
+/// generation `generation` of each source from its frame. The plain form lands for every source
+/// and the timeline in one block (#2205): the first at which every source that waits has its
+/// runway queued, or `R` blocks after render observed it ([`miso_engine_v1_source_seek`]). `generation` must be above every
 /// generation the host has used on this session (one above the largest is always valid).
 ///
 /// A plain session seek is a declared discontinuity (root ruling B16-R9): the engine declares it in
@@ -763,9 +770,9 @@ unsafe fn session_seek_entry(
 /// Copy where a source of the newest committed session landed, as render last published it
 /// (#1316): the generation in effect, the source-read sample (the render clock in this version) of
 /// the first block it played in, the source frame that block started at, and the source's
-/// cumulative underrun and held frames. A plain seek lands at the first block that begins after the
-/// call; an anchored seek at its anchor block, at its frame plus the lateness if render reached it
-/// late. Generation `0` means the source has not rendered a block yet. The report belongs to the
+/// cumulative underrun and held frames. A plain seek lands at the first block at which its runway
+/// is queued, at the latest `R` blocks after render observed it, at its frame (#2205); an
+/// anchored seek at its anchor block, at its frame plus the lateness if render reached it late. Generation `0` means the source has not rendered a block yet. The report belongs to the
 /// source's ring, so a plan swap that carries the source keeps it; a source a transaction adds
 /// starts at generation `0`.
 ///

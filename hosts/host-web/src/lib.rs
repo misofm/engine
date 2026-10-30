@@ -2544,7 +2544,9 @@ impl AudioWorkletEngineHost {
     /// a control-side call (the message handler, never `process()`). With `anchor_sample`, every
     /// consumer applies the seek in the block that starts there. This adapter holds no seek
     /// logic, and it never prepares the plan's consumer: every consumer observes the seek through
-    /// its command queue at the next block, the timeline included. A host that is not ready
+    /// its command queue at the next block, the timeline included, and a plain seek lands for all
+    /// of them in one block once every source that waits has its runway, or at the deadline
+    /// (#2205). A host that is not ready
     /// refuses with [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map
     /// through `refuse_source` (a stale generation or an anchor that is not a quantum
     /// multiple is [`RESULT_INVALID_ARGUMENT`], one full slot [`RESULT_BACKPRESSURE`]). The plain

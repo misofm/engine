@@ -1012,24 +1012,30 @@ fn seek_readiness_retained_bytes() -> usize {
 /// * bits 0..32, the **epoch**: the producer's accepted seek pushes, wrapped. Render compares it
 ///   with its own command pops, wrapped: equal exactly when the word describes the newest seek
 ///   render has popped. The command queue has one slot, so the producer is never more than one
-///   push ahead and the wrap never aliases.
-/// * bit 32, **fed**: a block of any generation was ever published. A never-fed ring has nothing
-///   to wait for, so its seek is ready at once (root ruling 4).
-/// * bit 33, **ended**: the epoch's seek has no more PCM to come: a block that ends the region
+///   push ahead and the wrap never aliases. A word of another epoch is not ready.
+/// * bit 32, **fed**: a block of any generation was ever published.
+/// * bit 33, **waits**: the ring was fed before the epoch's seek was pushed. A seek on a ring
+///   never fed before it has no old audio to play on and nothing it waits for, so it is ready at
+///   once (root ruling 4): an empty boot or a stem still loading does not hold a seek.
+/// * bit 34, **ended**: the epoch's seek has no more PCM to come: a block that ends the region
 ///   was published, or the seek named the region's end or past it.
-/// * bits 34..64, **blocks**: the epoch's published blocks, saturating.
+/// * bits 35..64, **blocks**: the epoch's published blocks, saturating.
 struct SeekReadiness;
 
 impl SeekReadiness {
     const EPOCH_MASK: u64 = 0xFFFF_FFFF;
     const FED: u64 = 1 << 32;
-    const ENDED: u64 = 1 << 33;
-    const BLOCK_SHIFT: u32 = 34;
-    const BLOCK_MAX: u64 = (1 << 30) - 1;
+    const WAITS: u64 = 1 << 33;
+    const ENDED: u64 = 1 << 34;
+    const BLOCK_SHIFT: u32 = 35;
+    const BLOCK_MAX: u64 = (1 << 29) - 1;
 
     /// The word after a seek push whose epoch is `epoch`: no block yet, fed kept.
     const fn after_seek(word: u64, epoch: u64, ended: bool) -> u64 {
-        (word & Self::FED) | (epoch & Self::EPOCH_MASK) | if ended { Self::ENDED } else { 0 }
+        let fed = word & Self::FED;
+        let waits = if fed != 0 { Self::WAITS } else { 0 };
+        let ended = if ended { Self::ENDED } else { 0 };
+        fed | waits | ended | (epoch & Self::EPOCH_MASK)
     }
 
     /// The word after one more block of the epoch.
@@ -1040,20 +1046,17 @@ impl SeekReadiness {
         } else {
             blocks
         };
-        (word & ((1 << Self::BLOCK_SHIFT) - 1))
-            | Self::FED
-            | if end_of_region { Self::ENDED } else { 0 }
-            | (blocks << Self::BLOCK_SHIFT)
+        let ended = if end_of_region { Self::ENDED } else { 0 };
+        (word & ((1 << Self::BLOCK_SHIFT) - 1)) | Self::FED | ended | (blocks << Self::BLOCK_SHIFT)
     }
 
     /// Whether `word` makes the seek render popped as its `epoch`-th command ready for a runway
     /// of `runway` blocks.
     const fn ready(word: u64, epoch: u64, runway: u32) -> bool {
-        if word & Self::FED == 0 {
-            return true;
-        }
         (word & Self::EPOCH_MASK) == (epoch & Self::EPOCH_MASK)
-            && (word & Self::ENDED != 0 || (word >> Self::BLOCK_SHIFT) >= runway as u64)
+            && (word & Self::WAITS == 0
+                || word & Self::ENDED != 0
+                || (word >> Self::BLOCK_SHIFT) >= runway as u64)
     }
 }
 
@@ -2582,7 +2585,7 @@ impl PcmSourceConsumer {
     }
 
     /// Whether the newest seek this consumer popped has its runway queued (#2205): `R` blocks of
-    /// its generation published, or its region's end, or a ring that was never fed. One
+    /// its generation published, or its region's end, or a ring never fed before the seek. One
     /// `Acquire` load, ordered after the producer's block pushes it counts.
     fn runway_queued(&self) -> bool {
         let runway = self.shape.seek_runway_blocks;
@@ -7897,6 +7900,34 @@ mod tests {
                 (2, 3 * Q, 100)
             );
             assert_eq!(report.cumulative_underrun_frames, 0);
+        }
+
+        /// Test value: red when a live plain seek with no more PCM to come waits for a runway it
+        /// can never get: a seek to the region's end ([`HostChunkProvider::set_region_end`]), or
+        /// one whose only block ends the region, would hold its source silent to the deadline.
+        #[test]
+        fn a_live_plain_seek_with_no_more_pcm_to_come_lands_at_the_next_block() {
+            for to_end in [true, false] {
+                let (producer, mut consumer, _) = session_ring(landing_config()).expect("ring");
+                let mut host = producer.into_host_chunk_provider(RATE);
+                host.set_region_end(SourceFrame(200));
+                for frame in [0, 4, 8, 12] {
+                    feed(&mut host, 1, frame);
+                }
+                consumer.begin_block_at(0);
+                if to_end {
+                    host.try_seek(plain(2, 200)).expect("seek to the end");
+                } else {
+                    host.try_seek(plain(2, 198)).expect("seek");
+                    host.submit(chunk(2, 198, &[&[value(2, 198); 2]], 2, true))
+                        .expect("the region's last block");
+                }
+                let report = consumer.begin_block_at(Q);
+                assert_eq!(report.active_generation.0, 2, "to the end: {to_end}");
+                if !to_end {
+                    assert_eq!(report.copied_frames, 2, "the region's last two frames");
+                }
+            }
         }
 
         /// Two mono sources and an occupied timeline at quantum 4 with a runway of 2, fenced by

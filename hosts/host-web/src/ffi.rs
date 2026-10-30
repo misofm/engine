@@ -913,7 +913,8 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
     })
 }
 
-/// Queue one generation-tagged absolute seek for the staged source ID.
+/// Queue one generation-tagged absolute seek for the staged source ID. A plain seek lands when its
+/// runway is queued, bounded by the deadline, as the C ABI's `miso_engine_v1_source_seek` (#2205).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_seek(
     handle: u32,
@@ -1003,7 +1004,9 @@ pub extern "C" fn miso_engine_web_v1_source_seek_at(
 /// nothing (issue #1643 D1). It runs the control plane's `SessionState::session_seek`, the call the
 /// C ABI's `miso_engine_v1_session_seek` runs, so the control Worker (or in `single` mode the
 /// worklet's message handler) calls it, never `process()`: it runs the service step. It never
-/// prepares the plan's consumer; every consumer observes the seek at the next block. It is a
+/// prepares the plan's consumer; every consumer observes the seek at the next block, and the plain
+/// form lands for every source and the timeline in one block once every source that waits has its
+/// runway queued, or at the deadline (#2205, as the C ABI's). It is a
 /// declared discontinuity (root ruling B16-R9): after every check and before any push it declares
 /// it as [`miso_engine_web_v1_declare_discontinuity`] does, and a plan that publishes is counted as
 /// a blocking rebuild; a refused seek declares nothing, so the page never declares before it.

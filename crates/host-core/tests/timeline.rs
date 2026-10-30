@@ -230,6 +230,13 @@ fn seek_both(sources: &mut SourceControlSet, command: SourceCommand) {
         .expect("session seek");
 }
 
+/// The blocks a plain seek's checks submit: [`CHECKED`], and at least the ring's seek runway, so
+/// the seek lands at the next block (#2205).
+fn plain_runway() -> u64 {
+    let runway = host_core::source_seek_runway_blocks(48_000, QUANTUM as u32, 4_096);
+    (CHECKED as u64).max(u64::from(runway))
+}
+
 /// Render `blocks` blocks of `plan` (whose source-read clock leads its render clock by `offset`)
 /// and check, after each, that the frame its source read started at is the timeline at its
 /// source-read sample. Returns the frames.
@@ -330,12 +337,12 @@ fn a_source_and_the_timeline_given_the_same_seeks_read_the_same_frame_in_every_b
     submit(
         &mut host.sources,
         3,
-        PLAIN_FRAME..PLAIN_FRAME + CHECKED as u64 * Q,
+        PLAIN_FRAME..PLAIN_FRAME + plain_runway() * Q,
     );
     let frames = render_in_step(&mut host.plan, 0, gain, CHECKED);
     assert_eq!(
         frames[0], PLAIN_FRAME as i64,
-        "a plain seek lands in the next block"
+        "a plain seek with its runway queued lands in the next block"
     );
     assert_eq!(
         timeline_report(&host.sources),
@@ -742,7 +749,7 @@ fn a_discontinuity_keeps_the_sources_and_the_timeline_in_step() {
     submit(
         &mut successor.sources,
         3,
-        PLAIN_FRAME..PLAIN_FRAME + CHECKED as u64 * Q,
+        PLAIN_FRAME..PLAIN_FRAME + plain_runway() * Q,
     );
     let frames = render_in_step(&mut successor.plan, 0, gain, CHECKED);
     assert_eq!(frames[0], PLAIN_FRAME as i64, "the plain seek lands");

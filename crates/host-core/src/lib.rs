@@ -189,7 +189,8 @@ pub use prepare::{
     prepare_host_runtime_with_selected_meters_successor, prepare_host_runtime_with_spectrum,
     prepare_host_runtime_with_spectrum_collection, prepare_host_session,
     prepare_host_session_with_live_controls, project_effects, session_jump_lengths,
-    stall_ring_frames, strip_control_table_bytes, strip_position, warm_lead,
+    source_seek_runway_blocks, stall_ring_frames, strip_control_table_bytes, strip_position,
+    warm_lead,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{

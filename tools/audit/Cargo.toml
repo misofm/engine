@@ -34,6 +34,8 @@ parametric-eq.workspace = true
 protocol = { workspace = true, features = ["test-support"] }
 session.workspace = true
 sha2.workspace = true
+# #2205: the C ABI leg submits a session seek's runway, sized by the engine's one formula.
+source.workspace = true
 
 [features]
 default = []

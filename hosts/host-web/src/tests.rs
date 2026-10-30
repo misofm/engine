@@ -9446,6 +9446,14 @@ mod session_seek {
             }
         }
 
+        /// `id`'s runway of generation `generation` from source frame `frame` (#2205): the
+        /// blocks a live plain seek of a fed source waits for, on the rig's 512-frame ring.
+        fn submit_runway(&self, id: &[u8], generation: u64, frame: u64) {
+            for block in 0..u64::from(host_core::source_seek_runway_blocks(48_000, Q as u32, 512)) {
+                assert_eq!(self.submit(id, generation, frame + block * Q), RESULT_OK);
+            }
+        }
+
         fn render(&mut self) -> Vec<u32> {
             assert_eq!(miso_engine_web_v1_render(self.handle, Q as u32), RESULT_OK);
             self.block += 1;
@@ -9496,9 +9504,10 @@ mod session_seek {
             miso_engine_web_v1_session_seek(rig.handle, 2, 6_000),
             RESULT_OK
         );
-        // The long source's PCM from the sought frame. The short source clamps to its end, 4,000,
-        // where it has no frame to submit: its seek report still names that frame.
-        assert_eq!(rig.submit(LONG, 2, 6_000), RESULT_OK);
+        // The long source's runway from the sought frame (#2205). The short source clamps to its
+        // end, 4,000, where it has no frame to submit: its seek report still names that frame,
+        // and it waits for nothing.
+        rig.submit_runway(LONG, 2, 6_000);
         let sample = rig.next();
         rig.render();
         assert_eq!(rig.landed(LONG), (2, sample, 6_000));
@@ -9595,7 +9604,7 @@ mod session_seek {
             miso_engine_web_v1_session_seek(rig.handle, 2, 3_000),
             RESULT_OK
         );
-        assert_eq!(rig.submit(LONG, 2, 3_000), RESULT_OK);
+        rig.submit_runway(LONG, 2, 3_000);
         let sample = rig.next();
         rig.render();
         let landed = rig.landed(LONG);
@@ -9684,7 +9693,7 @@ mod session_seek {
             miso_engine_web_v1_session_seek(rig.handle, 2, 3_000),
             RESULT_OK
         );
-        assert_eq!(rig.submit(LONG, 2, 3_000), RESULT_OK);
+        rig.submit_runway(LONG, 2, 3_000);
         let swap = rig.next();
         rig.render();
         assert_eq!(

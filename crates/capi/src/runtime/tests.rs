@@ -4,6 +4,13 @@ use super::*;
 use protocol::{ExpectedRevision, RequestId, SessionRevision, StatusCode};
 use session::parse_session_json;
 
+/// The seek runway `R` of a ring of [`limits`]'s 1,024 frames at 48 kHz and quantum 128 (#2205):
+/// a live plain seek of a source fed before it lands at the first block at which `R` blocks of
+/// its generation are queued.
+pub(super) fn runway_blocks() -> u64 {
+    u64::from(source::seek_runway_blocks(48_000, 128, 1_024 / 128))
+}
+
 /// Region end of the single fixture source, read through the facade's accessor.
 fn source_region_end(sources: &SourceControlSet) -> u64 {
     sources
@@ -1567,12 +1574,15 @@ fn a_scrubbed_stem_and_a_stem_started_from_its_report_stay_aligned() {
     submit_c(session, 1, 0, 48_000, &left, &right, false);
     let _ = feed_and_render_c(session, plan, 48_000, 0, 6);
 
-    // Scrub X during playback.
+    // Scrub X during playback; its runway lands it at the next block (#2205).
     assert_eq!(
         crate::ffi::test_source_seek(session, X, 2, 4_096),
         crate::RESULT_OK
     );
-    submit_block_c(session, X, 2, 32, 0, 48_000);
+    let runway = runway_blocks();
+    for block in 32..32 + runway {
+        submit_block_c(session, X, 2, block, 0, 48_000);
+    }
     let _ = render_c(plan, 6);
     let (g, s, f, _, _) = seek_report_c(session, X);
     assert_eq!((g, s, f), (2, 768, 4_096));
@@ -1597,7 +1607,8 @@ fn a_scrubbed_stem_and_a_stem_started_from_its_report_stay_aligned() {
     );
     let mut rendered = Vec::new();
     for block in 7..BLOCKS {
-        submit_block_c(session, X, 2, x_block(block), 0, 48_000);
+        // X stays its runway ahead.
+        submit_block_c(session, X, 2, x_block(block) + runway - 1, 0, 48_000);
         if block >= ANCHOR_BLOCK {
             submit_block_c(session, Y, 2, x_block(block), 1, 48_000);
         }
@@ -1620,8 +1631,11 @@ fn a_scrubbed_stem_and_a_stem_started_from_its_report_stay_aligned() {
         (1, 0),
         "one swap, and it carried X"
     );
-    // A starved block after the swap: the carried ring still publishes to the host's reader.
-    let _ = render_c(plan, BLOCKS);
+    // A starved block after the swap, once X's runway is played: the carried ring still
+    // publishes to the host's reader.
+    for block in BLOCKS..BLOCKS + runway {
+        let _ = render_c(plan, block);
+    }
     assert_eq!(seek_report_c(session, X), (2, 768, 4_096, 128, 0));
     let committed = snapshot_c(session);
     crate::ffi::test_plan_destroy(plan);
@@ -6868,6 +6882,14 @@ mod session_seek {
             crate::ffi::test_last_error(self.session)
         }
 
+        /// `LONG`'s runway of generation `generation` from source frame `frame` (#2205): the
+        /// blocks a live plain seek of it waits for.
+        fn feed_long_runway(&self, generation: u64, frame: u64) {
+            for block in 0..runway_blocks() {
+                self.feed_long(generation, frame + block * Q);
+            }
+        }
+
         /// One quantum of `LONG`'s generation `generation` from source frame `frame`.
         fn feed_long(&self, generation: u64, frame: u64) {
             let (left, right) = continuity_block(frame / Q, 0);
@@ -6891,12 +6913,12 @@ mod session_seek {
         }
     }
 
-    /// Gate 1 up to its anchored seek: the rig after `session_seek(2, 6_000)` and the block that
-    /// applied it.
+    /// Gate 1 up to its anchored seek: the rig after `session_seek(2, 6_000)`, `LONG`'s runway
+    /// and the block that applied it (`SHORT` was never fed, so it waits for nothing, #2205).
     fn after_gate_one_plain() -> Rig {
         let mut rig = Rig::new(&two_sources());
         assert_eq!(rig.seek(2, 6_000), crate::RESULT_OK);
-        rig.feed_long(2, 6_000);
+        rig.feed_long_runway(2, 6_000);
         let sample = rig.next();
         rig.render();
         assert_eq!(rig.landed(LONG), (2, sample, 6_000));
@@ -7079,6 +7101,7 @@ mod session_seek {
             crate::ffi::test_source_seek(rig.session, SHORT, 3, 100),
             crate::RESULT_OK
         );
+        rig.feed_long_runway(2, 640);
         let sample = rig.next();
         rig.render();
         assert_eq!(rig.landed(LONG), (2, sample, 640));
@@ -7108,7 +7131,7 @@ mod session_seek {
             &add_source_and_track(&model, "added", "t2"),
         );
         assert_eq!(rig.seek(2, 3_000), crate::RESULT_OK);
-        rig.feed_long(2, 3_000);
+        rig.feed_long_runway(2, 3_000);
         let swap = rig.next();
         rig.render();
         assert_eq!(
@@ -7121,6 +7144,36 @@ mod session_seek {
         assert_eq!(rig.timeline(swap), 3_000);
     }
 
+    /// #2205 gate (C ABI): a plain session seek during playback, with `LONG` fed and `SHORT`
+    /// never fed, waits while `LONG`'s producer is late (its old audio plays on), then lands
+    /// `LONG`, `SHORT` and the timeline in one block, the first at which `LONG`'s runway is
+    /// queued, with no underrun on `LONG`.
+    ///
+    /// Test value: red if the seek lands before `LONG` has PCM of its generation (today: at the
+    /// next block, `LONG` underruns a quantum), if the never-fed source holds the seek, or if
+    /// the sources and the timeline land in different blocks.
+    #[test]
+    fn a_plain_session_seek_lands_every_source_once_the_fed_one_has_its_runway() {
+        let mut rig = Rig::new(&two_sources());
+        assert_eq!(rig.seek(2, 2_000), crate::RESULT_OK);
+        let held = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(LONG).0, 1, "held: LONG's producer is late");
+        assert_eq!(rig.landed(SHORT).0, 1, "held with LONG");
+        assert_eq!(rig.timeline(held), held as i64, "the timeline runs on");
+        rig.feed_long_runway(2, 2_000);
+        let sample = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(LONG), (2, sample, 2_000));
+        assert_eq!(
+            rig.landed(SHORT),
+            (2, sample, 2_000),
+            "the never-fed source"
+        );
+        assert_eq!(rig.timeline(sample), 2_000);
+        assert_eq!(seek_report_c(rig.session, LONG).3, 0, "LONG never underran");
+    }
+
     /// Gate 5, a per-source seek leaves the timeline where it is.
     ///
     /// Test value: red if a per-source seek moves the playhead.
@@ -7131,6 +7184,7 @@ mod session_seek {
             crate::ffi::test_source_seek(rig.session, LONG, 2, 2_048),
             crate::RESULT_OK
         );
+        rig.feed_long_runway(2, 2_048);
         let sample = rig.next();
         rig.render();
         assert_eq!(rig.landed(LONG), (2, sample, 2_048));
@@ -7194,6 +7248,24 @@ mod session_seek_declares {
             crate::ffi::test_plan_latency(self.plan)
         }
 
+        /// Feeds the runway of generation `generation` from `frame` (#2205), without rendering;
+        /// returns the frame after it.
+        fn runway(&mut self, generation: u64, frame: u64) -> u64 {
+            for step in 0..runway_blocks() {
+                let (left, right) = continuity_block(self.block + 1 + step, 0);
+                submit_c(
+                    self.session,
+                    generation,
+                    frame + step * Q,
+                    48_000,
+                    &left,
+                    &right,
+                    false,
+                );
+            }
+            frame + runway_blocks() * Q
+        }
+
         /// Feeds generation `generation` from `frame` and renders `blocks` blocks.
         fn play(&mut self, generation: u64, frame: u64, blocks: u64) {
             for step in 0..blocks {
@@ -7239,7 +7311,8 @@ mod session_seek_declares {
             );
             assert_eq!(rig.epoch(), epoch + 1, "swap {swap}: one successor");
             let sample = rig.block * Q;
-            rig.play(2, 1_280, 3);
+            let next = rig.runway(2, 1_280);
+            rig.play(2, next, 3);
             let (generation, first, frame, _, _) = seek_report_c(rig.session, SOURCE);
             assert_eq!(
                 (generation, first, frame),
@@ -7283,7 +7356,8 @@ mod session_seek_declares {
         );
         assert_eq!(rig.epoch(), epoch + 1, "one successor");
         let sample = rig.block * Q;
-        rig.play(2, 1_280, 3);
+        let next = rig.runway(2, 1_280);
+        rig.play(2, next, 3);
         let (generation, first, frame, _, _) = seek_report_c(rig.session, SOURCE);
         assert_eq!((generation, first, frame), (2, sample, 1_280));
     }
@@ -7514,8 +7588,8 @@ fn seek_ride(mut model: session::SessionModel, automated: bool) -> session::Sess
 }
 
 /// Renders `model` on the C ABI: ten blocks of generation 1 (after the removal transaction of
-/// [`limited_session`] at block 6 when `floored`), a plain session seek to [`SEEK_TIMELINE`] and
-/// eight blocks of generation 2 from there. Returns the output, block by block, and the render
+/// [`limited_session`] at block 6 when `floored`), a plain session seek to [`SEEK_TIMELINE`] with
+/// its runway, and eight blocks of generation 2 from there. Returns the output, block by block, and the render
 /// sample the seek applied at (the source's seek report).
 fn render_seek_ride_c(
     model: &session::SessionModel,
@@ -7546,9 +7620,10 @@ fn render_seek_ride_c(
         crate::ffi::test_session_seek(c_session, 2, SEEK_TIMELINE, None),
         crate::RESULT_OK
     );
-    for step in 0..8_u64 {
-        let block = 10 + step;
-        let (left, right) = continuity_block(block + 1, 0);
+    // Generation 2's step `i` carries block `11 + i`'s content; its runway is fed at once
+    // (#2205), so the seek lands at the next block, and the feed stays the runway ahead.
+    let feed = |step: u64| {
+        let (left, right) = continuity_block(11 + step, 0);
         submit_c(
             c_session,
             2,
@@ -7558,7 +7633,14 @@ fn render_seek_ride_c(
             &right,
             false,
         );
-        blocks.push(render_c(c_plan, block));
+    };
+    let runway = runway_blocks();
+    for step in 0..runway - 1 {
+        feed(step);
+    }
+    for step in 0..8_u64 {
+        feed(step + runway - 1);
+        blocks.push(render_c(c_plan, 10 + step));
     }
     let (generation, first, frame, _, _) = seek_report_c(c_session, b"fixture-source");
     assert_eq!((generation, frame), (2, SEEK_TIMELINE));

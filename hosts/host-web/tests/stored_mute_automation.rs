@@ -48,6 +48,30 @@ struct Browser {
     start: u64,
 }
 
+impl Browser {
+    /// Submit both sources' next quantum.
+    fn feed(&mut self) {
+        let frames = u32::try_from(self.quantum).expect("quantum");
+        for (feed, name) in ["src-t", "src-u"].into_iter().enumerate() {
+            let [left, right] = chunk(feed as u64, self.start, self.quantum);
+            assert_eq!(
+                self.host.submit_source(
+                    name.as_bytes(),
+                    self.generation,
+                    self.start,
+                    RATE,
+                    &[&left, &right],
+                    frames,
+                    false,
+                ),
+                RESULT_OK,
+                "browser source {name}"
+            );
+        }
+        self.start += self.quantum;
+    }
+}
+
 impl Leg for Browser {
     fn boot(model: &SessionModel) -> Self {
         let document = canonical_session_json(model).expect("canonical session");
@@ -79,26 +103,9 @@ impl Leg for Browser {
     }
 
     fn step(&mut self) -> Vec<u32> {
-        let frames = u32::try_from(self.quantum).expect("quantum");
-        for (feed, name) in ["src-t", "src-u"].into_iter().enumerate() {
-            let [left, right] = chunk(feed as u64, self.start, self.quantum);
-            assert_eq!(
-                self.host.submit_source(
-                    name.as_bytes(),
-                    self.generation,
-                    self.start,
-                    RATE,
-                    &[&left, &right],
-                    frames,
-                    false,
-                ),
-                RESULT_OK,
-                "browser source {name}"
-            );
-        }
+        self.feed();
         assert_eq!(self.host.render_next(), RESULT_OK, "browser render");
         self.at += self.quantum;
-        self.start += self.quantum;
         bits(self.host.output_pcm().expect("browser output"))
     }
 
@@ -111,6 +118,12 @@ impl Leg for Browser {
             "browser session seek"
         );
         self.start = timeline_frame;
+        // #2205: the seek lands at the next block once its runway is queued; `step` feeds one
+        // more, so the sources stay the runway ahead from here.
+        let quantum = u32::try_from(self.quantum).expect("quantum");
+        for _ in 1..host_core::source_seek_runway_blocks(RATE, quantum, quantum * 4) {
+            self.feed();
+        }
     }
 
     fn command(&mut self, payload: CommandPayload<'_>, expected: ExpectedRevision) -> Vec<u8> {
