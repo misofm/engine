@@ -235,6 +235,7 @@ fn estimate() -> GraphResourceEstimate {
         effect_bank_scratch_bytes: 0,
         effect_bank_runtime_buffer_bytes: 0,
         effect_bank_metadata_bytes: 0,
+        effect_bank_processor_bytes: 0,
         builtin_bank_bytes: 0,
         builtin_bank_scratch_bytes: 0,
         builtin_bank_count: 0,

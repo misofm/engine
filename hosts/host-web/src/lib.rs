@@ -4026,7 +4026,8 @@ pub(crate) struct RetainedProjection {
     /// name `effect_state_bytes`.
     pub(crate) effect_state_bytes: u64,
     /// The graph row (issue #2199): the boot plan's graph and plan bytes beyond the declared effect
-    /// state and scratch the effect row charges.
+    /// state and scratch the effect row charges. Since issue #2223 it holds every bank's
+    /// processor bytes (`GraphResourceEstimate::effect_bank_processor_bytes`).
     pub(crate) graph_bytes: u64,
     /// The builtins' retained payload, inside the graph row; named, not added.
     pub(crate) builtin_bytes: u64,

@@ -6578,7 +6578,17 @@ mod tests {
                     "{what}"
                 );
                 assert_eq!(reference_estimate.effect_bank_metadata_bytes, 0, "{what}");
-                let overhead = scratch_bytes + runtime_buffer_bytes + metadata_bytes + slot_bytes;
+                // Issue #2223: the banks' processor bytes, measured on their binds; their bound
+                // is `projected_compile`'s contract test, so this reads the row and holds it to
+                // the banks alone.
+                let processor_bytes = estimate.effect_bank_processor_bytes;
+                assert!(processor_bytes > 0, "{what}");
+                assert_eq!(reference_estimate.effect_bank_processor_bytes, 0, "{what}");
+                let overhead = scratch_bytes
+                    + runtime_buffer_bytes
+                    + metadata_bytes
+                    + slot_bytes
+                    + processor_bytes;
                 if let LaunchEstimatePin::PerNode { every_field } = row.estimate {
                     // The estimate's bank-free arm, on the same backend: the strip folded into
                     // every track's inserts, where a declined group renders per node (#1098). Its

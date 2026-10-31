@@ -212,8 +212,9 @@ impl GraphCompiler {
     ///
     /// A banked member's processor is never prepared, so the compile holds the banks and the
     /// per-node processors, never both for one instance. A bank whose factory binds it otherwise
-    /// than the plan assumed is `graph.effect.bank_metadata`. On a failure the projected effects
-    /// and the builtins are handed back with the sorted diagnostics.
+    /// than the plan assumed is `graph.effect.bank_metadata`; one whose processor retains other bytes
+    /// than the plan's bank row charged is `graph.effect.bank_resource` (issue #2223). On a failure
+    /// the projected effects and the builtins are handed back with the sorted diagnostics.
     #[allow(clippy::result_large_err)]
     pub fn compile_projected(
         projection: GraphProjection,

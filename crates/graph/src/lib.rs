@@ -273,6 +273,9 @@ pub struct GraphResourceEstimate {
     pub effect_bank_runtime_buffer_bytes: u64,
     /// Checked bank/member metadata retained before render-plan binding.
     pub effect_bank_metadata_bytes: u64,
+    /// What every native-effect bank's processor retains (issue #2223): its box, which holds
+    /// every lane's inline state, padded lanes included, and the heap it reports.
+    pub effect_bank_processor_bytes: u64,
     /// Exact prepared post-input builtin bank payload retained by the graph.
     pub builtin_bank_bytes: u64,
     /// Exact `f32` plane payload retained by post-input builtin banks: two AoSoA scratch planes
@@ -7948,6 +7951,7 @@ mod tests {
             effect_bank_scratch_bytes: 0,
             effect_bank_runtime_buffer_bytes: 0,
             effect_bank_metadata_bytes: 0,
+            effect_bank_processor_bytes: 0,
             builtin_bank_bytes: 0,
             builtin_bank_scratch_bytes: 0,
             builtin_bank_count: 0,

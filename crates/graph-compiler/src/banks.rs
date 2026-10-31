@@ -1471,14 +1471,30 @@ fn uncollected_console_slot<E: AsProjected>(
 type BoundGroup = Vec<(PlannedEffectBank, GraphRackBoundSlot)>;
 
 /// One bank the compile's factories bind, planned without its processor (issue #2199): its members
-/// on lanes `0..members`, its active mask, the metadata its factory's bind returned and its cohort.
-/// [`bind_planned_banks`] binds it.
+/// on lanes `0..members`, its active mask, the metadata its factory's bind returned, the bytes its
+/// processor retains and its cohort. [`bind_planned_banks`] binds it.
 #[derive(Clone, Debug)]
 pub(crate) struct PlannedEffectBank {
     pub(crate) members: Box<[EffectNodeId]>,
     pub(crate) active_mask: Box<[bool]>,
     pub(crate) metadata: effect_contract::PreparedBankMetadata,
+    /// [`bank_processor_bytes`] of the processor the plan's bind returned (issue #2223): the bytes
+    /// the compile's bind of this bank retains, which [`bind_planned_banks`] holds equal.
+    pub(crate) processor_bytes: u64,
     pub(crate) cohort: graph::GraphBankCohort,
+}
+
+/// The bytes a bound bank's processor retains (issue #2223): its box, which holds every lane's
+/// inline state, padded lanes included, and every heap allocation it reports
+/// ([`PreparedNativeEffectBank::retained_bytes`](effect_contract::PreparedNativeEffectBank::retained_bytes)).
+/// The one rule for the projection and the compile: the plan measures the bank its bind returned,
+/// and the compile's bind must return a bank of the same bytes.
+pub(crate) fn bank_processor_bytes(
+    processor: &dyn effect_contract::PreparedNativeEffectBank,
+) -> Option<u64> {
+    u64::try_from(core::mem::size_of_val(processor))
+        .ok()?
+        .checked_add(processor.retained_bytes())
 }
 
 /// The shape of a bank the estimate charges: a planned bank, or a bound one.
@@ -1486,6 +1502,8 @@ pub(crate) trait BankLayout {
     fn members(&self) -> &[EffectNodeId];
     fn active_mask(&self) -> &[bool];
     fn metadata(&self) -> &effect_contract::PreparedBankMetadata;
+    /// [`bank_processor_bytes`] of the bank's processor, or `None` on overflow.
+    fn processor_bytes(&self) -> Option<u64>;
 }
 
 impl BankLayout for PlannedEffectBank {
@@ -1498,6 +1516,9 @@ impl BankLayout for PlannedEffectBank {
     fn metadata(&self) -> &effect_contract::PreparedBankMetadata {
         &self.metadata
     }
+    fn processor_bytes(&self) -> Option<u64> {
+        Some(self.processor_bytes)
+    }
 }
 
 impl BankLayout for graph::GraphPreparedEffectBank {
@@ -1509,6 +1530,9 @@ impl BankLayout for graph::GraphPreparedEffectBank {
     }
     fn metadata(&self) -> &effect_contract::PreparedBankMetadata {
         &self.metadata
+    }
+    fn processor_bytes(&self) -> Option<u64> {
+        bank_processor_bytes(&*self.processor)
     }
 }
 
@@ -1548,7 +1572,8 @@ fn bank_requests<'e, E: AsProjected>(
 /// factory consents. `padded` says whether a partial group is padded (issue #1088).
 ///
 /// The factory's consent is its bind's own answer: each slot is bound and the bank dropped at once
-/// (issue #2199), keeping its metadata, so the plan is exactly the banks the bind will return.
+/// (issue #2199), keeping its metadata and its processor's bytes (issue #2223), so the plan is
+/// exactly the banks the bind will return and the bytes they retain.
 #[allow(clippy::too_many_arguments)] // The binder's whole context, passed from one closure.
 fn plan_group_banks<E: AsProjected>(
     group_index: usize,
@@ -1576,13 +1601,21 @@ fn plan_group_banks<E: AsProjected>(
         };
         // Equal program key implies the same registry factory: the registry maps one
         // `EffectId` to one `Arc` (#96 F12), so a per-chunk `Arc::ptr_eq` scan proved nothing.
-        let Some(effect_contract::PreparedEffectBank { metadata, .. }) = first
+        let Some(effect_contract::PreparedEffectBank {
+            processor,
+            metadata,
+        }) = first
             .factory
             .bind_homogeneous_bank(request)
             .map_err(|error| diag(error.code, "$.effects"))?
         else {
             continue;
         };
+        // Issue #2223: what the bank retains, measured on this bind and charged in the bank row
+        // before the compile's bind allocates it.
+        let processor_bytes = bank_processor_bytes(&*processor)
+            .ok_or_else(|| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
+        drop(processor);
         // Issue #1461: the bind result carries the bank's metadata beside the processor, which
         // holds no copy of it.
         if metadata.width != width || metadata.program_key != group.program[slot] {
@@ -1602,6 +1635,7 @@ fn plan_group_banks<E: AsProjected>(
             members: members.clone().into_boxed_slice(),
             active_mask: group.active_mask.clone(),
             metadata,
+            processor_bytes,
             // Issue #181: the group this slot came out of, carried forward so the runtime can
             // build one chain per cohort instead of one per slot. It is the same `(group,
             // slot)` pair `bound_slots` already reports; the report was the only consumer.
@@ -1627,7 +1661,9 @@ fn plan_group_banks<E: AsProjected>(
 /// Bind every planned bank (issue #2199), in plan order: each slot's members' requests, the
 /// planned mask, the factory of its first member. A bank its factory declines, or binds with other
 /// metadata, contradicts the plan the compile's resources were admitted for, and is
-/// `graph.effect.bank_metadata`; a factory error is its own code, as the plan's bind's was.
+/// `graph.effect.bank_metadata`; one whose processor retains other bytes than the plan's charged
+/// (issue #2223) is `graph.effect.bank_resource`; a factory error is its own code, as the plan's
+/// bind's was.
 pub(crate) fn bind_planned_banks<E: AsProjected>(
     planned: Vec<PlannedEffectBank>,
     effects: &EffectInputs<'_, E>,
@@ -1655,6 +1691,9 @@ pub(crate) fn bind_planned_banks<E: AsProjected>(
         };
         if metadata != plan.metadata {
             return Err(diag("graph.effect.bank_metadata", "$.effects"));
+        }
+        if bank_processor_bytes(&*processor) != Some(plan.processor_bytes) {
+            return Err(diag("graph.effect.bank_resource", "$.effects"));
         }
         let scratch = rack::AoSoaScratch::new(width, effects.session.quantum().0)
             .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
@@ -1772,6 +1811,8 @@ pub(crate) struct EffectBankResourceEstimate {
     pub(crate) runtime_buffer_samples: u64,
     pub(crate) runtime_buffer_bytes: u64,
     pub(crate) metadata_bytes: u64,
+    /// Every bank's [`bank_processor_bytes`] (issue #2223).
+    pub(crate) processor_bytes: u64,
     pub(crate) largest_allocation_bytes: u64,
 }
 
@@ -1782,7 +1823,8 @@ pub(crate) struct EffectBankResourceEstimate {
 /// exactly lanes `0..members`, the planner's members-before-padding layout, which is also the
 /// layout the graph runtime gathers and scatters by. Scratch is charged for every lane, because a
 /// padded lane still occupies its AoSoA column; member metadata for the members only. The runtime
-/// buffers are the chain's staging planes, plus a padded bank's `+0.0` plane (issue #887).
+/// buffers are the chain's staging planes, plus a padded bank's `+0.0` plane (issue #887). The
+/// processor bytes are each bank's [`bank_processor_bytes`] (issue #2223), its box one allocation.
 pub(crate) fn effect_bank_resource<B: BankLayout>(
     banks: &[B],
     quantum: u32,
@@ -1838,6 +1880,8 @@ pub(crate) fn effect_bank_resource<B: BankLayout>(
         resource.runtime_buffer_bytes = resource
             .runtime_buffer_bytes
             .checked_add(runtime_buffer_bytes)?;
+        let processor_bytes = bank.processor_bytes()?;
+        resource.processor_bytes = resource.processor_bytes.checked_add(processor_bytes)?;
 
         let member_array_bytes = u64::try_from(core::mem::size_of::<EffectNodeId>())
             .ok()?
@@ -1850,6 +1894,7 @@ pub(crate) fn effect_bank_resource<B: BankLayout>(
             .checked_add(active_mask_bytes)?;
         resource.largest_allocation_bytes = resource
             .largest_allocation_bytes
+            .max(processor_bytes)
             .max(member_array_bytes)
             .max(scratch_plane_bytes)
             .max(u64::from(quantum).checked_mul(4)?);
@@ -1880,6 +1925,9 @@ pub(crate) fn checked_add_effect_banks(
     next.effect_bank_metadata_bytes = next
         .effect_bank_metadata_bytes
         .checked_add(resource.metadata_bytes)?;
+    next.effect_bank_processor_bytes = next
+        .effect_bank_processor_bytes
+        .checked_add(resource.processor_bytes)?;
     next.audio_buffer_samples = next
         .audio_buffer_samples
         .checked_add(resource.scratch_samples)?
@@ -1890,7 +1938,8 @@ pub(crate) fn checked_add_effect_banks(
     let retained = resource
         .scratch_bytes
         .checked_add(resource.runtime_buffer_bytes)?
-        .checked_add(resource.metadata_bytes)?;
+        .checked_add(resource.metadata_bytes)?
+        .checked_add(resource.processor_bytes)?;
     next.incremental_plan_bytes = next.incremental_plan_bytes.checked_add(retained)?;
     next.session_plus_plan_bytes = next.session_plus_plan_bytes.checked_add(retained)?;
     next.largest_allocation_bytes = next
