@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.10.3
+npm install @misofm/engine@0.10.4
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -886,7 +886,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.10.3 release record](https://github.com/misofm/engine/issues/2215) contains the accepted artifact
+[0.10.4 release record](https://github.com/misofm/engine/issues/2225) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -912,6 +912,25 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.10.3
+
+0.10.4 removes no export. It adds one C ABI symbol.
+
+- Changed: the browser boot and the replacement pre-check project the session's graph, builtin
+  and control rows against the memory budget before they allocate (issues #2199 and #2219). A
+  session that cannot fit is refused with `host.budget.retained_projection` before its rows
+  exist. In 0.10.3 such a boot could trap the Wasm module.
+- Added: the C ABI symbol `miso_engine_v1_plan_prepare_seek`, announced by
+  `MISO_ENGINE_V1_FEATURE_PLAN_PREPARE_SEEK` (bit 13) in the capability report (issue #2213). A
+  mobile host whose transport is stopped uses it to free a full ring and refill it before
+  restart. It and `miso_engine_v1_render_f32_planar` refuse a concurrent call on the same plan
+  with `render.busy`. No struct, size or `ABI_VERSION` changes.
+- Fixed: a render diagnostic that waits while both of its slots are full is no longer lost. The
+  newest one arrives, and each one it replaces counts in the `telemetryCoalesced` counter (issue
+  #2198).
+- Fixed: a pack group of more than 65,535 strips no longer overflows its sort counters (issue
+  #2173).
 
 ## Upgrading from 0.10.2
 
