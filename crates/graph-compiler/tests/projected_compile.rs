@@ -9,10 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bench_support::alloc::{
-    assert_installed, current_thread_counters, current_thread_delta_since, current_thread_peak,
-    current_thread_peak_reset,
-};
+use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use builtins_compiler::{BuiltinCompileCaps, PreparedBuiltinsSession, prepare_session_builtins};
 use effect_compiler::{
     EffectCompileCaps, EffectProjectedSession, launch_native_effect_registry,
@@ -325,18 +322,16 @@ fn per_node_charge(projection: &graph_compiler::GraphProjection) -> (u64, u64) {
 }
 
 /// A projected compile prepares a processor for every instance its plan leaves per node, once,
-/// and for no banked member, so its peak stays under the plan's retained estimate, its bank rows
-/// included (issue #2223), plus the processors of the instances the projection leaves per node;
-/// and the projection names those instances before any processor exists
-/// (`GraphProjection::per_node_entries`, issue #2219).
+/// and for no banked member; and the projection names those instances before any processor
+/// exists (`GraphProjection::per_node_entries`, issue #2219). Its peak is not bounded here: a
+/// processor for every banked member adds too little to cross the plan's charge, so the prepare
+/// count is the claim (issue #2223), and `a_banks_bytes_are_within_its_row` holds the bytes.
 ///
 /// Test value: red when a banked member gets a per-instance processor, as before #2199, when the
 /// effect compiler prepared every instance and the graph compiler held them all while it bound the
 /// banks: the prepare count is then every instance's. Red too when the projection's per-node
 /// entries are not the ones the compile prepares (a banked member counted per node): a host
-/// charges processor bytes on them before it prepares. The peak is bounded by exactly what a host
-/// charges the compile -- the plan, its bank rows included, and the per-node processors -- so it is
-/// red when the compile's peak passes that charge.
+/// charges processor bytes on them before it prepares.
 #[test]
 fn a_projected_compile_prepares_no_banked_members_processor() {
     assert_installed();
@@ -352,16 +347,12 @@ fn a_projected_compile_prepares_no_banked_members_processor() {
     );
     let projection = GraphCompiler::project(request(effects, &builtins))
         .unwrap_or_else(|failure| panic!("the console projects: {:?}", failure.diagnostics));
-    let retained = projection.resource_estimate().session_plus_plan_bytes;
     let projected_per_node = projection
         .per_node_entries()
         .filter(|per_node| *per_node)
         .count();
-    let (per_node_processors, _) = per_node_charge(&projection);
-    current_thread_peak_reset();
     let artifact = GraphCompiler::compile_projected(projection, builtins)
         .unwrap_or_else(|failure| panic!("the console compiles: {:?}", failure.diagnostics));
-    let peak = current_thread_peak().peak_bytes;
     let banked: usize = artifact.graph().effect_bank_members().map(<[_]>::len).sum();
     let per_node = instances - banked;
     assert!(
@@ -376,11 +367,6 @@ fn a_projected_compile_prepares_no_banked_members_processor() {
     assert_eq!(
         projected_per_node, per_node,
         "the projection's per-node entries are the compile's"
-    );
-    assert!(
-        peak < retained + per_node_processors,
-        "the compile peaked at {peak} bytes, at least the {retained}-byte plan plus the \\
-         {per_node_processors} processor bytes of its per-node instances"
     );
 }
 
