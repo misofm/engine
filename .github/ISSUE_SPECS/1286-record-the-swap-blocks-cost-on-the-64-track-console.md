@@ -302,3 +302,29 @@ whole-bank move (#1269, Deferred) earns a brief.
 - **1286a evidence.** At 96 kHz the self-test measured `prime_bytes()` of 524,288 (512 KiB), 1,040,384,
   1,556,480 and 2,072,576 bytes for growths 1-4 (D3's estimate: 512 KiB and up to 2 MiB), every
   `P = 1,024`, `ΣP = 4,096`, no restarted strip on the move, and zero carry refusals.
+- **1286b evidence (attempt 1, 2026-10-31).** The bench at `7d89eecc5` still matched D1-D5
+  (`L_max(96 kHz) = 966`; every other launch effect declares 0, the soft clipper 31), so it was not
+  changed. The preflight passed with 0 workload launches. One run, at `7d89eecc5`, on an AMD EPYC
+  7313P (AVX2 + FMA, `schedutil`, render CPU 31, producer CPU 30, sibling CPU 15 at 5 %), admitted as
+  controlled at load 0.44 (ceiling 0.50; after the run 0.66), disposition `PASS`. No `perf` counter
+  on the host, so no cycle columns. Record: `artifacts/steps/swap-carry-base/`. Both rounds: 32
+  carrying move swaps, 0 restarted strips, 128 adoptions with 0 late, every `P = 1,024`,
+  `ΣP = 4,096`, no silent timed block, 0 carry refusals in both phases. `prime_bytes()`: 524,288,
+  1,040,384, 1,556,480 and 2,072,576 bytes (the estimate holds).
+  - p50 / p99 in ns, round 1 (round 2): ordinary 73,630 / 177,157 (73,329 / 176,145); move
+    1,033,337 / 1,070,848 (1,031,753 / 1,038,877); adoption at growth 1 981,639 / 997,929
+    (983,953 / 1,109,782); at growth 4 (`ΣP = p_max_samples`) 508,558 / 625,831 (506,054 / 516,854).
+    Per lane (p50 over 128 dual-mono lanes): move 7.50 µs, growth 1 7.1 µs, growth 4 3.4 µs.
+  - D3 item 3, round 1 (round 2): `o` 177,157 (176,145), `a_P` 625,831 (516,854), `b_P` 2,072,576,
+    `β` 216.481 (164.389) ps/byte, `b_native` 3,493,032 (4,606,072), `b_browser` 7,012,421
+    (9,181,789). No refusal; the native row binds. D3 gives one value per round and no rule for two;
+    the attempt takes the smaller, **`PRIME_BYTES_MAX = 3,493,032` bytes** (round 1), for review.
+  - D3 items 1-2 (q = 128): `p_max_samples` 2,048, 2,048, 3,584, 4,096 and default ring 6,912,
+    7,296, 12,800, 14,080 frames at 44.1, 48, 88.2 and 96 kHz (headroom `p_max_samples + q`; ring PCM
+    bytes 37,888 → 55,296, 40,960 → 58,368, 72,704 → 102,400, 78,848 → 112,640). #1406's code agrees.
+  - Findings: every move block (min 1,020,322 ns) is above `m · D = 933,333` ns, so a whole-bank move
+    earns a brief. The first growth's adoption block is also above it (p50 about twice the later
+    growths', with the smallest prime); D3 charges only `C_3 -> C_4`, so `PRIME_BYTES_MAX` does not
+    cover it. Not investigated (non-goal).
+  - The tool harness refused the report file `artifacts/steps/swap-carry-base/REPORT.md` in this
+    attempt; this entry holds its content until root adds it.
