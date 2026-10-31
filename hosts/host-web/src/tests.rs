@@ -1356,23 +1356,44 @@ fn retained_projection_budget_diagnostic_names_projected_bytes() {
     );
 }
 
+/// The sixty-four-track console with one delay insert after the first track's compressor (issue
+/// #2223): a delay never banks, so the drift test's console has one instance the bank plan leaves
+/// per node, which `HostProjection::per_node_processor_bytes` charges.
+fn console_with_one_per_node_insert() -> String {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/console-sixty-four-track.json"
+    ))
+    .expect("the console fixture");
+    let mut delay = model.tracks[0].inserts.effects[0].clone();
+    delay.id = session::StableId::parse("delay").expect("an effect ID");
+    delay.identity = session::EffectIdentity::Native {
+        effect_id: session::StableId::parse("miso.delay").expect("a native ID"),
+    };
+    delay.params.clear();
+    delay.sidechain = session::SidechainDeclaration::None;
+    model.tracks[0].inserts.effects.push(delay);
+    canonical_session_json(&model).expect("the canonical console")
+}
+
 /// Issue #2199: the boot's retained projection is a ceiling of the exact aggregate the booted
 /// host reports, for the three shipped representatives, and over-projects each by at most its
 /// bound in millionths of the projection: the measured `(projection - exact) / projection` plus
 /// about 8%, so a projector that grows a row past what the plan holds is an explicit re-pin. An
 /// undershoot of any size is red: the boot admits on the projection before anything is
 /// allocated, so a projection under the exact aggregate admits a session the budget cannot hold.
-/// Pinned at (issue #2219, which charges no processor for a banked member): identity 32 /
-/// 1,118,367 = 28.6, nine-track 288 / 1,474,483 = 195.3, console 7,496 / 4,953,706 = 1,513.2, each
-/// plus about 8% and rounded up. The residual slack is the ceiling rows': the state inventory's
-/// route rows for every route (a route the plan gives no live op is charged its row and ID text),
-/// its meter ID text at the longest strip ID, and the observation handles' vector at its growth
-/// bound.
+/// Pinned at (issue #2223, which charges each bank's processor in the graph row of both, and gives
+/// the console one per-node delay): identity 32 / 1,142,319 = 28.0, nine-track 288 / 1,522,179 =
+/// 189.2, console 7,800 / 5,991,255 = 1,301.9, each plus about 8% and rounded up. The residual
+/// slack is the ceiling rows': the state inventory's route rows for every route (a route the plan
+/// gives no live op is charged its row and ID text), its meter ID text at the longest strip ID,
+/// the observation handles' vector at its growth bound, and the delay's per-node processor bytes
+/// (304), which only the boot projection charges.
 ///
 /// Test value: red when the projection leaves out a row the booted host retains (the graph, a
 /// control-plane row, a shape table) or charges one below its exact bytes, which the old form of
 /// this test (an undershoot bound) admitted by design, and red when a row is over-charged past its
-/// pin, as the effect row was when it charged every banked member a processor (#2219).
+/// pin, as the effect row was when it charged every banked member a processor (#2219), or as the
+/// per-node processor row is when it charges the console's delay more than its processor bytes.
 #[test]
 fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() {
     let defaults = boot_options(128);
@@ -1388,7 +1409,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "parametric-eq-nine-track",
-            211_u64,
+            205_u64,
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1397,8 +1418,8 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "console-sixty-four-track",
-            1_635_u64,
-            include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
+            1_407_u64,
+            console_with_one_per_node_insert(),
             WebBootOptions {
                 source_ring_frames: 512,
                 live_control_meter_blocks: u64::from(DEFAULT_METER_BLOCKS),
