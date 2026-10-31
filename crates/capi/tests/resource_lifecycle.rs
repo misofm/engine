@@ -1437,18 +1437,26 @@ impl Budget {
 /// plan state the C ABI's `Plan` holds. Measured 340,878 -> 418,934 on x86-64; the ceiling is the
 /// new value plus 10 %, rounded up to 64: 460,827.4 -> 460,864, at both widths (the four-lane
 /// plan state is smaller).
+///
+/// #2223 charges each effect bank's processor (its box and the heap it reports) in the bank row,
+/// a row the graph estimate never held: the two graph rows rise by exactly the reference's EQ banks,
+/// +47,488 on x86-64 (`graph_session_plus_plan_bytes` 374,894 -> 422,382 and
+/// `graph_incremental_plan_bytes` 374,654 -> 422,142). The eight-lane ceilings are the new values
+/// plus 10 %, rounded up to 64: 464,620.2 -> 464,640 and 464,356.2 -> 464,384. The four-lane
+/// ceilings rise by the same +47,488 plus 10 % (52,236.8): 419,404.8 -> 419,456 and 419,276.8 ->
+/// 419,328, unmeasured until the next `aarch64-debug` print tightens them.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
         value: |report| report.graph_session_plus_plan_bytes,
-        eight_lanes: 410_624,
-        four_lanes: 367_168,
+        eight_lanes: 464_640,
+        four_lanes: 419_456,
     },
     Budget {
         row: "graph_incremental_plan_bytes",
         value: |report| report.graph_incremental_plan_bytes,
-        eight_lanes: 410_368,
-        four_lanes: 367_040,
+        eight_lanes: 464_384,
+        four_lanes: 419_328,
     },
     Budget {
         row: "graph_metadata_bytes",
