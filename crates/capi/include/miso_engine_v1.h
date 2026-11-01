@@ -123,6 +123,38 @@ extern "C" {
  * lower latency returns only with a fresh miso_engine_v1_compile_session, or at a host-declared
  * discontinuity (below); there is no permanent latency reserve.
  *
+ * Latency growth during playback (issue 1360). A structural transaction that grows a path's
+ * latency (an added latent effect, or a track that holds one) is adopted by render, not by a
+ * control call. SESSION_TRANSACTION_APPLY returns at once with edit-path 3 (rebuild): it prepares
+ * a warm successor, publishes it and returns, and it never waits for render. Render adopts the
+ * successor at the first block at which every source it carries is ready. For that adoption to
+ * be exact, the host keeps at least P + q frames of each source queued past that source's read
+ * position: P is the latency growth rounded up to whole render quanta, and q is the render
+ * quantum. A host that keeps its rings full always qualifies with the default ring
+ * (source_ring_frames = 0), whose headroom covers P_MAX, the largest growth the engine prepares
+ * warm (four times the largest effect latency at the session rate, in whole quanta). A host that
+ * sets a nonzero source_ring_frames needs at least stall + P_MAX + q frames for warm growth,
+ * where stall is the stall part of the default ring rule; with fewer, a growth whose P + q is
+ * more than the ring's frames above stall takes the transition below, which still completes the
+ * edit. At the adoption, render reads each carried source P frames further ahead in that one
+ * render call; from that block on, the source-read clock leads the render clock by P more, and a
+ * command or seek_at that arrives during that call applies at that block on the new clock. The
+ * output continues with no gap. The watermark reports the outcome:
+ * MISO_ENGINE_V1_OUTCOME_EXACT when render adopted the successor;
+ * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK when the successor was not available at submit, or
+ * not ready by its deadline. The transition ducks every strip whose arrival the growth moves, not
+ * only the edited ones, and they fade back in: a bus add with a latent effect on the new bus
+ * ducks every track routed into it. MISO_ENGINE_V1_OUTCOME_SUPERSEDED is set when a later
+ * structural edit replaced it before adoption. A declared discontinuity completes it MISO_ENGINE_V1_OUTCOME_EXACT, with
+ * MISO_ENGINE_V1_OUTCOME_SUPERSEDED only for the revisions it had folded in. The deadline counts
+ * render samples, so a paused host stays pending and never falls back. The fallback runs only in
+ * a session call: miso_engine_v1_service, or any session call, does at most one bounded step,
+ * and that step may prepare the transition once. The counter TRANSITION_REPREPARE_REFUSALS
+ * (protocol counter 17, read with COUNTERS_GET or a configured COUNTER_SNAPSHOT) counts the
+ * transition preparations that were refused and tried again at the next step; the edit stays
+ * pending meanwhile, and the counter stays 0 in a correct build. There is no new symbol and no
+ * new feature bit.
+ *
  * Declared discontinuity (issue 1323). miso_engine_v1_declare_discontinuity(session) says that
  * the next block the host renders need not continue the previous output, because the host has
  * stopped or is about to seek every source. The host's duty: call it at a stop, and before a seek
@@ -343,8 +375,11 @@ extern "C" {
  * for render, never commits or acknowledges anything, and never takes or drops a pending edit; its
  * cost does not grow with the time since the last call. It returns MISO_ENGINE_V1_OK; a null
  * session as MISO_ENGINE_V1_INVALID_ARGUMENT and another handle as MISO_ENGINE_V1_WRONG_HANDLE;
- * and, should the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the
- * session diagnostic "source.epoch". The host's duty: a pending edit progresses only while the
+ * should the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the
+ * session diagnostic "source.epoch"; and, should a warm successor's deadline transition fail
+ * (see "Latency growth during playback"), MISO_ENGINE_V1_COMPILE_REJECTED with the compile
+ * diagnostic for an allocation refusal or MISO_ENGINE_V1_INTERNAL with "control.internal". The
+ * host's duty: a pending edit progresses only while the
  * host makes session calls, the same duty as draining events. A host that renders but never calls
  * keeps retired plans allocated, and its next structural edit waits for that reclaim; a warm
  * successor that misses its deadline falls back only at the host's next session call. The plan
@@ -494,7 +529,7 @@ extern "C" {
  * The source-read clock (issues 1275, 1316). A seek that names a block names it on the plan's
  * source-read clock: the absolute sample of source time the block reads. It is equal to the
  * render clock until a plan that reads its sources ahead of it is adopted (a warm successor, issue
- * 1355); no call publishes one in this version (issue 1403). A plan's clock is 0 at compile.
+ * 1355; see "Latency growth during playback"). A plan's clock is 0 at compile.
  * Each miso_engine_v1_render_f32_planar call must pass the clock's value as absolute_sample,
  * renders one quantum and advances the clock by one quantum; a call at another sample renders
  * nothing, moves nothing and returns MISO_ENGINE_V1_RENDER_REJECTED with

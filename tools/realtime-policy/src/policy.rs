@@ -221,7 +221,7 @@ impl Policy {
     pub fn workspace() -> Self {
         // The unsafe-ownership files. `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership",
         // carries the justification of each.
-        const UNSAFE_ALLOWLIST: [&str; 29] = [
+        const UNSAFE_ALLOWLIST: [&str; 30] = [
             "crates/engine/src/realtime/spsc.rs",
             "crates/engine/src/realtime/disjoint.rs",
             "crates/lane/src/softfma.rs",
@@ -242,6 +242,7 @@ impl Policy {
             "crates/capi/tests/session_replace.rs",
             "crates/capi/tests/empty_boot.rs",
             "crates/capi/tests/strip_transitions.rs",
+            "crates/capi/tests/latency_growth.rs",
             "hosts/host-web/src/ffi.rs",
             // #1332 S6: the handoff registry's address round trip and the stack reservation.
             "hosts/host-web/src/handoff.rs",

@@ -1000,6 +1000,12 @@ pub struct TestOwnerCounters {
     /// A withdrawn candidate superseded: its replacement committed and was published, and it was
     /// dropped on the control thread (#1310 D5).
     pub candidate_superseded: u64,
+    /// The deadline step withdrew a `Primed` candidate render had not adopted by its deadline
+    /// (#1360 D2).
+    pub deadline_withdrawals: u64,
+    /// The deadline step re-prepared the committed model as the transition, whether the
+    /// re-preparation was then published or refused (#1360 D2).
+    pub transition_reprepares: u64,
 }
 
 /// One effect producer's row of `SessionControlSnapshot::effect_cells`: `(epoch, strip ID,
@@ -1134,6 +1140,8 @@ thread_local! {
             candidate_taken: 0,
             candidate_republished: 0,
             candidate_superseded: 0,
+            deadline_withdrawals: 0,
+            transition_reprepares: 0,
         }) };
 }
 
@@ -2684,6 +2692,25 @@ impl Drop for ObservedPreparedToken {
 /// "re-prepare" result.
 pub const REPREPARE_REQUIRED: &str = "control.apply.reprepare_required";
 
+/// Which part of the service step failed ([`SessionState::service_step`], #1360 review M1).
+#[derive(Debug)]
+pub enum ServiceFailure {
+    /// The plan epochs could not be synchronized.
+    Epoch(CommandError),
+    /// The warm-successor deadline step failed (#1360 D2).
+    Deadline(CommandError),
+}
+
+impl ServiceFailure {
+    /// The command error the failure carries.
+    #[must_use]
+    pub fn into_command(self) -> CommandError {
+        match self {
+            Self::Epoch(error) | Self::Deadline(error) => error,
+        }
+    }
+}
+
 /// What one transition fallback across the pending `Primed` candidate did (#1397 D2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransitionStep {
@@ -4073,10 +4100,31 @@ where
     /// acknowledges nothing and adds no queue. The only things it discards are plans render has
     /// already displaced; a committed revision's plan is never among them.
     pub fn service(&mut self) -> Result<(), CommandError> {
+        self.service_step().map_err(ServiceFailure::into_command)
+    }
+
+    /// [`Self::service`], with its failure named by the step that failed, so a host reports each
+    /// under its own diagnostic (#1360 review M1).
+    ///
+    /// # Errors
+    ///
+    /// [`ServiceFailure::Epoch`] when the plan epochs cannot be synchronized;
+    /// [`ServiceFailure::Deadline`] when the warm-successor deadline step fails (an allocation
+    /// refusal or an internal fault of its transition re-preparation).
+    pub fn service_step(&mut self) -> Result<(), ServiceFailure> {
         self.fold_observation_pending();
         // #2115: at most the record queue's depth of hops.
         self.loudness.drain();
-        self.synchronize_plan_epochs()?;
+        self.synchronize_plan_epochs()
+            .map_err(ServiceFailure::Epoch)?;
+        // #1360 D2: after the epochs, so a candidate render adopted is promoted first, and before
+        // the counter refresh, so a refused re-preparation is counted in this same call. A render
+        // half that is gone (`Backpressure`) renders neither the candidate nor a transition, so
+        // the step has nothing to do and the call goes on.
+        match self.check_prime_deadline() {
+            Ok(_) | Err(CommandError::Backpressure) => {}
+            Err(error) => return Err(ServiceFailure::Deadline(error)),
+        }
         self.poll_response_capture();
         self.refresh_provider_counters();
         self.collect_render_activity();
@@ -5303,13 +5351,6 @@ where
     /// record; every candidate it withdraws is either the donor of a transition prepared from the
     /// committed model or republished whole, and it adds no queue. One step does at most one
     /// withdrawal, one re-preparation and one republication, and never waits on render.
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(
-            dead_code,
-            reason = "#1360 and #1361 wire the hosts' service steps to it"
-        )
-    )]
     pub(crate) fn check_prime_deadline(&mut self) -> Result<Option<TransitionStep>, CommandError> {
         let Some(record) = self.primed else {
             return Ok(None);
@@ -5454,13 +5495,6 @@ where
     /// ruling on #1358). W's revision stays pending and the next step retries. **Acked-batch
     /// question (D4): can an ack ever precede a drop? No:** W drops only after its replacement is prepared from the committed model, which holds
     /// every acked edit, and its rings move by a donation checked before anything is published.
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(
-            dead_code,
-            reason = "its caller, the deadline step, is not yet wired (#1360)"
-        )
-    )]
     fn fall_back_pending_warm(&mut self) -> Result<TransitionStep, CommandError> {
         let Some(record) = self.primed else {
             return Ok(TransitionStep::NotPending);
@@ -5497,6 +5531,11 @@ where
             Some(_) => {}
         }
         #[cfg(feature = "test-support")]
+        update_test_owners(|owners| {
+            owners.deadline_withdrawals += 1;
+            owners.transition_reprepares += 1;
+        });
+        #[cfg(feature = "test-support")]
         let injected = TEST_REFUSE_REPREPARE.with(|state| state.replace(false));
         // A refusal republishes W whole, as a panic before the commit does (#2010).
         let result = self.rebuild_withdrawn(
@@ -5516,7 +5555,7 @@ where
                 // W's record stays: the withdrawal of the epoch it names keeps it.
                 debug_assert_eq!(self.primed, Some(record));
                 // Root ruling (#1358): a refusal is counted, never asserted, since a real one
-                // reaches this path once the deadline step is wired (#1360).
+                // reaches this path through the service step (#1360 D2).
                 self.transition_reprepare_refusals =
                     self.transition_reprepare_refusals.saturating_add(1);
                 Ok(TransitionStep::Refused)
@@ -9629,7 +9668,8 @@ mod tests {
             epochs: Vec<u64>,
             /// The boot plan's epoch.
             boot: u64,
-            /// Whether [`Self::render`] runs the service step after each block.
+            /// Whether [`Self::render`] runs the service step after each block and feeds through
+            /// the serviced `submit`; unserviced, it makes no control call.
             serviced: bool,
         }
 
@@ -9669,14 +9709,20 @@ mod tests {
             ) -> Self {
                 super::super::test_reset_lifecycle_observer();
                 let document = session::canonical_session_json(model).expect("canonical");
-                let children = compile_children_warm::<Adapter>(
-                    &document,
-                    limits,
-                    Box::new(Preparer(backend)),
-                    warm,
-                    None,
+                Self::from_children(
+                    compile_children_warm::<Adapter>(
+                        &document,
+                        limits,
+                        Box::new(Preparer(backend)),
+                        warm,
+                        None,
+                    )
+                    .expect("boot"),
                 )
-                .expect("boot");
+            }
+
+            /// A rig over `children`, booted.
+            fn from_children(children: CompiledChildren<Adapter>) -> Self {
                 let boot = children
                     .plan
                     .test_active_epoch()
@@ -9708,17 +9754,24 @@ mod tests {
                         };
                         while *next < until {
                             let range = *next as usize..(*next + QUANTUM) as usize;
-                            match self.children.session.submit(
-                                id.as_bytes(),
-                                SourceSubmission {
-                                    generation: 1,
-                                    start_frame: *next,
-                                    sample_rate_hz: 48_000,
-                                    planes: &[&planes[0][range.clone()], &planes[1][range]],
-                                    frames: QUANTUM as u32,
-                                    end_of_region: false,
-                                },
-                            ) {
+                            let submission = SourceSubmission {
+                                generation: 1,
+                                start_frame: *next,
+                                sample_rate_hz: 48_000,
+                                planes: &[&planes[0][range.clone()], &planes[1][range]],
+                                frames: QUANTUM as u32,
+                                end_of_region: false,
+                            };
+                            // An unserviced rig makes no control call at all (#1360 D2: every
+                            // serviced call runs the deadline step).
+                            let submitted = if self.serviced {
+                                self.children.session.submit(id.as_bytes(), submission)
+                            } else {
+                                self.children
+                                    .session
+                                    .submit_unserviced(id.as_bytes(), submission)
+                            };
+                            match submitted {
                                 Ok(_) => *next += QUANTUM,
                                 // A source added after boot (W's `c-source`) queues from its
                                 // frame 0 while W waits, so its ring fills before any plan reads
@@ -10410,8 +10463,8 @@ mod tests {
         }
 
         /// #1358 gate 5's setup: W ([`growth_with_source`]) waits `Primed` with frames withheld
-        /// until its deadline, and the deadline step there, with #1397's injected refusal,
-        /// withdraws W, is refused and republishes W whole. Returns the rig, W's record and its
+        /// until its deadline, and the service step of the block that reaches it (#1360 D2), with
+        /// #1397's injected refusal, withdraws W, is refused and republishes W whole. Returns the rig, W's record and its
         /// revision, after asserting the refusal: W is back in the mailbox with its record, one
         /// `transition_reprepare_refusals`, the revision pending, nothing adopted.
         fn refused_at_the_deadline() -> (Rig, PrimedCandidate, u64) {
@@ -10425,14 +10478,15 @@ mod tests {
             rig.feeds.push(("c-source", pcm(17), 0));
             let record = rig.primed().expect("W's record");
             let revision = rig.revision();
-            rig.render_to(record.not_before + DEADLINE);
             rig.children.session.test_refuse_next_reprepare();
-            assert_eq!(rig.deadline(), Some(TransitionStep::Refused));
+            rig.render_to(record.not_before + DEADLINE);
             assert_eq!(rig.children.session.test_take_published_adoption(), None);
             assert_eq!(rig.children.session.test_transition_reprepare_refusals(), 1);
             assert_eq!(rig.primed(), Some(record), "W keeps its record");
             assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+            rig.serviced = false;
             rig.render(1);
+            rig.serviced = true;
             assert!(rig.swaps().is_empty(), "W is still pending, unready");
             let watermark = rig.children.plan.queries().watermark().expect("watermark");
             assert!(watermark.revision < revision, "W's revision is pending");
@@ -10447,8 +10501,9 @@ mod tests {
         ///    with `c` played from the donor's ring and no underrun.
         /// 2. W's frames are queued and render adopts W before the next step, which finds it
         ///    taken: nothing is published and the revision completes `EXACT`.
-        /// 3. A structural edit supersedes W (#1310) before the next step: its adoption reports
-        ///    `EXACT | SUPERSEDED`, no transition is published, and `c` plays with no underrun.
+        /// 3. A structural edit B: its own service step (#1360 D2) withdraws W again and publishes
+        ///    the transition, which B supersedes (#1310) at its duck's `S`. Its adoption reports
+        ///    `EXACT | SUPERSEDED`, no transition renders, and `c` plays with no underrun.
         ///
         /// Test value: a refusal that keeps the donor outside the mailbox or drops the record
         /// leaves the revision pending forever (no step runs without a record, and a superseding
@@ -10510,12 +10565,21 @@ mod tests {
 
             // Run 3.
             let (mut rig, _, revision) = refused_at_the_deadline();
-            assert_eq!(rig.rebuild(&remove_track("t3")), PlanAdoption::Next);
+            let withdrawals = super::super::test_lifecycle_counters().deadline_withdrawals;
+            let PlanAdoption::NoEarlierThan(s) = rig.rebuild(&remove_track("t3")) else {
+                panic!("B supersedes the transition at its duck")
+            };
+            assert_eq!(
+                super::super::test_lifecycle_counters().deadline_withdrawals,
+                withdrawals + 1,
+                "B's own service step withdrew W again first"
+            );
             assert_eq!(rig.primed(), None);
             assert_eq!(rig.deadline(), None, "no record, no step");
             rig.ahead = AHEAD;
-            rig.render(8);
-            assert_eq!(rig.swaps().len(), 1, "B is adopted");
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.render(s_block + 8 - rig.blocks.len());
+            assert_eq!(rig.swaps(), [s_block], "B is adopted at its S");
             let watermark = rig.children.plan.queries().watermark().expect("watermark");
             assert_eq!(
                 (watermark.revision, watermark.outcome_flags),
@@ -10525,19 +10589,20 @@ mod tests {
             assert_eq!(rig.underruns(), 0, "every chunk submitted for c is played");
         }
 
-        /// #1358 gates 1 and 3, never fed, in two arms: the growth W, whose `not_before` is the
-        /// render clock at publication, and W with track 2's removal, which ducks track 2, so its
+        /// #1358 gate 1, never fed, in two arms: the growth W, whose `not_before` is the render
+        /// clock at publication, and W with track 2's removal, which ducks track 2, so its
         /// `not_before` is the duck's `S`, past publication. The carried sources are fed no frame
-        /// past what A needs. With render paused, 1,000 deadline steps publish nothing. The step at
+        /// past what A needs. The step at
         /// render clock `not_before + 7,040 - q` publishes nothing; the step at `not_before +
         /// 7,040` withdraws W and publishes the transition, whose adoption completes W's revision
         /// as `TRANSITION_FALLBACK`, `transition_fallback` 1. Until the step, the output is A
-        /// continued (with track 2 live-muted at the edit's block in the second arm).
+        /// continued (with track 2 live-muted at the edit's block in the second arm). The step at
+        /// the deadline is the service step of the block that reaches it (#1360 D2).
         ///
         /// Test value: a deadline that never fires leaves the edit pending forever; one counted
         /// from publication instead of `not_before` (second arm), one quantum short, or one taken
-        /// as the stall ring (7,296) fires at the wrong call; one counted in control calls falls
-        /// back on a paused host (no wall-clock sleep: scope note R2 refuses one).
+        /// as the stall ring (7,296) fires at the wrong call (no wall-clock sleep: scope note R2
+        /// refuses one). A paused host is `the_service_step_runs_the_deadline_step_once`'s.
         #[test]
         fn a_warm_candidate_not_ready_by_its_deadline_takes_the_transition() {
             for ducks in [false, true] {
@@ -10555,18 +10620,12 @@ mod tests {
                 assert_eq!(not_before > published, ducks);
                 let record = rig.primed().expect("W's record");
                 let revision = rig.revision();
-                // Gate 3: a paused host.
-                for _ in 0..1_000 {
-                    assert_eq!(rig.deadline(), None, "paused");
-                }
-                assert_eq!(rig.children.session.test_take_published_adoption(), None);
                 rig.render_to(not_before + DEADLINE - QUANTUM);
                 assert_eq!(rig.deadline(), None, "one quantum short");
                 assert_eq!(rig.children.session.test_take_published_adoption(), None);
                 assert_eq!(rig.primed(), Some(record));
                 rig.render(1);
                 let stepped = rig.blocks.len();
-                assert_eq!(rig.deadline(), Some(TransitionStep::Published));
                 let Some(PlanAdoption::NoEarlierThan(s)) =
                     rig.children.session.test_take_published_adoption()
                 else {
@@ -10596,8 +10655,99 @@ mod tests {
             }
         }
 
-        /// #1358 gate 2, render adopts first: W's deadline passes with its frames withheld, then
-        /// the frames are queued and render adopts W in one block before the next control call.
+        /// #1360 D1: a session compiled through the public `compile_children`, as both hosts
+        /// compile theirs, holds the production bounds, so the growth W is published `Primed` and
+        /// recorded.
+        ///
+        /// Test value: a product session built without a `WarmConfig` publishes W as an ordinary
+        /// `Next` (today's floored rebuild), with no record.
+        #[test]
+        fn a_publicly_compiled_session_publishes_a_growth_primed() {
+            super::super::test_reset_lifecycle_observer();
+            let document = session::canonical_session_json(&session_a()).expect("canonical");
+            let mut rig = Rig::from_children(
+                crate::compile::compile_children::<Adapter>(
+                    &document,
+                    limits(),
+                    Box::new(Preparer(None)),
+                )
+                .expect("boot"),
+            );
+            rig.render(BEFORE);
+            assert!(matches!(
+                rig.rebuild(&growth()),
+                PlanAdoption::Primed { .. }
+            ));
+            assert!(rig.primed().is_some());
+        }
+
+        /// #1360 gates 4 and 5, through `service` itself: W waits `Primed`, never fed. With render
+        /// paused, 1,000 service calls publish nothing and withdraw nothing. Render then reaches
+        /// W's deadline with no control call. With one injected re-preparation refusal, one
+        /// service call does exactly one withdrawal and one re-preparation, keeps W pending with
+        /// its record, and its own counter refresh reports `TRANSITION_REPREPARE_REFUSALS` 1. The
+        /// next call withdraws W again and publishes the transition; the call after it does
+        /// nothing.
+        ///
+        /// Test value: a service step that does not run the deadline step never withdraws W (the
+        /// counts stay); one that withdraws before the deadline, or counts control calls, falls
+        /// back on the paused host; one that loops retries the refusal in the same call (two
+        /// withdrawals); a refresh before the step, or none, reports 0.
+        #[test]
+        fn the_service_step_runs_the_deadline_step_once() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let PlanAdoption::Primed { not_before, .. } = rig.rebuild(&growth()) else {
+                panic!("W is warm")
+            };
+            let record = rig.primed().expect("W's record");
+            let counts = || {
+                let owners = super::super::test_lifecycle_counters();
+                (owners.deadline_withdrawals, owners.transition_reprepares)
+            };
+            let refusals = |rig: &mut Rig| {
+                rig.children
+                    .session
+                    .test_provider_counters()
+                    .iter()
+                    .find(|counter| counter.id == protocol::CounterId::TransitionReprepareRefusals)
+                    .expect("counter 17")
+                    .value
+            };
+            let before = counts();
+            for _ in 0..1_000 {
+                rig.children.session.service().expect("service");
+            }
+            assert_eq!(counts(), before, "paused");
+            assert_eq!(rig.children.session.test_take_published_adoption(), None);
+            assert_eq!(rig.primed(), Some(record));
+
+            rig.serviced = false;
+            rig.render_to(not_before + DEADLINE);
+            assert_eq!(counts(), before, "no control call");
+            rig.children.session.test_refuse_next_reprepare();
+            rig.children.session.service().expect("service");
+            assert_eq!(counts(), (before.0 + 1, before.1 + 1), "one step");
+            assert_eq!(rig.children.session.test_take_published_adoption(), None);
+            assert_eq!(rig.primed(), Some(record), "refused: W keeps its record");
+            assert_eq!(refusals(&mut rig), 1);
+
+            rig.children.session.service().expect("service");
+            assert_eq!(counts(), (before.0 + 2, before.1 + 2));
+            assert!(matches!(
+                rig.children.session.test_take_published_adoption(),
+                Some(PlanAdoption::NoEarlierThan(_))
+            ));
+            assert_eq!(rig.primed(), None);
+            rig.children.session.service().expect("service");
+            assert_eq!(counts(), (before.0 + 2, before.1 + 2), "no record, no step");
+            assert_eq!(rig.children.session.test_take_published_adoption(), None);
+        }
+
+        /// #1358 gate 2, render adopts first: W's deadline passes with its frames withheld and no
+        /// control call, then the frames are queued and render adopts W in one block before the
+        /// next control call.
         /// That call's deadline step finds W taken: it publishes nothing and drops the record, the
         /// revision completes `EXACT`, `transition_fallback` stays 0, and the output is A
         /// continued.
@@ -10613,9 +10763,9 @@ mod tests {
                 panic!("W is warm")
             };
             let revision = rig.revision();
+            rig.serviced = false;
             rig.render_to(not_before + DEADLINE + QUANTUM);
             rig.ahead = AHEAD;
-            rig.serviced = false;
             rig.render(1);
             rig.serviced = true;
             assert_eq!(rig.swaps(), [rig.blocks.len() - 1], "render adopts W");
@@ -10728,7 +10878,6 @@ mod tests {
             rig.render_to(record.not_before + DEADLINE - QUANTUM);
             assert_eq!(rig.deadline(), None);
             rig.render(1);
-            assert_eq!(rig.deadline(), Some(TransitionStep::Published));
             let Some(PlanAdoption::NoEarlierThan(s)) =
                 rig.children.session.test_take_published_adoption()
             else {

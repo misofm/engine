@@ -954,9 +954,11 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek_report(
 /// edit progresses only while the host makes session calls, so a host with edits pending calls
 /// this at least once per render-buffer period.
 ///
-/// Returns `RESULT_OK`; a null or wrong handle as every session call; and `RESULT_INTERNAL` with
+/// Returns `RESULT_OK`; a null or wrong handle as every session call; `RESULT_INTERNAL` with
 /// the session diagnostic `source.epoch` when the session's plan epochs cannot be
-/// synchronized.
+/// synchronized; and, when the warm-successor deadline step's transition fails (#1360 D2),
+/// `RESULT_COMPILE_REJECTED` with the compile diagnostic for an allocation refusal or
+/// `RESULT_INTERNAL` with `control.internal` for an internal fault.
 ///
 /// # Safety
 ///
@@ -973,17 +975,24 @@ pub unsafe extern "C" fn miso_engine_v1_service(session: *mut Session) -> u32 {
         }
         // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
         let session = unsafe { &mut *session };
-        match session.state.service() {
+        match session.state.service_step() {
             Ok(()) => {
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
             }
-            Err(_) => {
-                // The step's only failure is the epoch synchronization's, reported with the
-                // diagnostic the source calls already set for it.
+            Err(control_plane::ServiceFailure::Epoch(_)) => {
+                // An epoch synchronization failure, reported with the diagnostic the source calls
+                // already set for it.
                 let (code, diagnostic) = SourceFailure::Internal.report();
                 session.last_error.borrow_mut().set(diagnostic);
                 code
+            }
+            // The deadline step's failure (#1360 D2) under its own diagnostic and code, as a
+            // rebuild's refusal reports it: an allocation refusal of the transition's
+            // re-preparation is COMPILE_REJECTED with the compile diagnostic, an internal fault
+            // INTERNAL with control.internal.
+            Err(control_plane::ServiceFailure::Deadline(refused)) => {
+                declaration_refused(session, &refused)
             }
         }
     })

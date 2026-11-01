@@ -259,7 +259,7 @@ pub enum WarmDecision {
 }
 
 /// The bounds a warm successor is checked against (#1354 D1). It has no default: every caller
-/// passes both. #1360 builds the production value from [`p_max_samples`] and `PRIME_BYTES_MAX`.
+/// passes both. [`crate::warm::production_config`] is the production value (#1360 D1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WarmConfig {
     /// The largest `ΣP + P`, in samples.

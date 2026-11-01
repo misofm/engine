@@ -9262,8 +9262,9 @@ mod structural_apply {
     /// Issue #1688 gate 2: the plan latency record is the control plane's row for the plan that
     /// renders now. It is refused (and left zero) while the host is not ready, holds the boot
     /// plan's words after boot, keeps them while a rebuild that adds a true-peak limiter insert
-    /// waits for its adoption block, and holds the successor's words from the first read after it,
-    /// equal to a fresh boot of the committed model.
+    /// waits for its adoption block (here the transition's, past the warm successor's deadline),
+    /// and holds the successor's words from the first read after it, equal to a fresh boot of the
+    /// committed model.
     ///
     /// Test value: red if the read reports the candidate's latency before render adopts it, keeps
     /// the boot value after a rebuild (a boot-time copy like `WebResourceReport`), or answers a
@@ -9344,10 +9345,22 @@ mod structural_apply {
             "the record is the active plan's"
         );
 
-        // The first read after the adopting block holds the successor's words. The limiter
-        // restarts the track: a duck-swap, adopted at its `S` (#1324a).
-        rig.step_through_adoption();
-        assert_eq!(rig.epoch(), 1);
+        // The first read after the adopting block holds the successor's words. The limiter grows
+        // an audible track's latency, so the session's production bounds (#1360 D1) publish it
+        // warm, held to its duck's `S`, 1,408 (#1397 D1). This rig feeds each source only the
+        // block it renders, so the warm successor is never ready: the service step, run after
+        // every block as the Worker's loop runs it, takes the transition at 1,408 + 7,040 = 8,448
+        // (#1358 D3), the second plan published, which ducks again and is adopted at its own `S`,
+        // ceil_q(8,448 + 128 + 480 mute samples) = 9,088.
+        let revision = rig.host.committed_revision();
+        while rig.watermark().revision < revision {
+            assert!(rig.block <= 71, "adopted by block 71");
+            rig.step();
+            assert_eq!(rig.host.service(), RESULT_OK);
+        }
+        assert_eq!(rig.watermark().first_sample, 9_088);
+        assert_eq!(rig.block, 72, "the last block adopted it");
+        assert_eq!(rig.epoch(), 2);
         assert_eq!(rig.host.read_plan_latency(), RESULT_OK);
         assert_eq!(
             *rig.host.plan_latency(),

@@ -2,7 +2,7 @@
 
 Stream C of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-8 (round-5 amendment), D15-17).
 Slice of *Grow latency during playback by adopting a primed warm successor* (#1287). Code anchors
-verified on `main` at `6fb211594`.
+refreshed on `main` at `7d89eecc5` (attempt 1).
 
 ## Product outcome
 
@@ -24,8 +24,8 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
   - the entry point takes the session handle (D4);
   - its duty text (D5).
 - After *Extract the C ABI control plane into a portable crate both hosts call* (#1309), the
-  structural path of `crates/capi/src/runtime/control.rs` (reservation now at
-  `crates/control-plane/src/control.rs:1098`) lives in `crates/control-plane`.
+  structural path of `crates/capi/src/runtime/control.rs` lives in `crates/control-plane`
+  (`SessionState::service` at `crates/control-plane/src/control.rs:4133`).
 - Warm preparation (`warm_lead`, `WarmConfig`, `WarmUnavailable`) is host-core code from #1354.
   Classification with an injected `WarmConfig`, the `Primed` publication and the `PrimedCandidate`
   record are *Classify a latency-growth edit and publish its warm successor from the control
@@ -33,17 +33,23 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
   (`prime_deadline_samples`, in render samples) is #1358's. `fall_back_to_transition` and the
   session counter `transition_reprepare_refusals` are #1397's. The watermark, its flags and
   `miso_engine_v1_plan_watermark` are #1314's.
-- The C header's live-edit paragraph is `crates/capi/include/miso_engine_v1.h:35-62`; its session
-  thread rule is `:18-22`.
-- The C ABI builds its `SessionState` in `crates/control-plane/src/compile.rs:818`. The structural
-  fault and owner counters for tests are `TestOwnerCounters` (`crates/control-plane/src/control.rs:163`,
-  read by `test_lifecycle_counters`, `:315-317`), which #1309 moves into the control plane.
-- The release audit runs `./target/release/audit capi` (`.github/workflows/qualification.yml:715`)
+- The C header's live-edit paragraph is `crates/capi/include/miso_engine_v1.h:50-124`; its session
+  thread rule is `:18-26`.
+- The C ABI builds its `SessionState` through the public `control_plane::compile_children`
+  (`crates/control-plane/src/compile.rs:2544`, called at `crates/capi/src/runtime/mod.rs:198`). The
+  structural fault and owner counters for tests are `TestOwnerCounters`
+  (`crates/control-plane/src/control.rs:951`, read by `test_lifecycle_counters`, `:1223`).
+- The release audit runs `./target/release/audit capi` (`.github/workflows/qualification.yml:889`)
   from `tools/audit/src/capi.rs`.
 
 ## Decisions frozen for this slice
 
-- **D1. The production `WarmConfig`.** The C ABI creates every session with
+- **D1. The production `WarmConfig`.** (Amended, root ruling Q2 of attempt 1: the config is
+  central. `host_core::warm::production_config(fs, q)` builds it, and the control plane's public
+  `compile_children` and `compile_children_with_boot_command` pass it, from the parsed session's
+  rate and quantum, so the C ABI and the browser get it with no host code. The gates keep the
+  crate-private `compile_children_warm` for `None` and for custom bounds.) Every product session
+  holds
   `warm: Some(WarmConfig { p_max: p_max_samples(fs, q), prime_bytes_max: PRIME_BYTES_MAX })` for
   the session's rate and quantum (#1403 D1; `p_max_samples` is *Grow the default source ring by the
   warm-prime headroom*, #1406 D1), so its rebuilds are classified by #1403 D2 and routed by #1397
@@ -114,8 +120,9 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 
 ## Deliverables
 
-1. D1's config in `crates/capi/src/runtime/compile.rs` (the session constructor), D2, D3 and D5
-   in `crates/control-plane/src/`, and D1's `PRIME_BYTES_MAX` in `crates/host-core/src/warm.rs`.
+1. D1's config in `crates/control-plane/src/compile.rs` (the public session compile; amended by
+   root ruling Q2), D2, D3 and D5 in `crates/control-plane/src/`, and D1's `PRIME_BYTES_MAX` and
+   `production_config` in `crates/host-core/src/warm.rs`.
 2. Two `test-support` owner counters beside `TestOwnerCounters`' existing ones: deadline
    withdrawals and transition re-preparations, each raised once per event by D2's step.
 3. D4 in `crates/capi/include/miso_engine_v1.h` and `docs/C_ABI_V1_QUALIFICATION.md`.
@@ -215,3 +222,145 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 - `AdmissionPeak::WithReprepare` named above did not ship with #1398 (root ruling: code with no
   production caller is a placeholder). #1403 adds the reprepare admission peak together with its
   first caller; see its batch 15a amendment.
+
+## Amendment (attempt 1, 2026-11-01: root rulings on the plan's questions)
+
+- **Q1.** #1286 first. Its record (PR #2228, `artifacts/steps/swap-carry-base/`) gives
+  `PRIME_BYTES_MAX = 3,493,032` bytes: the smaller of its two rounds (round 1), native row binding.
+  Inputs: `o` 177,157 ns, `a_P` 625,831 ns, `b_P` 2,072,576 B, `β` 216.481 ps/B, `m` 0.7.
+- **Q2.** The config is central (D1 and deliverable 1 above are amended). #1361's deliverable 3 (the
+  browser wiring) is dropped with it.
+- **Q3.** Firefox is out (owner ruling 2026-10-25): Chromium and WebKit only.
+- **Q4.** A changed growth expectation is the feature. Each one is worked out again and reported; no
+  gate gets weaker.
+- **Q5.** One PR closes #1360 (S1 to S4).
+- **Paths beyond the list above**, each a direct consequence of the slices:
+  `crates/host-core/src/prepare.rs` (one doc line on `WarmConfig`), `hosts/host-web/src/tests.rs`
+  (one growth expectation worked out again, S2), and `tools/realtime-policy/src/policy.rs` with
+  `docs/REALTIME_DEPENDENCY_POLICY.md` (the new test binary's unsafe C calls join the ownership
+  allowlist).
+- **Stated limit (#2229, not in scope).** At 96 kHz and quantum 128, the first warm adoption block
+  (p99 1.11 ms) and every carrying-swap move block (1.07 ms) are above 70% of the 1.333 ms quantum.
+  A warm adoption is not slower than the move it replaces, so this issue goes on; #2229 owns the
+  margin.
+
+## Evidence (attempt 1)
+
+Branch `codex/issue-1360-warm-deadline`, from `7d89eecc5`.
+
+- **S1** (`SessionState::service`, `control.rs:4133`): the step runs after `synchronize_plan_epochs`
+  and before the first counter refresh. A `Backpressure` (the render half is gone) is skipped, so
+  every other session call goes on. `TestOwnerCounters` gains `deadline_withdrawals` and
+  `transition_reprepares`, raised once per withdrawal in `fall_back_pending_warm`.
+  - New test `the_service_step_runs_the_deadline_step_once` (gates 4 and 5 through `service`).
+    Red with the step taken out of `service` (`(0, 0)` against `(1, 1)`), and red with the step run
+    twice per call (`(2, 2)` against `(1, 1)`).
+  - The four step-level tests now take the step from the block's service. The rig's unserviced
+    mode makes no control call at all (its feed uses `submit_unserviced`). Run 3 of
+    `a_refused_fallback_at_the_deadline_keeps_the_donor_pending` is worked out again: B's own service
+    step withdraws W first (withdrawal 2) and B supersedes the transition at its `S`, `EXACT |
+    SUPERSEDED`, no underrun. The paused 1,000-step loop of
+    `a_warm_candidate_not_ready_by_its_deadline_takes_the_transition` is deleted: the new test owns
+    that claim through `service`.
+- **S2** (`PRIME_BYTES_MAX`, `production_config`, `compile_children_bounded`).
+  - New test `a_publicly_compiled_session_publishes_a_growth_primed`: red with no production
+    config (the growth is published as an ordinary successor).
+  - Sweep, by a temporary probe at each warm classification and fallback over the capi, host-web,
+    control-plane and host-core suites: one expectation changed.
+    `hosts/host-web/src/tests.rs::the_plan_latency_record_follows_the_active_plan` feeds each source
+    only the block it renders, so its growth (a limiter on an audible track) is never ready. Old:
+    an ordinary duck-swap adopted at sample 1,408, epoch 1. New: warm, held to its duck's `S`
+    1,408, the transition at 1,408 + 7,040 = 8,448, adopted at its own `S`, ceil_q(8,448 + 128 +
+    480) = 9,088, epoch 2. The test now services after each block, as the Worker's loop does; red
+    on the old config (1,408 against 9,088).
+  - These now take the transition at submit (#1397a: a duck is pending) or the warm path and pass
+    unchanged: `crates/capi/tests/strip_transitions.rs::every_restarting_edit_ducks_and_a_send_or_value_edit_does_not`,
+    and in `hosts/host-web/tests/control_parity.rs`
+    `a_rebuild_that_adds_latency_moves_the_plan_latency_alike_on_both_hosts`,
+    `a_stale_effect_row_edit_is_refused_alike_on_both_hosts`,
+    `both_hosts_boot_an_empty_session_and_add_the_first_stem_alike` and
+    `both_hosts_designate_the_master_strip_after_an_empty_boot_alike`.
+- **S3** (`crates/capi/tests/latency_growth.rs`; D4 in the header's "Latency growth during
+  playback" paragraph and in `docs/C_ABI_V1_QUALIFICATION.md`). Gates 1 to 3, one test each:
+  `a_growth_with_sources_queued_ahead_is_adopted_exact`,
+  `render_adopts_the_growth_with_no_session_call` and
+  `a_growth_never_ready_falls_back_only_at_a_service_call` (the transition is adopted at
+  `ceil_q(clock + q + 480)`). With no production config, gate 1 diverges at block 29, gate 2 at
+  block 6, and gate 3 completes the revision with no service call.
+- **S4** (`tools/audit/src/capi.rs::growth_leg`): a render thread and a service thread, `EXACT`,
+  zero render-thread violations (added into the record's totals; the record's keys do not change),
+  output equal to the predecessor rendered on. With no production config the leg fails at block 29.
+- **No bit moved elsewhere.** A scratch harness rendered every `fixtures/session/v1` session that
+  compiles (17; `json-invalid-duplicate-key.json` does not parse and `canonical.json` is refused at
+  compile on both trees) for 300 blocks through the C ABI, plain and live (six mute toggles and one
+  non-growth structural edit), at `7d89eecc5` and at the head: all 34 digests and watermarks are
+  equal. `audit capi`'s main `pcm_digest` is `30dcfd806e7ba058` on both.
+- **Checks.** fmt; workspace clippy (`--all-targets --all-features -D warnings`); release tests of
+  control-plane, host-core, capi, host-web and audit (`--all-features`) and realtime-policy;
+  `check-workspace-policy.sh`, `realtime-policy` and `check-test-support-ci.py`;
+  `check-capi-abi.sh`; `audit capi` (0 violations); `build-web-audioworklet.sh` and
+  `check-web-audioworklet.sh`: all pass.
+
+## Attempt 2 (2026-11-01): rebased onto `1fa4cee4e`
+
+- **Rebase.** Onto `origin/main` `1fa4cee4e`, which holds #2232 (`fe37db741`, PR #2235), #2137 and
+  #1713/#1718. No conflict; #1713's deletions stay.
+- **#2232.** `warm_lead` decides on `GraphCompiler::project` and prepares no effect processor: at 256
+  tracks its peak fell from 222.7 MB to 14.0 MB, with the same answers.
+- **The bus add's transition is the intended behaviour.** The 256-track `console-limits` bus add
+  answers `Unavailable(Misaligned)`, which is correct. With `warm: None` it completed `EXACT`
+  falsely: the output had a hard 10.1 ms gap of zeros, then the whole stream ran 486 samples late
+  (#2232's diagnosis). Under D15-8 an `Unavailable` growth takes the transition, so S2's path (the
+  transition, a ramped duck, `TRANSITION_FALLBACK`) is right.
+- **Sweep, again.** The same probe over the capi, host-web, control-plane and host-core suites gives
+  the same set as attempt 1 (plus this issue's own gates); no expectation changed again.
+- **No bit moved, again.** The 34 digests of `1fa4cee4e` and the head are equal; `audit capi`'s main
+  `pcm_digest` is `30dcfd806e7ba058` on both.
+- **Browser.** `npm run qualify -- --check-matrix --self-test-mutations`, `sdk/dist` deleted: Chromium
+  `single` and `worker`, WebKit `single` and `worker` all pass; `console-limits` replies `ok`,
+  path `rebuild`, render allocations 0.
+- **Checks.** fmt; workspace clippy (CI flags); release tests of control-plane, host-core, capi,
+  host-web, audit and realtime-policy (`--all-features`); workspace policy, `realtime_policy`,
+  `check-test-support-ci.py`; `check-capi-abi.sh`; `audit capi` (0 violations); web build and
+  check; aarch64 `cargo check --release --tests --all-features` of the touched crates.
+
+## Review folds (attempt 2 verify: PASS, three MINORs)
+
+- **M1.** `miso_engine_v1_service` reported every service failure as `source.epoch`. The control
+  plane's `SessionState::service_step` now names the failing part (`ServiceFailure::Epoch` or
+  `::Deadline`); `service()` wraps it for every other caller. The C entry reports the deadline
+  step's failure as a rebuild refusal: `COMPILE_REJECTED` with the compile diagnostic, or
+  `INTERNAL` with `control.internal`. No test: no existing test can make the step's transition
+  fail cheaply (an allocation refusal in `observation.after`), and a new hook is not worth it.
+- **M2.** The header and the qualification doc said the transition ducks the edited strips. It
+  ducks every strip whose arrival the growth moves (`grown_strips`): a bus add with a latent effect
+  on the new bus ducks every track routed into it.
+- **M3.** The audit leg's claim is the render thread's counters across the adoption block. Its
+  bit-identity check is dropped (gate 1 owns exactness), and it keeps one precondition: the
+  watermark covers the growth with `EXACT` inside the audited blocks. D6's "output equal to the
+  predecessor" is gate 1's from here on.
+
+### History: attempt 1's browser blocker (fixed upstream by #2232)
+
+`npm run qualify -- --check-matrix --self-test-mutations` fails in all four legs (Chromium and
+WebKit, `single` and `worker`) at `console-limits`: the #2191 bus add on the 256-track console
+session (a submix with the console's post-insert true-peak limiter, a route from every track into
+it) fails with `internal` from a control call. With the production config switched off, the
+Chromium `worker` leg passes. Native reproduction (`AudioWorkletEngineHost`, same document and
+frame):
+- `warm_lead` answers `Unavailable(Misaligned)`, so the edit takes the transition at submit
+  (`TRANSITION_FALLBACK`, adopted at 1,152) instead of the ordinary rebuild (`EXACT`, at 512).
+- Peak RSS: 175 MB with no config; 200 MB when `warm_lead` runs but its answer is ignored; 300 MB
+  with the transition. The transition restarts the grown strips at rest, so it allocates fresh
+  state that the ordinary rebuild carried. `warm_lead` also adds 1.9 s of control-thread time
+  (1.08 s to 2.94 s), which in `single` mode runs in the worklet's message handler.
+- The Wasm module's memory is capped at 512 MiB (`build-web-audioworklet.sh`, 8,192 pages), and
+  this session's boot already reaches about 300 MB there, so the transition's allocation fails and
+  the host reports `internal`.
+
+So, through S2, a valid console edit (a bus add) is refused by its warm path, against D1 ("a valid
+edit is never refused for its warm path"), and on a 256-track console it also ducks every grown
+strip. Attempt 1 asked for a ruling before S2 merged: for example, admit the classification's and the
+transition's peak (a typed refusal, not `internal`), answer `Ordinary` for a growth whose duck
+set the session cannot afford, or bound `warm_lead`'s passes. It is not fixed here (owner of
+`warm_lead`: #1354/#1403; of the transition: #1397).
