@@ -23,7 +23,9 @@ Each row names its owning issue. Two scripts consume this file, so the rows live
 Subcommands:
 
     rows <debug|release>                       issue|package|selector|name, one per line
-    judge-skips <debug|release> <list-output>  each row names exactly one test in the leg
+    judge-skips <debug|release> <list-output> [package ...]
+                                               each row (of those packages) names exactly one
+                                               test in the leg (or the shard)
     judge-test <debug|release> <name> <log> <exit-status>
     count-memset <assembly> <product-crates-file> <counts-file>
     judge-memset <counts-file> <product-crates-file>
@@ -705,9 +707,10 @@ def main(argv: list[str]) -> int:
         elif len(argv) == 2 and argv[0] == "rows" and argv[1] in TEST_ROWS:
             for issue, package, selector, name, _ in TEST_ROWS[argv[1]]:
                 print(f"{issue}|{package}|{selector}|{name}")
-        elif len(argv) == 3 and argv[0] == "judge-skips" and argv[1] in TEST_ROWS:
-            judge_skips(TEST_ROWS[argv[1]],
-                        pathlib.Path(argv[2]).read_text(encoding="utf-8", errors="replace"))
+        elif len(argv) >= 3 and argv[0] == "judge-skips" and argv[1] in TEST_ROWS:
+            # A debug shard (#2237) names its packages and judges only the rows it runs.
+            rows = [row for row in TEST_ROWS[argv[1]] if not argv[3:] or row[1] in argv[3:]]
+            judge_skips(rows, pathlib.Path(argv[2]).read_text(encoding="utf-8", errors="replace"))
         elif len(argv) == 5 and argv[0] == "judge-test" and argv[1] in TEST_ROWS:
             log = pathlib.Path(argv[3]).read_text(encoding="utf-8", errors="replace")
             print(judge_test(TEST_ROWS[argv[1]], argv[2], log, int(argv[4])))

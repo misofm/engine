@@ -1113,13 +1113,19 @@ jobs:
   # lists, the no-silent-skip gate and the known defects' expected failures, by name. `-D warnings`
   # makes an aarch64-only warning red here as well as in cross-target's clippy rows. The arm64
   # image is a partner image: rustup is installed if it is absent, before the cache (whose key
-  # reads rustc).
+  # reads rustc). #2237: the debug leg ran about 28 of its 30 minutes, so it runs as three matrix
+  # shards that partition its packages (the script's `debug_shard_count`); the verdict reads the
+  # matrix's one result, which is success only when every shard succeeds.
   aarch64-debug:
-    name: AArch64 product crate debug tests (NEON Simd4, FPCR)
+    name: AArch64 product crate debug tests (NEON Simd4, FPCR, shard ${{ matrix.shard }}/3)
     needs: route
     if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       RUSTFLAGS: -D warnings
     steps:
@@ -1136,10 +1142,10 @@ jobs:
           sudo apt-get install -y ripgrep
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: aarch64-debug
+          shared-key: aarch64-debug-${{ matrix.shard }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Product crate debug tests on arm64, known defects as named expected failures
-        run: bash scripts/run-aarch64-tests.sh debug
+      - name: Product crate debug tests on arm64 (one shard), known defects as named expected failures
+        run: bash scripts/run-aarch64-tests.sh debug ${{ matrix.shard }}/3
 
   aarch64-release:
     name: AArch64 release digest gates and realtime audits (NEON Simd4, FPCR)
