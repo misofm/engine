@@ -8316,11 +8316,9 @@ mod tests {
         };
         let lanes = width.lanes() as usize;
         let registry = launch_native_effect_registry().expect("launch registry");
-        let half_mono = |index: usize| !index.is_multiple_of(2);
-        let ten_six = |index: usize| index >= 10;
-        let rows: [(&str, usize, &dyn Fn(usize) -> bool); 2] =
-            [("half-mono", 64, &half_mono), ("10 + 6", 16, &ten_six)];
-        for (row, count, stereo) in rows {
+        // Each row: its name, its track count, and the first stereo track (`None`: the odd ones).
+        for (row, count, tail) in [("half-mono", 64, None), ("10 + 6", 16, Some(10))] {
+            let stereo = |index: usize| tail.map_or(!index.is_multiple_of(2), |tail| index >= tail);
             let mut model = mono_fixture_with_tracks(count);
             for (index, track) in model.tracks.iter_mut().enumerate() {
                 if stereo(index) {

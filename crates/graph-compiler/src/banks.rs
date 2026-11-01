@@ -1230,6 +1230,10 @@ fn route_fold_targets(model: &session::SessionModel) -> BTreeMap<String, Vec<Str
     targets
 }
 
+/// Binds one plan group's slots: the chain pass's binder, as [`try_pool_move`] calls it.
+type BindGroup<'a> =
+    dyn Fn(usize, &BankGroup<RackChainId>) -> Result<BoundGroup, GraphDiagnostic> + 'a;
+
 /// What a speculative pool move ([`try_pool_move`]) must improve to be kept.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PoolMoveObjective {
@@ -1289,7 +1293,7 @@ fn try_pool_move(
     bound: &mut Vec<BoundGroup>,
     classes: &mut SessionPoolClasses,
     width: BankWidth,
-    bind_group: &dyn Fn(usize, &BankGroup<RackChainId>) -> Result<BoundGroup, GraphDiagnostic>,
+    bind_group: &BindGroup<'_>,
 ) -> Result<(), GraphDiagnostic> {
     if candidates.is_empty() {
         return Ok(());
