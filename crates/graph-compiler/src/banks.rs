@@ -1241,8 +1241,10 @@ enum PoolMoveObjective {
     /// banks nowhere, so a move that lets it bind gains banks.
     BindCount,
     /// Issue #2137: the re-plan's banks cost **less** than the trial's, a mono bank weighing
-    /// [`MONO_BANK_WEIGHT`] of a stereo one, and no slot member the trial banked falls to the
-    /// per-node path. A merged console remainder removes a bank, so the bind count would score it
+    /// [`MONO_BANK_WEIGHT`] of a stereo one, and its changed groups bank **at least as many** slot
+    /// members as the trial's did. That is a count, not a per-member check: a move may bank one
+    /// effect node and leave another per node, but it never banks fewer in all, so the weight is
+    /// never paid for with per-node work it does not price. A merged console remainder removes a bank, so the bind count would score it
     /// as a loss (M3, [`stranded_mono_tracks`]); the weight is what makes the merge measurable.
     ClassWeighted,
 }
@@ -1265,6 +1267,21 @@ fn weighted_cost(class: CohortPoolClass, banks: &BoundGroup) -> u64 {
         CohortPoolClass::Stereo => STEREO_BANK_WEIGHT,
     };
     weight * banks.len() as u64
+}
+
+/// A whole rack plan's class-weighted bank cost and the slot members it banks (issue #2137): the
+/// [`PoolMoveObjective::ClassWeighted`] terms over every bound slot of `report`.
+pub(crate) fn rack_plan_cost(report: &GraphRackBankReport) -> (u64, usize) {
+    report
+        .bound_slots
+        .iter()
+        .fold((0, 0), |(cost, members), slot| {
+            let weight = match report.plan.groups.get(slot.group).map(|group| group.class) {
+                Some(CohortPoolClass::MonoSymmetricAtPrepare) => MONO_BANK_WEIGHT,
+                _ => STEREO_BANK_WEIGHT,
+            };
+            (cost + weight, members + slot.members.len())
+        })
 }
 
 /// The slot members one plan group's bound banks run banked.
@@ -1412,31 +1429,24 @@ fn try_pool_move(
     Ok(())
 }
 
-/// The console tracks issue #2137's cost-weighted rule may move to the stereo pool: those every
-/// one of whose console groups is a fitting mono remainder
-/// ([`BankPlan::class_remainder_moves`]).
+/// The console tracks issue #2137's cost-weighted rule may move to the stereo pool: those in a
+/// fitting mono remainder of **any** console group ([`BankPlan::class_remainder_moves`]).
 ///
 /// A track's class is global -- one per track, read by every rack and by the builtin-stage planner
-/// -- so a track moves only when the move fits at **every** console slot it carries; a track whose
-/// `pre_insert` remainder fits while its `post_insert` group is full stays. Insert remainders are
-/// not candidates here: they keep #971's rule ([`stranded_mono_tracks`]).
+/// -- so a move changes every group the track sits in, not only the one that fits. The candidate
+/// is therefore named by any one fitting console remainder, and the class-weighted objective, which
+/// compares every group the move changes, decides. A track whose `pre_insert` remainder fits while
+/// its `post_insert` group does not (the post-insert level splits whenever only some tracks carry
+/// inserts) is a candidate. Insert remainders are not candidates here: they keep #971's rule
+/// ([`stranded_mono_tracks`]).
 fn console_remainder_tracks(plan: &BankPlan<RackChainId>, width: BankWidth) -> Vec<String> {
-    let moves: BTreeSet<RackChainId> = plan.class_remainder_moves(width).into_iter().collect();
-    let mut fits: BTreeMap<&str, bool> = BTreeMap::new();
-    for group in plan
-        .groups
-        .iter()
-        .filter(|group| is_console_rack(group.rack))
-    {
-        for id in group.members.iter().flatten() {
-            let entry = fits.entry(id.track_id.as_str()).or_insert(true);
-            *entry = *entry && moves.contains(id);
-        }
-    }
-    fits.into_iter()
-        .filter(|(_, fits)| *fits)
-        .map(|(track, _)| track.to_owned())
-        .collect()
+    let tracks: BTreeSet<String> = plan
+        .class_remainder_moves(width)
+        .into_iter()
+        .filter(|id| is_console_rack(rack_location(id.rack)))
+        .map(|id| id.track_id)
+        .collect();
+    tracks.into_iter().collect()
 }
 
 /// The mono-class tracks the trial `plan` strands (issue #971): every effect group each one sits in
