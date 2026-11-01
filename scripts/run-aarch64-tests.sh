@@ -171,7 +171,7 @@ shard_crates=()
 # reaches a shard transitively and resolves differently there fails here; move it into that shard
 # or the shard of the crate that turns its feature on.
 resolved_features() {
-    cargo tree --quiet --locked --target "$target" -e normal,dev,build --prefix none \
+    cargo tree --quiet --locked --color never --target "$target" -e normal,dev,build --prefix none \
         --format '{p}|{f}' "$@" |
         grep -F "($root/" | sed -E 's/ v[^|]*\|/|/; s/ \(\*\)$//' | LC_ALL=C sort -u
 }
@@ -215,7 +215,7 @@ import sys
 
 root, leg, selected = sys.argv[1], sys.argv[2], sys.argv[3:]
 metadata = json.loads(subprocess.run(
-    ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1",
+    ["cargo", "metadata", "--locked", "--color", "never", "--no-deps", "--format-version", "1",
      "--manifest-path", f"{root}/Cargo.toml"], check=True, capture_output=True, text=True).stdout)
 members = {package["name"]: package for package in metadata["packages"]}
 accepted = set(selected)
