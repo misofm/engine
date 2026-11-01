@@ -23,6 +23,12 @@
 //! (root ruling B16-R9), then submits the generation-3 quantum for that frame, all outside the
 //! render scope, then the rest of the seek's runway (#2205); the next audited call applies the
 //! seek at the timeline and the source in one block.
+//!
+//! The latency-growth leg ([`growth_leg`], #1360 D6) runs after it on a session of its own: during
+//! playback, with the source queued ahead, it adds a muted track with a true-peak limiter, renders
+//! on one thread and services from a second until the watermark covers the revision. Its render
+//! calls are audited on the render thread and their counters are added to the record's; it
+//! asserts `EXACT` and an output equal to the predecessor rendered on with no edit.
 
 #![allow(unsafe_code)]
 
@@ -31,14 +37,16 @@ use std::ptr;
 
 use capi::{
     ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits, ENGINE_CONFIG_SIZE,
-    EVENT_LANE_RELIABLE, Engine, EngineConfig, PLANAR_OUTPUT_SIZE, Plan, PlanarOutput,
-    RESULT_INTERNAL, RESULT_OK, SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk,
-    SubmitReport, miso_engine_v1_compile_session, miso_engine_v1_dequeue_event,
-    miso_engine_v1_engine_create, miso_engine_v1_engine_destroy, miso_engine_v1_plan_destroy,
-    miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy, miso_engine_v1_session_seek,
+    EVENT_LANE_RELIABLE, Engine, EngineConfig, OUTCOME_EXACT, PLANAR_OUTPUT_SIZE, Plan,
+    PlanarOutput, RESULT_INTERNAL, RESULT_OK, SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session,
+    SourceChunk, SubmitReport, WATERMARK_SIZE, Watermark, miso_engine_v1_compile_session,
+    miso_engine_v1_dequeue_event, miso_engine_v1_engine_create, miso_engine_v1_engine_destroy,
+    miso_engine_v1_plan_destroy, miso_engine_v1_plan_watermark, miso_engine_v1_render_f32_planar,
+    miso_engine_v1_service, miso_engine_v1_session_destroy, miso_engine_v1_session_seek,
     miso_engine_v1_source_seek_at, miso_engine_v1_source_submit_planar_f32,
     miso_engine_v1_submit_command, plan_carry_counts, plan_replacement_count,
 };
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use engine::realtime::audit::{self, AuditSnapshot};
 use protocol::{
     CommandPayload, DecodeScratch, DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec,
@@ -148,6 +156,20 @@ impl AuditHandles {
     }
 
     fn prepare() -> Result<Self, u32> {
+        let handles = Self::compile(audit_limits())?;
+        let (submitted, accepted_frames) = submit_source_chunk(handles.session, 1, 0);
+        if submitted != RESULT_OK || accepted_frames != QUANTUM_FRAMES as u64 {
+            return Err(if submitted != RESULT_OK {
+                submitted
+            } else {
+                RESULT_INTERNAL
+            });
+        }
+        Ok(handles)
+    }
+
+    /// Compiles the audit session under `limits`, with nothing submitted.
+    fn compile(limits: CompileLimits) -> Result<Self, u32> {
         let mut handles = Self::empty();
         let config = EngineConfig {
             struct_size: ENGINE_CONFIG_SIZE,
@@ -160,7 +182,6 @@ impl AuditHandles {
             return Err(created);
         }
 
-        let limits = audit_limits();
         let session_json = audit_session_json();
         let mut diagnostic_storage = [0_u8; 4_096];
         let mut diagnostics = BytesOut {
@@ -185,15 +206,6 @@ impl AuditHandles {
         };
         if compiled != RESULT_OK {
             return Err(compiled);
-        }
-
-        let (submitted, accepted_frames) = submit_source_chunk(handles.session, 1, 0);
-        if submitted != RESULT_OK || accepted_frames != QUANTUM_FRAMES as u64 {
-            return Err(if submitted != RESULT_OK {
-                submitted
-            } else {
-                RESULT_INTERNAL
-            });
         }
         Ok(handles)
     }
@@ -530,6 +542,11 @@ impl LiveEditor {
         assert_eq!(header.status, StatusCode::Ok, "live edit {}", self.edits);
         self.revision += 1;
         assert_eq!(header.revision, SessionRevision(self.revision));
+        self.drain_reliable();
+    }
+
+    /// Dequeues the reliable lane until it is empty.
+    fn drain_reliable(&mut self) {
         loop {
             let mut event = BytesOut {
                 struct_size: BYTES_OUT_SIZE,
@@ -615,7 +632,7 @@ impl PreparedAudit {
                 pcm_digest = pcm_digest.wrapping_mul(0x0000_0100_0000_01b3);
             }
         }
-        let snapshot = audit::snapshot();
+        let mut snapshot = audit::snapshot();
         // SAFETY: The plan is live and no render call runs concurrently.
         let (carried, carry_mismatches) = unsafe { plan_carry_counts(plan) };
         // SAFETY: As above.
@@ -638,6 +655,20 @@ impl PreparedAudit {
             (1, 0),
             "the structural transaction's swap block carried the source's ring"
         );
+        let grown = growth_leg();
+        for (total, leg) in [
+            (&mut snapshot.allocations, grown.allocations),
+            (&mut snapshot.deallocations, grown.deallocations),
+            (&mut snapshot.locks, grown.locks),
+            (&mut snapshot.feature_detection, grown.feature_detection),
+            (&mut snapshot.logs, grown.logs),
+            (&mut snapshot.file_io, grown.file_io),
+            (&mut snapshot.network_io, grown.network_io),
+            (&mut snapshot.syscalls, grown.syscalls),
+            (&mut snapshot.panic_unwinds, grown.panic_unwinds),
+        ] {
+            *total = total.saturating_add(leg);
+        }
         AuditEvidence {
             calls: CALLS,
             stable_output_address: output_address_changes == 0,
@@ -646,6 +677,306 @@ impl PreparedAudit {
             snapshot,
         }
     }
+}
+
+/// Blocks the latency-growth leg renders, and the blocks before its growth.
+const GROWTH_BLOCKS: u64 = 64;
+const GROWTH_BEFORE: u64 = 6;
+/// `P` of the leg's growth: the true-peak limiter's `Fs/100 + 6` = 486 at 48 kHz in whole quanta.
+const GROWTH_LEAD: u64 = 512;
+/// How far past the render clock the leg's control thread keeps the source queued, inside the
+/// default ring (9,472 frames at 48 kHz and quantum 128).
+const GROWTH_FEED_AHEAD: u64 = 4_096;
+/// What the leg's render thread waits for before each block: `P + q` past the read position, which
+/// the adoption moves `P` further ahead.
+const GROWTH_READY_AHEAD: u64 = 2 * GROWTH_LEAD + 2 * QUANTUM_FRAMES as u64;
+
+/// The leg's source frame `frame`: never zero, different from frame to frame, so a gap or a
+/// shifted stream changes the output.
+fn growth_pcm(frame: u64) -> [f32; 2] {
+    let step = (frame.wrapping_mul(7_919) % 1_999) as f32;
+    [(step - 999.5) / 2_000.0, (999.5 - step) / 4_000.0]
+}
+
+/// The leg's growth (#1360 D6): a muted copy of the first track with a true-peak limiter insert,
+/// and its route, at `revision`.
+fn growth_transaction(request_id: u64, revision: u64) -> Vec<u8> {
+    let model = session::parse_session_json(&audit_session_json()).expect("the audit session");
+    let mut track = model.tracks[0].clone();
+    track.id = StableId::parse("grown").expect("track ID");
+    track.fader.left_mute = true;
+    track.fader.right_mute = true;
+    track.inserts.effects.push(session::Effect {
+        id: StableId::parse("grown-limiter").expect("effect ID"),
+        identity: EffectIdentity::Native {
+            effect_id: StableId::parse("miso.true-peak-limiter").expect("effect ID"),
+        },
+        quality: session::EffectQuality::Normal,
+        bypass: false,
+        link_mode: session::LinkMode::Maximum,
+        params: Vec::new(),
+        sidechain: session::SidechainDeclaration::None,
+    });
+    let mut route = model.routes[0].clone();
+    route.id = StableId::parse("grown-main").expect("route ID");
+    if let session::RouteSource::Track { track_id, .. } = &mut route.source {
+        *track_id = track.id.clone();
+    }
+    let edits = [
+        SessionEdit::UpsertTrack { track },
+        SessionEdit::UpsertRoute { route },
+    ];
+    let mut bytes = vec![0_u8; 4_096];
+    let len = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::SessionTransactionApply(&edits),
+            },
+            &mut bytes,
+        )
+        .expect("the growth encodes");
+    bytes.truncate(len);
+    bytes
+}
+
+/// The leg's session half: the source fed so far, on the control thread.
+struct GrowthControl {
+    session: *mut Session,
+    fed: u64,
+}
+
+impl GrowthControl {
+    /// Submits whole quanta of [`growth_pcm`] until `until` frames are queued.
+    fn feed_to(&mut self, until: u64) {
+        let quantum = QUANTUM_FRAMES as u64;
+        while self.fed < until {
+            let mut left = [0.0_f32; QUANTUM_FRAMES];
+            let mut right = [0.0_f32; QUANTUM_FRAMES];
+            for index in 0..QUANTUM_FRAMES {
+                [left[index], right[index]] = growth_pcm(self.fed + index as u64);
+            }
+            let planes = [left.as_ptr(), right.as_ptr()];
+            let chunk = SourceChunk {
+                struct_size: SOURCE_CHUNK_SIZE,
+                sample_rate_hz: SAMPLE_RATE_HZ,
+                generation: 1,
+                start_frame: self.fed,
+                planes: planes.as_ptr(),
+                plane_count: 2,
+                frames: QUANTUM_FRAMES as u32,
+                end_of_region: 0,
+                reserved0: 0,
+            };
+            let mut report = SubmitReport {
+                struct_size: SUBMIT_REPORT_SIZE,
+                reserved0: 0,
+                accepted_frames: 0,
+                cumulative_written_frames: 0,
+                active_generation: 0,
+            };
+            // SAFETY: The session is live and used by this thread alone; the planes and the
+            // report outlive the synchronous call.
+            let submitted = unsafe {
+                miso_engine_v1_source_submit_planar_f32(
+                    self.session,
+                    SOURCE_ID.as_ptr(),
+                    SOURCE_ID.len() as u64,
+                    &chunk,
+                    &mut report,
+                )
+            };
+            assert_eq!(submitted, RESULT_OK, "the leg's feed at {}", self.fed);
+            assert_eq!(report.accepted_frames, quantum);
+            self.fed += quantum;
+        }
+    }
+
+    /// Commits [`growth_transaction`] and drains its reliable events: control work.
+    fn apply_growth(&mut self) {
+        let request = growth_transaction(1, INITIAL_REVISION);
+        let mut response = [0_u8; 4_096];
+        let mut output = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: response.as_mut_ptr(),
+            capacity_bytes: response.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the request and response
+        // storage outlive the synchronous call.
+        let committed = unsafe {
+            miso_engine_v1_submit_command(
+                self.session,
+                request.as_ptr(),
+                request.len() as u64,
+                &mut output,
+            )
+        };
+        assert_eq!(committed, RESULT_OK, "the leg's growth commits");
+        let mut fields = [0_u16; 64];
+        let decoded = ProtocolCodec::default()
+            .decode_typed_response(
+                &response[..output.required_bytes as usize],
+                &mut DecodeScratch::new(&mut fields),
+            )
+            .expect("the growth's response");
+        assert!(
+            matches!(
+                decoded,
+                DecodedTypedResponseFrame::Success {
+                    header,
+                    payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(
+                        applied
+                    ),
+                } if header.status == StatusCode::Ok
+                    && applied.edit_path == protocol::EditPath::Rebuild
+            ),
+            "the growth commits with path rebuild"
+        );
+        LiveEditor::new(self.session).drain_reliable();
+    }
+}
+
+/// The leg's plan half, on the render thread.
+struct GrowthRender {
+    plan: *mut Plan,
+}
+
+impl GrowthRender {
+    /// Renders block `block`, audited on this thread when `audited`; its output bits.
+    fn render(&self, block: u64, audited: bool) -> Vec<u32> {
+        let mut pcm = [0.0_f32; QUANTUM_FRAMES * 2];
+        let output = PlanarOutput {
+            struct_size: PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: QUANTUM_FRAMES as u32,
+            plane_stride_samples: QUANTUM_FRAMES as u32,
+            reserved: [0; 2],
+        };
+        let sample = block * QUANTUM_FRAMES as u64;
+        // SAFETY: The plan is live and rendered by this thread alone; `output` is owned storage.
+        let call = || unsafe { miso_engine_v1_render_f32_planar(self.plan, sample, &output) };
+        let result = if audited {
+            audit::in_render_scope(call)
+        } else {
+            call()
+        };
+        assert_eq!(result, RESULT_OK, "the leg's render at {sample}");
+        pcm.iter().map(|value| value.to_bits()).collect()
+    }
+
+    fn watermark(&self) -> Watermark {
+        // SAFETY: The plan is live, and a zeroed watermark is a valid value whose size field is
+        // then set for the complete fixed-size write.
+        unsafe {
+            let mut watermark: Watermark = core::mem::zeroed();
+            watermark.struct_size = WATERMARK_SIZE;
+            assert_eq!(
+                miso_engine_v1_plan_watermark(self.plan, &mut watermark),
+                RESULT_OK
+            );
+            watermark
+        }
+    }
+}
+
+// SAFETY: Each half's handle is used by the one thread that holds the half: the session's calls
+// on the control thread, the plan's render calls on the render thread (the watermark query is
+// any-thread).
+unsafe impl Send for GrowthRender {}
+
+/// The latency-growth leg (#1360 D6), on a session of its own with the default source ring: the
+/// render thread renders [`GROWTH_BLOCKS`] blocks, each audited and each once the source is queued
+/// [`GROWTH_READY_AHEAD`] past its start, while this control thread keeps the source queued
+/// [`GROWTH_FEED_AHEAD`] ahead, commits the growth after [`GROWTH_BEFORE`] blocks and calls
+/// `miso_engine_v1_service` between feeds. It asserts that the watermark covers the growth with
+/// `EXACT` and that the output equals the same session rendered on with no edit, bit for bit.
+/// Returns the render thread's audit counters.
+fn growth_leg() -> AuditSnapshot {
+    let limits = CompileLimits {
+        source_ring_frames: 0,
+        ..audit_limits()
+    };
+    let quantum = QUANTUM_FRAMES as u64;
+    let grown = AuditHandles::compile(limits).expect("compile the growth leg's session");
+    let mut control = GrowthControl {
+        session: grown.session,
+        fed: 0,
+    };
+    let render = GrowthRender { plan: grown.plan };
+    let (rendered, fed, done) = (
+        &AtomicU64::new(0),
+        &AtomicU64::new(0),
+        &AtomicBool::new(false),
+    );
+    let (blocks, snapshot, render) = std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            audit::warm_up();
+            audit::reset();
+            let mut blocks = Vec::new();
+            for block in 0..GROWTH_BLOCKS {
+                while fed.load(Ordering::Acquire) < block * quantum + GROWTH_READY_AHEAD {
+                    assert!(!done.load(Ordering::Acquire), "the leg's feed stopped");
+                    std::hint::spin_loop();
+                }
+                blocks.push(render.render(block, true));
+                rendered.store(block + 1, Ordering::Release);
+            }
+            (blocks, audit::snapshot(), render)
+        });
+        let mut applied = false;
+        loop {
+            let blocks = rendered.load(Ordering::Acquire);
+            control.feed_to(blocks * quantum + GROWTH_FEED_AHEAD);
+            fed.store(control.fed, Ordering::Release);
+            if blocks >= GROWTH_BLOCKS {
+                break;
+            }
+            if !applied && blocks >= GROWTH_BEFORE {
+                control.apply_growth();
+                applied = true;
+            }
+            // SAFETY: The session is live and used by this thread alone.
+            let serviced = unsafe { miso_engine_v1_service(control.session) };
+            assert_eq!(serviced, RESULT_OK);
+            std::thread::yield_now();
+        }
+        done.store(true, Ordering::Release);
+        worker.join().expect("the leg's render thread")
+    });
+    let watermark = render.watermark();
+    assert_eq!(
+        (
+            watermark.revision,
+            watermark.outcome_flags,
+            watermark.exact_count
+        ),
+        (INITIAL_REVISION + 1, OUTCOME_EXACT, 1),
+        "the growth is adopted exact"
+    );
+    drop(grown);
+
+    let continued = AuditHandles::compile(limits).expect("compile the leg's predecessor");
+    let mut control = GrowthControl {
+        session: continued.session,
+        fed: 0,
+    };
+    let render = GrowthRender {
+        plan: continued.plan,
+    };
+    for (block, bits) in blocks.iter().enumerate() {
+        let block = block as u64;
+        control.feed_to(block * quantum + GROWTH_FEED_AHEAD);
+        assert!(
+            render.render(block, false) == *bits,
+            "the leg's block {block} differs from the predecessor rendered on"
+        );
+    }
+    snapshot
 }
 
 #[derive(Clone, Copy)]
