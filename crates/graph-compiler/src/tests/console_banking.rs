@@ -484,10 +484,10 @@ fn node_levels(artifact: &PreparedGraphBuiltinsArtifact) -> BTreeMap<GraphNodeId
 /// * each console rack forms one group per (pool class, placement level of its first slot),
 ///   `ceil(n / W)` of them for `n` tracks there, and binds every slot of every group;
 /// * `post_insert` is placed at one level per pool, whatever the insert count (#2136);
-/// * each track pools in one class across its chains: stereo when its feed is stereo, and
-///   mono-symmetric when its feed is mono unless #2137's remainder rule moved it to the stereo
-///   pool (#971's demotion never moves it, under padding); bypassed lanes share banks with
-///   unbypassed ones. Since
+/// * each track pools as its own class, mono-symmetric exactly when its feed is mono (#971's
+///   demotion never moves it, under padding), except the mono tracks #2137's decision moved to the
+///   stereo pool, which it moves only for a plan better than the unmoved one (checked against that
+///   plan, compiled with the move disabled); bypassed lanes share banks with unbypassed ones. Since
 ///   #1873 every console-eligible effect carries a channel-symmetry witness, so this holds on both
 ///   consoles; a declining witness is
 ///   [`a_mono_track_whose_witness_declines_pools_as_stereo`]'s.
@@ -548,7 +548,49 @@ fn every_console_slot_binds_banked_at_every_track_count() {
                     && report.scalar_in(RackLocation::Simd2).is_empty(),
                 "{n} tracks: a console slot renders per node"
             );
-            let mut track_class: BTreeMap<usize, CohortPoolClass> = BTreeMap::new();
+            // Issue #2137: the tracks the compile moved, held to the plan compiled with the move
+            // disabled: the moved plan is better than it, or nothing moved and the plans are one.
+            crate::compile::set_remainder_move(crate::compile::RemainderMove::Disabled);
+            let unmoved = compile_at(&model, host_dispatch()).expect("the unmoved plan compiles");
+            crate::compile::set_remainder_move(crate::compile::RemainderMove::Decided);
+            let unmoved = &unmoved.report().rack_cohorts;
+            let stereo_pool = |report: &GraphRackBankReport| -> BTreeSet<String> {
+                report
+                    .plan
+                    .groups
+                    .iter()
+                    .filter(|group| group.class == CohortPoolClass::Stereo)
+                    .flat_map(|group| group.members.iter().flatten())
+                    .map(|chain| chain.track_id.clone())
+                    .collect()
+            };
+            let moved: BTreeSet<String> = &stereo_pool(report) - &stereo_pool(unmoved);
+            if moved.is_empty() {
+                assert_eq!(report.plan, unmoved.plan, "{n} tracks: no move, one plan");
+            } else {
+                // Restated here rather than called, so the decision cannot vouch for itself.
+                let cost = |report: &GraphRackBankReport| -> u64 {
+                    report
+                        .bound_slots
+                        .iter()
+                        .map(|slot| match report.plan.groups[slot.group].class {
+                            CohortPoolClass::MonoSymmetricAtPrepare => 61,
+                            CohortPoolClass::Stereo => 100,
+                        })
+                        .sum()
+                };
+                let banked = |report: &GraphRackBankReport| -> BTreeSet<EffectNodeId> {
+                    report
+                        .bound_slots
+                        .iter()
+                        .flat_map(|slot| slot.members.iter().cloned())
+                        .collect()
+                };
+                assert!(
+                    cost(report) < cost(unmoved) && banked(unmoved).is_subset(&banked(report)),
+                    "{n} tracks: moved {moved:?} for a plan that is not better"
+                );
+            }
             for (rack, location, slots) in [
                 (RackId::Simd1, RackLocation::Simd1, console.pre.len()),
                 (RackId::Simd2, RackLocation::Simd2, console.post.len()),
@@ -564,17 +606,16 @@ fn every_console_slot_binds_banked_at_every_track_count() {
                         .find(|group| group.members.contains(&Some(chain.clone())))
                         .unwrap_or_else(|| panic!("{n} tracks: {chain:?} is in a group"));
                     let index: usize = chain.track_id[2..].parse().expect("chNN");
-                    // A stereo feed always pools stereo. A mono feed pools mono unless #2137's
-                    // remainder rule moved it to the stereo pool, and then every chain of the
-                    // track does: the class is the track's.
-                    assert!(
-                        !tracks[index].feed.stereo || group.class == CohortPoolClass::Stereo,
-                        "{n} tracks: {chain:?} pools as its own class"
-                    );
+                    // Each track pools as its own class, except a mono track #2137's decision
+                    // moved, and that one in every chain: the class is the track's.
+                    let expected = if tracks[index].feed.stereo || moved.contains(&chain.track_id) {
+                        CohortPoolClass::Stereo
+                    } else {
+                        CohortPoolClass::MonoSymmetricAtPrepare
+                    };
                     assert_eq!(
-                        *track_class.entry(index).or_insert(group.class),
-                        group.class,
-                        "{n} tracks: {chain:?} pools in one class with its track's other chains"
+                        group.class, expected,
+                        "{n} tracks: {chain:?} pools as its own class"
                     );
                     pools.insert(group.class);
                     // Issue #2136: the chain's placement level, which the planner pooled it at;
@@ -1240,63 +1281,6 @@ fn a_console_track_stays_mono_when_filling_a_bank_costs_more() {
     );
 }
 
-/// Issue #2137: the remainder rule never trades banked work for per-node work.
-///
-/// `ch00..ch{W+k-2}` are mono and `ch{W+k-1}` stereo, where `k` is the insert padding threshold
-/// (#888); every track carries the limiter as its `pre_insert` slot (so every track's slot sits at
-/// one level), and the last `k` mono tracks carry EQ then compressor as inserts. The mono limiter
-/// remainder (`k - 1` tracks) fits beside the
-/// stereo track's, so the rule names it. Moving it would save a padded mono limiter bank and
-/// split the `k`-member mono insert group, which pads and binds two banks, into two groups below
-/// `k` that render per node: fewer banks, so a lower bank cost, and `2 k` effect nodes off the
-/// banked path. The move is refused, and the mono insert group keeps its two banks.
-///
-/// Red if the class-weighted objective compares the bank cost alone.
-#[test]
-fn the_remainder_rule_never_trades_banked_work_for_per_node_work() {
-    let width = BankWidth::for_backend(host_dispatch()).expect("a vector host");
-    let lanes = width.lanes() as usize;
-    let k = crate::banks::min_padded_insert_members(width);
-    let console = Console {
-        pre: vec![Kind::Limiter],
-        post: Vec::new(),
-    };
-    let mono = lanes + k - 1;
-    let tracks: Vec<TrackShape> = (0..=mono)
-        .map(|index| TrackShape {
-            feed: Feed {
-                gain: 2.0,
-                stereo: index == mono,
-                poison: false,
-            },
-            inserts: if (mono - k..mono).contains(&index) {
-                vec![Kind::Eq, Kind::Comp]
-            } else {
-                Vec::new()
-            },
-            bypass: vec![false],
-            variant: 0,
-        })
-        .collect();
-    let model = console_session(&console, &tracks);
-    let artifact = compile_at(&model, host_dispatch()).expect("the console session compiles");
-    assert_eq!(
-        pooled_tracks(&artifact)[1],
-        BTreeSet::from([format!("ch{mono:02}")]),
-        "the stereo pool is the stereo track alone"
-    );
-    let report = &artifact.report().rack_cohorts;
-    assert!(
-        report.scalar_in(RackLocation::Dynamic).is_empty(),
-        "no insert renders per node"
-    );
-    assert_eq!(
-        artifact.graph().prepared_bank_count(),
-        5,
-        "three limiter banks (mono full, mono padded, stereo padded) and the mono insert group's two"
-    );
-}
-
 /// Issue #2137: a track moves when any one of its console remainders fits, because its class is
 /// global and the objective weighs every group the move changes.
 ///
@@ -1347,6 +1331,93 @@ fn a_track_moves_when_any_console_remainder_fits() {
     // Re-placed with the moved classes, the eight mono limiters share one placement level and the
     // eight stereo ones another: `16 / W` banks at each console slot, and one compressor bank.
     assert_eq!(artifact.graph().prepared_bank_count(), 2 * 16 / lanes + 1);
+}
+
+/// Issue #2137: a move that would send a banked effect node to the per-node path is refused,
+/// even where it saves bank cost.
+///
+/// Ten mono tracks and one stereo track carry an EQ `pre_insert` slot and a limiter `post_insert`
+/// slot; by `index % 3` a track carries a compressor and a multiband compressor as inserts, the
+/// multiband alone, or none. The `pre_insert` mono remainder (`ch08`, `ch09` at eight lanes) fits
+/// beside the stereo track, so `ch08` and `ch09` are candidates. Moved, `ch09`'s compressor and
+/// multiband would leave the mono leftover banks the #2138 pass binds them in and render per node.
+/// The whole-plan decision sees that loss and keeps the unmoved plan: 33 effect nodes banked at
+/// eight lanes.
+///
+/// A second shape moves the same number of banked nodes but not the same ones.
+///
+/// Red when the move is decided before the leftover pass (attempt 2: `ch08` and `ch09` move and 31
+/// nodes bank), or by a total of banked nodes instead of node by node (the second shape moves).
+#[test]
+fn a_move_that_unbanks_a_leftover_node_is_refused() {
+    let lanes = BankWidth::for_backend(host_dispatch())
+        .expect("a vector host")
+        .lanes() as usize;
+    let console = Console {
+        pre: vec![Kind::Eq],
+        post: vec![Kind::Limiter],
+    };
+    let tracks: Vec<TrackShape> = (0..11)
+        .map(|index| TrackShape {
+            feed: Feed {
+                gain: 0.5,
+                stereo: index == 10,
+                poison: false,
+            },
+            inserts: match index % 3 {
+                0 => vec![Kind::Comp, Kind::Multiband],
+                1 => vec![Kind::Multiband],
+                _ => Vec::new(),
+            },
+            bypass: vec![false; 2],
+            variant: index % VARIANTS.len(),
+        })
+        .collect();
+    let model = console_session(&console, &tracks);
+    let artifact = compile_at(&model, host_dispatch()).expect("the console session compiles");
+    assert_eq!(
+        pooled_tracks(&artifact)[1],
+        BTreeSet::from(["ch10".to_owned()]),
+        "ch08 and ch09 stay mono"
+    );
+    if lanes == 8 {
+        let banked: usize = artifact
+            .report()
+            .rack_cohorts
+            .bound_slots
+            .iter()
+            .map(|slot| slot.members.len())
+            .sum();
+        assert_eq!(banked, 33, "every effect node the unmoved plan banks");
+
+        // One mono track and nine stereo ones, a multiband insert on the mono track and the first
+        // eight stereo ones. The mono remainder `ch00` fits beside the ninth stereo track, and
+        // moving it banks as many effect nodes as before, but not the same ones: `ch00`'s
+        // multiband would leave its bank. Refused, per node.
+        let tracks: Vec<TrackShape> = (0..10)
+            .map(|index| TrackShape {
+                feed: Feed {
+                    gain: 0.5,
+                    stereo: index >= 1,
+                    poison: false,
+                },
+                inserts: if index < 9 {
+                    vec![Kind::Multiband]
+                } else {
+                    Vec::new()
+                },
+                bypass: vec![false; 2],
+                variant: index % VARIANTS.len(),
+            })
+            .collect();
+        let model = console_session(&console, &tracks);
+        let artifact = compile_at(&model, host_dispatch()).expect("the console session compiles");
+        assert_eq!(
+            pooled_tracks(&artifact)[0],
+            BTreeSet::from(["ch00".to_owned()]),
+            "ch00 stays mono: an equal count of banked nodes is not the same nodes"
+        );
+    }
 }
 
 /// Issue #1368 gate 2: inserts of the lane-link effects at mixed detector link modes share one

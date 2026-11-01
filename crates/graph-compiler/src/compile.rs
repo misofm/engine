@@ -13,7 +13,8 @@
 use super::*;
 use crate::banks::{
     PlacementLevels, PlannedEffectBank, bind_planned_banks, checked_add_effect_banks,
-    effect_bank_resource, placement_levels, plan_rack_banks_placed, rack_chains, rack_plan_cost,
+    console_remainder_tracks, effect_bank_resource, moved_plan_is_better, placement_levels,
+    plan_rack_banks_placed, rack_chains,
 };
 use crate::canonical::{
     Sha256Writer, canonical_parts, dot, hex_digest, hex_sha256, reductions_of, write_canonical,
@@ -589,9 +590,10 @@ impl GraphCompiler {
         // prepared: `SOURCE` from the compiled session, and `DESIGNED` from each prepared native
         // effect and from each track's prepared input section.
         //
-        // `bind_rack_banks_indexed` is the one place the map then changes (issue #971): a mono
-        // track that every effect group would strand is pooled as stereo, before the rack plan it
-        // keeps and before the builtin-stage planner below reads the map.
+        // The map then changes in two places, both before the builtin-stage planner below reads
+        // it: inside the rack planner (issue #971), where a mono track that every effect group
+        // would strand is pooled as stereo, and at #2137's decision point below, where a fitting
+        // mono console remainder is pooled as stereo when the whole moved plan is better.
         //
         // Issue #2199: an effect's `DESIGNED` term is its factory's answer from the request
         // (`EffectProjectedEntry::designed_symmetry`), which preparation holds every prepared
@@ -630,64 +632,50 @@ impl GraphCompiler {
                 BankWidth::for_backend(dispatch),
             )
         };
-        let mut placement = match place(&pool_classes) {
-            Ok(value) => value,
-            Err(diagnostic) => return Err(vec![diagnostic]),
-        };
-        let placed_classes = pool_classes.clone();
-        let (mut banks, mut rack_cohorts) = match plan_rack_banks_placed(
-            effects,
-            &prepared,
-            &effect_ids,
-            &levels,
-            &placement,
-            dispatch,
-            &mut pool_classes,
-        ) {
-            Ok(value) => value,
-            Err(diagnostic) => return Err(vec![diagnostic]),
-        };
-        // Issue #2137: the placement buckets chains by pool class, so a plan that moved a track to
-        // the stereo pool was placed with the track's old class. Place again with the classes the
-        // plan settled on and plan once more, and keep the re-placed plan unless its banks cost
-        // more or bank fewer slot members ([`rack_plan_cost`]). Each pass can only move mono
-        // tracks to the stereo pool, so this ends; it is bounded by the track count.
-        let mut placed_classes = placed_classes;
-        for _ in 0..model.tracks.len() {
-            let moved = model.tracks.iter().any(|track| {
-                placed_classes.class_of(track.id.as_str())
-                    != pool_classes.class_of(track.id.as_str())
-            });
-            if !moved {
-                break;
-            }
-            let replaced = match place(&pool_classes) {
-                Ok(value) => value,
-                Err(diagnostic) => return Err(vec![diagnostic]),
-            };
-            let mut classes = pool_classes.clone();
-            let (replanned_banks, replanned) = match plan_rack_banks_placed(
+        let plan_at = |classes: &mut SessionPoolClasses| {
+            let placement = place(classes)?;
+            let (banks, report) = plan_rack_banks_placed(
                 effects,
                 &prepared,
                 &effect_ids,
                 &levels,
-                &replaced,
+                &placement,
                 dispatch,
-                &mut classes,
-            ) {
-                Ok(value) => value,
-                Err(diagnostic) => return Err(vec![diagnostic]),
-            };
-            let (cost, members) = rack_plan_cost(&rack_cohorts);
-            let (replanned_cost, replanned_members) = rack_plan_cost(&replanned);
-            if replanned_cost > cost || replanned_members < members {
-                break;
+                classes,
+            )?;
+            Ok::<_, GraphDiagnostic>((placement, banks, report))
+        };
+        // The plan without #2137's move: placement, chain pass, #971's demotion and the
+        // leftover pass (#2138).
+        let (mut placement, mut banks, mut rack_cohorts) = match plan_at(&mut pool_classes) {
+            Ok(value) => value,
+            Err(diagnostic) => return Err(vec![diagnostic]),
+        };
+        // Issue #2137: the one decision point. The tracks in a fitting mono console remainder of
+        // the plan above move to the stereo pool, and the whole plan is built again with them
+        // there -- placed again, since the placement buckets by pool class, and through the
+        // leftover pass. The moved plan is kept only when its banks cost strictly less
+        // (`MONO_BANK_WEIGHT`) and every effect node the unmoved plan banks is still banked in it
+        // ([`moved_plan_is_better`]). Otherwise, and when building it fails (#1001: a speculative
+        // plan never fails the compile), the unmoved plan stands.
+        if let Some(width) = BankWidth::for_backend(dispatch).filter(|_| !remainder_move_disabled())
+        {
+            let remainders = console_remainder_tracks(&rack_cohorts.plan, width);
+            if !remainders.is_empty() {
+                let mut moved = pool_classes.clone();
+                for track in &remainders {
+                    moved.pool_as_stereo(track);
+                }
+                if let Ok((moved_placement, moved_banks, moved_report)) = plan_at(&mut moved)
+                    && (remainder_move_forced()
+                        || moved_plan_is_better(&rack_cohorts, &moved_report))
+                {
+                    pool_classes = moved;
+                    placement = moved_placement;
+                    banks = moved_banks;
+                    rack_cohorts = moved_report;
+                }
             }
-            placed_classes = pool_classes.clone();
-            pool_classes = classes;
-            placement = replaced;
-            banks = replanned_banks;
-            rack_cohorts = replanned;
         }
         // Every strip, in `strips()` order: tracks, then submixes (#1201 D1). The entry is keyed
         // by the strip's `Input` node either way, and the runtime tells the two apart by what
@@ -1689,4 +1677,49 @@ fn bypass_automated_strips(model: &session::SessionModel) -> Vec<Box<str>> {
         }
     }
     strips
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: how this thread's compiles take issue #2137's console remainder move.
+    static REMAINDER_MOVE: core::cell::Cell<RemainderMove> =
+        const { core::cell::Cell::new(RemainderMove::Decided) };
+}
+
+/// Test-only: how a compile takes issue #2137's console remainder move.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemainderMove {
+    /// As production: the whole-plan decision.
+    Decided,
+    /// Never: the unmoved plan, which the decision is held against.
+    Disabled,
+    /// Always, when the moved plan builds: what the decision refused.
+    Forced,
+}
+
+/// Test-only: set how this thread's compiles take issue #2137's move.
+#[cfg(test)]
+pub(crate) fn set_remainder_move(mode: RemainderMove) {
+    REMAINDER_MOVE.with(|cell| cell.set(mode));
+}
+
+#[cfg(test)]
+fn remainder_move_disabled() -> bool {
+    REMAINDER_MOVE.with(core::cell::Cell::get) == RemainderMove::Disabled
+}
+
+#[cfg(test)]
+fn remainder_move_forced() -> bool {
+    REMAINDER_MOVE.with(core::cell::Cell::get) == RemainderMove::Forced
+}
+
+#[cfg(not(test))]
+const fn remainder_move_disabled() -> bool {
+    false
+}
+
+#[cfg(not(test))]
+const fn remainder_move_forced() -> bool {
+    false
 }
