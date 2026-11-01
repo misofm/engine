@@ -6654,9 +6654,10 @@ fn muted_send_rebuild(model: &SessionModel) -> Vec<SessionEdit> {
 }
 
 /// #1718 and #1654 root ruling R19-5 on both hosts, on [`open_follow_model`] (the B19-R8 MAJOR-1
-/// and MAJOR-2 setups). MAJOR-1: a live send move (`gain_db` to -3 dB over 4,000 samples, from
-/// block 4) is in flight when a rebuild before block 6 adds a muted, inactive send: the move keeps
-/// its own length (every block is the never-rebuilt run's, bit for bit). MAJOR-2: one transaction
+/// and MAJOR-2 setups). MAJOR-1: a live send move (`gain_db` to -3 dB, or `matrix_rr` to 0.5,
+/// over 4,000 samples, from block 4) is in flight when a rebuild before block 6 adds a muted,
+/// inactive send: the move keeps its own length (every block is the never-rebuilt run's, bit for
+/// bit). MAJOR-2: one transaction
 /// before block 4 moves `gain_db` over 4,000 samples and adds the muted send. Each rebuild
 /// completes `EXACT` (one watermark, fallback count 0), and every block both hosts render the
 /// same bits.
@@ -6674,24 +6675,26 @@ fn a_rebuild_carrying_a_following_send_across_a_live_send_move_is_exact_alike_on
     let hand = send_row_edit(1, -3.0, Some(RAMP));
     let mut same_transaction = hand.clone();
     same_transaction.extend(unrelated.iter().cloned());
-    let moved = both_run(&model, RUN, &[(4, hand.clone(), EditPath::Live)]);
-    // (label, live move block, rebuild block, rebuild edits)
+    let matrix = send_row_edit(6, 0.5, Some(RAMP));
+    // (label, live move, rebuild block, rebuild edits)
     for (label, live, rebuild, edits) in [
-        ("MAJOR-1", Some(4), 6, &unrelated),
+        ("MAJOR-1, gain_db", Some(&hand), 6, &unrelated),
+        ("MAJOR-1, matrix_rr", Some(&matrix), 6, &unrelated),
         ("MAJOR-2", None, 4, &same_transaction),
     ] {
+        let moved = live.map(|edit| both_run(&model, RUN, &[(4, edit.clone(), EditPath::Live)]));
         let mut browser = Rig::new(&model);
         let mut c_abi = CAbi::new(&model);
         for block in 0..RUN {
-            if live == Some(block) {
-                both_commit(&mut browser, &mut c_abi, &hand, EditPath::Live, label);
+            if let (4, Some(edit)) = (block, live) {
+                both_commit(&mut browser, &mut c_abi, edit, EditPath::Live, label);
             }
             if block == rebuild {
                 both_commit(&mut browser, &mut c_abi, edits, EditPath::Rebuild, label);
             }
             let (b, c) = (browser.step(block), c_abi.step(block));
             assert_eq!(b, c, "{label}, block {block}: the two hosts agree");
-            if live.is_some() {
+            if let Some(moved) = &moved {
                 assert_eq!(
                     b, moved[block as usize],
                     "{label}, block {block}: the never-rebuilt run's bits"
