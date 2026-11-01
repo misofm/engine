@@ -770,6 +770,115 @@ async function runConsoleLimitsQualification(createHost) {
   };
 }
 
+/// Issue #1361: the warm-growth row's capture, the block before which its growth is committed, and
+/// the stem it prefills: the capture plus `P / q` (4) blocks the adopted successor reads ahead,
+/// rounded up. The source ring holds the whole stem, so the prefill is one feed before the first
+/// quantum.
+const WARM_GROWTH_BLOCKS = 64;
+const WARM_GROWTH_FRAMES = WARM_GROWTH_BLOCKS * QUANTUM_FRAMES;
+const WARM_GROWTH_BEFORE = 8;
+const WARM_GROWTH_SOURCE_BLOCKS = 72;
+const WARM_GROWTH_SOURCE_FRAMES = WARM_GROWTH_SOURCE_BLOCKS * QUANTUM_FRAMES;
+
+/// Issue #1361: a latency-growing edit during playback is adopted exact. Two renders of one
+/// session, each with the whole stem prefilled before the first quantum, so the source leads the
+/// render by far more than the `P + q` frames a warm prime needs. The first renders with no edit:
+/// the predecessor continued. The second suspends the offline context after
+/// [`WARM_GROWTH_BEFORE`] quanta, commits the growth (a muted limiter track and its route), reads
+/// the status while the revision is pending, and resumes. The row records the reply, the status
+/// before and after, the watermark the host reported last, and both captures' digests.
+///
+/// Why exact and not the transition fallback: the browser's render adopts a ready warm successor
+/// at its first block with no control call, so a prefilled stem makes the block and the outcome
+/// independent of timing. The fallback runs only from a service step past the deadline, which the
+/// Worker's loop and the single-mode tick run on wall-clock timers while an offline context renders
+/// as fast as it can, so its block, and so its capture, is not deterministic here. The native
+/// browser-host test (`tests/latency_growth.rs`) owns the fallback.
+async function runWarmGrowthQualification(createHost) {
+  const sdk = await import("/sdk/sdk-response-client.js");
+  const document = sdk.warmGrowthDocument(WARM_GROWTH_SOURCE_FRAMES);
+  const status = async (host) => {
+    const value = await host.status();
+    return {
+      appliedRevision: value.appliedRevision.toString(),
+      appliedSample: value.appliedSample.toString(),
+      appliedOutcome: value.appliedOutcome.toString(),
+      nextAbsoluteSample: value.nextAbsoluteSample.toString(),
+    };
+  };
+  const render = async (grow) => {
+    const context = new OfflineAudioContext(2, WARM_GROWTH_FRAMES, SAMPLE_RATE);
+    const host = await createHost({
+      context,
+      document,
+      options: bootOptions(WARM_GROWTH_SOURCE_FRAMES),
+      simd128ModuleUrl: ARTIFACT_URL,
+      workletModuleUrl: WORKLET_URL,
+    });
+    host.node.connect(context.destination);
+    for (let block = 0; block < WARM_GROWTH_SOURCE_BLOCKS; block += 1) {
+      const acknowledgement = await host.submitSource({
+        sourceId: "stem",
+        generation: 1n,
+        startFrame: BigInt(block * QUANTUM_FRAMES),
+        sampleRateHz: SAMPLE_RATE,
+        planes: sourcePlanes(block),
+        frames: QUANTUM_FRAMES,
+        endOfRegion: block === WARM_GROWTH_SOURCE_BLOCKS - 1,
+      });
+      if (acknowledgement.result !== RESULT_OK) {
+        throw new Error(`warm-growth prefill rejected at block ${block}: result ${acknowledgement.result}`);
+      }
+    }
+    const watermarks = [];
+    host.onWatermark((watermark) => watermarks.push({
+      revision: watermark.revision.toString(),
+      sample: watermark.sample.toString(),
+      outcome: watermark.outcome.toString(),
+    }));
+    const before = await status(host);
+    let edit = null;
+    if (grow) {
+      edit = context.suspend((WARM_GROWTH_BEFORE * QUANTUM_FRAMES) / SAMPLE_RATE).then(async () => {
+        const reply = await sdk.warmGrowthThroughSdk(host, WARM_GROWTH_SOURCE_FRAMES, before.appliedRevision);
+        const pending = await status(host);
+        await context.resume();
+        return { reply, pending };
+      });
+    }
+    const rendered = await context.startRendering();
+    const committed = edit === null ? null : await edit;
+    for (let spin = 0; spin < 8 && grow && watermarks.at(-1)?.revision !== committed.reply.revision; spin += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 4));
+    }
+    const after = await status(host);
+    const renderAllocations = await renderAllocationCount(host);
+    await host.dispose();
+    return {
+      committed,
+      before,
+      after,
+      watermark: watermarks.at(-1) ?? null,
+      digest: await pcmDigest([rendered.getChannelData(0), rendered.getChannelData(1)], WARM_GROWTH_FRAMES),
+      renderAllocations,
+    };
+  };
+  const continued = await render(false);
+  const grown = await render(true);
+  return {
+    replyStatus: grown.committed.reply.status,
+    commandPath: grown.committed.reply.path,
+    initialRevision: grown.before.appliedRevision,
+    committedRevision: grown.committed.reply.revision,
+    pending: grown.committed.pending,
+    after: grown.after,
+    watermark: grown.watermark,
+    grownDigest: grown.digest,
+    continuedDigest: continued.digest,
+    renderAllocations: [continued.renderAllocations, grown.renderAllocations],
+  };
+}
+
 /// Issue #1295 D1: the structural-edit capture, the swap block and 32 quanta after it.
 const STRUCTURAL_EDIT_BLOCKS = 33;
 const STRUCTURAL_EDIT_FRAMES = STRUCTURAL_EDIT_BLOCKS * QUANTUM_FRAMES;
@@ -1868,6 +1977,7 @@ export async function runQualification() {
       emptyBoot: null,
       structuralReplace: null,
       consoleLimits: null,
+      warmGrowth: null,
       observation: null,
       stall: null,
       stagingReads: null,
@@ -1965,6 +2075,14 @@ export async function runQualification() {
       name: error?.name, message: error?.message, ...error,
     })}`);
   }
+  let warmGrowth;
+  try {
+    warmGrowth = await runWarmGrowthQualification(createMisoAudioWorkletHost);
+  } catch (error) {
+    throw new Error(`warm-growth qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error,
+    })}`);
+  }
   let observation;
   try {
     observation = await runObservationQualification(
@@ -2028,6 +2146,7 @@ export async function runQualification() {
     emptyBoot,
     structuralReplace,
     consoleLimits,
+    warmGrowth,
     observation,
     stall,
     stagingReads,
@@ -2045,6 +2164,8 @@ export async function runQualification() {
       { workload: "structural-replace-large", count: structuralReplace.large.renderAllocations },
       { workload: "growth-while-rendering", count: structuralReplace.growth.renderAllocations },
       { workload: "console-limits", count: consoleLimits.renderAllocations },
+      { workload: "warm-growth-continued", count: warmGrowth.renderAllocations[0] },
+      { workload: "warm-growth", count: warmGrowth.renderAllocations[1] },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },

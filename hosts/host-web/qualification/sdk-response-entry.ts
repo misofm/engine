@@ -2948,6 +2948,59 @@ export async function consoleBusAddThroughSdk(
   };
 }
 
+/**
+ * Issue #1361: the warm-growth row's session, one stereo track on a `frames`-frame stem with no
+ * console slot and no insert, and its route to the output.
+ */
+function warmGrowthBuilder(frames: number) {
+  return session({ id: "warm.growth", sampleRateHz: 48_000 })
+    .source("stem", { channels: 2, bitDepth: "32f", frames, content: `blake3:${"0".repeat(64)}` })
+    .output("main")
+    .track("track", { source: "stem" })
+    .route({
+      id: "track-main",
+      source: { kind: "track", trackId: "track", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "main" },
+    });
+}
+
+/** Issue #1361: the document of [`warmGrowthBuilder`]. */
+export function warmGrowthDocument(frames: number): Uint8Array {
+  return new TextEncoder().encode(warmGrowthBuilder(frames).toJson());
+}
+
+/**
+ * Issue #1361: the latency-growing edit, encoded by the SDK and sent through the browser
+ * transport: a muted track `grown` on the same stem with a true-peak limiter insert, whose
+ * latency (`P` = 512 at 48 kHz) raises the plan's, and its route to the output. A muted track adds
+ * exact `+0.0` to the output sum, so an exact (warm) adoption leaves the output the predecessor's
+ * continued.
+ */
+export async function warmGrowthThroughSdk(
+  host: MisoAudioWorkletHost,
+  frames: number,
+  revision: string,
+): Promise<{ status: string; path: string | undefined; revision: string }> {
+  const edit = transaction(warmGrowthBuilder(frames))
+    .upsertTrack("grown", {
+      source: "stem",
+      inserts: [effect("miso.true-peak-limiter", {}, { slotId: "grown-limiter", linkMode: "maximum" })],
+      fader: { leftMute: true, rightMute: true },
+    })
+    .upsertRoute({
+      id: "grown-main",
+      source: { kind: "track", trackId: "grown", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "main" },
+    });
+  const transport = await createBrowserControlListTransport(host);
+  const frame = encodeSessionTransaction(edit.build(), {
+    requestId: transport.requestIds.next(),
+    expectedRevision: BigInt(revision),
+  });
+  const reply = decodeControlReply(await transport.send(frame));
+  return { status: reply.status, path: reply.applied?.editPath, revision: String(reply.revision) };
+}
+
 /** `SESSION_REPLACE`'s message ID (#1386, `crates/protocol/src/wire.rs`). */
 const MESSAGE_SESSION_REPLACE = 0x0013;
 /** The reply's edit-path codes (`crates/protocol`'s `EditPath`), as the SDK's reply decoder names them. */

@@ -82,6 +82,9 @@ const MUTATIONS = Object.freeze([
   // Issue #2191: a 256-track console session's bus add refused at the frame, or one whose document
   // no longer exceeds the old 1 MiB ceiling.
   ...caughtBy("console-limits", "console-limits-refused", "console-limits-small-document"),
+  // Issue #1361: a latency-growing edit during playback that the browser did not report as exact
+  // (the transition fallback's outcome), or whose capture is not the predecessor's continued.
+  ...caughtBy("warm-growth", "warm-growth-outcome", "warm-growth-output"),
   // Issue #1332 S3: after the 1 MiB replacement grew the shared memory in a handler, a capture
   // that is not the module's own render under Node.
   ...caughtBy("structural-replace-grown", "structural-replace-grown-output"),
@@ -163,7 +166,7 @@ const MUTATIONS = Object.freeze([
 const PAGE_DEADLINE_MS = 300_000;
 
 // Issue #1332 S9: the raw hosts the page boots (one render-allocation row each).
-const RAW_INSTANCES = 17;
+const RAW_INSTANCES = 19;
 // Issue #1332 S9 (R-S7-meters 3): the bound on the meter frames a worker-mode growth row may skip.
 // A frame is skipped only between render adopting a plan and the worklet's handler cutting that
 // plan's set from the Worker's `miso.meter-view.v1`. The Worker posts the view as soon as the
@@ -538,6 +541,22 @@ function validate(browserName, result, leg) {
     && BigInt(limits?.committedRevision ?? "0") > BigInt(limits?.initialRevision ?? "0")
     && limits?.finalRevision === limits?.committedRevision,
   `the 256-track console session did not boot, or its bus add did not commit and apply: ${JSON.stringify(limits)}`);
+  // Issue #1361: a latency-growing edit (a muted limiter track, `P` = 512) committed during playback
+  // with the stem queued far past `P + q` is adopted warm by render: the reply is the rebuild path,
+  // the revision is pending at the commit, which came after the context rendered, the status and
+  // the watermark report it in effect with the outcome exact (1), and the capture equals the same
+  // session rendered with no edit, bit for bit (no gap, no shift). `console-limits` holds a bus add
+  // that takes the transition; this row holds the warm path's exact continuation.
+  const warm = result.warmGrowth;
+  gate(browserName, "warm-growth", warm?.replyStatus === "ok" && warm?.commandPath === "rebuild"
+    && BigInt(warm?.committedRevision ?? "0") > BigInt(warm?.initialRevision ?? "0")
+    && warm?.pending?.appliedRevision === warm?.initialRevision
+    && BigInt(warm?.pending?.nextAbsoluteSample ?? "0") > 0n
+    && warm?.after?.appliedRevision === warm?.committedRevision
+    && warm?.watermark?.revision === warm?.committedRevision
+    && warm?.after?.appliedOutcome === "1" && warm?.watermark?.outcome === "1"
+    && typeof warm?.grownDigest === "string" && warm.grownDigest === warm?.continuedDigest,
+  `the latency growth during playback was not adopted exact as the predecessor continued: ${JSON.stringify(warm ?? null)}`);
   // Issue #1332 S3: on a shared memory a growth gives `memory.buffer` a new identity, and a view
   // over the older object stays valid for its bytes, so the growth is no fault. The capture renders
   // 64 quanta on after the sixteen. Precondition: the memory grew. The capture is the module's
@@ -1381,6 +1400,13 @@ function mutate(result, mutation, leg) {
   if (mutation === "structural-replace-large") copy.structuralReplace.large.replyStatus = "limit_exceeded";
   if (mutation === "console-limits-refused") copy.consoleLimits.replyStatus = "limit_exceeded";
   if (mutation === "console-limits-small-document") copy.consoleLimits.documentBytes = 1 << 20;
+  // Issue #1361: the outcome the transition fallback reports (`TRANSITION_FALLBACK` = 2), and a
+  // capture that is not the predecessor's continued.
+  if (mutation === "warm-growth-outcome") {
+    copy.warmGrowth.after.appliedOutcome = "2";
+    copy.warmGrowth.watermark.outcome = "2";
+  }
+  if (mutation === "warm-growth-output") copy.warmGrowth.grownDigest = "0".repeat(64);
   if (mutation === "structural-replace-grown-output") copy.structuralReplace.large.renderedDigest = "0".repeat(64);
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
@@ -1950,6 +1976,8 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
       })}\n`);
       // Issue #2191: the configured limits' row, as gated.
       process.stdout.write(`${label}: console-limits: ${JSON.stringify(result.consoleLimits)}\n`);
+      // Issue #1361: the warm-growth row, as gated.
+      process.stdout.write(`${label}: warm-growth: ${JSON.stringify(result.warmGrowth)}\n`);
       // The commit-to-adoption delay of the exact case, recorded, not gated (D6 non-goal).
       process.stdout.write(`${label}: structural-edit: ${JSON.stringify({
         committedRevision: replace.edit.committedRevision,
