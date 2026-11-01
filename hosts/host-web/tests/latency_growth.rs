@@ -167,11 +167,10 @@ impl Control {
     /// Submits whole blocks of the source until `until` frames are queued.
     fn feed_to(&mut self, until: u64) {
         while self.fed < until {
-            let mut planes = [vec![0.0_f32; QUANTUM as usize], vec![0.0; QUANTUM as usize]];
-            for index in 0..QUANTUM as usize {
-                [planes[0][index], planes[1][index]] = pcm(self.fed + index as u64);
-            }
-            let views: [&[f32]; 2] = [&planes[0], &planes[1]];
+            let (left, right): (Vec<f32>, Vec<f32>) = (self.fed..self.fed + Q)
+                .map(|frame| pcm(frame).into())
+                .unzip();
+            let views: [&[f32]; 2] = [&left, &right];
             let result = self
                 .host
                 .submit_source(SOURCE_ID, 1, self.fed, 48_000, &views, QUANTUM, false);
