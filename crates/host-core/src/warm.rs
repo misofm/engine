@@ -14,8 +14,32 @@ use engine::realtime::{PlanAdoption, PlanPublisher, PlanReplacementReservation};
 
 use session::SessionModel;
 
-use crate::prepare::{PlanStateInventory, SOURCE_STALL_TOLERANCE_MS, SuccessorBase, p_max_samples};
+use crate::prepare::{
+    PlanStateInventory, SOURCE_STALL_TOLERANCE_MS, SuccessorBase, WarmConfig, p_max_samples,
+};
 use crate::source::SourceControlSet;
+
+/// The largest prime a warm successor may run in its adoption block, in bytes (#1360 D1): the
+/// bound [`WarmConfig::prime_bytes_max`] of every product session.
+///
+/// The value is *Record the swap block's cost on the 64-track console* (#1286) D3 item 3, record
+/// `artifacts/steps/swap-carry-base/swap-benchmark.accepted.jsonl`, round 1, the smaller of its two
+/// rounds (root ruling). Inputs: the ordinary block `o` 177,157 ns, the adoption block of the
+/// `ΣP = P_MAX` growth `a_P` 625,831 ns with its prime `b_P` 2,072,576 bytes, so `β = (a_P − o) /
+/// b_P` 216.481 ps per byte, and the margin `m` 0.7 of the 96 kHz, 128-frame quantum `D`. The
+/// native row binds: `floor((m · D − o) / β)`, below the browser row's 7,012,421.
+pub const PRIME_BYTES_MAX: u64 = 3_493_032;
+
+/// The warm-successor bounds of every product session at `sample_rate_hz` and `quantum_frames`
+/// (#1360 D1): `P_MAX` ([`p_max_samples`], #1406 D1) and [`PRIME_BYTES_MAX`]. Both hosts get it
+/// through the control plane's public session compile.
+#[must_use]
+pub const fn production_config(sample_rate_hz: u32, quantum_frames: u32) -> WarmConfig {
+    WarmConfig {
+        p_max: p_max_samples(sample_rate_hz, quantum_frames) as u64,
+        prime_bytes_max: PRIME_BYTES_MAX,
+    }
+}
 
 /// The record of the one warm candidate published [`PlanAdoption::Primed`] and not yet adopted,
 /// superseded or withdrawn (#1403 D4). Every step that reads it compares [`Self::epoch`] with the

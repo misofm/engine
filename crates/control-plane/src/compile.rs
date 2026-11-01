@@ -2537,6 +2537,10 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 ///
 /// The first plan has no spectrum taps, and the session's monitor starts at configuration epoch 0
 /// (#1597). A host whose boot sets taps passes them to [`compile_children_with_boot_command`].
+///
+/// The session holds the production warm-successor bounds for its rate and quantum
+/// ([`host_core::warm::production_config`], #1360 D1), so a latency-growing rebuild is classified
+/// (#1403 D2) and may be published `Primed`.
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
     limits: ControlLimits,
@@ -2545,7 +2549,7 @@ pub fn compile_children<A: ControlAdapter>(
 where
     A::Row: Send + 'static,
 {
-    compile_children_warm(document, limits, preparer, None, None)
+    compile_children_bounded(document, limits, preparer, production_warm, None)
 }
 
 /// [`compile_children`] with one boot command frame (#2166): the session applies it to the boot
@@ -2570,7 +2574,22 @@ pub fn compile_children_with_boot_command<A: ControlAdapter>(
 where
     A::Row: Send + 'static,
 {
-    compile_children_warm(document, limits, preparer, None, Some(boot_command))
+    compile_children_bounded(
+        document,
+        limits,
+        preparer,
+        production_warm,
+        Some(boot_command),
+    )
+}
+
+/// Every product session's warm-successor bounds (#1360 D1): host-core's production value at the
+/// session's rate and quantum, so both hosts classify every structural rebuild (#1403 D2).
+fn production_warm(sample_rate_hz: u32, quantum_frames: u32) -> Option<host_core::WarmConfig> {
+    Some(host_core::warm::production_config(
+        sample_rate_hz,
+        quantum_frames,
+    ))
 }
 
 /// The session's protocol codec, at the control frame `limits` name.
@@ -2690,16 +2709,32 @@ fn boot_command_spectrum(
     crate::control::boot_spectrum_configuration(&request, model, limits.maximum_control_frame_bytes)
 }
 
-/// [`compile_children`] with the session's warm-successor bounds (#1403 D1): with
+/// [`compile_children`] with the session's warm-successor bounds given (#1403 D1): with
 /// `Some(config)`, every structural rebuild is classified with [`host_core::warm_lead`] and a
 /// latency growth that ducks no strip is published `Primed`; with `None`, every rebuild takes
-/// today's path. Every product session passes `None` until #1360 (the C ABI) and #1361 (the
-/// browser) build the production bounds; the gates set both bounds directly.
+/// the ordinary path. Every product session takes the production bounds (#1360 D1); the gates set
+/// both bounds directly, or none.
+#[cfg(test)]
 pub(crate) fn compile_children_warm<A: ControlAdapter>(
+    document: &str,
+    limits: ControlLimits,
+    preparer: Box<dyn RuntimePreparer>,
+    warm: Option<host_core::WarmConfig>,
+    boot_command: Option<&[u8]>,
+) -> Result<CompiledChildren<A>, CompileFailure>
+where
+    A::Row: Send + 'static,
+{
+    compile_children_bounded(document, limits, preparer, |_, _| warm, boot_command)
+}
+
+/// The one session compile: `warm` gives the warm-successor bounds from the parsed session's rate
+/// and quantum.
+fn compile_children_bounded<A: ControlAdapter>(
     document: &str,
     mut limits: ControlLimits,
     preparer: Box<dyn RuntimePreparer>,
-    warm: Option<host_core::WarmConfig>,
+    warm: impl FnOnce(u32, u32) -> Option<host_core::WarmConfig>,
     boot_command: Option<&[u8]>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
@@ -2712,6 +2747,7 @@ where
     // The C ABI needs the transactional `SessionStore` for the control protocol, so it parses and
     // caps through the facade and builds the store itself; the facade never sees the protocol.
     let model = parse_host_session(document).map_err(prepare_failure)?;
+    let warm = warm(model.sample_rate_hz, model.quantum_frames);
     if limits.source_ring_frames == 0 {
         limits.source_ring_frames =
             host_core::default_source_ring_frames(model.sample_rate_hz, model.quantum_frames);

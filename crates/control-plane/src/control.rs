@@ -9677,14 +9677,20 @@ mod tests {
             ) -> Self {
                 super::super::test_reset_lifecycle_observer();
                 let document = session::canonical_session_json(model).expect("canonical");
-                let children = compile_children_warm::<Adapter>(
-                    &document,
-                    limits,
-                    Box::new(Preparer(backend)),
-                    warm,
-                    None,
+                Self::from_children(
+                    compile_children_warm::<Adapter>(
+                        &document,
+                        limits,
+                        Box::new(Preparer(backend)),
+                        warm,
+                        None,
+                    )
+                    .expect("boot"),
                 )
-                .expect("boot");
+            }
+
+            /// A rig over `children`, booted.
+            fn from_children(children: CompiledChildren<Adapter>) -> Self {
                 let boot = children
                     .plan
                     .test_active_epoch()
@@ -10615,6 +10621,32 @@ mod tests {
                 continued.render(stepped - BEFORE);
                 assert_eq!(rig.blocks[..stepped], continued.blocks[..], "A continued");
             }
+        }
+
+        /// #1360 D1: a session compiled through the public `compile_children`, as both hosts
+        /// compile theirs, holds the production bounds, so the growth W is published `Primed` and
+        /// recorded.
+        ///
+        /// Test value: a product session built without a `WarmConfig` publishes W as an ordinary
+        /// `Next` (today's floored rebuild), with no record.
+        #[test]
+        fn a_publicly_compiled_session_publishes_a_growth_primed() {
+            super::super::test_reset_lifecycle_observer();
+            let document = session::canonical_session_json(&session_a()).expect("canonical");
+            let mut rig = Rig::from_children(
+                crate::compile::compile_children::<Adapter>(
+                    &document,
+                    limits(),
+                    Box::new(Preparer(None)),
+                )
+                .expect("boot"),
+            );
+            rig.render(BEFORE);
+            assert!(matches!(
+                rig.rebuild(&growth()),
+                PlanAdoption::Primed { .. }
+            ));
+            assert!(rig.primed().is_some());
         }
 
         /// #1360 gates 4 and 5, through `service` itself: W waits `Primed`, never fed. With render
