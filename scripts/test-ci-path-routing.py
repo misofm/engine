@@ -426,6 +426,7 @@ def workspace(self_test_inputs: bool = False) -> pathlib.Path:
     shutil.copy2(CHECKER, root / "scripts/check-ci-path-routing.py")
     shutil.copy2(TEST, root / "scripts/test-ci-path-routing.py")
     shutil.copy2(ROOT / "scripts/check-cross-targets.sh", root / "scripts/check-cross-targets.sh")
+    shutil.copy2(ROOT / "scripts/run-aarch64-tests.sh", root / "scripts/run-aarch64-tests.sh")
     # The self-test key rule (#1043) scans each suite's scripts with the reachability rule's mention
     # scanner. Only the key mutations need the scripts themselves: without them the rule has
     # nothing to scan, which keeps every other mutant's checker run cheap.
@@ -1584,7 +1585,8 @@ def main() -> int:
         '"${known_defects[@]}" judge-memset "$asm_out/counts" "$asm_out/products" ||\n',
         'true ||\n',
     )  # the per-crate judge dropped
-    for name, mode in (("aarch64-debug", "debug"), ("aarch64-release", "release")):
+    for name, mode in (("aarch64-debug", "debug ${{ matrix.shard }}/3"),
+                       ("aarch64-release", "release")):
         variable = name.replace("-", "_").upper() + "_RESULT"
         workflow_mutation_fails(
             "qualification.yml", f"        run: bash scripts/run-aarch64-tests.sh {mode}\n",
@@ -1602,6 +1604,16 @@ def main() -> int:
         "    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    env:\n"
         "      RUSTFLAGS: -D warnings\n    steps:\n      - uses: actions/checkout@",
     )
+    # #2237: the debug leg's shards. A shard dropped from the matrix, a shard count the script
+    # does not use, or every matrix job running one shard leaves packages untested.
+    workflow_mutation_fails("qualification.yml", "        shard: [1, 2, 3]\n",
+                            "        shard: [1, 2]\n")
+    workflow_mutation_fails(
+        "qualification.yml", "run-aarch64-tests.sh debug ${{ matrix.shard }}/3\n",
+        "run-aarch64-tests.sh debug 1/3\n",
+    )
+    script_mutation_fails("run-aarch64-tests.sh", "debug_shard_count=3\n",
+                          "debug_shard_count=4\n")
     workflow_mutation_fails(
         "qualification.yml",
         "  aarch64-release:\n    name: AArch64 release digest gates and realtime audits "

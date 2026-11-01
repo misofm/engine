@@ -113,7 +113,8 @@ What qualifies the target:
   and `aarch64-release`, both on `ubuntu-24.04-arm`, both in the verdict's full-route table).
   `aarch64-debug` runs the product crates' tests, plus `dsp-reference`, `conformance` and
   `target-smoke`, in the debug profile: the four-lane banks bind natively and `lane::fpenv`'s FPCR
-  path runs. `aarch64-release` runs, in the shipping release profile, the G5 class-A corpus
+  path runs. It is a matrix of three shards that partition these packages (#2237); each shard
+  builds every workspace crate with the features the whole leg resolves for it, or fails. `aarch64-release` runs, in the shipping release profile, the G5 class-A corpus
   (`wasm-gates`, #1048's native owner, as its own unfiltered step) and `lane` and `math` (G1-G4, G6
   under `FPCR.FZ`, P1, M1-M3). It also runs `console-workload`'s console digests and the realtime
   audits (`audit capi` and the delay, compressor, EQ and gate audits).
