@@ -249,10 +249,10 @@ fn first_divergence(left: &[Vec<u32>], right: &[Vec<u32>]) -> Option<usize> {
 /// then renders 16 blocks while the control thread makes no call: the render status's watermark
 /// words read the growth's revision with `EXACT`, and the output equals the predecessor rendered on.
 ///
-/// Test value: a browser feed that does not reach the warm successor's rings without a service
-/// step, or a render half that needs a control call to adopt, leaves the revision pending; a render
-/// half that does not copy the report into its status words reads the initial revision; a growth
-/// published as an ordinary successor floors the output by `P`.
+/// Test value: the browser legs run `service` on a timer, so only this row shows the adoption with
+/// no control call at all. A browser feed that does not reach the warm successor's rings without a
+/// service step, or a render half that needs a control call to adopt, leaves the revision pending;
+/// a growth published as an ordinary successor floors the output by `P`.
 #[test]
 fn a_growth_fed_ahead_is_adopted_exact_with_no_service_call() {
     const AFTER: u64 = 16;

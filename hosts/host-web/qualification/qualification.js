@@ -860,6 +860,8 @@ async function runWarmGrowthQualification(createHost) {
       after,
       watermark: watermarks.at(-1) ?? null,
       digest: await pcmDigest([rendered.getChannelData(0), rendered.getChannelData(1)], WARM_GROWTH_FRAMES),
+      heard: [rendered.getChannelData(0), rendered.getChannelData(1)]
+        .some((channel) => channel.some((sample) => sample !== 0)),
       renderAllocations,
     };
   };
@@ -875,6 +877,7 @@ async function runWarmGrowthQualification(createHost) {
     watermark: grown.watermark,
     grownDigest: grown.digest,
     continuedDigest: continued.digest,
+    continuedHeard: continued.heard,
     renderAllocations: [continued.renderAllocations, grown.renderAllocations],
   };
 }

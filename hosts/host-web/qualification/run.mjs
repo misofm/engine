@@ -548,6 +548,9 @@ function validate(browserName, result, leg) {
   // session rendered with no edit, bit for bit (no gap, no shift). `console-limits` holds a bus add
   // that takes the transition; this row holds the warm path's exact continuation.
   const warm = result.warmGrowth;
+  // Precondition: two silent captures have equal digests, so the no-edit capture must play.
+  gate(browserName, "warm-growth", warm?.continuedHeard === true,
+    "the no-edit capture is all zeros, so equal digests would prove nothing about the growth");
   gate(browserName, "warm-growth", warm?.replyStatus === "ok" && warm?.commandPath === "rebuild"
     && BigInt(warm?.committedRevision ?? "0") > BigInt(warm?.initialRevision ?? "0")
     && warm?.pending?.appliedRevision === warm?.initialRevision
