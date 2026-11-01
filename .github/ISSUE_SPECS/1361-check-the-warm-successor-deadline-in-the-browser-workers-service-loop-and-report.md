@@ -82,8 +82,8 @@ cross-origin isolation.
 
 1. **Isolated, three engines.** In the browser qualification, on the isolated leg, a playing
    session gains a muted limiter track.
-   - The captured output equals, bit for bit, the native render of the same fixture, quantum and
-     rate continued with no swap.
+   - The captured output equals, bit for bit, the browser's own render of the same session, quantum
+     and rate with no edit (the predecessor continued), and that render is not silent.
    - The status watermark reaches the revision with `appliedOutcome === 1n` (`EXACT`).
    - The worklet's render-allocation counter is 0.
    - Mutation `warm-growth-outcome` (outcome set to `TRANSITION_FALLBACK`) must fail.
@@ -147,3 +147,54 @@ cross-origin isolation.
   that feeds each source only the block it renders and services after each block takes the
   transition at the deadline (#1360's evidence: `the_plan_latency_record_follows_the_active_plan`).
 
+
+## Evidence (attempt 1, 2026-11-01)
+
+Branch `codex/issue-1361-browser-warm-deadline`, from #1360's head `63a690aea`.
+
+- **No host code changed.** The browser host already reports the outcome: its render half copies
+  each advancing render report into the status words (`hosts/host-web/src/lib.rs:3224`), and its
+  `service` runs `SessionState::service`. No gap was found, so no rendered bit moves.
+- **Gate 3** (`hosts/host-web/tests/latency_growth.rs`, new). The control half on the test thread,
+  the released render half (`RenderHost`) rendering on its own thread. The growth is
+  `crates/capi/tests/latency_growth.rs`'s (a muted limiter track, `P` = 512) on the nine-track
+  fixture, default ring.
+  - `a_growth_fed_ahead_is_adopted_exact_with_no_service_call`: the source queued 4,096 frames
+    (more than `2P + 2q`) past the clock; 16 blocks with no control call; the status words read the
+    revision with `EXACT`; the output equals the predecessor rendered on. Red with no production
+    config (diverges at block 6).
+  - `a_growth_never_ready_falls_back_at_the_next_service_call`: fed one quantum ahead; 110 blocks
+    (twice the 7,040-sample deadline) with no call: pending, bits equal to the predecessor; the next
+    `service()` publishes the transition, adopted at `ceil_q(clock + q + 480)` = 15,488, status
+    `TRANSITION_FALLBACK`. Red with the step taken out of `SessionState::service` (`(42, 0, 1)`
+    against `(43, 15488, 2)`), and red with no production config (completed with no service call).
+    The status copy itself is `control_parity.rs:1859`'s claim.
+- **Gates 1 and 2** (`warm-growth`, one case run on both legs). A one-track session on a 72-block
+  stem, the whole stem prefilled into a ring that holds it. Two offline renders of 64 quanta: one
+  with no edit, one that suspends after 8 quanta, commits the growth through the SDK's
+  transaction builder, reads the status, and resumes. The gate holds: reply `ok`, path `rebuild`;
+  pending at the commit, which came after 1,024 rendered samples; status and watermark at the
+  revision, outcome `1`; the capture's digest equal to the no-edit capture's; both instances' render
+  allocations 0 (two new rows, `RAW_INSTANCES` 17 to 19); precondition: the no-edit capture is not
+  all zeros.
+  - Why exact and not the fallback: render adopts a ready warm successor at its first block with no
+    control call, so a prefilled stem makes the block and the outcome timing-free. The fallback
+    needs a service step past the deadline, and the Worker loop and the single-mode tick run on
+    wall-clock timers while an offline context renders as fast as it can. Gate 3 owns the fallback.
+  - What it adds to `console-limits`: that row's bus add takes the transition; this row holds the
+    warm path's exact continuation through the browser.
+  - Red: mutations `warm-growth-outcome` (outcome `2`, `TRANSITION_FALLBACK`) and
+    `warm-growth-output` (digest) under `--self-test-mutations`; and a module built with no
+    production config fails the gate on Chromium `single` and `worker` (the ordinary successor
+    reports `1` but its digest differs: `edf985f1...` against `25784310...`).
+- **Browser.** `npm run qualify -- --check-matrix --self-test-mutations`, `sdk/dist` deleted:
+  Chromium 151 and WebKit 26.5, `single` and `worker`, all pass; the same capture digest on all four.
+- **Stated observation (not investigated).** With the default ring, a 72-block prefill is accepted
+  on the `worker` leg (the control Worker's default ring is 65,536 frames,
+  `miso-engine-v1-control-worker.js:90-94, 354-355`; `receiveSource` submits straight into the
+  engine ring, line 683) but refused `BACKPRESSURE` at block
+  57 on the `single` leg. The case uses an explicit ring that holds the stem.
+- **Checks.** fmt; workspace clippy (`--all-targets --all-features -D warnings`); release tests of
+  host-web (`--all-features`); `check-workspace-policy.sh`, `realtime_policy`,
+  `check-test-support-ci.py`; web build and `check-web-audioworklet.sh` in both forms;
+  `test-web-audioworklet.sh`: all pass.
