@@ -766,32 +766,34 @@ mod tests {
     /// Issue #2137 S1: a partial mono group that fits a partial stereo group of its `(level,
     /// rack)` names its members, and nothing else does.
     ///
-    /// Red when the rule ignores the fit: 13 + 5 leaves two partial remainders of five, and
-    /// 5 + 5 > 8. (A full group can never fit a non-empty remainder, so the fit is also what keeps
-    /// the full mono lanes of 10 + 6 and 8 + 8 from moving.)
+    /// Red when the rule ignores the fit: at eight lanes 13 + 5 leaves two partial remainders of
+    /// five (5 + 5 > 8), and at four lanes 7 + 7 leaves two of three (3 + 3 > 4). (A full group can
+    /// never fit a non-empty remainder, so the fit is also what keeps the full mono lanes of 10 + 6
+    /// and 8 + 8 from moving.) The eight-lane rows run where the build has eight-lane banks.
     #[test]
     fn a_fitting_mono_remainder_names_its_members() {
         let mono = CohortPoolClass::MonoSymmetricAtPrepare;
         let stereo = CohortPoolClass::Stereo;
-        let session = |m: u32, s: u32| {
+        let moves = |m: u32, s: u32, width: BankWidth| {
             let candidates = (0..m)
                 .map(|id| classed(id, &[0, 1], mono))
                 .chain((m..m + s).map(|id| classed(id, &[0, 1], stereo)))
                 .collect();
-            plan_bank_groups(&one_level(candidates), BankWidth::Eight).expect("plan")
+            plan_bank_groups(&one_level(candidates), width)
+                .expect("plan")
+                .class_remainder_moves(width)
         };
-        let moves = |m, s| session(m, s).class_remainder_moves(BankWidth::Eight);
-        assert_eq!(moves(10, 6), vec![8, 9]);
-        assert_eq!(moves(8, 8), Vec::<u32>::new());
-        assert_eq!(moves(2, 14), vec![0, 1]);
-        assert_eq!(moves(13, 5), Vec::<u32>::new());
+        #[cfg(target_feature = "avx2")]
+        {
+            assert_eq!(moves(10, 6, BankWidth::Eight), vec![8, 9]);
+            assert_eq!(moves(8, 8, BankWidth::Eight), Vec::<u32>::new());
+            assert_eq!(moves(2, 14, BankWidth::Eight), vec![0, 1]);
+            assert_eq!(moves(13, 5, BankWidth::Eight), Vec::<u32>::new());
+        }
         // At four lanes the 10 + 6 remainders are 2 + 2, and they fit.
-        let candidates = (0..10)
-            .map(|id| classed(id, &[0, 1], mono))
-            .chain((10..16).map(|id| classed(id, &[0, 1], stereo)))
-            .collect();
-        let four = plan_bank_groups(&one_level(candidates), BankWidth::Four).expect("plan");
-        assert_eq!(four.class_remainder_moves(BankWidth::Four), vec![8, 9]);
+        assert_eq!(moves(10, 6, BankWidth::Four), vec![8, 9]);
+        assert_eq!(moves(8, 8, BankWidth::Four), Vec::<u32>::new());
+        assert_eq!(moves(7, 7, BankWidth::Four), Vec::<u32>::new());
     }
 
     /// P1: single-slot pools conserve every candidate and partition by dependency level and key.
