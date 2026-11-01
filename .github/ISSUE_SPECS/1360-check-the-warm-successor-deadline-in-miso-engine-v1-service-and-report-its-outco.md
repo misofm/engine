@@ -301,7 +301,30 @@ Branch `codex/issue-1360-warm-deadline`, from `7d89eecc5`.
   `check-capi-abi.sh`; `audit capi` (0 violations); `build-web-audioworklet.sh` and
   `check-web-audioworklet.sh`: all pass.
 
-## Blocker (attempt 1): the browser qualification fails with S2
+## Attempt 2 (2026-11-01): rebased onto `1fa4cee4e`
+
+- **Rebase.** Onto `origin/main` `1fa4cee4e`, which holds #2232 (`fe37db741`, PR #2235), #2137 and
+  #1713/#1718. No conflict; #1713's deletions stay.
+- **#2232.** `warm_lead` decides on `GraphCompiler::project` and prepares no effect processor: at 256
+  tracks its peak fell from 222.7 MB to 14.0 MB, with the same answers.
+- **The bus add's transition is the intended behaviour.** The 256-track `console-limits` bus add
+  answers `Unavailable(Misaligned)`, which is correct. With `warm: None` it completed `EXACT`
+  falsely: the output had a hard 10.1 ms gap of zeros, then the whole stream ran 486 samples late
+  (#2232's diagnosis). Under D15-8 an `Unavailable` growth takes the transition, so S2's path (the
+  transition, a ramped duck, `TRANSITION_FALLBACK`) is right.
+- **Sweep, again.** The same probe over the capi, host-web, control-plane and host-core suites gives
+  the same set as attempt 1 (plus this issue's own gates); no expectation changed again.
+- **No bit moved, again.** The 34 digests of `1fa4cee4e` and the head are equal; `audit capi`'s main
+  `pcm_digest` is `30dcfd806e7ba058` on both.
+- **Browser.** `npm run qualify -- --check-matrix --self-test-mutations`, `sdk/dist` deleted: Chromium
+  `single` and `worker`, WebKit `single` and `worker` all pass; `console-limits` replies `ok`,
+  path `rebuild`, render allocations 0.
+- **Checks.** fmt; workspace clippy (CI flags); release tests of control-plane, host-core, capi,
+  host-web, audit and realtime-policy (`--all-features`); workspace policy, `realtime_policy`,
+  `check-test-support-ci.py`; `check-capi-abi.sh`; `audit capi` (0 violations); web build and
+  check; aarch64 `cargo check --release --tests --all-features` of the touched crates.
+
+### History: attempt 1's browser blocker (fixed upstream by #2232)
 
 `npm run qualify -- --check-matrix --self-test-mutations` fails in all four legs (Chromium and
 WebKit, `single` and `worker`) at `console-limits`: the #2191 bus add on the 256-track console
@@ -321,8 +344,7 @@ frame):
 
 So, through S2, a valid console edit (a bus add) is refused by its warm path, against D1 ("a valid
 edit is never refused for its warm path"), and on a 256-track console it also ducks every grown
-strip. This needs a ruling before S2 merges: for example, admit the classification's and the
+strip. Attempt 1 asked for a ruling before S2 merged: for example, admit the classification's and the
 transition's peak (a typed refusal, not `internal`), answer `Ordinary` for a growth whose duck
 set the session cannot afford, or bound `warm_lead`'s passes. It is not fixed here (owner of
 `warm_lead`: #1354/#1403; of the transition: #1397).
-
