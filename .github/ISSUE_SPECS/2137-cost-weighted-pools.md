@@ -104,7 +104,7 @@ updated before the builtin planner reads it.
   or when the builtin planner reads the pre-move map. Bits equal the Scalar oracle.
 - `the_remainder_rule_never_trades_banked_work_for_per_node_work` (new): red when the weighted
   objective compares bank cost alone.
-- `a_console_track_is_never_pooled_as_stereo_to_fill_a_bank` (doc updated): red when the remainder
+- `a_console_track_stays_mono_when_filling_a_bank_costs_more` (doc updated): red when the remainder
   objective is bind count.
 - `the_two_planners_agree_on_every_track_class`: one new row, 10 + 6; red when the builtin planner
   reads the class map from before the move.
@@ -152,3 +152,61 @@ capi, graph, builtins-compiler and wasm-gates; `check-workspace-policy.sh`; `rea
 benchmark preflight (no workload launched); `build-web-audioworklet.sh` and
 `check-web-audioworklet.sh`; browser qualification `--check-matrix` on Chromium and WebKit, single
 and worker legs: all pass. No timed benchmark was run, because the machine was not quiet.
+
+## Amendment (attempt 2, 2026-11-01)
+
+Verdict 1 was FAIL with one MAJOR. Attempt 1's track filter needed every console group of a track
+to be a fitting remainder. The post-insert level splits whenever only some tracks carry inserts,
+so on that normal shape the rule did nothing (the verifier's shape: 7 banks with the rule on and
+7 with it off).
+
+- **Candidates:** a track is a candidate when any one of its console groups is a fitting mono
+  remainder. A track's class is global, so the weighted objective compares every group that the
+  move changes. The members guard stays. It is a **sum**: the changed groups must bank at least
+  as many slot members as before. That is not a per-member check, and the doc now says so.
+- **Re-placement (new):** the #2136 placement buckets by pool class, so after a move the moved
+  tracks were placed with their old class. The compile now places again with the settled classes
+  and plans once more. It keeps the re-placed plan unless it costs more or banks fewer slot members
+  (`rack_plan_cost`). The loop runs again while classes still move, and the track count bounds it.
+  I found this when the wider candidate set made `every_console_slot_binds_banked_at_every_track_count`
+  red: a moved track's limiter sat at a stale level (`{(Stereo, 9): 1, (Stereo, 10): 2}`), so the
+  objective had chosen a plan that broke #2136's one-level-per-pool property.
+- **Worse plan found?** Only that one, and re-placement fixes it. I found no other test or shape
+  where the wider set picks a worse plan.
+
+### Tests (attempt 2)
+
+- `a_track_moves_when_any_console_remainder_fits` (new; the verifier's shape: 10 mono + 6 stereo,
+  pre=[EQ], post=[Limiter], a compressor insert on `ch00..03`). It expects `ch08` and `ch09` in the
+  stereo pool and `2 * 16 / W + 1` banks, which is 5 at W=8. It was red on attempt 1's filter (no
+  move, 7 banks) and red without the re-placement (6 banks).
+- `a_console_track_is_never_pooled_as_stereo_to_fill_a_bank` is renamed to
+  `a_console_track_stays_mono_when_filling_a_bank_costs_more`.
+- `every_console_slot_binds_banked_at_every_track_count` now accepts a moved mono track. It still
+  requires one class per track and a stereo class for every stereo feed. It was red without the
+  re-placement.
+
+### Bank counts (attempt 2, planner report, W=8)
+
+| shape | base | head |
+| --- | --- | --- |
+| verifier insert shape (`prepared_bank_count`) | 7 | 5 |
+| insert shape + bus + post-fader sends + meters (groups) | 9 | 7 |
+| 10 + 6 / 37 + 27 | 6 / 18 | 4 / 16 (no change from attempt 1) |
+
+At W=4 the new test asserts 9 for the insert shape. This host has no W=4 build, so that count
+has not been run.
+
+### Bits (attempt 2)
+
+The harness now also taps every track's `PostFader` (the send tap) and every submix's `PostMatrix`.
+It also adds a metered arm, which hashes every meter snapshot. A new session joins the cases: the
+insert shape, a bus, and post-fader sends from the moved `ch08` and from the stereo tracks. The
+full digest set ran again at the new head (`7de9861a1`) against base (`263c27651`). Every output
+digest, every meter digest and all 3566 tap digests are identical. Base and head refuse the same
+cases as in attempt 1.
+
+**Checks (attempt 2):** fmt; clippy with CI's flags; release tests of rack-compiler,
+graph-compiler, host-core and capi; `realtime_policy`; `build-web-audioworklet.sh` and
+`check-web-audioworklet.sh`. All pass. I did not run the browser matrix again: no qualification
+fixture has a fitting remainder, so the browser plan output did not change beyond attempt 1.
