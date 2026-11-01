@@ -636,16 +636,22 @@ fn every_console_slot_binds_banked_at_every_track_count() {
     assert_eq!(pools.len(), 2, "both pool classes bind console banks");
 }
 
-/// A mono-fed track whose console EQ has different left and right gains pools as stereo, beside a
-/// symmetric mono track that pools mono-symmetric: the pool class reads each prepared effect's
+/// A mono-fed track whose console EQ has different left and right gains pools as stereo, beside
+/// symmetric mono tracks that pool mono-symmetric: the pool class reads each prepared effect's
 /// `DESIGNED` witness, not the feed alone. Red if the class ignored the effects' witnesses.
+///
+/// The symmetric tracks fill one whole bank, so issue #2137's remainder rule has no mono
+/// remainder to move into the declining track's bank.
 #[test]
 fn a_mono_track_whose_witness_declines_pools_as_stereo() {
     let console = Console {
         pre: vec![Kind::Eq],
         post: vec![],
     };
-    let tracks: Vec<TrackShape> = (0..2)
+    let lanes = BankWidth::for_backend(host_dispatch())
+        .expect("a vector host")
+        .lanes() as usize;
+    let tracks: Vec<TrackShape> = (0..1 + lanes)
         .map(|_| TrackShape {
             feed: Feed {
                 gain: 0.5,
@@ -1140,8 +1146,13 @@ fn a_console_group_a_factory_declines_fails_the_compile() {
 /// track banks nowhere, moves `ch{W}` to the stereo pool and binds both insert groups (the stereo
 /// one padded), six banks.
 ///
-/// Red if a padded console group strands its members again (`ch{W}` moves and six banks bind), or
-/// if the demotion is retired for console-free sessions too (`ch{W}` stays mono there).
+/// Issue #2137's remainder rule does name `ch{W}`: its limiter remainder of one fits beside the
+/// stereo one. It weighs the move and refuses it: the merge saves 0.61 of a limiter bank, and the
+/// stereo insert group it completes costs two stereo banks.
+///
+/// Red if a padded console group strands its members again (`ch{W}` moves and six banks bind), if
+/// #2137's rule weighs its move by bind count (the same six), or if the demotion is retired for
+/// console-free sessions too (`ch{W}` stays mono there).
 #[test]
 fn a_console_track_is_never_pooled_as_stereo_to_fill_a_bank() {
     const BLOCKS: u64 = 12;
@@ -1222,6 +1233,63 @@ fn a_console_track_is_never_pooled_as_stereo_to_fill_a_bank() {
     );
 }
 
+/// Issue #2137: the remainder rule never trades banked work for per-node work.
+///
+/// `ch00..ch{W+k-2}` are mono and `ch{W+k-1}` stereo, where `k` is the insert padding threshold
+/// (#888); every track carries the limiter as its `pre_insert` slot (so every track's slot sits at
+/// one level), and the last `k` mono tracks carry EQ then compressor as inserts. The mono limiter
+/// remainder (`k - 1` tracks) fits beside the
+/// stereo track's, so the rule names it. Moving it would save a padded mono limiter bank and
+/// split the `k`-member mono insert group, which pads and binds two banks, into two groups below
+/// `k` that render per node: fewer banks, so a lower bank cost, and `2 k` effect nodes off the
+/// banked path. The move is refused, and the mono insert group keeps its two banks.
+///
+/// Red if the class-weighted objective compares the bank cost alone.
+#[test]
+fn the_remainder_rule_never_trades_banked_work_for_per_node_work() {
+    let width = BankWidth::for_backend(host_dispatch()).expect("a vector host");
+    let lanes = width.lanes() as usize;
+    let k = crate::banks::min_padded_insert_members(width);
+    let console = Console {
+        pre: vec![Kind::Limiter],
+        post: Vec::new(),
+    };
+    let mono = lanes + k - 1;
+    let tracks: Vec<TrackShape> = (0..=mono)
+        .map(|index| TrackShape {
+            feed: Feed {
+                gain: 2.0,
+                stereo: index == mono,
+                poison: false,
+            },
+            inserts: if (mono - k..mono).contains(&index) {
+                vec![Kind::Eq, Kind::Comp]
+            } else {
+                Vec::new()
+            },
+            bypass: vec![false],
+            variant: 0,
+        })
+        .collect();
+    let model = console_session(&console, &tracks);
+    let artifact = compile_at(&model, host_dispatch()).expect("the console session compiles");
+    assert_eq!(
+        pooled_tracks(&artifact)[1],
+        BTreeSet::from([format!("ch{mono:02}")]),
+        "the stereo pool is the stereo track alone"
+    );
+    let report = &artifact.report().rack_cohorts;
+    assert!(
+        report.scalar_in(RackLocation::Dynamic).is_empty(),
+        "no insert renders per node"
+    );
+    assert_eq!(
+        artifact.graph().prepared_bank_count(),
+        5,
+        "three limiter banks (mono full, mono padded, stereo padded) and the mono insert group's two"
+    );
+}
+
 /// Issue #1368 gate 2: inserts of the lane-link effects at mixed detector link modes share one
 /// bank per slot per group, and every track renders its per-node bits.
 ///
@@ -1287,8 +1355,9 @@ fn inserts_at_mixed_link_modes_share_one_bank_per_slot() {
 
 /// Issue #987: a later chain of a mono strip is armed on its producers' rendering, and collapses.
 ///
-/// Sixteen tracks on the collapse-capable console (EQ and compressor, then the limiter), every
-/// fourth one stereo; the even tracks carry a banked EQ insert, so their strip is three chains
+/// Sixteen tracks on the collapse-capable console (EQ and compressor, then the limiter), the
+/// third and fourth of every four stereo, so each pool is whole banks at either width and issue
+/// #2137's remainder rule moves nothing; the even tracks carry a banked EQ insert, so their strip is three chains
 /// (the `pre_insert` chain, the insert chain and the `post_insert` chain), and the odd tracks a
 /// delay insert, which banks nowhere, so theirs is two chains around a per-node op (issue #1899).
 /// Armed and forced off, every track's post-matrix bits and the session output agree, the
@@ -1309,7 +1378,7 @@ fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
         .map(|index| TrackShape {
             feed: Feed {
                 gain: 0.5,
-                stereo: index % 4 == 3,
+                stereo: index % 4 >= 2,
                 poison: false,
             },
             inserts: if index % 2 == 0 {
