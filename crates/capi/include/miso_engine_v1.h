@@ -292,10 +292,8 @@ extern "C" {
  * over the revisions the last advance covered of MISO_ENGINE_V1_OUTCOME_EXACT,
  * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK and MISO_ENGINE_V1_OUTCOME_SUPERSEDED.
  * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK reports a warm successor's fallback to its
- * transition, or a rebuild that carries a send following a stored mute into one that follows
- * none (conservative: it can be set when no send moves at the swap; #1713 removes it). It also
- * reports any rebuild that carries an automated following send while a live send move may still
- * ramp (conservative; #1718 removes it). The host
+ * transition. A rebuild that carries a live send keeps each move in flight, so it completes
+ * exact (issues 1713 and 1718). The host
  * polls the watermark to learn that an edit is audible, never the event lane. The caller zeroes
  * reserved0 and reserved[] and sets struct_size, or the call returns
  * MISO_ENGINE_V1_INVALID_ARGUMENT; a copy that keeps landing inside render's publication

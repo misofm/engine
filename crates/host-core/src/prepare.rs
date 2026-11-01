@@ -916,66 +916,6 @@ impl PlanStateInventory {
     pub fn restarted_strips(&self) -> &[Box<str>] {
         &self.restarted
     }
-
-    /// Whether this plan's send join carries a route that follows an automated source mute in
-    /// the plan it was prepared to displace into a route that follows none in this plan (a
-    /// seven-word route into a six-word one, #1652 D3). The join flags every such carry by the
-    /// route's kind alone: a carried route whose source strip automates a mute lane in the
-    /// committed plan and automates none in this one (the rebuild removes the strip's last mute
-    /// entry, or retargets it to another strip). `false` for a plan prepared without a
-    /// predecessor and for a declared discontinuity, which carries nothing.
-    ///
-    /// **Conservative (#1652 U2a fold 2, MAJOR-A; #1713 removes it).** A six-word successor holds
-    /// one ramp, so render may re-time a carried column's move: a join record composed with the
-    /// heard curve reopens the route over the session mute length `J` instead of the record's own
-    /// length, and two columns' moves fold into one ramp over the longer remaining length. The
-    /// control plane completes such a rebuild as [`engine::realtime::CandidateOutcome::TransitionFallback`]
-    /// so the watermark never reports it exact. It over-reports: a rebuild that carries a
-    /// following route into a six-word one is flagged whether or not a column is moving at the
-    /// swap.
-    #[must_use]
-    pub fn carries_a_following_route_into_a_six_word_route(&self) -> bool {
-        self.follow_into_six_word
-    }
-
-    /// Whether this plan's send join carries a following route of the plan it was prepared to
-    /// displace into a following route of its own that no longer hears one of the predecessor's
-    /// curves: a source lane's mute curve, its own or a reaching VCA's (#1654, root ruling
-    /// B19-R7). `false` for a plan prepared without a predecessor and for a
-    /// declared discontinuity, which carries nothing.
-    ///
-    /// Render lands such a column at once over the removed curve's own length at the swap; the
-    /// control plane folds that landing into its send-move window. The transition fallback reads
-    /// the wider [`Self::carries_a_following_route_into_a_following_route`] (B19-R8).
-    #[must_use]
-    pub fn carries_a_following_route_that_loses_a_curve(&self) -> bool {
-        self.follow_loses_a_curve
-    }
-
-    /// Whether this plan's send join carries a following route of the plan it was prepared to
-    /// displace into a following route of its own (a seven-word route in both plans; #1654, root
-    /// ruling B19-R8). `false` for a plan prepared without a predecessor and for a declared
-    /// discontinuity, which carries nothing.
-    ///
-    /// **Conservative (B19-R8; #1718 removes it).** Render may land a carried column at once at
-    /// the swap (a removed follow curve, or a column that composes otherwise), so a live send
-    /// move still ramping on it is cut. The control plane completes such a
-    /// rebuild as [`engine::realtime::CandidateOutcome::TransitionFallback`] while a live send move
-    /// may still ramp. It over-reports: the join cannot tell which column lands at once or whether
-    /// that column moves at the swap. It includes
-    /// [`Self::carries_a_following_route_that_loses_a_curve`].
-    #[must_use]
-    pub fn carries_a_following_route_into_a_following_route(&self) -> bool {
-        self.follow_into_following
-    }
-
-    /// The longest ramp of the records this plan's send join writes to its carried following
-    /// routes (a live send move the successor starts at its first block, B19-R7), `0` when it
-    /// writes none.
-    #[must_use]
-    pub fn following_route_retarget_ramp(&self) -> u32 {
-        self.follow_retarget_ramp
-    }
 }
 
 /// Set `host`'s source-read offset (#1396 deliverable 2): the plan's
@@ -1044,20 +984,6 @@ pub struct PlanStateInventory {
     strip_delays: Box<[graph::GraphStripDelayLine]>,
     /// One row per live send of the plan (#1284 D2), sorted by route ID.
     live_routes: Box<[graph::GraphLiveRoute]>,
-    /// Whether this plan's send join carries a following route of the plan it was prepared to
-    /// displace into a six-word route of its own (#1652 U2a fold 2, MAJOR-A; see
-    /// [`Self::carries_a_following_route_into_a_six_word_route`]). `false` for a plan prepared
-    /// without a predecessor.
-    follow_into_six_word: bool,
-    /// Whether this plan's send join carries a following route into a following route (B19-R8;
-    /// see [`Self::carries_a_following_route_into_a_following_route`]).
-    follow_into_following: bool,
-    /// Whether this plan's send join carries a following route into a following route that hears
-    /// fewer curves (B19-R7; see [`Self::carries_a_following_route_that_loses_a_curve`]).
-    follow_loses_a_curve: bool,
-    /// The longest ramp of the join's following-route records (B19-R7; see
-    /// [`Self::following_route_retarget_ramp`]).
-    follow_retarget_ramp: u32,
     /// The strips this plan restarts relative to the plan it was prepared to displace (#1277 D6):
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
@@ -1455,10 +1381,6 @@ impl PlanStateInventory {
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
-            follow_into_six_word: false,
-            follow_into_following: false,
-            follow_loses_a_curve: false,
-            follow_retarget_ramp: 0,
             restarted: Box::default(),
             fade_arms: Box::default(),
             fade_watch: graph::GraphFadeArmWatch::default(),
@@ -1502,10 +1424,6 @@ impl PlanStateInventory {
             delay_lines: Box::default(),
             strip_delays: self.strip_delays.clone(),
             live_routes: Box::default(),
-            follow_into_six_word: false,
-            follow_into_following: false,
-            follow_loses_a_curve: false,
-            follow_retarget_ramp: 0,
             restarted: Box::default(),
             fade_arms: Box::default(),
             fade_watch: graph::GraphFadeArmWatch::default(),
@@ -5843,10 +5761,6 @@ fn prepare_or_project(
         delay_lines: delay_lines.into_boxed_slice(),
         strip_delays: strip_delays.into_boxed_slice(),
         live_routes: live_routes.into_boxed_slice(),
-        follow_into_six_word: route_carry.follow_into_six_word,
-        follow_into_following: route_carry.follow_into_following,
-        follow_loses_a_curve: route_carry.follow_loses_a_curve,
-        follow_retarget_ramp: route_carry.follow_retarget_ramp,
         restarted: restarted.into_boxed_slice(),
         fade_arms: fade_arm_rows.into_boxed_slice(),
         fade_watch,
@@ -9341,26 +9255,6 @@ struct RouteCarry<'a> {
     /// The carried sends whose live values differ, by route ID, with the record to write to the
     /// successor's cell.
     retargets: Vec<(&'a str, SendRecord)>,
-    /// Whether some move carries a following predecessor route into a six-word successor route
-    /// (#1652 U2a fold 2, MAJOR-A): the rebuild then completes as the transition fallback
-    /// ([`PlanStateInventory::carries_a_following_route_into_a_six_word_route`]).
-    follow_into_six_word: bool,
-    /// Whether some move carries a following route into a following route (B19-R8,
-    /// [`PlanStateInventory::carries_a_following_route_into_a_following_route`]).
-    follow_into_following: bool,
-    /// Whether some move carries a following route into a following route that no longer hears
-    /// a source mute curve of the predecessor's (B19-R7,
-    /// [`PlanStateInventory::carries_a_following_route_that_loses_a_curve`]).
-    follow_loses_a_curve: bool,
-    /// The longest ramp of the following-route records among `retargets` (B19-R7).
-    follow_retarget_ramp: u32,
-}
-
-/// Whether a following route of automated lanes `before` loses a curve in `after`: a source
-/// lane's mute curve (own or a reaching VCA's) that `before` automates and `after` does not
-/// (B19-R7).
-fn loses_a_curve(before: [bool; 2], after: [bool; 2]) -> bool {
-    before.iter().zip(&after).any(|(&had, &has)| had && !has)
 }
 
 /// The route half of the send join (#1284 D2): a send carries when both plans hold a live route of
@@ -9373,46 +9267,21 @@ fn resolve_route_carry<'a>(
     let row = |rows: &[graph::GraphLiveRoute], id: &str| {
         rows.binary_search_by(|row| (*row.route_id).cmp(id))
             .ok()
-            .map(|index| {
-                (
-                    rows[index].unit,
-                    rows[index].following,
-                    rows[index].automated,
-                )
-            })
+            .map(|index| (rows[index].unit, rows[index].following))
     };
     let mut carry = RouteCarry::default();
     for join in joins {
-        let (Some((before, follows, heard)), Some((after, successor_follows, hears))) =
+        let (Some((before, follows)), Some((after, _))) =
             (row(predecessor, join.id), row(own, join.id))
         else {
             continue;
         };
-        // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): a following route carried into a
-        // six-word one holds one ramp, so render may re-time a column's move (a record composed
-        // with the heard curve reopens over `J`, not its own length; two columns' moves fold into
-        // one ramp over the longer remaining length). The join cannot tell whether a move is in
-        // flight, so it flags every such carry: the conservative rule.
-        carry.follow_into_six_word |= follows && !successor_follows;
-        // B19-R7 (#1718 deletes it): a carried following route that stays seven-word and loses
-        // a source mute curve lands that column at once over the removed curve's length, cutting
-        // a live send move in flight there. The join flags every such carry;
-        // the control plane completes it as the fallback while a send move may still ramp.
-        carry.follow_loses_a_curve |= follows && successor_follows && loses_a_curve(heard, hears);
-        // B19-R8 (#1718 deletes it): any carried following route that stays seven-word may land
-        // a column at once at the swap, cutting a live send move in flight there, whether or not
-        // it loses a curve. The control plane completes it as the fallback while a send move may
-        // still ramp.
-        carry.follow_into_following |= follows && successor_follows;
         carry.moves.push(graph::GraphRouteMove {
             successor: after,
             predecessor: before,
             predecessor_follows: follows,
         });
         if let Some(record) = join.retarget {
-            if let SendRecord::Following(record) = record {
-                carry.follow_retarget_ramp = carry.follow_retarget_ramp.max(record.length());
-            }
             carry.retargets.push((join.id, record));
         }
     }
@@ -10826,114 +10695,6 @@ mod tests {
             ]
         );
         assert_eq!(carry.retargets, vec![("a-main", record)]);
-        assert!(
-            !carry.follow_into_six_word,
-            "no route follows in either plan"
-        );
-    }
-
-    /// #1652 U2a fold 2 (MAJOR-A): the join flags a carry of a following predecessor route into a
-    /// six-word successor route, and only that kind pair: six -> six, six -> seven and seven ->
-    /// seven moves leave the flag clear, and a following route present in one plan only moves
-    /// nothing and flags nothing.
-    ///
-    /// Test value: red if the flag reads the predecessor's kind alone (seven -> seven flagged:
-    /// a rebuild that keeps the mute entry would over-report), the successor's alone, or ignores
-    /// both (the seven -> six re-timing then completes exact).
-    #[test]
-    fn the_join_flags_a_following_route_carried_into_a_six_word_one() {
-        use super::{RouteJoin, resolve_route_carry};
-        let live = |route: &str, unit, following| graph::GraphLiveRoute {
-            route_id: route.into(),
-            unit,
-            following,
-            automated: [false; 2],
-        };
-        let join = |id| RouteJoin { id, retarget: None };
-        // (case, predecessor following, successor following, flagged)
-        for (case, before, after, flagged) in [
-            ("six -> six", false, false, false),
-            ("six -> seven", false, true, false),
-            ("seven -> seven", true, true, false),
-            ("seven -> six", true, false, true),
-        ] {
-            let predecessor = [live("a-main", 1, false), live("b-main", 2, before)];
-            let own = [live("a-main", 3, false), live("b-main", 4, after)];
-            let carry = resolve_route_carry(&predecessor, &own, &[join("a-main"), join("b-main")]);
-            assert_eq!(carry.moves.len(), 2, "{case}: both sends carry");
-            assert_eq!(carry.follow_into_six_word, flagged, "{case}");
-        }
-        // A following route the successor lacks is not a move.
-        let predecessor = [live("a-main", 1, true)];
-        let carry = resolve_route_carry(&predecessor, &[], &[join("a-main")]);
-        assert!(carry.moves.is_empty() && !carry.follow_into_six_word);
-    }
-
-    /// B19-R7: the join flags a carry of a following route into a following route whose
-    /// automated lanes lack a source lane's mute curve of the predecessor's, and only then: an
-    /// unchanged or a larger set, and a kind change, leave it clear.
-    ///
-    /// Test value: red if the flag compares the sets for equality (an added curve would flag), or
-    /// ignores the kinds.
-    #[test]
-    fn the_join_flags_a_following_route_that_loses_a_curve() {
-        use super::{RouteJoin, resolve_route_carry};
-        let left = [true, false];
-        let right = [false, true];
-        let both = [true, true];
-        let none = [false; 2];
-        let live = |unit, following, automated| graph::GraphLiveRoute {
-            route_id: "a-main".into(),
-            unit,
-            following,
-            automated,
-        };
-        // (case, predecessor, successor, flagged)
-        for (case, before, after, flagged) in [
-            ("same set", live(1, true, left), live(2, true, left), false),
-            (
-                "adds a lane",
-                live(1, true, left),
-                live(2, true, both),
-                false,
-            ),
-            (
-                "loses a lane",
-                live(1, true, both),
-                live(2, true, left),
-                true,
-            ),
-            (
-                "swaps a lane",
-                live(1, true, left),
-                live(2, true, right),
-                true,
-            ),
-            (
-                "seven -> six",
-                live(1, true, left),
-                live(2, false, none),
-                false,
-            ),
-            (
-                "six -> seven",
-                live(1, false, none),
-                live(2, true, left),
-                false,
-            ),
-        ] {
-            let carry = resolve_route_carry(
-                &[before],
-                &[after],
-                &[RouteJoin {
-                    id: "a-main",
-                    retarget: None,
-                }],
-            );
-            assert_eq!(carry.follow_loses_a_curve, flagged, "{case}");
-            // B19-R8: every seven-to-seven carry, whatever its sets.
-            assert_eq!(carry.follow_into_following, !case.contains("->"), "{case}");
-        }
     }
 
     /// #1283 D1: lines join by edge ID and endpoints, never by index. A line moves when its
@@ -10993,10 +10754,6 @@ mod tests {
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
-            follow_into_six_word: false,
-            follow_into_following: false,
-            follow_loses_a_curve: false,
-            follow_retarget_ramp: 0,
             restarted: Box::default(),
             fade_arms: Box::default(),
             fade_watch: graph::GraphFadeArmWatch::default(),

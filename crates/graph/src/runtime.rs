@@ -2181,10 +2181,9 @@ impl LiveFollowRoute {
     /// own mute, `VcaMute` for a VCA mute, R19-4). A column that no longer hears a follow curve of
     /// its predecessor (U2 fold 1, MAJOR-3) lands at once over the removed curve's own length (the
     /// longer one with a coincident gate move, R19-4), also with a column ramp in flight
-    /// (B19-R7). With send rows off this is the column jump an uninterrupted gate change makes;
-    /// the control plane still marks such a rebuild `TransitionFallback` while a live send move
-    /// may ramp, a conservative over-report (#1718). Any other move lands at once over the
-    /// mute length. No landing state survives the carry. A column with no curve compares its
+    /// (B19-R7). With send rows off this is the column jump an uninterrupted gate change makes,
+    /// so the rebuild is exact (#1718; landing a send row exactly is a gate of #1654's
+    /// reopening). Any other move lands at once over the mute length. No landing state survives the carry. A column with no curve compares its
     /// cell's target the same way.
     ///
     /// #2011 (R3): an armed route only takes the composed targets and silences; its ramps stay

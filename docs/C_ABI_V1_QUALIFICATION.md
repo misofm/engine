@@ -251,11 +251,10 @@ before it pushes a record, so the watermark never reads a revision the gate cann
 `struct_size` or a nonzero reserved word is `RESULT_INVALID_ARGUMENT`; a copy that keeps landing
 inside render's publication (bounded at 64 attempts) is `RESULT_BACKPRESSURE` with `out`
 untouched, and the host retries. In this slice every revision completes as `exact`; the
-`superseded` and `transition_fallback` producers are #1310, #1397 and #1358. `transition_fallback`
-also reports a rebuild that carries a send following a stored mute into one that follows none
-(conservative: it can be set when no send moves at the swap; #1713 removes it; #1652 U2a fold 2).
-It also reports any rebuild that carries an automated following send while a live send move may
-still ramp (conservative; #1718 removes it; #1654, root rulings B19-R7 and B19-R8).
+`superseded` and `transition_fallback` producers are #1310, #1397 and #1358. A rebuild that
+carries a live send keeps each move in flight, so it completes `exact` (#1713 and #1718 removed
+the conservative `transition_fallback` terms of #1652 U2a fold 2 and of root rulings B19-R7 and
+B19-R8).
 The frozen exported
 set is now 16 `miso_engine_v1_*` definitions;
 `abi_smoke.c` checks the bit against the queried mask and queries a compiled plan with a valid

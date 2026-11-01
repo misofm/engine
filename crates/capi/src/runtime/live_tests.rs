@@ -9253,41 +9253,28 @@ fn fallback_count(rig: &Rig) -> u64 {
     watermark.transition_fallback_count
 }
 
-/// #1654 root ruling B19-R8 (the split verifier's MAJOR-1) and R19-5 on the C ABI. On
-/// [`open_follow_document`] (`eq0-b` follows a held-open mute curve), a live send move over
+/// #1718 and #1654 root ruling R19-5 on the C ABI (the B19-R8 split verifier's MAJOR-1 setup).
+/// On [`open_follow_document`] (`eq0-b` follows a held-open mute curve), a live send move over
 /// 4,000 samples (a D6 `gain_db` edit to -3 dB, or a `matrix_rr` edit to 0.5) is in flight when
 /// a rebuild edits only the direct route `eq0-main`. The move keeps its own length: the send's
-/// plane is the never-rebuilt twin's, bit for bit, through the move and after it. Control cannot
-/// tell that, so the rebuild completes `TRANSITION_FALLBACK` (count 1, the conservative term).
-/// With the move long finished the same rebuild completes `EXACT` (count 0).
+/// plane is the never-rebuilt twin's, bit for bit, through the move and after it, and the rebuild
+/// completes `EXACT` (fallback count 0).
 ///
-/// Test value: red if an unrelated rebuild that carries a following send completes `EXACT` while
-/// a live send move may still ramp, if it is flagged with no live send move in the window, or if
-/// the carry cuts the move (R19-5).
+/// Test value: red if the control plane marks the exact carry `TRANSITION_FALLBACK` (the removed
+/// B19-R8 send-move window), or if the carry cuts the move (R19-5).
 #[test]
-fn an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_flagged_on_the_c_abi() {
+fn an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_exact_on_the_c_abi() {
     const RAMP: u32 = 4_000;
     let document = open_follow_document();
     let quantum = 128_usize;
-    // (label, the live send move, its lead before the rebuild in blocks, flagged)
-    for (label, edit, lead, flagged) in [
+    for (label, edit) in [
         (
             "gain_db in flight",
             send_row_edit("gain_db", -3.0, Some(RAMP)),
-            2,
-            true,
         ),
         (
             "matrix_rr in flight",
             send_row_edit("matrix_rr", 0.5, Some(RAMP)),
-            2,
-            true,
-        ),
-        (
-            "the move long finished",
-            send_row_edit("gain_db", -3.0, Some(RAMP)),
-            40,
-            false,
         ),
     ] {
         let mut rig = Rig::new(&document);
@@ -9295,26 +9282,17 @@ fn an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_flagged_o
         for _ in 0..4 {
             assert_eq!(bits(&rig.step()), bits(&twin.step()), "{label}");
         }
-        let (start, _) = live_and_render(&mut rig, std::slice::from_ref(&edit), lead);
-        let _ = live_and_render(&mut twin, std::slice::from_ref(&edit), lead);
+        let (start, _) = live_and_render(&mut rig, std::slice::from_ref(&edit), 2);
+        let _ = live_and_render(&mut twin, std::slice::from_ref(&edit), 2);
         let now = rig.block * rig.quantum as u64;
-        assert_eq!(
+        assert!(
             now < start + u64::from(RAMP),
-            flagged,
             "{label}: the move is in flight at the rebuild"
         );
         let direct = direct_route_edit(&mut rig, -3.0);
-        let outcome = if flagged {
-            crate::OUTCOME_TRANSITION_FALLBACK
-        } else {
-            crate::OUTCOME_EXACT
-        };
-        let (adoption, live) = rebuild_and_adopt_as(&mut rig, &[direct], 48, Some(outcome));
-        assert_eq!(
-            fallback_count(&rig),
-            u64::from(flagged),
-            "{label}: the fallback count"
-        );
+        let (adoption, live) =
+            rebuild_and_adopt_as(&mut rig, &[direct], 48, Some(crate::OUTCOME_EXACT));
+        assert_eq!(fallback_count(&rig), 0, "{label}: the fallback count");
         while (twin.block as usize) * quantum < adoption as usize {
             twin.step();
         }
@@ -9323,84 +9301,6 @@ fn an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_flagged_o
             plane_bits(&live, 1, quantum),
             plane_bits(&reference, 1, quantum),
             "{label}: the send keeps its move, the twin's bits"
-        );
-    }
-}
-
-/// #1654 root ruling B19-R8 (the split verifier's MAJOR-2) on the C ABI. On
-/// [`open_follow_document`], one transaction moves the send's `gain_db` to -3 dB over 4,000
-/// samples and edits the direct route `eq0-main`: it rebuilds, and its own send move is a join
-/// record with a ramp. The rebuild completes `TRANSITION_FALLBACK` (count 1), though no earlier
-/// send move is in the window. The direct-route edit alone completes `EXACT`.
-///
-/// Test value: red if the flag reads only the send moves of earlier commits (the window folds the
-/// transaction's own records after the commit), or if a rebuild with no live send move is flagged.
-#[test]
-fn a_send_move_inside_a_rebuild_is_flagged_on_the_c_abi() {
-    let document = open_follow_document();
-    for (label, moved) in [
-        ("the move with the rebuild", true),
-        ("the rebuild alone", false),
-    ] {
-        let mut rig = Rig::new(&document);
-        for _ in 0..4 {
-            rig.step();
-        }
-        let mut edits = Vec::new();
-        if moved {
-            edits.push(send_row_edit("gain_db", -3.0, Some(4_000)));
-        }
-        edits.push(direct_route_edit(&mut rig, -3.0));
-        let outcome = if moved {
-            crate::OUTCOME_TRANSITION_FALLBACK
-        } else {
-            crate::OUTCOME_EXACT
-        };
-        let _ = rebuild_and_adopt_as(&mut rig, &edits, 1, Some(outcome));
-        assert_eq!(
-            fallback_count(&rig),
-            u64::from(moved),
-            "{label}: the fallback count"
-        );
-    }
-}
-
-/// #1654 root ruling B19-R9 (the B19-R8 check's repro) on the C ABI. On [`open_follow_document`]
-/// (quantum 128, 480-sample landings), a live send gain move to -3 dB from 512 over 200 samples
-/// is in flight when R1 (the direct route `eq0-main` to -3 dB) rebuilds: R1 adopts at 640 flagged
-/// (count 1), and render may land the send at once there over the landing length. R2 (`eq0-main`
-/// to -6 dB), submitted at 896 after the move ended but inside R1's landing, completes
-/// `TRANSITION_FALLBACK` too (count 2). R3 (`eq0-main` to -9 dB), long after every landing ended,
-/// with no live send move, completes `EXACT` (count stays 2).
-///
-/// Test value: red if a flagged rebuild does not fold its own at-once landing into the send move
-/// window (a second rebuild inside it reads `EXACT`), or if the window outlives that landing.
-#[test]
-fn a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi() {
-    let mut rig = Rig::new(&open_follow_document());
-    assert_eq!(rig.quantum, 128);
-    for _ in 0..4 {
-        rig.step();
-    }
-    let (start, _) = live_and_render(&mut rig, &[send_row_edit("gain_db", -3.0, Some(200))], 1);
-    assert_eq!(start, 512, "the move starts at 512");
-    // (label, submit block, gain, outcome, fallback count)
-    for (label, block, db, outcome, fallbacks) in [
-        ("R1", 5, -3.0, crate::OUTCOME_TRANSITION_FALLBACK, 1),
-        ("R2", 7, -6.0, crate::OUTCOME_TRANSITION_FALLBACK, 2),
-        ("R3", 16, -9.0, crate::OUTCOME_EXACT, 2),
-    ] {
-        while rig.block < block {
-            rig.step();
-        }
-        assert_eq!(rig.block, block, "{label}: submitted at its block");
-        let edits = [direct_route_edit(&mut rig, db)];
-        let (first, _) = rebuild_and_adopt_as(&mut rig, &edits, 1, Some(outcome));
-        assert_eq!(first, block * 128, "{label}: adopted at its submit block");
-        assert_eq!(
-            fallback_count(&rig),
-            fallbacks,
-            "{label}: the fallback count"
         );
     }
 }
