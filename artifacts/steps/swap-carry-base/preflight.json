@@ -1,0 +1,19 @@
+{
+  "bench_cpu": "31",
+  "benchmark_source_sha256": "98a586a42aaf3237c5017a7319dabc357eb496dd05ecd926874da19c29c409d8",
+  "binary_sha256": "25d61e66f7e3f322be96b2ca9fb896e5b2cddd95a666c9901ddc0fd78dbdd489",
+  "candidate_commit": "7d89eecc54aa0ced2471ecbfde8f664da3a5c56f",
+  "fixture_sha256": "493c50fe48c962c86ee0fe4e954c2bd64d4b7cab4d99ac1e2eba2bcadab5d2ea",
+  "issue": 1286,
+  "kind": "swap_benchmark_preflight",
+  "measured_rounds": 2,
+  "preconditions_sha256": "9e90661adabbf8486ce8bcb7e0b697043aacc202cfa1ee37b4c113b6e1fc4e7a",
+  "producer_cpu": "30",
+  "records_required": 2,
+  "runner_sha256": "556ff1741f1248414c1eeded6192958ed0c1652245ddffddca1e8cd635a54f6c",
+  "schema_version": 1,
+  "taskset_mask": "31,30",
+  "validator_sha256": "e656b627d855b5277e26e08c46596510b43394696b3e2918f2e2ac1aa37da430",
+  "warmup_rounds": 1,
+  "workload_launches": 0
+}
