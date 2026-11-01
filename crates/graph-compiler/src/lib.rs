@@ -318,8 +318,10 @@ pub struct GraphRackBankReport {
 pub struct BankUtilisation {
     /// Plan groups with at least one bound slot: one bank of `W` lanes each.
     pub banks: u32,
-    /// Pairs of partial banks the planner could have merged into one: one rack, one pool class,
-    /// intersecting level windows (issue #2136: a bank's window is the intersection over its
+    /// Pairs of partial banks the planner could have merged into one: one rack, one pool class
+    /// (or, in a console rack, either class: issue #2137 moves a fitting mono console remainder
+    /// into the stereo pool, so a pair it did not merge is counted whatever the objective
+    /// decided), intersecting level windows (issue #2136: a bank's window is the intersection over its
     /// members of `[asap', ALAP]` after placement, so no pair the sweep could not merge counts),
     /// one fold target, every member of one a subsequence of the other's leader program,
     /// together no more than `W` active lanes, and a merge that still binds every slot either bank
@@ -491,7 +493,10 @@ impl BankUtilisation {
                     && b_lanes < lanes
                     && a_lanes + b_lanes <= lanes
                     && a.rack == b.rack
-                    && a.class == b.class
+                    // Issue #2137: a mono and a stereo console remainder are one key, since the
+                    // planner may move the mono one into the stereo pool. An insert remainder
+                    // keeps its class.
+                    && (a.class == b.class || crate::banks::is_console_rack(a.rack))
                     && windows_intersect(window_of(a), window_of(b))
                     && matches!((fold_of(a), fold_of(b)), (Some(a), Some(b)) if a == b)
                     && (merge_binds((a_index, a), (b_index, b))

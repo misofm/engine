@@ -199,8 +199,9 @@ fn a_pair_is_mergeable_only_when_the_merge_still_binds() {
 }
 
 /// Gate 1. Test value: red when the report stops seeing a pair the planner could have merged --
-/// a count that ignores the pool class, or one that counts padded lanes as active (then two
-/// half-full banks no longer fit one, and the lane use reads full).
+/// a count that ignores the pool class, one that ignores a cross-class console pair (issue
+/// #2137), or one that counts padded lanes as active (then two half-full banks no longer fit
+/// one, and the lane use reads full).
 #[test]
 fn the_bank_report_counts_mergeable_pairs() {
     let console = report(&parse_session_json(INTENDED).expect("the standing console parses"));
@@ -266,8 +267,17 @@ fn the_bank_report_counts_mergeable_pairs() {
     };
     assert_eq!(
         measure(&first, &other_class).mergeable_partial_pairs,
+        1,
+        "a mono and a stereo console remainder are one key (#2137)"
+    );
+    let insert = |group: &BankGroup<_>| BankGroup {
+        rack: rack::RackLocation::Dynamic,
+        ..group.clone()
+    };
+    assert_eq!(
+        measure(&insert(&first), &insert(&other_class)).mergeable_partial_pairs,
         0,
-        "another pool class is another key"
+        "in the insert rack another pool class is another key"
     );
     let mut routed = BTreeMap::new();
     for member in first.members.iter().flatten() {
