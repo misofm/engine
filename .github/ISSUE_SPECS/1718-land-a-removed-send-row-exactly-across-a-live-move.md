@@ -114,11 +114,14 @@ at a seven-to-six carry; this issue's half (the seven-to-seven window) moves no 
   `send_fallback` term, and the doc text on the C header, the ABI constant,
   `docs/C_ABI_V1_QUALIFICATION.md`, the browser `.d.ts` (and its SDK copy) and the graph's
   `place_carried` note.
-- G1b, both hosts: `an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_exact_on_the_c_abi`
-  (C ABI) and `a_rebuild_carrying_a_following_send_across_a_live_send_move_is_exact_alike_on_both_hosts`
-  (host-web) now assert `OUTCOME_EXACT`, fallback count 0, and the never-rebuilt twin's bits.
-  Both are red on `7d89eecc5` (they read `TRANSITION_FALLBACK`).
-- Deleted gates: `a_send_move_inside_a_rebuild_is_flagged_on_the_c_abi`,
+- G1b, both hosts: `a_rebuild_carrying_a_following_send_across_a_live_send_move_is_exact_alike_on_both_hosts`
+  (host-web, `gain_db` and `matrix_rr` moves, and MAJOR-2) now asserts `OUTCOME_EXACT`, fallback
+  count 0, and the never-rebuilt twin's bits. It is red on `7d89eecc5` (it reads
+  `TRANSITION_FALLBACK`). Attempt 2 folded the C ABI copy of this claim
+  (`an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_exact_on_the_c_abi`) into
+  it and deleted the copy.
+- Deleted gates: `an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_flagged_on_the_c_abi`,
+  `a_send_move_inside_a_rebuild_is_flagged_on_the_c_abi`,
   `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi`,
   `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts` and the
   host-core `the_join_flags_a_following_route_that_loses_a_curve`; with the window gone they

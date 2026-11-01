@@ -118,3 +118,19 @@ exact form must also cover that case.
   blocks, plain and live; three fixtures refuse alike) are identical at `7d89eecc5` and at head.
 - The resource ceilings hold: `LiveRoute`'s ramp state grows by 56 bytes (one more `IndexedRamp` and position),
   inside every pinned ceiling; no re-pin was needed.
+
+## Attempt 2 (2026-11-01)
+
+- Verifier MAJOR-1 of attempt 1: after a split seven-to-six carry, a six-word route's live record
+  restarted both columns on one ramp, so a record that changes one column (`matrix_rr`) stretched
+  the other column's move in flight to the record's length (252 of 256 words differed from the
+  twin, both revisions `EXACT`). Fix: `ColumnRamps::restart` keeps the one-ramp restart when both
+  columns share one ramp at one position, and otherwise retargets column by column
+  (`retarget_column`), as the following twin's block entry does.
+- New graph test `a_one_column_record_after_a_split_carry_keeps_the_other_columns_move`: each
+  column's coefficients and the mixed bits equal the twin's in every block after the record. Red
+  on attempt 1's head (block 0, the coefficients).
+- The C ABI exact-carry gate duplicated the two-host gate; its `matrix_rr` row moved into
+  `a_rebuild_carrying_a_following_send_across_a_live_send_move_is_exact_alike_on_both_hosts`, and
+  the C ABI test and its helpers are deleted.
+- The 34 digests over `fixtures/session/v1` are again identical to `7d89eecc5`.
