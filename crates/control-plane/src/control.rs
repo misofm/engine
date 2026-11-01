@@ -2692,6 +2692,25 @@ impl Drop for ObservedPreparedToken {
 /// "re-prepare" result.
 pub const REPREPARE_REQUIRED: &str = "control.apply.reprepare_required";
 
+/// Which part of the service step failed ([`SessionState::service_step`], #1360 review M1).
+#[derive(Debug)]
+pub enum ServiceFailure {
+    /// The plan epochs could not be synchronized.
+    Epoch(CommandError),
+    /// The warm-successor deadline step failed (#1360 D2).
+    Deadline(CommandError),
+}
+
+impl ServiceFailure {
+    /// The command error the failure carries.
+    #[must_use]
+    pub fn into_command(self) -> CommandError {
+        match self {
+            Self::Epoch(error) | Self::Deadline(error) => error,
+        }
+    }
+}
+
 /// What one transition fallback across the pending `Primed` candidate did (#1397 D2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransitionStep {
@@ -4081,17 +4100,30 @@ where
     /// acknowledges nothing and adds no queue. The only things it discards are plans render has
     /// already displaced; a committed revision's plan is never among them.
     pub fn service(&mut self) -> Result<(), CommandError> {
+        self.service_step().map_err(ServiceFailure::into_command)
+    }
+
+    /// [`Self::service`], with its failure named by the step that failed, so a host reports each
+    /// under its own diagnostic (#1360 review M1).
+    ///
+    /// # Errors
+    ///
+    /// [`ServiceFailure::Epoch`] when the plan epochs cannot be synchronized;
+    /// [`ServiceFailure::Deadline`] when the warm-successor deadline step fails (an allocation
+    /// refusal or an internal fault of its transition re-preparation).
+    pub fn service_step(&mut self) -> Result<(), ServiceFailure> {
         self.fold_observation_pending();
         // #2115: at most the record queue's depth of hops.
         self.loudness.drain();
-        self.synchronize_plan_epochs()?;
+        self.synchronize_plan_epochs()
+            .map_err(ServiceFailure::Epoch)?;
         // #1360 D2: after the epochs, so a candidate render adopted is promoted first, and before
         // the counter refresh, so a refused re-preparation is counted in this same call. A render
         // half that is gone (`Backpressure`) renders neither the candidate nor a transition, so
         // the step has nothing to do and the call goes on.
         match self.check_prime_deadline() {
             Ok(_) | Err(CommandError::Backpressure) => {}
-            Err(error) => return Err(error),
+            Err(error) => return Err(ServiceFailure::Deadline(error)),
         }
         self.poll_response_capture();
         self.refresh_provider_counters();

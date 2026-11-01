@@ -324,6 +324,22 @@ Branch `codex/issue-1360-warm-deadline`, from `7d89eecc5`.
   `check-test-support-ci.py`; `check-capi-abi.sh`; `audit capi` (0 violations); web build and
   check; aarch64 `cargo check --release --tests --all-features` of the touched crates.
 
+## Review folds (attempt 2 verify: PASS, three MINORs)
+
+- **M1.** `miso_engine_v1_service` reported every service failure as `source.epoch`. The control
+  plane's `SessionState::service_step` now names the failing part (`ServiceFailure::Epoch` or
+  `::Deadline`); `service()` wraps it for every other caller. The C entry reports the deadline
+  step's failure as a rebuild refusal: `COMPILE_REJECTED` with the compile diagnostic, or
+  `INTERNAL` with `control.internal`. No test: no existing test can make the step's transition
+  fail cheaply (an allocation refusal in `observation.after`), and a new hook is not worth it.
+- **M2.** The header and the qualification doc said the transition ducks the edited strips. It
+  ducks every strip whose arrival the growth moves (`grown_strips`): a bus add with a latent effect
+  on the new bus ducks every track routed into it.
+- **M3.** The audit leg's claim is the render thread's counters across the adoption block. Its
+  bit-identity check is dropped (gate 1 owns exactness), and it keeps one precondition: the
+  watermark covers the growth with `EXACT` inside the audited blocks. D6's "output equal to the
+  predecessor" is gate 1's from here on.
+
 ### History: attempt 1's browser blocker (fixed upstream by #2232)
 
 `npm run qualify -- --check-matrix --self-test-mutations` fails in all four legs (Chromium and

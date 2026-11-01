@@ -142,9 +142,10 @@ extern "C" {
  * output continues with no gap. The watermark reports the outcome:
  * MISO_ENGINE_V1_OUTCOME_EXACT when render adopted the successor;
  * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK when the successor was not available at submit, or
- * not ready by its deadline (the edited strips duck and fade back in); and
- * MISO_ENGINE_V1_OUTCOME_SUPERSEDED set when a later structural edit replaced it before
- * adoption. A declared discontinuity completes it MISO_ENGINE_V1_OUTCOME_EXACT, with
+ * not ready by its deadline. The transition ducks every strip whose arrival the growth moves, not
+ * only the edited ones, and they fade back in: a bus add with a latent effect on the new bus
+ * ducks every track routed into it. MISO_ENGINE_V1_OUTCOME_SUPERSEDED is set when a later
+ * structural edit replaced it before adoption. A declared discontinuity completes it MISO_ENGINE_V1_OUTCOME_EXACT, with
  * MISO_ENGINE_V1_OUTCOME_SUPERSEDED only for the revisions it had folded in. The deadline counts
  * render samples, so a paused host stays pending and never falls back. The fallback runs only in
  * a session call: miso_engine_v1_service, or any session call, does at most one bounded step,
@@ -374,8 +375,11 @@ extern "C" {
  * for render, never commits or acknowledges anything, and never takes or drops a pending edit; its
  * cost does not grow with the time since the last call. It returns MISO_ENGINE_V1_OK; a null
  * session as MISO_ENGINE_V1_INVALID_ARGUMENT and another handle as MISO_ENGINE_V1_WRONG_HANDLE;
- * and, should the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the
- * session diagnostic "source.epoch". The host's duty: a pending edit progresses only while the
+ * should the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the
+ * session diagnostic "source.epoch"; and, should a warm successor's deadline transition fail
+ * (see "Latency growth during playback"), MISO_ENGINE_V1_COMPILE_REJECTED with the compile
+ * diagnostic for an allocation refusal or MISO_ENGINE_V1_INTERNAL with "control.internal". The
+ * host's duty: a pending edit progresses only while the
  * host makes session calls, the same duty as draining events. A host that renders but never calls
  * keeps retired plans allocated, and its next structural edit waits for that reclaim; a warm
  * successor that misses its deadline falls back only at the host's next session call. The plan

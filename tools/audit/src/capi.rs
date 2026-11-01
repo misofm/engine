@@ -27,8 +27,8 @@
 //! The latency-growth leg ([`growth_leg`], #1360 D6) runs after it on a session of its own: during
 //! playback, with the source queued ahead, it adds a muted track with a true-peak limiter, renders
 //! on one thread and services from a second until the watermark covers the revision. Its render
-//! calls are audited on the render thread and their counters are added to the record's; it
-//! asserts `EXACT` and an output equal to the predecessor rendered on with no edit.
+//! calls are audited on the render thread and their counters are added to the record's. Its one
+//! precondition is that the watermark covers the growth with `EXACT` inside the audited blocks.
 
 #![allow(unsafe_code)]
 
@@ -691,8 +691,7 @@ const GROWTH_FEED_AHEAD: u64 = 4_096;
 /// the adoption moves `P` further ahead.
 const GROWTH_READY_AHEAD: u64 = 2 * GROWTH_LEAD + 2 * QUANTUM_FRAMES as u64;
 
-/// The leg's source frame `frame`: never zero, different from frame to frame, so a gap or a
-/// shifted stream changes the output.
+/// The leg's source frame `frame`: never zero, different from frame to frame.
 fn growth_pcm(frame: u64) -> [f32; 2] {
     let step = (frame.wrapping_mul(7_919) % 1_999) as f32;
     [(step - 999.5) / 2_000.0, (999.5 - step) / 4_000.0]
@@ -845,8 +844,8 @@ struct GrowthRender {
 }
 
 impl GrowthRender {
-    /// Renders block `block`, audited on this thread when `audited`; its output bits.
-    fn render(&self, block: u64, audited: bool) -> Vec<u32> {
+    /// Renders block `block`, audited on this thread.
+    fn render(&self, block: u64) {
         let mut pcm = [0.0_f32; QUANTUM_FRAMES * 2];
         let output = PlanarOutput {
             struct_size: PLANAR_OUTPUT_SIZE,
@@ -859,14 +858,10 @@ impl GrowthRender {
         };
         let sample = block * QUANTUM_FRAMES as u64;
         // SAFETY: The plan is live and rendered by this thread alone; `output` is owned storage.
-        let call = || unsafe { miso_engine_v1_render_f32_planar(self.plan, sample, &output) };
-        let result = if audited {
-            audit::in_render_scope(call)
-        } else {
-            call()
-        };
+        let result = audit::in_render_scope(|| unsafe {
+            miso_engine_v1_render_f32_planar(self.plan, sample, &output)
+        });
         assert_eq!(result, RESULT_OK, "the leg's render at {sample}");
-        pcm.iter().map(|value| value.to_bits()).collect()
     }
 
     fn watermark(&self) -> Watermark {
@@ -893,9 +888,10 @@ unsafe impl Send for GrowthRender {}
 /// render thread renders [`GROWTH_BLOCKS`] blocks, each audited and each once the source is queued
 /// [`GROWTH_READY_AHEAD`] past its start, while this control thread keeps the source queued
 /// [`GROWTH_FEED_AHEAD`] ahead, commits the growth after [`GROWTH_BEFORE`] blocks and calls
-/// `miso_engine_v1_service` between feeds. It asserts that the watermark covers the growth with
-/// `EXACT` and that the output equals the same session rendered on with no edit, bit for bit.
-/// Returns the render thread's audit counters.
+/// `miso_engine_v1_service` between feeds. Its claim is the render thread's audit counters, which
+/// it returns: zero allocations, syscalls and every other forbidden operation across the audited
+/// blocks, the warm adoption's block among them. (The exact output is gate 1 of
+/// `crates/capi/tests/latency_growth.rs`.)
 fn growth_leg() -> AuditSnapshot {
     let limits = CompileLimits {
         source_ring_frames: 0,
@@ -913,20 +909,19 @@ fn growth_leg() -> AuditSnapshot {
         &AtomicU64::new(0),
         &AtomicBool::new(false),
     );
-    let (blocks, snapshot, render) = std::thread::scope(|scope| {
+    let (snapshot, render) = std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
             audit::warm_up();
             audit::reset();
-            let mut blocks = Vec::new();
             for block in 0..GROWTH_BLOCKS {
                 while fed.load(Ordering::Acquire) < block * quantum + GROWTH_READY_AHEAD {
                     assert!(!done.load(Ordering::Acquire), "the leg's feed stopped");
                     std::hint::spin_loop();
                 }
-                blocks.push(render.render(block, true));
+                render.render(block);
                 rendered.store(block + 1, Ordering::Release);
             }
-            (blocks, audit::snapshot(), render)
+            (audit::snapshot(), render)
         });
         let mut applied = false;
         loop {
@@ -948,34 +943,16 @@ fn growth_leg() -> AuditSnapshot {
         done.store(true, Ordering::Release);
         worker.join().expect("the leg's render thread")
     });
+    // The one precondition: render adopted the growth, exact, inside the audited blocks, so the
+    // counters cover the adoption block. That the adoption is warm and its output exact is
+    // `latency_growth.rs` gate 1's claim and `a_publicly_compiled_session_publishes_a_growth_primed`'s.
     let watermark = render.watermark();
     assert_eq!(
-        (
-            watermark.revision,
-            watermark.outcome_flags,
-            watermark.exact_count
-        ),
-        (INITIAL_REVISION + 1, OUTCOME_EXACT, 1),
-        "the growth is adopted exact"
+        (watermark.revision, watermark.outcome_flags),
+        (INITIAL_REVISION + 1, OUTCOME_EXACT),
+        "precondition: the audited blocks adopted the growth"
     );
     drop(grown);
-
-    let continued = AuditHandles::compile(limits).expect("compile the leg's predecessor");
-    let mut control = GrowthControl {
-        session: continued.session,
-        fed: 0,
-    };
-    let render = GrowthRender {
-        plan: continued.plan,
-    };
-    for (block, bits) in blocks.iter().enumerate() {
-        let block = block as u64;
-        control.feed_to(block * quantum + GROWTH_FEED_AHEAD);
-        assert!(
-            render.render(block, false) == *bits,
-            "the leg's block {block} differs from the predecessor rendered on"
-        );
-    }
     snapshot
 }
 

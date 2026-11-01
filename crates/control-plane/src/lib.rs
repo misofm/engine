@@ -74,8 +74,8 @@ pub use compile::{
 pub use control::{
     CarriedTaps, CommandError, EventError, EventLane, ObservationChange, ObservationForward,
     ObservationKeyError, ObservationKeyRef, ObservationLimit, ObservationRefusal,
-    REPREPARE_REQUIRED, ResolvedObservationTap, SessionSeekFailure, SessionState, SourceFailure,
-    SourceRefusalKind, TransitionStep, resolve_observation_tap,
+    REPREPARE_REQUIRED, ResolvedObservationTap, ServiceFailure, SessionSeekFailure, SessionState,
+    SourceFailure, SourceRefusalKind, TransitionStep, resolve_observation_tap,
 };
 pub use document::{
     DOCUMENT_DIGEST, DOCUMENT_LENGTH, DOCUMENT_TOO_LARGE, DOCUMENT_UTF8, diff as diff_document,

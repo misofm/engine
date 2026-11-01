@@ -320,10 +320,12 @@ during playback"):
   `seek_at` that arrives during that call applies at that block on the new clock.
 - Outcomes: `EXACT` when render adopted it; `TRANSITION_FALLBACK` when the successor was not
   available at submit or not ready by its deadline (`prime_deadline_samples`, 7,040 render
-  samples past its `not_before` at 48 kHz and quantum 128; the edited strips duck and fade back
-  in); `SUPERSEDED` set when a later structural edit replaced it first. A declared stop (#1323)
-  completes it `EXACT`, with `SUPERSEDED` only for revisions it had folded in. The deadline counts
-  render samples, so a paused host stays pending and never falls back.
+  samples past its `not_before` at 48 kHz and quantum 128). The transition ducks every strip whose
+  arrival the growth moves (`grown_strips`), not only the edited ones, and they fade back in: a
+  bus add with a latent effect on the new bus ducks every track routed into it. `SUPERSEDED` is
+  set when a later structural edit replaced it first. A declared stop (#1323) completes it
+  `EXACT`, with `SUPERSEDED` only for revisions it had folded in. The deadline counts render
+  samples, so a paused host stays pending and never falls back.
 - The fallback runs only in a session call: `SessionState::service`, which every session call runs
   first, checks the deadline after the epoch synchronization and before the counter refresh. One
   step does at most one withdrawal and one re-preparation, never loops on render progress and
