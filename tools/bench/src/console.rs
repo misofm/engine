@@ -344,7 +344,8 @@ pub(crate) fn main() {
     let clock = CoreClock::from_runner(metadata);
     // Every `native_session_rows()` row: the standing rows, then the gain/pan row (issue #956),
     // the metered row (issue #881), the bus-and-send row (issue #1227), the console-strip rows
-    // (issue #1085) and the packing rows (issue #1783). One list, so the floor subtraction below
+    // (issue #1085), the packing rows (issue #1783), the bypass-skip row (issue #2129) and the
+    // mixed-class row (issue #2137). One list, so the floor subtraction below
     // finds a control wherever it sits.
     let rows: Vec<Workload> = native_session_rows().collect();
     let sessions: Vec<SessionMeasurement> = rows
@@ -4144,6 +4145,7 @@ mod tests {
             .into_iter()
             .chain(console_workload::PACKING_WORKLOADS)
             .chain(console_workload::BYPASS_WORKLOADS)
+            .chain(console_workload::MIXED_CLASS_WORKLOADS)
         {
             let measured = SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS);
             assert_eq!(measured.render_errors, 0, "{}", workload.kind());

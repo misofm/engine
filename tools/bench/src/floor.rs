@@ -215,7 +215,12 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         | Workload::OneTwentyEightTrackStretch
         | Workload::SixtyFourTrackConsoleMono
         | Workload::SixtyFourTrackConsoleMonoDual
-        | Workload::SixtyFourTrackConsoleHalfMono => FloorRow {
+        | Workload::SixtyFourTrackConsoleHalfMono
+        // The mixed-class row (issue #2137) is the half-mono row's strip and fixture with the
+        // stereo mapping on a contiguous tail: the same inventory. Its two remainders fill one
+        // eight-lane bank once #2137 merges them, so its 64 tracks are eight full banks and the
+        // full-bank width factor holds.
+        | Workload::SixtyFourTrackConsoleMixed => FloorRow {
             lane_ops: BUILTINS_LANE_OPS + EQ_LANE_OPS + COMPRESSOR_LANE_OPS + LIMITER_LANE_OPS,
             width_factor: full,
             // The limiter is the one effect the intended strip adds to the chain-shape row, so
@@ -601,7 +606,7 @@ input as $rust |
         );
     }
 
-    /// The three mono rows are the standing console row's inventory, restated for their fixture.
+    /// The four mono rows are the standing console row's inventory, restated for their fixture.
     ///
     /// The mono fixture differs from the standing one in per-channel *values* only, and a floor is
     /// an inventory of operations. Pinning the equality here is what makes a future change that
@@ -613,6 +618,7 @@ input as $rust |
             Workload::SixtyFourTrackConsoleMono,
             Workload::SixtyFourTrackConsoleMonoDual,
             Workload::SixtyFourTrackConsoleHalfMono,
+            Workload::SixtyFourTrackConsoleMixed,
         ] {
             let row = floor_row(workload).expect("a derived row");
             assert_eq!(row.basis, console.basis, "{}", workload.kind());
