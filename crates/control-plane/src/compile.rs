@@ -2996,7 +2996,6 @@ where
         observation_slots_high_water: 0,
         capture_owners_high_water: 0,
         next_arm_tag: 1,
-        send_moves: None,
         spectrum,
         output_meter,
         loudness,

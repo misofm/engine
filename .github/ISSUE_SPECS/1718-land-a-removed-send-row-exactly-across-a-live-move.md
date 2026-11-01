@@ -92,3 +92,38 @@ keeps its own length, whatever else the rebuild changes.
   earlier column jump follows the column's free time and never moves earlier (R19-3 (d), #1654 T3),
   while in a fader cell a later step's jump shortens the hold. Unifying the two rules is phase 2 (root,
   batch 19); it is not part of this issue's gates.
+
+## Rescope (root Q2, 2026-11-01): #1718 closes with the flag gone
+
+Send rows are off at main (B19-R10), so no production carry cuts a live send move: the
+B19-R10 check found every gate change at a carry bit-equal to the same change on one plan, and
+`ColumnRamps::retarget_column` keeps a column whose composed target bits do not change. The flag
+only over-reports, which is a product defect today. #1718 therefore deletes the flag now and
+closes. The "owed landing" has no red-before test without send-row value cursors, so it becomes
+a gate of #1654's reopening: **the #1654 reopening brief inherits G1, G1c and G1d** and must
+pass them, with send rows on, before send rows ship.
+
+The owner ruling of 2026-10-31 (Q3, recorded in #1713) accepts the one bit move this PR makes,
+at a seven-to-six carry; this issue's half (the seven-to-seven window) moves no bit.
+
+## Evidence (attempt 1, with #1713)
+
+- Deleted (G2): `PlanStateInventory::carries_a_following_route_into_a_following_route`,
+  `carries_a_following_route_that_loses_a_curve`, `following_route_retarget_ramp`, their join
+  lines, the control plane's `SendMoveWindow`, `fold_send_move`, `send_landing_ramp` and the
+  `send_fallback` term, and the doc text on the C header, the ABI constant,
+  `docs/C_ABI_V1_QUALIFICATION.md`, the browser `.d.ts` (and its SDK copy) and the graph's
+  `place_carried` note.
+- G1b, both hosts: `a_rebuild_carrying_a_following_send_across_a_live_send_move_is_exact_alike_on_both_hosts`
+  (host-web, `gain_db` and `matrix_rr` moves, and MAJOR-2) now asserts `OUTCOME_EXACT`, fallback
+  count 0, and the never-rebuilt twin's bits. It is red on `7d89eecc5` (it reads
+  `TRANSITION_FALLBACK`). Attempt 2 folded the C ABI copy of this claim
+  (`an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_exact_on_the_c_abi`) into
+  it and deleted the copy.
+- Deleted gates: `an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_flagged_on_the_c_abi`,
+  `a_send_move_inside_a_rebuild_is_flagged_on_the_c_abi`,
+  `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi`,
+  `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts` and the
+  host-core `the_join_flags_a_following_route_that_loses_a_curve`; with the window gone they
+  defend no behaviour.
+- G3: render is unchanged by this half; `realtime_policy` passes.

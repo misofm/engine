@@ -1366,9 +1366,6 @@ pub struct SessionState<A: ControlAdapter> {
     /// observation record, so tags are monotone per session and `0` is never one. A record is
     /// tagged when it is queued, after its batch was admitted, so a refused submission issues none.
     pub(crate) next_arm_tag: u64,
-    /// The live send moves that may still ramp, as one conservative window (root ruling B19-R7,
-    /// the B17-R14 pattern; #1718 deletes it): `None` when none may.
-    pub(crate) send_moves: Option<SendMoveWindow>,
     /// The session's spectrum monitor state (#1593 D1): host-local, never saved, never in a
     /// snapshot, and no change of it advances the revision. Every plan is prepared with its
     /// configuration.
@@ -1970,53 +1967,6 @@ impl host_core::GainReductionTaps for CapiGainReductionTaps<'_> {
             }
         }
     }
-}
-
-/// Every live send move (a following route's record with a ramp, written by a live commit or by a
-/// rebuild's send join) and every landing at once a rebuild's carry starts, folded into one
-/// bound (B19-R7): the newest revision among them and the longest ramp any of them takes. A move
-/// is in effect from at most the watermark's `first_sample` once the watermark covers its revision
-/// (the watermark is monotone), so every move has ended once the watermark covers `revision` and
-/// the render clock is at or past `first_sample + ramp`. The bound only errs toward "may still
-/// ramp", and it is one word pair: nothing grows with the moves.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SendMoveWindow {
-    revision: u64,
-    ramp: u32,
-}
-
-impl SendMoveWindow {
-    /// Whether some move of the window may still ramp, given the watermark (`None` when a read
-    /// gave up: then it may) and the render clock read after it.
-    fn may_ramp(self, watermark: Option<PlanWatermark>, render_clock: u64) -> bool {
-        watermark.is_none_or(|watermark| {
-            watermark.revision < self.revision
-                || render_clock < watermark.first_sample.saturating_add(u64::from(self.ramp))
-        })
-    }
-}
-
-/// Fold a send move of `revision` over `ramp` into the window (B19-R7): the newest revision and
-/// the longest ramp. A zero ramp is a step, which nothing can cut, and folds nothing.
-fn fold_send_move(window: &mut Option<SendMoveWindow>, revision: u64, ramp: u32) {
-    if ramp == 0 {
-        return;
-    }
-    *window = Some(match *window {
-        Some(window) => SendMoveWindow {
-            revision: window.revision.max(revision),
-            ramp: window.ramp.max(ramp),
-        },
-        None => SendMoveWindow { revision, ramp },
-    });
-}
-
-/// The length a landing at once takes at its successor's first block (B19-R7): a carried
-/// following route's column that lost a follow curve (its own source mute or a reaching VCA mute)
-/// or that composes otherwise lands over the `Mute` or `VcaMute` row's length, both the session's
-/// mute length.
-fn send_landing_ramp(model: &session::SessionModel) -> u32 {
-    controls::LiveRamps::for_session(model).for_row(controls::LiveRampRow::Mute)
 }
 
 /// The stable key of one observation tap, borrowed from the bytes that name it (#1677): the strip's
@@ -5969,14 +5919,6 @@ where
             // service reads the running plan's captures.
             spectrum: candidate_captures,
         } = prepared_runtime;
-        // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
-        // candidate's provider epoch.
-        let follow_into_six_word = inventory.carries_a_following_route_into_a_six_word_route();
-        // B19-R7/B19-R8 (#1718 deletes them): the same, for any carried following route that
-        // stays following, and for one that loses a curve (its landing joins the window).
-        let follow_into_following = inventory.carries_a_following_route_into_a_following_route();
-        let follow_loses_a_curve = inventory.carries_a_following_route_that_loses_a_curve();
-        let follow_retarget_ramp = inventory.following_route_retarget_ramp();
         let mut candidate_provider = ProviderEpoch::candidate(
             sources,
             inventory,
@@ -6099,78 +6041,14 @@ where
         };
         #[cfg(not(feature = "test-support"))]
         let adoption = PlanAdoption::Next;
-        // #1652 U2a fold 2 (MAJOR-A; #1713 deletes this): a successor whose send join carries a
-        // following route into a six-word route (a route whose source strip automates a mute
-        // lane in the committed plan and automates none in the successor: the rebuild removes
-        // that strip's last mute entry, or retargets it) may re-time a carried column's move, which
-        // render cannot report: one ramp of the six-word route takes the session mute length for
-        // a join record, and folds two columns' moves into one. Such a rebuild completes as the
-        // transition fallback, whether or not a column moves at the swap: conservative, it
-        // over-reports.
-        //
-        // B19-R8 (#1718 deletes this; it widens B19-R7's removed-curve term): a successor whose
-        // send join carries a following route into a following route may land a carried column
-        // at once at the swap (a removed follow curve, or a column that composes otherwise),
-        // cutting a live send move still ramping there, which render cannot
-        // report. Control cannot tell which column lands at once or whether its move is in
-        // flight, so such a rebuild completes as the transition fallback whenever any live send
-        // move may still ramp: the transaction's own join records with a ramp (MAJOR-2: they are
-        // not yet in the window, which folds them only after the commit), or a move of the
-        // window (read here, before the reservation; a watermark read that gives up counts as
-        // "may"). A declared discontinuity carries nothing. Conservative, it over-reports.
-        // #1594 (attempt 2): a monitor rebuild that supersedes a withdrawn candidate A carries A's
-        // edits against the plan A succeeds, so its join can carry a following route as a
-        // transaction that supersedes A would: it takes the same outcome terms. A monitor rebuild
-        // on the newest plan has an equal model and carries no route change. It inherits only when
-        // it covers a revision the plan it succeeds has not published: a withdrawn monitor
-        // candidate at the same revision carried no edit, and a claim at a revision the watermark
-        // already reached would pass its outcome to the next advance.
-        let carries_withdrawn_edits = (monitor || fallback)
-            && superseding
-            && self
-                .kept_holder()
-                .is_some_and(|holder| revision > holder.revision_gate.last_published());
-        let transaction = matches!(kind, Rebuild::Transaction(_)) || carries_withdrawn_edits;
-        let send_fallback = transaction
-            && follow_into_following
-            && (follow_retarget_ramp > 0
-                || self.send_moves.is_some_and(|window| {
-                    window.may_ramp(
-                        self.shared.watermark.read().ok(),
-                        self.publisher.render_clock(),
-                    )
-                }));
-        // The rebuild's own send moves join the window with the commit: its join's records, and
-        // a landing at once at the swap (a removed curve's, or one a flagged rebuild may make,
-        // B19-R9), so a second rebuild inside that landing is flagged too.
-        let rebuild_send_ramp = match &kind {
-            Rebuild::Transaction(prepared) if follow_loses_a_curve || send_fallback => {
-                let session = prepared.get().prospective_session();
-                let next = session
-                    .compiled()
-                    .ok_or(CommandError::Internal)?
-                    .normalized_model();
-                follow_retarget_ramp.max(send_landing_ramp(next))
-            }
-            Rebuild::Transaction(_) => follow_retarget_ramp,
-            Rebuild::Monitor { model, .. } | Rebuild::Transition { model, .. }
-                if carries_withdrawn_edits =>
-            {
-                if follow_loses_a_curve || send_fallback {
-                    follow_retarget_ramp.max(send_landing_ramp(model.normalized_model()))
-                } else {
-                    follow_retarget_ramp
-                }
-            }
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => 0,
+        // #1397 D5: the transition is the one writer of `TRANSITION_FALLBACK`. A carried live
+        // send keeps each column's move in flight across the swap (#1713, #1718), so a rebuild
+        // that carries one is exact.
+        let outcome = if transition_fallback {
+            engine::realtime::CandidateOutcome::TransitionFallback
+        } else {
+            engine::realtime::CandidateOutcome::Exact
         };
-        // #1397 D5: the transition is the one writer of `TRANSITION_FALLBACK` beside these.
-        let outcome =
-            if transition_fallback || (transaction && (follow_into_six_word || send_fallback)) {
-                engine::realtime::CandidateOutcome::TransitionFallback
-            } else {
-                engine::realtime::CandidateOutcome::Exact
-            };
         let reservation = match self
             .publisher
             .reserve_replacement(candidate_plan.take(), adoption)
@@ -6465,8 +6343,6 @@ where
         // #2044: the candidate is taken first, so no write below precedes the step after which a
         // panic no longer republishes it.
         let withdrawn = withdrawn.take();
-        // B19-R7: the rebuild's own send moves ramp from its successor's first block.
-        fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         let monitor_ramp = writes_monitor.then_some(monitor_change.ramp);
         let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
@@ -7319,19 +7195,6 @@ where
         } else {
             protocol::EditPath::Live
         };
-        // B19-R7: the longest ramp of the following routes' records this commit writes, folded
-        // into the send-move window once committed.
-        let send_ramp = delta
-            .routes
-            .iter()
-            .filter_map(|route| {
-                route
-                    .record
-                    .following()
-                    .map(host_core::FollowRouteControlRecord::length)
-            })
-            .max()
-            .unwrap_or(0);
         drop(delta);
         let published = core::mem::take(&mut owners.begun);
 
@@ -7347,7 +7210,6 @@ where
         );
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         self.monitor = monitor_change.overlay;
-        fold_send_move(&mut self.send_moves, revision, send_ramp);
         for index in published {
             owners.effects[index]
                 .commit_owner()

@@ -1818,47 +1818,6 @@ fn follow_document() -> String {
     canonical_session_json(&model).expect("canonical follow document")
 }
 
-/// #1594 attempt 2 (the verifier's first MAJOR). Turns red if a monitor rebuild that supersedes a
-/// pending transaction drops the transaction's fallback: removing `eq0`'s last mute entry carries
-/// the following send `eq0-b` into a six-word route, so that transaction completes as the
-/// transition fallback (shown on a twin); superseded by a configure before render adopts it, the
-/// successor carries the same edit against the same base and completes the revision as the
-/// fallback too.
-#[test]
-fn a_configure_that_supersedes_a_fallback_edit_reports_the_fallback() {
-    let document = follow_document();
-    let remove = [SessionEdit::RemoveAutomation {
-        automation_id: id("eq0-mute"),
-    }];
-    let mut twin = Rig::of(&document, None);
-    let mut rig = Rig::of(&document, None);
-    for _ in 0..3 {
-        twin.block();
-        rig.block();
-    }
-    twin.rebuild(&remove);
-    twin.until_promoted();
-    twin.block();
-    assert_eq!(
-        twin.watermark().transition_fallback,
-        1,
-        "the edit alone is the fallback"
-    );
-
-    rig.rebuild(&remove);
-    let reply = rig.configure(&single_request()).expect("supersede");
-    assert!(reply.rebuild);
-    rig.until_promoted();
-    rig.block();
-    let after = rig.watermark();
-    assert_eq!(after.revision, twin.watermark().revision);
-    assert_eq!(
-        after.transition_fallback, 1,
-        "the superseding configure keeps the fallback"
-    );
-    assert_eq!(after.outcome_flags, twin.watermark().outcome_flags);
-}
-
 /// #1594 R6, #1595 R7. Turns red if a plan with spectrum captures does not charge the session's
 /// spectrum service, analysis and one-shot slot: the running plan's control-retained bytes grow
 /// by `SpectrumService::RETAINED_BYTES`, one `SpectrumAnalysisResult` and one `SpectrumSnapshot`
@@ -1949,53 +1908,6 @@ fn a_monitor_rebuild_keeps_a_live_send_move_on_a_following_route() {
         "the plan was adopted"
     );
     assert!(moved, "the send move is audible");
-}
-
-/// #1594 attempt-2 fold. Turns red if a configure that supersedes another monitor candidate
-/// inherits a transaction's outcome terms: during a ramping send move on a following route (live,
-/// at revision r, which the watermark has reached), a configure is superseded by a second one
-/// before render adopts it. The second covers no new revision, so its claim must be `EXACT`; the
-/// next live edit's revision r + 1 then reports no transition fallback.
-#[test]
-fn a_configure_that_supersedes_a_monitor_candidate_reports_no_fallback() {
-    let mut rig = Rig::of(&follow_document(), None);
-    for _ in 0..3 {
-        rig.block();
-    }
-    let send_move = [SessionEdit::SetControl {
-        expected_effect: None,
-        address: session::ControlAddress {
-            owner: session::Owner::Route(id("eq0-b")),
-            section: session::Section::Own,
-            control: 1,
-            lane: session::ParameterChannel::Both,
-        },
-        value: -6.0,
-        ramp_samples: Some(4_000),
-    }];
-    assert_eq!(rig.apply(&send_move), Ok(EditPath::Live));
-    rig.block();
-    let revision = rig.session.test_controller().session().revision().0;
-    assert_eq!(rig.watermark().revision, revision);
-    assert!(rig.configure(&single_request()).expect("first").rebuild);
-    assert!(
-        rig.configure(&collection_as_request(None))
-            .expect("second")
-            .rebuild
-    );
-    assert_eq!(
-        rig.session.test_pending_providers().len(),
-        1,
-        "the first was superseded"
-    );
-    rig.until_promoted();
-    rig.live_fader(-3.0);
-    rig.block();
-    rig.block();
-    let after = rig.watermark();
-    assert_eq!(after.revision, revision + 1);
-    assert_eq!(after.transition_fallback, 0, "no false fallback");
-    assert_eq!(after.outcome_flags, engine::realtime::OUTCOME_EXACT);
 }
 
 const ARM: CaptureRequest = CaptureRequest::Arm;
