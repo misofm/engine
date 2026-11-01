@@ -23,7 +23,7 @@ use effect_compiler::{
     EffectStateProjection, LiveEffectAddress, LiveEffectRack,
     attach_projected_effect_live_controls, attach_projected_effect_observation,
     effect_control_resources, launch_native_effect_registry, plan_projected_effect_live_controls,
-    prepare_native_session_effects, project_native_session_effects, resolve_initial_values,
+    project_native_session_effects, resolve_initial_values,
 };
 use effect_contract::{
     AutomationRate, BypassSwitch, EffectControlRecord, NativeEffectFactory,
@@ -40,7 +40,7 @@ use graph::{
     TrackStage,
 };
 pub use graph::{GraphJumpLengthProducer, GraphJumpLengths, jump_length_retained_bytes};
-use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler, GraphProjectionRequest};
+use graph_compiler::{Backend, GraphCompiler, GraphProjectionRequest};
 use lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
 use session::{
     CompileCaps, CompiledSession, EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity,
@@ -2143,12 +2143,6 @@ fn graph_compile_caps(caps: &HostPrepareCaps) -> GraphCompileCaps {
     }
 }
 
-fn graph_compile_diagnostics(
-    failure: &graph_compiler::GraphBuiltinsCompileFailure,
-) -> PrepareDiagnostics {
-    graph_diagnostics(&failure.diagnostics)
-}
-
 /// A graph compile's or projection's diagnostics as a preparation's.
 fn graph_diagnostics(diagnostics: &graph::GraphDiagnosticSet) -> PrepareDiagnostics {
     PrepareDiagnostics::new(
@@ -2162,20 +2156,22 @@ fn graph_diagnostics(diagnostics: &graph::GraphDiagnosticSet) -> PrepareDiagnost
     )
 }
 
-/// A compile of `compiled` with `floors` for its arrivals and schedule only (#1354a ruling 1):
-/// no live control, no meter, fixed gains. A node's latency, the graph's edges and its schedule
-/// do not depend on them.
-fn compile_for_arrivals(
+/// The graph of `compiled` projected with `floors`, for its arrivals, edges, schedule and delays
+/// only (#1354a ruling 1): no live control, no meter, fixed gains. A node's latency, the graph's
+/// edges and its schedule do not depend on them. Issue #2232: a projection, not a compile, so no
+/// effect processor is prepared; the plan a compile would lower copies these rows from the same
+/// front unchanged (`GraphCompiler::compile_projected`).
+fn project_for_arrivals(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     overlay: &controls::MonitorOverlay,
     floors: BTreeMap<GraphNodeId, effect_contract::LatencySamples>,
-) -> Result<graph_compiler::PreparedGraphBuiltinsArtifact, PrepareDiagnostics> {
-    // Issue #2194: the effect state inside the caps before any instance is allocated.
+) -> Result<graph_compiler::GraphProjection, PrepareDiagnostics> {
+    // Issue #2194: the effect state inside the caps, as a preparation checks it.
     check_effect_projection(project_effects(compiled)?, caps)?;
     let registry =
         launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
-    let effects = prepare_native_session_effects(
+    let effects = project_native_session_effects(
         compiled,
         registry,
         EffectCompileCaps {
@@ -2207,41 +2203,40 @@ fn compile_for_arrivals(
             ),
         )
     })?;
-    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+    GraphCompiler::project(GraphProjectionRequest {
         dispatch: Backend::current(),
         plan_id: 1,
         effects,
-        builtins,
+        builtins: &builtins,
         input_floors: floors,
         caps: graph_compile_caps(caps),
         gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
-    .map_err(|failure| graph_compile_diagnostics(&failure))
+    .map_err(|failure| graph_diagnostics(&failure.diagnostics))
 }
 
-/// The arrivals a compiled artifact reports, as `(node, samples)` rows sorted by node ID.
-fn artifact_arrivals(
-    artifact: &graph_compiler::PreparedGraphBuiltinsArtifact,
+/// Arrival rows (a compiled artifact's or a projection's input arrivals) as `(node, samples)`
+/// rows sorted by node ID.
+fn arrival_rows(
+    arrivals: &[(GraphNodeId, effect_contract::LatencySamples)],
 ) -> Vec<(GraphNodeId, u64)> {
-    artifact
-        .report()
-        .input_arrivals
+    arrivals
         .iter()
         .map(|(node, arrival)| (node.clone(), arrival.0))
         .collect()
 }
 
-/// The first carried node of `graph`, in its schedule order, whose arrival is not its
-/// predecessor arrival plus `lead` (C1, #1354 D2 step 6), with the arrival it has.
+/// The first carried node of `schedule` (a graph's schedule), in its order, whose arrival is not
+/// its predecessor arrival plus `lead` (C1, #1354 D2 step 6), with the arrival it has.
 fn first_late_node<'g>(
-    graph: &'g graph::PreparedGraphPlan,
+    schedule: &'g [GraphNodeId],
     arrivals: &[(GraphNodeId, u64)],
     a: &[(GraphNodeId, u64)],
     predecessor: &BTreeSet<GraphNodeId>,
     restart: &WarmRestart<'_>,
     lead: u64,
 ) -> Option<&'g GraphNodeId> {
-    graph.sequential_schedule.iter().find(|node| {
+    schedule.iter().find(|node| {
         predecessor.contains(*node)
             && !restart.restarts(node)
             && arrival_in(arrivals, node) != arrival_in(a, node).saturating_add(lead)
@@ -2475,13 +2470,12 @@ pub fn warm_lead(
             .checked_mul(quantum)
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
         let floors = warm_floors(a, &predecessor, &restart, lead)?;
-        let artifact = compile_for_arrivals(compiled, caps, base.monitor.next, floors)?;
-        let arrivals = artifact_arrivals(&artifact);
-        let graph = artifact.graph();
+        let graph = project_for_arrivals(compiled, caps, base.monitor.next, floors)?;
+        let arrivals = arrival_rows(graph.input_arrivals());
         // Step 2 on the lead's compile: the strips its strip delay join restarts (a track's claim
         // line that grows on a source that does not carry, #1354b), and the sidechain closure
         // with the submix `input`-tap rule (M1) over its lines, join `R` before C1 is checked.
-        let lines = compiled_sidechain_lines(graph);
+        let lines = compiled_sidechain_lines(graph.inserted_delays(), graph.edges());
         let after = |id: &str| {
             let node = claim_node(id);
             graph
@@ -2503,12 +2497,15 @@ pub fn warm_lead(
             continue;
         }
         // Step 6, C1.
-        let Some(late) = first_late_node(graph, &arrivals, a, &predecessor, &restart, lead) else {
-            found = Some((lead, artifact, lines));
+        let Some(late) =
+            first_late_node(graph.schedule(), &arrivals, a, &predecessor, &restart, lead)
+        else {
+            found = Some((lead, graph, lines));
             break;
         };
         let reached = walk_back(
-            graph,
+            graph.nodes(),
+            graph.edges(),
             &arrivals,
             late,
             arrival_in(a, late) + lead,
@@ -2529,7 +2526,8 @@ pub fn warm_lead(
         }
         whole.extend(added);
         // Misaligned: every predecessor strip that reaches the output restarts whole.
-        let reaching = strips_reaching_output(graph, &restart);
+        let reaching =
+            strips_reaching_output(graph.nodes(), graph.edges(), graph.schedule(), &restart);
         let reaching: Vec<&str> = reaching
             .into_iter()
             .filter_map(|strip| predecessor_strips.get(strip).copied())
@@ -2538,7 +2536,7 @@ pub fn warm_lead(
             return Ok(WarmDecision::Unavailable(WarmUnavailable::Misaligned));
         }
     }
-    let Some((lead, artifact, lines)) = found else {
+    let Some((lead, graph, lines)) = found else {
         debug_assert!(
             false,
             "#1354 D2: the walk ends within twice the strip count"
@@ -2575,7 +2573,7 @@ pub fn warm_lead(
         model,
         &carried,
         &base.inventory.strip_delays,
-        artifact.graph().track_delays(),
+        graph.track_delays(),
     )
     .and_then(|bytes| {
         sidechain_fill_words(&base, &lines, &fills, lead)?
@@ -2659,22 +2657,20 @@ fn delay_restarted(
     restarted
 }
 
-/// The sidechain compensation lines of a compiled, unbound graph, from its inserted delays (the
-/// lines its program lowers, one per delayed edge), each with its edge's endpoints. `line` is the
-/// row's index in the result: a bound plan's lines are read after bind
+/// The sidechain compensation lines of a compiled or projected, unbound graph, from its inserted
+/// delays (the lines its program lowers, one per delayed edge) and its edges, each with its edge's
+/// endpoints. `line` is the row's index in the result: a bound plan's lines are read after bind
 /// ([`graph::take_compensation_lines`]), so these rows serve [`warm_lead`]'s closure and its L3
 /// count only.
-fn compiled_sidechain_lines(graph: &graph::PreparedGraphPlan) -> Vec<graph::GraphDelayLine> {
-    graph
-        .inserted_delays
+fn compiled_sidechain_lines(
+    inserted_delays: &[graph::InsertedDelay],
+    edges: &[graph::GraphEdge],
+) -> Vec<graph::GraphDelayLine> {
+    inserted_delays
         .iter()
         .filter(|delay| matches!(delay.edge_id, graph::GraphEdgeId::EffectSidechain { .. }))
         .filter_map(|delay| {
-            let edge = graph
-                .spec
-                .edges
-                .iter()
-                .find(|edge| edge.id == delay.edge_id)?;
+            let edge = edges.iter().find(|edge| edge.id == delay.edge_id)?;
             Some((edge, delay.samples.0))
         })
         .zip(0_u32..)
@@ -2730,16 +2726,15 @@ fn sidechain_fill_words(
 /// that hold its arrival. Returns the strips of the carried nodes it reaches (a route node counts
 /// as its source strip).
 fn walk_back<'g>(
-    graph: &'g graph::PreparedGraphPlan,
+    nodes: &'g [graph::GraphNode],
+    edges: &'g [graph::GraphEdge],
     arrivals: &[(GraphNodeId, u64)],
     late: &'g GraphNodeId,
     target: u64,
     predecessor: &BTreeSet<GraphNodeId>,
     restart: &WarmRestart<'_>,
 ) -> BTreeSet<String> {
-    let latency: BTreeMap<&GraphNodeId, u64> = graph
-        .spec
-        .nodes
+    let latency: BTreeMap<&GraphNodeId, u64> = nodes
         .iter()
         .map(|node| (&node.id, node.latency.0))
         .collect();
@@ -2747,7 +2742,7 @@ fn walk_back<'g>(
         arrival_in(arrivals, node).saturating_add(latency.get(node).copied().unwrap_or(0))
     };
     let mut incoming: BTreeMap<&GraphNodeId, Vec<&'g GraphNodeId>> = BTreeMap::new();
-    for edge in &graph.spec.edges {
+    for edge in edges {
         incoming
             .entry(&edge.destination.node)
             .or_default()
@@ -2782,22 +2777,21 @@ fn walk_back<'g>(
     reached
 }
 
-/// The strips with a node from which the output is reachable in `graph`.
+/// The strips with a node from which the output is reachable in the graph of `nodes`, `edges` and
+/// `schedule`.
 fn strips_reaching_output<'g>(
-    graph: &'g graph::PreparedGraphPlan,
+    nodes: &'g [graph::GraphNode],
+    edges: &'g [graph::GraphEdge],
+    schedule: &'g [GraphNodeId],
     restart: &'g WarmRestart<'_>,
 ) -> BTreeSet<&'g str> {
-    let mut reaches: BTreeSet<&GraphNodeId> = graph
-        .spec
-        .nodes
+    let mut reaches: BTreeSet<&GraphNodeId> = nodes
         .iter()
         .filter(|node| matches!(node.id, GraphNodeId::Output { .. }))
         .map(|node| &node.id)
         .collect();
-    for node in graph.sequential_schedule.iter().rev() {
-        if graph
-            .spec
-            .edges
+    for node in schedule.iter().rev() {
+        if edges
             .iter()
             .any(|edge| edge.source.node == *node && reaches.contains(&edge.destination.node))
         {
@@ -4521,9 +4515,9 @@ fn prepare_or_project(
     // over its own source-claim lines (D3).
     let warm_prime_bytes = match (successor, warm, &warm_restart, &warm_predecessor) {
         (Some(base), Some(lead), Some(restart), Some(predecessor)) => {
-            let arrivals = artifact_arrivals(&artifact);
+            let arrivals = arrival_rows(&artifact.report().input_arrivals);
             if first_late_node(
-                artifact.graph(),
+                &artifact.graph().sequential_schedule,
                 &arrivals,
                 &base.inventory.input_floors,
                 predecessor,
