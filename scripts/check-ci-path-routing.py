@@ -1070,20 +1070,47 @@ def check_qualification_v8_spill(text: str) -> None:
             "digests before the V8 spill gate reads the twin")
 
 
+AARCH64_TEST_SCRIPT = "scripts/run-aarch64-tests.sh"
 AARCH64_JOBS = {
-    "aarch64-debug": "bash scripts/run-aarch64-tests.sh debug",
+    "aarch64-debug": "bash scripts/run-aarch64-tests.sh debug ${{ matrix.shard }}/{count}",
     "aarch64-release": "bash scripts/run-aarch64-tests.sh release",
 }
 AARCH64_TARGETS = ("aarch64-apple-ios", "aarch64-linux-android")
 CROSS_TARGET_SCRIPT = "scripts/check-cross-targets.sh"
 
 
-def check_qualification_aarch64(text: str) -> None:
+def aarch64_debug_shard_count(root: pathlib.Path) -> int:
+    """Issue #2237: the debug leg's shard count, `debug_shard_count=<n>` in the test script."""
+    path = root / AARCH64_TEST_SCRIPT
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise Invalid(f"{AARCH64_TEST_SCRIPT}: {error}") from error
+    counts = re.findall(r"^debug_shard_count=([1-9][0-9]*)$", text, re.MULTILINE)
+    require(len(counts) == 1, f"{AARCH64_TEST_SCRIPT}: expected one `debug_shard_count=<n>` line")
+    return int(counts[0])
+
+
+def check_qualification_aarch64(text: str, shards: int) -> None:
     """Issue #1017: native AArch64 (iOS and Android arm64) is a product target. Its two test jobs
     run on arm64 hardware on every full route and the verdict expects them to succeed there, and
     cross-target installs both mobile targets for the compile rows. Any of these drifting would
-    drop the mobile target out of the required workflow with every remaining job green."""
+    drop the mobile target out of the required workflow with every remaining job green.
+
+    Issue #2237: the debug job is a matrix over every shard of the script's debug leg, exactly
+    1..n, and each matrix job runs its own shard; a missing shard would drop its packages' tests
+    with every shard that ran green."""
+    debug = job(text, "aarch64-debug")
+    shard_list = ", ".join(str(shard) for shard in range(1, shards + 1))
+    require(f"    strategy:\n      fail-fast: false\n      matrix:\n        shard: [{shard_list}]\n"
+            in debug,
+            f"qualification.yml: aarch64-debug must be a matrix over shard: [{shard_list}], "
+            f"the {shards} shards of {AARCH64_TEST_SCRIPT}'s debug leg")
+    require(len(re.findall(r"^      matrix:$", debug, re.MULTILINE)) == 1
+            and "include:" not in debug and "exclude:" not in debug,
+            "qualification.yml: aarch64-debug's matrix must be its shard list alone")
     for name, command in AARCH64_JOBS.items():
+        command = command.replace("{count}", str(shards))
         block = job(text, name)
         require("    runs-on: ubuntu-24.04-arm\n" in block,
                 f"qualification.yml: {name} must run on the ubuntu-24.04-arm runner")
@@ -1389,7 +1416,7 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_doctest_twins(text)
     check_qualification_realtime_policy_tests(text)
     check_qualification_v8_spill(text)
-    check_qualification_aarch64(text)
+    check_qualification_aarch64(text, aarch64_debug_shard_count(root))
     check_qualification_native_g5(text)
     check_qualification_aarch64_g5(text, names)
     check_qualification_self_tests(text)

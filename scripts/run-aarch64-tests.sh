@@ -5,11 +5,18 @@
 # and `lane::fpenv` pins FPCR. The x86-64-v3 jobs cover `Simd8` and MXCSR. iOS and Android arm64
 # compile and lint in scripts/check-cross-targets.sh; this script runs tests.
 #
-#   run-aarch64-tests.sh debug
+#   run-aarch64-tests.sh debug [<shard>/3]
 #       The product crates' tests (scripts/lib/product-crates.sh: capi's workspace closure) plus
 #       the DSP oracles `dsp-reference` and `conformance` and `target-smoke`'s width pin, in the
 #       debug profile with the test-support features test-debug-a/b name on x86. Both modes also
 #       run the four existing host-web session pins against the shared browser/native corpus.
+#       With a shard, the run is one of the three `aarch64-debug` matrix jobs (#2237): shards 1 and
+#       2 name their packages, and shard 3 runs every other package of the leg, so the shards
+#       partition the leg and a crate that joins the leg runs in shard 3 from the day it joins.
+#       Each shard runs its packages' tests, doctests and expected-failure rows; the host-web pins
+#       run in shard 2 and the uncaptured `resource_lifecycle` budget run in the shard that holds
+#       `capi`. A shard must build every workspace crate with the features the whole leg resolves
+#       for it (see "Shards" below). Without a shard, the run is the whole leg.
 #   run-aarch64-tests.sh release
 #       `lane` and `math` (G1-G4, G6 under FPCR.FZ, P1, M1-M3) in the shipping release profile,
 #       because LANE-3 is an optimizer fold a debug build does not make; `console-workload`'s
@@ -38,19 +45,39 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
+# #2237: the debug leg's shards. Shards 1 and 2 name their packages; the last shard takes every
+# other package of the leg. Each holds about a third of the leg's test time on the arm64 runner
+# (run of PR #2236: capi 311 s, host-core 143 s, control-plane 54 s; graph-compiler 217 s,
+# builtins 128 s, builtins-compiler 57 s, graph 50 s, effect-compiler 39 s, session 18 s,
+# protocol 2 s; the other 25 crates 514 s).
+debug_shard_count=3
+debug_shard_packages=(
+    ''
+    'capi control-plane host-core'
+    'builtins builtins-compiler effect-compiler graph graph-compiler protocol session'
+)
+host_web_shard=2
+
 usage() {
-    printf 'usage: run-aarch64-tests.sh debug|release\n' >&2
+    printf 'usage: run-aarch64-tests.sh debug [<shard>/%d] | release\n' "$debug_shard_count" >&2
     exit 2
 }
-[[ $# -eq 1 ]] || usage
+[[ $# -eq 1 || $# -eq 2 ]] || usage
 mode=$1
 [[ "$mode" == debug || "$mode" == release ]] || usage
+shard=
+if [[ $# -eq 2 ]]; then
+    [[ "$mode" == debug && "$2" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] || usage
+    shard=${BASH_REMATCH[1]}
+    ((BASH_REMATCH[2] == debug_shard_count && shard <= debug_shard_count)) || usage
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+leg="$mode leg${shard:+ shard $shard/$debug_shard_count}"
 fail() {
-    printf 'aarch64 %s leg failure: %s\n' "$mode" "$1" >&2
+    printf 'aarch64 %s failure: %s\n' "$leg" "$1" >&2
     exit 1
 }
 
@@ -94,11 +121,13 @@ fi
 
 # --- expected failures ---------------------------------------------------------------------------
 # Each row's name must name exactly one test among the binaries `cargo test "$@"` runs.
+# A debug shard judges only its own rows, which name its packages (`shard_crates`).
 check_skip_names() {
     local listing
     listing="$(mktemp)"
     cargo test "$@" -- --list >"$listing" || fail 'could not list the leg'"'"'s tests'
-    "${known_defects[@]}" judge-skips "$mode" "$listing" || fail 'an expected-failure row is ambiguous'
+    "${known_defects[@]}" judge-skips "$mode" "$listing" "${shard_crates[@]}" ||
+        fail 'an expected-failure row is ambiguous'
     rm -f "$listing"
 }
 
@@ -130,16 +159,113 @@ skip_arguments() {
     done
 }
 mapfile -t skips < <(skip_arguments)
+shard_crates=()
+
+# --- shards (#2237) -------------------------------------------------------------------------------
+# A crate's resolved features depend on every package `cargo test` selects: a dev-dependency of one
+# selected package (capi's `engine/test-support`, say) turns the feature on for every unit that
+# links the crate. A shard selects fewer packages, so it passes, for each workspace crate the whole
+# leg builds, the features the leg resolves for it, wherever cargo accepts them (a selected package
+# or a direct dependency of one). It then requires every workspace crate in its own build to resolve
+# exactly the leg's features, so a shard runs the same program as the whole leg. A crate that only
+# reaches a shard transitively and resolves differently there fails here; move it into that shard
+# or the shard of the crate that turns its feature on.
+resolved_features() {
+    cargo tree --quiet --locked --target "$target" -e normal,dev,build --prefix none \
+        --format '{p}|{f}' "$@" |
+        grep -F "($root/" | sed -E 's/ v[^|]*\|/|/; s/ \(\*\)$//' | LC_ALL=C sort -u
+}
+
+# Narrows `packages`, `features`, `rows` and `skips` from the whole leg to shard `$shard`.
+select_debug_shard() {
+    local leg_packages=() crate index
+    for ((index = 1; index < ${#packages[@]}; index += 2)); do
+        leg_packages+=("${packages[index]}")
+    done
+    local named=()
+    shard_crates=()
+    for ((index = 1; index < debug_shard_count; index++)); do
+        for crate in ${debug_shard_packages[index]}; do
+            [[ " ${leg_packages[*]} " == *" $crate "* ]] ||
+                fail "shard $index names $crate, which the debug leg does not run"
+            [[ " ${named[*]} " != *" $crate "* ]] || fail "$crate is named by two shards"
+            named+=("$crate")
+            if ((index == shard)); then shard_crates+=("$crate"); fi
+        done
+    done
+    if ((shard == debug_shard_count)); then
+        for crate in "${leg_packages[@]}"; do
+            [[ " ${named[*]} " == *" $crate "* ]] || shard_crates+=("$crate")
+        done
+    fi
+    ((${#shard_crates[@]} > 0)) || fail 'the shard has no package'
+
+    local leg_features shard_features
+    leg_features="$(resolved_features "${packages[@]}" --features "$features")" ||
+        fail "could not resolve the whole leg's features"
+    packages=()
+    for crate in "${shard_crates[@]}"; do
+        packages+=(-p "$crate")
+    done
+    features="$(
+        python3 -B - "$root" "$leg_features" "${shard_crates[@]}" <<'PY'
+import json
+import subprocess
+import sys
+
+root, leg, selected = sys.argv[1], sys.argv[2], sys.argv[3:]
+metadata = json.loads(subprocess.run(
+    ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1",
+     "--manifest-path", f"{root}/Cargo.toml"], check=True, capture_output=True, text=True).stdout)
+members = {package["name"]: package for package in metadata["packages"]}
+accepted = set(selected)
+for name in selected:
+    accepted.update(dependency.get("rename") or dependency["name"]
+                    for dependency in members[name]["dependencies"])
+features = []
+for line in leg.splitlines():
+    crate, enabled = line.split("|", 1)
+    if crate in accepted:
+        features += [f"{crate}/{feature}" for feature in enabled.split(",")
+                     if feature and feature != "default"]
+print(",".join(features))
+PY
+    )" || fail 'could not derive the shard features'
+    shard_features="$(resolved_features "${packages[@]}" ${features:+--features "$features"})" ||
+        fail "could not resolve the shard's features"
+    local drift
+    drift="$(LC_ALL=C comm -13 <(printf '%s\n' "$leg_features") <(printf '%s\n' "$shard_features"))"
+    [[ -z "$drift" ]] || {
+        printf 'resolved in the shard, not in the whole leg: %s\n' $drift >&2
+        fail "the shard builds a workspace crate with other features than the whole leg"
+    }
+    feature_args=()
+    [[ -z "$features" ]] || feature_args=(--features "$features")
+
+    # Each expected-failure row runs in the shard that holds its package.
+    local row package kept=()
+    for row in "${rows[@]}"; do
+        IFS='|' read -r _ package _ _ <<<"$row"
+        [[ " ${leg_packages[*]} " == *" $package "* ]] ||
+            fail "expected-failure row package $package is not in the debug leg"
+        if [[ " ${shard_crates[*]} " == *" $package "* ]]; then kept+=("$row"); fi
+    done
+    rows=("${kept[@]}")
+    mapfile -t skips < <(skip_arguments)
+}
 
 # #1670: reuse the single browser/native corpus owner, including #1669's narrowed automation
 # transcript. These exact tests run on NEON in both profiles; none is an expected failure.
+# A debug shard runs them only if it is the host-web shard.
 profile=()
 [[ "$mode" == release ]] && profile=(--release)
-cargo test --locked "${profile[@]}" -p host-web --features test-support --lib -- --exact \
-    tests::native_identity_session_digest_pins_the_wasm_parity \
-    tests::native_set_control_timeline_digest_pins_the_wasm_parity \
-    tests::native_observation_timeline_digest_pins_the_wasm_parity \
-    tests::native_automation_timeline_digest_pins_the_wasm_parity
+if [[ -z "$shard" || "$shard" == "$host_web_shard" ]]; then
+    cargo test --locked "${profile[@]}" -p host-web --features test-support --lib -- --exact \
+        tests::native_identity_session_digest_pins_the_wasm_parity \
+        tests::native_set_control_timeline_digest_pins_the_wasm_parity \
+        tests::native_observation_timeline_digest_pins_the_wasm_parity \
+        tests::native_automation_timeline_digest_pins_the_wasm_parity
+fi
 
 if [[ "$mode" == debug ]]; then
     source "$root/scripts/lib/product-crates.sh"
@@ -152,22 +278,28 @@ if [[ "$mode" == debug ]]; then
     features=builtins-compiler/test-support,graph/test-support
     features+=,host-core/test-support,effect-compiler/test-support,protocol/test-support
     features+=,engine/realtime-audit,math/lane,parametric-eq/test-support,builtins/test-support
-    check_skip_names --locked --all-targets "${packages[@]}" --features "$features"
-    cargo test --locked --all-targets "${packages[@]}" --features "$features" -- "${skips[@]}"
+    feature_args=(--features "$features")
+    if [[ -n "$shard" ]]; then
+        select_debug_shard
+    fi
+    check_skip_names --locked --all-targets "${packages[@]}" "${feature_args[@]}"
+    cargo test --locked --all-targets "${packages[@]}" "${feature_args[@]}" -- "${skips[@]}"
     # --all-targets runs no doctest (#1422); lane's CanonicalFpEnv guarantee is target-specific,
     # so AArch64 runs the same packages' doctests with the same features.
-    cargo test --locked --doc "${packages[@]}" --features "$features"
+    cargo test --locked --doc "${packages[@]}" "${feature_args[@]}"
     # The reference session's retained rows at four lanes (#1304): libtest captures a passing
     # test's output, so the main run never shows them. Run the budget test alone, uncaptured, with
     # the main run's packages and features so nothing rebuilds; its four-lane ceilings are set from
-    # these rows.
-    cargo test --locked "${packages[@]}" --features "$features" --test resource_lifecycle -- \
-        --exact reference_session_retained_rows_stay_within_their_budgets --nocapture
+    # these rows. It is capi's test, so a shard runs it only if it holds capi.
+    if [[ " ${packages[*]} " == *" -p capi "* ]]; then
+        cargo test --locked "${packages[@]}" "${feature_args[@]}" --test resource_lifecycle -- \
+            --exact reference_session_retained_rows_stay_within_their_budgets --nocapture
+    fi
     for row in "${rows[@]}"; do
-        expect_failure "$row" --locked "${packages[@]}" --features "$features"
+        expect_failure "$row" --locked "${packages[@]}" "${feature_args[@]}"
     done
-    printf 'aarch64 debug leg: PASS (%d product crates, %d expected failures)\n' \
-        "$(wc -l <<<"$product_list")" "${#rows[@]}"
+    printf 'aarch64 %s: PASS (%d of %d leg crates, %d expected failures)\n' \
+        "$leg" "$((${#packages[@]} / 2))" "$(($(wc -l <<<"$product_list") + 3))" "${#rows[@]}"
     exit 0
 fi
 
