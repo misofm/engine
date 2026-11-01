@@ -306,7 +306,7 @@ SCALAR_SLACK = 8
 #   gate-expander        f32x4    134 /  0   ratio 0        (collapsed, #973; [82 / 0])
 #   parametric-eq        f32x4    748 /  1   ratio 0.0013   (collapsed; [84 / 0])
 #   soft-clip            f32x4     55 /  0   ratio 0        ([25 / 0])
-#   route-mix-ramp       f32x4     22 /  0   ratio 0        (#1220; row added by its verdict NIT-1)
+#   route-mix-column-ramps f32x4   48 /  0   ratio 0        (#1713; replaced route-mix-ramp, 22 / 0, #1220 NIT-1)
 #   dynamic-eq           f32x4   1014 /  0   ratio 0        (dual, #17 S2; 626 / 0 before #1969)
 #   dynamic-eq           f32x4    511 /  0   ratio 0        (collapsed, #17 S2; 316 / 0 before #1969)
 #   de-esser             f32x4    893 /  0   ratio 0        (dual, #1920; 561 / 0 before #1969)
@@ -434,10 +434,13 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     # scalar operations beside its 22 vector ones (re-measured after #1452's undo 2 advanced the
     # frame index by a vector add again; 21 between the #1220 amendment and that undo), which the
     # generic "vector > scalar" rule admits and this row's budget (max(0.10 x 22, slack 8) = 8)
-    # refuses.
+    # refuses. #1713: every live route, six-word or following, now mixes by its column ramps
+    # (`route_mix_column_ramps_block`, bit for bit the one-ramp kernel when both columns share
+    # one ramp), so the one-ramp kernel left the render path and this row holds its successor,
+    # 48 vector / 0 scalar on the #1713 named twin.
     (
-        "route-mix-ramp f32x4",
-        r"lane7kernels20route_mix_ramp_block.*4wide6f32x4",
+        "route-mix-column-ramps f32x4",
+        r"lane7kernels28route_mix_column_ramps_block.*4wide6f32x4",
         0.10,
     ),
     # #17 S2: the dynamic EQ's block bodies are `run_block::<MONO>`'s inner closures (the bank's
@@ -821,10 +824,10 @@ RENDER_KERNELS: dict[str, str] = {
         "silence-skip settle step, the parametric_eq instance",
     "_RINvNtCs_4lane7kernels19silence_skip_settleNtNtCs_4wide6f32x4_5f32x4ECs_20multiband_compressor":
         "silence-skip settle step, the multiband_compressor instance",
-    "_RINvNtCs_4lane7kernels20route_mix_ramp_blockNtNtCs_4wide6f32x4_5f32x4ECs_5graph":
-        "live route mix, one ramped route (#1220)",
+    # #1713: the one-ramp `route_mix_ramp_block` left the render path; its arithmetic is this
+    # kernel's, which every live route now mixes by.
     "_RINvNtCs_4lane7kernels28route_mix_column_ramps_blockNtNtCs_4wide6f32x4_5f32x4ECs_5graph":
-        "live route mix, the indexed-ramp column body",
+        "live route mix, the indexed-ramp column body of every live route (#1220, #1652, #1713)",
     # #2129: the per-node crossfade's body, behind `BypassShunt::crossfade` and `crossfade_held`.
     "_RINvNtCs_15effect_contract4live16crossfade_planesNtNtCs_4wide6f32x4_5f32x4ECs_5graph":
         "live bypass crossfade of a per-node insert",

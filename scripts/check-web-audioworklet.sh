@@ -571,7 +571,7 @@ fi
 #   parametric-eq dual      1352/1     parametric-eq mono        748/1   [168/0, 84/0]
 #   dynamic-eq dual         1014/0     dynamic-eq mono           511/0   [626/0, 316/0 before #1969]
 #   de-esser dual            893/0     de-esser mono             450/0   [561/0, 283/0 before #1969]
-#   soft-clip f32x4           55/0     route-mix-ramp f32x4       22/0   [25/0 soft-clip]
+#   soft-clip f32x4           55/0     route-mix-column-ramps     48/0   [25/0 soft-clip; route-mix-ramp 22/0 before #1713]
 #
 # The dynamic-eq and de-esser rows were re-measured after #1969 (its detector link glide), on the
 # named twin built from `e3e7cdab3`, and the multiband rows re-measured after #1367b (its detector
@@ -589,7 +589,9 @@ fi
 # links the live route's indexed-ramp mix, `lane::kernels::route_mix_ramp_block<f32x4>` (22 vector
 # / 0 scalar since #1452's undo 2; 21 between the #1220 amendment and that undo), into the render
 # path: the artifact carries thirteen and the floor rises to that count, so the slack is spent and
-# losing any one kernel is red.
+# losing any one kernel is red. Issue #1713 mixes every live route by
+# `lane::kernels::route_mix_column_ramps_block<f32x4>` (48 vector / 0 scalar), which the following
+# routes already linked, so the one-ramp kernel left the artifact (41 kernels at #1713).
 #
 # The pattern counts four-lane kernels only (`4wide6f32x4`; it was `4wide6f32x[48]`), so an
 # eight-lane kernel can never pad the count. Eight lanes are refused outright instead: the
