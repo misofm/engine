@@ -301,6 +301,47 @@ mask and the signature, and the capi runtime tests cover reclaim by `service` al
 inside a source submit, the counter refresh, a scheduled candidate kept across 1,000 calls, and
 idle calls that change nothing.
 
+A latency-growing structural edit during playback is adopted by render, not by a control call
+(#1360, decision 15 D15-8 and D15-17). Every session the C ABI compiles holds the production
+warm-successor bounds: `P_MAX` (`host_core::p_max_samples` at the session's rate and quantum) and
+`PRIME_BYTES_MAX` (3,493,032 bytes, from #1286's record), so a growth is classified (#1403 D2)
+and published as a warm successor, or takes the transition at submit where D2 says so. `SESSION_TRANSACTION_APPLY` returns at once
+with path `rebuild`; render adopts the successor at the first block at which every carried source
+is ready, and the stream continues bit for bit. The host's duty, in the header ("Latency growth
+during playback"):
+- For an exact adoption, keep at least `P + q` frames of each source queued past its read
+  position, where `P` is the growth in whole quanta and `q` the quantum. The default ring
+  (`source_ring_frames = 0`) covers `P_MAX` for a host that keeps its rings full; a nonzero
+  `source_ring_frames` needs at least `stall + P_MAX + q` frames (`stall` is
+  `host_core::stall_ring_frames`), or a growth whose `P + q` exceeds the ring's frames above
+  `stall` takes the transition (`WarmUnavailable::LeadBound`, #1354), which still completes it.
+- At the adoption, render reads each carried source `P` frames further ahead in that one call;
+  from that block the source-read clock leads render by `P` more (#1396), and a command or
+  `seek_at` that arrives during that call applies at that block on the new clock.
+- Outcomes: `EXACT` when render adopted it; `TRANSITION_FALLBACK` when the successor was not
+  available at submit or not ready by its deadline (`prime_deadline_samples`, 7,040 render
+  samples past its `not_before` at 48 kHz and quantum 128; the edited strips duck and fade back
+  in); `SUPERSEDED` set when a later structural edit replaced it first. A declared stop (#1323)
+  completes it `EXACT`, with `SUPERSEDED` only for revisions it had folded in. The deadline counts
+  render samples, so a paused host stays pending and never falls back.
+- The fallback runs only in a session call: `SessionState::service`, which every session call runs
+  first, checks the deadline after the epoch synchronization and before the counter refresh. One
+  step does at most one withdrawal and one re-preparation, never loops on render progress and
+  never waits. A refused re-preparation republishes the successor with its record, raises
+  `TRANSITION_REPREPARE_REFUSALS` (protocol counter 17, refreshed in the same call) and is tried
+  again at the next step; it never completes the revision as nothing, so an ack never precedes a
+  drop.
+
+No symbol, feature bit, flag or struct is added. `crates/capi/tests/latency_growth.rs` holds the
+three ABI gates: exact adoption with a render thread and a servicing control thread, adoption with
+no session call after the submit, and a never-ready growth that stays pending for twice the deadline
+with no session call and falls back at the first `miso_engine_v1_service`. `audit capi` adds the
+same growth as a leg on two threads (render and service), with zero render allocations.
+
+Stated limit (#2229): at 96 kHz and quantum 128, the first warm adoption block (p99 1.11 ms) and
+every carrying-swap move block (1.07 ms) take more than 70% of the 1.333 ms quantum. A warm
+adoption is not slower than the move it replaces; #2229 brings both under the margin.
+
 A host learns where a seek landed through `miso_engine_v1_source_seek_report` (#1316, decision 15
 D15-12), an in-place V1 amendment: one new exported symbol and one new 64-byte struct,
 `miso_engine_v1_seek_report` (`MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE`; not D6's
