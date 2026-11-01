@@ -540,6 +540,19 @@ pub enum Workload {
     ///
     /// Not in [`WORKLOADS`]: see [`PACKING_WORKLOADS`].
     SixtyFourTrackConsoleOnePerBank,
+    /// The mixed-class row (issue #2137): thirty-seven collapse-eligible tracks, then twenty-seven
+    /// that are not, in track order.
+    ///
+    /// Derived from the mono fixture as [`Self::SixtyFourTrackConsoleHalfMono`] is, but the
+    /// standing fixture's stereo source mapping goes back on the last twenty-seven tracks only.
+    /// So the mono pool and the stereo pool of every console slot each leave a partial remainder:
+    /// 5 + 3 at eight lanes (they fit one bank) and 1 + 3 at four lanes (they fit one bank). It is
+    /// the session shape #2137's cost-weighted remainder rule moves, and the row its before/after
+    /// read is taken on. Read against [`Self::SixtyFourTrackConsoleHalfMono`] (32 + 32, no
+    /// remainder) and [`Self::SixtyFourTrackConsole`] (all stereo).
+    ///
+    /// Not in [`WORKLOADS`]: see [`MIXED_CLASS_WORKLOADS`].
+    SixtyFourTrackConsoleMixed,
     /// The console app's C1 shape (issue #2132): `tracks` tracks feeding four groups, two aux
     /// returns and a master, every strip carrying `gate, eq, comp | drive`, in `state`.
     ///
@@ -792,6 +805,15 @@ pub const PACKING_WORKLOADS: [Workload; 2] = [
 /// [`Workload::SixteenTrackStrip`]. Descriptive; it states no floor.
 pub const BYPASS_WORKLOADS: [Workload; 1] = [Workload::SixteenTrackStripBypassed];
 
+/// The mixed-class row the native bench emits after [`BYPASS_WORKLOADS`] (issue #2137): 37 mono
+/// and 27 stereo tracks, whose two partial remainders per console slot fit one bank at either
+/// width. Read against [`Workload::SixtyFourTrackConsoleHalfMono`].
+pub const MIXED_CLASS_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackConsoleMixed];
+
+/// The tracks of [`Workload::SixtyFourTrackConsoleMixed`] that keep the mono fixture's mapping;
+/// the rest read two source channels.
+pub const MIXED_CLASS_MONO_TRACKS: usize = 37;
+
 /// The bank-utilisation rows (issue #2132): the C1 shape at 16, 32 and 64 tracks in each
 /// [`C1State`], then the irregular graph. `bench console --bank-report` measures them; no standing
 /// record carries them, so the standing record set and its validator are unchanged.
@@ -921,7 +943,7 @@ pub fn bank_counters(workload: Workload, blocks: u64) -> [u64; 7] {
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
 /// [`DRIVER_FED_WORKLOADS`], then [`LIVE_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then
 /// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`], then [`PACKING_WORKLOADS`], then
-/// [`BYPASS_WORKLOADS`].
+/// [`BYPASS_WORKLOADS`], then [`MIXED_CLASS_WORKLOADS`].
 pub fn native_session_rows() -> impl Iterator<Item = Workload> {
     WORKLOADS
         .into_iter()
@@ -932,6 +954,7 @@ pub fn native_session_rows() -> impl Iterator<Item = Workload> {
         .chain(CONSOLE_STRIP_WORKLOADS)
         .chain(PACKING_WORKLOADS)
         .chain(BYPASS_WORKLOADS)
+        .chain(MIXED_CLASS_WORKLOADS)
 }
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
@@ -975,6 +998,10 @@ enum Strip {
     /// tracks carry the standing fixture's source mapping and its even tracks the mono fixture's,
     /// and no third session exists anywhere.
     HalfMono,
+    /// The mono fixture with the stereo source mapping put back on every track from
+    /// [`MIXED_CLASS_MONO_TRACKS`] on (issue #2137): [`Self::HalfMono`]'s edit, on a contiguous
+    /// tail instead of the odd tracks.
+    MixedClass,
 }
 
 /// Retains the `pre_insert` console slots `keep` accepts, and the `post_insert` slots only when
@@ -1029,6 +1056,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleMono => "sixty_four_track_console_mono",
             Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
             Self::SixtyFourTrackConsoleHalfMono => "sixty_four_track_console_half_mono",
+            Self::SixtyFourTrackConsoleMixed => "sixty_four_track_console_mixed",
             Self::SixtyFourTrackConsoleMetered => "sixty_four_track_console_metered",
             Self::SixtyFourTrackConsoleSends => "sixty_four_track_console_sends",
             Self::TenTrackRaggedStrip => "ten_track_ragged_strip",
@@ -1088,7 +1116,8 @@ impl Workload {
             }
             Self::SixtyFourTrackConsoleMono
             | Self::SixtyFourTrackConsoleMonoDual
-            | Self::SixtyFourTrackConsoleHalfMono => {
+            | Self::SixtyFourTrackConsoleHalfMono
+            | Self::SixtyFourTrackConsoleMixed => {
                 "fixtures/session/v1/console-sixty-four-track-mono.json"
             }
             Self::SixtyFourTrackAppShape => "fixtures/session/v1/console-sixty-four-track-app.json",
@@ -1155,6 +1184,7 @@ impl Workload {
             Self::SixtyFourTrackEqCompSimd1 => Strip::LimiterRemoved,
             Self::SixtyFourTrackGainPanRing | Self::SixtyFourTrackGainPanLive => Strip::GainPan,
             Self::SixtyFourTrackConsoleHalfMono => Strip::HalfMono,
+            Self::SixtyFourTrackConsoleMixed => Strip::MixedClass,
             _ => Strip::AsWritten,
         }
     }
@@ -1259,11 +1289,12 @@ impl Workload {
 /// subset of what `sixty_four_track_console` measures, which is what makes the differences between
 /// the rows subtractions rather than comparisons of two different sessions.
 fn apply_strip(model: &mut SessionModel, strip: Strip) {
-    // The console edits are session-level (decision 12). Every derived row but `HalfMono` drops
+    // The console edits are session-level (decision 12). Every derived row but `HalfMono` and
+    // `MixedClass` drops
     // the `post_insert` limiter; the `pre_insert` chain (EQ, compressor) is narrowed or emptied
     // as the row says, and `LimiterRemoved` leaves it exactly as the fixture wrote it.
     match strip {
-        Strip::AsWritten | Strip::HalfMono => {}
+        Strip::AsWritten | Strip::HalfMono | Strip::MixedClass => {}
         Strip::EqOnly => retain_console(model, |slot| is_native(slot, "miso.parametric-eq"), false),
         Strip::CompressorOnly => {
             retain_console(model, |slot| is_native(slot, "miso.compressor"), false)
@@ -1314,6 +1345,12 @@ fn apply_strip(model: &mut SessionModel, strip: Strip) {
             // across its lanes is whether a track's two channels read one source channel or two.
             Strip::HalfMono => {
                 if index % 2 == 1 {
+                    track.right_source_channel = 1;
+                }
+            }
+            // The same field on a contiguous tail: 37 mono tracks, then 27 stereo ones.
+            Strip::MixedClass => {
+                if index >= MIXED_CLASS_MONO_TRACKS {
                     track.right_source_channel = 1;
                 }
             }
@@ -1441,7 +1478,8 @@ fn console_model(workload: Workload) -> SessionModel {
         Workload::SixtyFourTrackConsoleLegacy => SIXTY_FOUR_TRACK_LEGACY,
         Workload::SixtyFourTrackConsoleMono
         | Workload::SixtyFourTrackConsoleMonoDual
-        | Workload::SixtyFourTrackConsoleHalfMono => SIXTY_FOUR_TRACK_MONO,
+        | Workload::SixtyFourTrackConsoleHalfMono
+        | Workload::SixtyFourTrackConsoleMixed => SIXTY_FOUR_TRACK_MONO,
         Workload::SixtyFourTrackAppShape => SIXTY_FOUR_TRACK_APP,
         Workload::SixtyFourTrackConsoleSends => SIXTY_FOUR_TRACK_SENDS,
         Workload::C1Console { tracks, .. } => match tracks {
@@ -4235,6 +4273,7 @@ mod tests {
             .chain(CONSOLE_STRIP_WORKLOADS)
             .chain(PACKING_WORKLOADS)
             .chain(BYPASS_WORKLOADS)
+            .chain(MIXED_CLASS_WORKLOADS)
         {
             assert!(!workload.web_meters(), "{}", workload.kind());
         }
@@ -4249,6 +4288,7 @@ mod tests {
                 + CONSOLE_STRIP_WORKLOADS.len()
                 + PACKING_WORKLOADS.len()
                 + BYPASS_WORKLOADS.len()
+                + MIXED_CLASS_WORKLOADS.len()
         );
         assert!(
             rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + LIVE_FED_WORKLOADS.len())
@@ -4671,14 +4711,19 @@ mod tests {
             );
         }
         let rows: Vec<Workload> = native_session_rows().collect();
-        let strip_end = rows.len() - PACKING_WORKLOADS.len() - BYPASS_WORKLOADS.len();
+        let strip_end = rows.len()
+            - PACKING_WORKLOADS.len()
+            - BYPASS_WORKLOADS.len()
+            - MIXED_CLASS_WORKLOADS.len();
         let packing_end = strip_end + PACKING_WORKLOADS.len();
+        let bypass_end = packing_end + BYPASS_WORKLOADS.len();
         assert!(
             rows[strip_end - STRIP_ROWS.len()..strip_end] == STRIP_ROWS
                 && rows[strip_end..packing_end] == PACKING_WORKLOADS
-                && rows[packing_end..] == BYPASS_WORKLOADS,
-            "the console-strip rows are emitted last but for the packing rows (#1783) and the \
-             bypass-skip row (#2129)"
+                && rows[packing_end..bypass_end] == BYPASS_WORKLOADS
+                && rows[bypass_end..] == MIXED_CLASS_WORKLOADS,
+            "the console-strip rows are emitted last but for the packing rows (#1783), the \
+             bypass-skip row (#2129) and the mixed-class row (#2137)"
         );
         let mut kinds: Vec<&str> = rows.iter().map(|row| row.kind()).collect();
         kinds.sort_unstable();

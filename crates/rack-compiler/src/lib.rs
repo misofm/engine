@@ -167,6 +167,50 @@ pub struct BankPlan<Id, K = EffectProgramKey> {
     pub scalar: Vec<Id>,
 }
 
+impl<Id: Ord + Clone, K: BankSlotKey> BankPlan<Id, K> {
+    /// The mono-class members a cost-weighted planner may move to the stereo pool (issue #2137):
+    /// for each `(level, rack)`, the members of every partial mono group that fits into a partial
+    /// stereo group of the same `(level, rack)`, `m + s <= width`. Sorted by id, no duplicate.
+    ///
+    /// Each partial stereo group takes at most one partial mono group, in plan order. A full group
+    /// never moves, and nor does a remainder that does not fit: either move would add a bank, not
+    /// remove one. A pool holds one partial group per cohort, so in a pool of one cohort this is
+    /// exactly "the mono pool's last group fits into the stereo pool's last group".
+    ///
+    /// This names candidates only. Whether the members' programs join the stereo cohort, and
+    /// whether the move is worth its cost, is the caller's re-plan and objective: this function
+    /// is pure and knows neither the racks' kind nor the banks' cost.
+    #[must_use]
+    pub fn class_remainder_moves(&self, width: BankWidth) -> Vec<Id> {
+        let lanes = width.lanes() as usize;
+        let partial = |class: CohortPoolClass| {
+            self.groups
+                .iter()
+                .filter(move |group| group.class == class && !group.is_full())
+        };
+        let mut taken = vec![false; self.groups.len()];
+        let mut moves = Vec::new();
+        for mono in partial(CohortPoolClass::MonoSymmetricAtPrepare) {
+            let m = mono.active_count();
+            let fit = self.groups.iter().enumerate().find(|(index, stereo)| {
+                !taken[*index]
+                    && stereo.class == CohortPoolClass::Stereo
+                    && !stereo.is_full()
+                    && stereo.level == mono.level
+                    && stereo.rack == mono.rack
+                    && m + stereo.active_count() <= lanes
+            });
+            if let Some((index, _)) = fit {
+                taken[index] = true;
+                moves.extend(mono.members.iter().flatten().cloned());
+            }
+        }
+        moves.sort();
+        moves.dedup();
+        moves
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RackCompileError {
     DuplicateId,
@@ -717,6 +761,39 @@ mod tests {
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
+    }
+
+    /// Issue #2137 S1: a partial mono group that fits a partial stereo group of its `(level,
+    /// rack)` names its members, and nothing else does.
+    ///
+    /// Red when the rule ignores the fit: at eight lanes 13 + 5 leaves two partial remainders of
+    /// five (5 + 5 > 8), and at four lanes 7 + 7 leaves two of three (3 + 3 > 4). (A full group can
+    /// never fit a non-empty remainder, so the fit is also what keeps the full mono lanes of 10 + 6
+    /// and 8 + 8 from moving.) The eight-lane rows run where the build has eight-lane banks.
+    #[test]
+    fn a_fitting_mono_remainder_names_its_members() {
+        let mono = CohortPoolClass::MonoSymmetricAtPrepare;
+        let stereo = CohortPoolClass::Stereo;
+        let moves = |m: u32, s: u32, width: BankWidth| {
+            let candidates = (0..m)
+                .map(|id| classed(id, &[0, 1], mono))
+                .chain((m..m + s).map(|id| classed(id, &[0, 1], stereo)))
+                .collect();
+            plan_bank_groups(&one_level(candidates), width)
+                .expect("plan")
+                .class_remainder_moves(width)
+        };
+        #[cfg(target_feature = "avx2")]
+        {
+            assert_eq!(moves(10, 6, BankWidth::Eight), vec![8, 9]);
+            assert_eq!(moves(8, 8, BankWidth::Eight), Vec::<u32>::new());
+            assert_eq!(moves(2, 14, BankWidth::Eight), vec![0, 1]);
+            assert_eq!(moves(13, 5, BankWidth::Eight), Vec::<u32>::new());
+        }
+        // At four lanes the 10 + 6 remainders are 2 + 2, and they fit.
+        assert_eq!(moves(10, 6, BankWidth::Four), vec![8, 9]);
+        assert_eq!(moves(8, 8, BankWidth::Four), Vec::<u32>::new());
+        assert_eq!(moves(7, 7, BankWidth::Four), Vec::<u32>::new());
     }
 
     /// P1: single-slot pools conserve every candidate and partition by dependency level and key.

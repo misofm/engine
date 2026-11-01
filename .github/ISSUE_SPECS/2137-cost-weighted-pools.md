@@ -56,3 +56,214 @@ None in substance (#2131 is merged; the rule runs on levels or windows alike). *
   saving is 0.6 of a bank's slots per occurrence. Reopening condition: a measured session shape
   with two partial remainders in one class; then this slice runs after #2136 with the amendment
   above and its three gates as written.
+
+
+## Amendment (attempt 1, 2026-11-01; base main `7d89eecc5`)
+
+Reopened by root with a plan (`issue-2137-plan.md`). The reopening condition holds: a mixed-source
+session with two partial remainders per console slot is a production shape under the dual-mono-by-
+source-file ruling, and S4 adds the measured row.
+
+### Root rulings
+
+- **Q1, the weight:** 0.61. Measured on the 64-track mono row-pair of
+  `artifacts/steps/b13-2133/main/console-benchmark.accepted.jsonl` (p50 61.5 us collapsed against
+  100.2 us dual). The code names that record (`banks::MONO_BANK_WEIGHT`).
+- **Q2, builtin stages:** the rack-chain compare is the proxy. The builtin remainders follow the
+  per-track class; the agreement test checks the class.
+- **Q3, pack groups (#2135):** the moved strip joins the stereo pack group, with no change there.
+- **Q4, order:** S4 first, then S1 to S3, on one branch.
+
+### Objective (stated)
+
+The cost of a plan's changed groups is the sum over their bound effect banks of `w(class)`, with
+`w(mono) = 61` and `w(stereo) = 100` (integer hundredths, exact compare). A move set is kept when
+the re-plan's changed groups cost less than the trial's **and** bank no fewer slot members (no
+banked effect node falls to the per-node path, which the weight does not price). One decision for
+the whole move set. Candidates: the console tracks every console group of which is a partial mono
+group that fits a partial stereo group of its `(level, rack)` (`m + s <= W`, each stereo group taken
+once). Then #971's stranded set runs on the result with its bind-count objective. The class map is
+updated before the builtin planner reads it.
+
+### Slices
+
+- **S4** `sixty_four_track_console_mixed` (37 mono, then 27 stereo; remainders 5 + 3 at W=8, 1 + 3
+  at W=4), emitted last (`MIXED_CLASS_WORKLOADS`), the half-mono row's floor. Validators: 82
+  records, 54 session records. No timed run: root schedules one at base and head.
+- **S1** `BankPlan::class_remainder_moves(width)` (rack-compiler, pure).
+- **S2** `try_pool_move(candidates, objective)` in `banks.rs`, run for the console remainder set
+  (class-weighted) and then #971's stranded set (bind count).
+- **S3** `mergeable_partial_pairs` counts a mono + stereo pair in a console rack.
+
+### Tests and their red claims
+
+- `a_fitting_mono_remainder_names_its_members` (rack-compiler): red when the fit is ignored (13 + 5
+  names `[8..12]`). A full group never fits a non-empty remainder, so the fit also keeps full groups.
+- `the_console_remainder_rule_merges_a_fitting_pair` (graph-compiler, the 63 + 1 test rewritten):
+  red when the move is removed (27 banks for 24 at W=8), when the remainder objective is bind count,
+  or when the builtin planner reads the pre-move map. Bits equal the Scalar oracle.
+- `the_remainder_rule_never_trades_banked_work_for_per_node_work` (new; deleted in attempt 3): red when the weighted
+  objective compares bank cost alone.
+- `a_console_track_stays_mono_when_filling_a_bank_costs_more` (doc updated): red when the remainder
+  objective is bind count.
+- `the_two_planners_agree_on_every_track_class`: one new row, 10 + 6; red when the builtin planner
+  reads the class map from before the move.
+- `the_bank_report_counts_mergeable_pairs` (the "another pool class" assertion inverted for a
+  console rack, kept for the insert rack): red without the S3 clause, red when the clause reaches
+  the insert rack.
+- Shape edits, claims kept: `a_mono_track_whose_witness_declines_pools_as_stereo` (now 1 + W tracks
+  so no remainder fits) and `a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits`
+  (stereo on the third and fourth of every four tracks, so every pool is whole banks).
+
+### Not tested
+
+The track filter "every console group fits" (a track whose `pre_insert` remainder fits while its
+`post_insert` group is full) has no test: the shape needs differing post-insert levels, and the
+objective weighs such a move anyway.
+
+### Evidence (attempt 1)
+
+Bank counts are what the planner reports (`BankUtilisation::banks`: bound plan groups, both
+console racks). The W=8 counts come from a native render. The W=4 counts come from the `simd128`
+guest under wasmtime (`bank_counters`, 256 blocks).
+
+| shape | W=8 base | W=8 head | W=4 base | W=4 head |
+| --- | --- | --- | --- | --- |
+| 10 + 6 | 6 | 4 | 10 | 8 |
+| 37 + 27 (`sixty_four_track_console_mixed`) | 18 | 16 | 34 | 32 |
+
+The W=4 C1 rows (`W4_CONSOLE_COUNTERS`) did not change.
+
+**No bit moved (PR evidence; the harness is in scratch and is not committed).** Base is S4
+(`263c27651`), head is S3 plus the clippy fix (`f64ab9203`). Each case renders 300 blocks, plain
+(`PlanConfig::BASELINE`) and live (the product's live lanes), at W=8. The harness hashes the
+session output with SHA-256 and every track's `PostMatrix` words (bound observers, FNV-64). The
+cases are the 10 + 6 and 37 + 27 shapes, the half-mono row and every `fixtures/session/v1`
+session. Across 1075 per-strip digests and every output digest, base and head are identical. Base
+and head refuse the same cases: `canonical` (an effect not available at launch),
+`json-invalid-duplicate-key` (invalid by design), and the live arm of the submix sessions (C1,
+sends, irregular graph, builtins-automation), whose route lanes the harness does not attach. The
+moved strips render dual in a stereo bank and emit the words of their collapsed render.
+
+**Checks:** `cargo fmt --all --check`; workspace clippy with CI's flags; release tests of
+rack-compiler, graph-compiler (`--all-features`), console-workload and bench, and of host-core,
+capi, graph, builtins-compiler and wasm-gates; `check-workspace-policy.sh`; `realtime_policy`;
+`check-bench-policy.sh`, `test-bench-policy.sh` and `test-console-benchmark.sh`; the console
+benchmark preflight (no workload launched); `build-web-audioworklet.sh` and
+`check-web-audioworklet.sh`; browser qualification `--check-matrix` on Chromium and WebKit, single
+and worker legs: all pass. No timed benchmark was run, because the machine was not quiet.
+
+## Amendment (attempt 2, 2026-11-01)
+
+Verdict 1 was FAIL with one MAJOR. Attempt 1's track filter needed every console group of a track
+to be a fitting remainder. The post-insert level splits whenever only some tracks carry inserts,
+so on that normal shape the rule did nothing (the verifier's shape: 7 banks with the rule on and
+7 with it off).
+
+- **Candidates:** a track is a candidate when any one of its console groups is a fitting mono
+  remainder. A track's class is global, so the weighted objective compares every group that the
+  move changes. The members guard stays. It is a **sum**: the changed groups must bank at least
+  as many slot members as before. That is not a per-member check, and the doc now says so.
+- **Re-placement (new):** the #2136 placement buckets by pool class, so after a move the moved
+  tracks were placed with their old class. The compile now places again with the settled classes
+  and plans once more. It keeps the re-placed plan unless it costs more or banks fewer slot members
+  (`rack_plan_cost`). The loop runs again while classes still move, and the track count bounds it.
+  I found this when the wider candidate set made `every_console_slot_binds_banked_at_every_track_count`
+  red: a moved track's limiter sat at a stale level (`{(Stereo, 9): 1, (Stereo, 10): 2}`), so the
+  objective had chosen a plan that broke #2136's one-level-per-pool property.
+- **Worse plan found?** Only that one, and re-placement fixes it. I found no other test or shape
+  where the wider set picks a worse plan.
+
+### Tests (attempt 2)
+
+- `a_track_moves_when_any_console_remainder_fits` (new; the verifier's shape: 10 mono + 6 stereo,
+  pre=[EQ], post=[Limiter], a compressor insert on `ch00..03`). It expects `ch08` and `ch09` in the
+  stereo pool and `2 * 16 / W + 1` banks, which is 5 at W=8. It was red on attempt 1's filter (no
+  move, 7 banks) and red without the re-placement (6 banks).
+- `a_console_track_is_never_pooled_as_stereo_to_fill_a_bank` is renamed to
+  `a_console_track_stays_mono_when_filling_a_bank_costs_more`.
+- `every_console_slot_binds_banked_at_every_track_count` now accepts a moved mono track. It still
+  requires one class per track and a stereo class for every stereo feed. It was red without the
+  re-placement.
+
+### Bank counts (attempt 2, planner report, W=8)
+
+| shape | base | head |
+| --- | --- | --- |
+| verifier insert shape (`prepared_bank_count`) | 7 | 5 |
+| insert shape + bus + post-fader sends + meters (groups) | 9 | 7 |
+| 10 + 6 / 37 + 27 | 6 / 18 | 4 / 16 (no change from attempt 1) |
+
+At W=4 the new test asserts 9 for the insert shape. This host has no W=4 build, so that count
+has not been run.
+
+### Bits (attempt 2)
+
+The harness now also taps every track's `PostFader` (the send tap) and every submix's `PostMatrix`.
+It also adds a metered arm, which hashes every meter snapshot. A new session joins the cases: the
+insert shape, a bus, and post-fader sends from the moved `ch08` and from the stereo tracks. The
+full digest set ran again at the new head (`7de9861a1`) against base (`263c27651`). Every output
+digest, every meter digest and all 3566 tap digests are identical. Base and head refuse the same
+cases as in attempt 1.
+
+**Checks (attempt 2):** fmt; clippy with CI's flags; release tests of rack-compiler,
+graph-compiler, host-core and capi; `realtime_policy`; `build-web-audioworklet.sh` and
+`check-web-audioworklet.sh`. All pass. I did not run the browser matrix again: no qualification
+fixture has a fitting remainder, so the browser plan output did not change beyond attempt 1.
+
+## Amendment (attempt 3, 2026-11-01)
+
+Verdict 2 was FAIL with one MAJOR: the members guard ran before the #2138 leftover pass. A move
+could therefore unbank leftover insert nodes. The verifier's shape at W=8 is 10 mono + 1 stereo
+with inserts by `index % 3`: base banks 33 members, attempt 2 banks 31. The re-placement compare
+also never compared against the plan with no move.
+
+**Root ruling: decide on the whole plan.** There is now one decision point, in the compile:
+
+1. Build the whole plan without the move: placement, chain pass, #971 and the leftover pass.
+2. If a console mono remainder fits, move those tracks to the stereo pool. Then build the whole
+   plan again: place again, then the chain pass, #971 and the leftover pass.
+3. Keep the moved plan only if its weighted bank cost is **strictly lower** and **every** effect
+   node that the unmoved plan banks is still banked. This is checked per node
+   (`moved_plan_is_better`).
+4. In every other case, keep the unmoved plan. If the moved plan fails to build, the unmoved plan
+   stands (#1001), and the compile does not fail.
+
+This replaces the in-planner weighted `try_pool_move` (now #971's alone) and attempt 2's
+re-placement loop. The stale `placement_levels` doc and the class-map comment are fixed. A
+test-only hook (`compile::set_remainder_move`) can compile with the move disabled or forced.
+
+### Tests (attempt 3)
+
+- `a_move_that_unbanks_a_leftover_node_is_refused` (new). First shape: the verifier's. `ch08` and
+  `ch09` stay mono, and 33 nodes are banked at W=8. It is red on attempt 2's head (`ch08` and
+  `ch09` move). Second shape: 1 mono + 9 stereo with multiband inserts. There the move banks
+  the same number of nodes, but not the same nodes. It is red under a total-count guard.
+- `the_remainder_rule_never_trades_banked_work_for_per_node_work` is deleted. The new test
+  supersedes it: every mutation that failed it also fails the new test.
+- `every_console_slot_binds_banked_at_every_track_count` expects each track's own class again,
+  except for tracks the compile moved. The test compiles each shape a second time with the move
+  disabled, and holds every move to that plan (cost strictly lower, every banked node kept). The
+  check is written out in the test, not called from the planner. It stays green under an
+  always-move mutation, because none of its shapes has a move the decision refuses. The
+  dedicated tests catch that mutation.
+- `a_track_moves_when_any_console_remainder_fits` stays green: 5 banks at W=8.
+
+### Sweep (attempt 3)
+
+The verifier's 4,620 shapes compiled at head, with the move disabled and with the move forced:
+
+- 1,603 shapes take a move. 311 shapes refuse a move whose plan builds.
+- **0** shapes lose a banked member, and **0** shapes cost more.
+- In 122 shapes, a total-count guard would have kept a move that loses a member. That is why the
+  check is per node.
+
+### Bits and checks (attempt 3)
+
+The full digest set, including the tap, send and meter shape, was compared at head `9186a4897`
+against base `263c27651`. All outputs, meters and 3,566 taps are identical. The bank counts are
+unchanged from attempt 2: 10 + 6: 6 → 4; 37 + 27: 18 → 16; insert + send + meter: 9 → 7; the
+verifier's insert shape: 7 → 5 at W=8.
+
+**Checks (attempt 3):** fmt, clippy (CI flags), release tests of rack-compiler, graph-compiler
+(`--all-features`), host-core, capi and wasm-gates, and `realtime_policy`: all pass.

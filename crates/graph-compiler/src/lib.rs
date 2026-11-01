@@ -318,8 +318,10 @@ pub struct GraphRackBankReport {
 pub struct BankUtilisation {
     /// Plan groups with at least one bound slot: one bank of `W` lanes each.
     pub banks: u32,
-    /// Pairs of partial banks the planner could have merged into one: one rack, one pool class,
-    /// intersecting level windows (issue #2136: a bank's window is the intersection over its
+    /// Pairs of partial banks the planner could have merged into one: one rack, one pool class
+    /// (or, in a console rack, either class: issue #2137 moves a fitting mono console remainder
+    /// into the stereo pool, so a pair it did not merge is counted whatever the objective
+    /// decided), intersecting level windows (issue #2136: a bank's window is the intersection over its
     /// members of `[asap', ALAP]` after placement, so no pair the sweep could not merge counts),
     /// one fold target, every member of one a subsequence of the other's leader program,
     /// together no more than `W` active lanes, and a merge that still binds every slot either bank
@@ -491,7 +493,10 @@ impl BankUtilisation {
                     && b_lanes < lanes
                     && a_lanes + b_lanes <= lanes
                     && a.rack == b.rack
-                    && a.class == b.class
+                    // Issue #2137: a mono and a stereo console remainder are one key, since the
+                    // planner may move the mono one into the stereo pool. An insert remainder
+                    // keeps its class.
+                    && (a.class == b.class || crate::banks::is_console_rack(a.rack))
                     && windows_intersect(window_of(a), window_of(b))
                     && matches!((fold_of(a), fold_of(b)), (Some(a), Some(b)) if a == b)
                     && (merge_binds((a_index, a), (b_index, b))
@@ -8292,10 +8297,17 @@ mod tests {
     /// of one per cohort. That is the failure F6 named and the only kind a digest cannot see, so
     /// this asserts the lane sets and the chain count, not the map.
     ///
-    /// Red mutation: derive the effect-chain candidate's class from anything but
+    /// Two rows. The half-mono row alternates the classes, so every `lanes`-wide cohort would be
+    /// half and half without the pool class. The 10 + 6 row (issue #2137) leaves a mono and a
+    /// stereo remainder that fit one bank at either width, so the rack planner moves the mono
+    /// remainder (`ch08`, `ch09`) to the stereo pool: the builtin stages must pool them there too.
+    ///
+    /// Red mutations: derive the effect-chain candidate's class from anything but
     /// `classes.class_of(track)` -- for instance hard-code `CohortPoolClass::Stereo` in
     /// `bind_rack_banks` -- and the strip's `chains` jumps from one per cohort to one per stage
-    /// per cohort while every digest here stays green.
+    /// per cohort while every digest here stays green; or let the builtin planner read the class
+    /// map from before #2137's move, and the 10 + 6 row's effect bank `ch08..ch15` matches no
+    /// builtin bank.
     #[test]
     fn the_two_planners_agree_on_every_track_class() {
         const BLOCKS: u64 = 12;
@@ -8303,104 +8315,113 @@ mod tests {
             return;
         };
         let lanes = width.lanes() as usize;
-        let mut model =
-            parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
-        // The half-mono shape: alternate tracks get the standing fixture's stereo mapping back, so
-        // every `lanes`-wide cohort would be half and half without the pool class.
-        for (index, track) in model.tracks.iter_mut().enumerate() {
-            if !index.is_multiple_of(2) {
-                track.right_source_channel = 1;
-            }
-        }
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&model, 2_070, &[], registry);
+        // Each row: its name, its track count, and the first stereo track (`None`: the odd ones).
+        for (row, count, tail) in [("half-mono", 64, None), ("10 + 6", 16, Some(10))] {
+            let stereo = |index: usize| tail.map_or(!index.is_multiple_of(2), |tail| index >= tail);
+            let mut model = mono_fixture_with_tracks(count);
+            for (index, track) in model.tracks.iter_mut().enumerate() {
+                if stereo(index) {
+                    track.right_source_channel = 1;
+                }
+            }
+            let artifact = compile_console_model_with_builtins(&model, 2_070, &[], registry);
+            // The class each track pools in, read from the rack plan: after #2137's move.
+            let [mono_pool, stereo_pool] = pooled_tracks(&artifact);
+            assert_eq!(mono_pool.len() + stereo_pool.len(), count, "{row}");
+            if row == "10 + 6" {
+                assert!(
+                    stereo_pool.contains("ch08") && stereo_pool.contains("ch09"),
+                    "{row}: the mono remainder pools as stereo"
+                );
+            }
+            let same_pool = |tracks: &[String]| {
+                tracks.iter().all(|track| mono_pool.contains(track))
+                    || tracks.iter().all(|track| stereo_pool.contains(track))
+            };
 
-        // Every builtin bank is class-homogeneous, which is the strip-stage planner's half.
-        let mono = |track: &str| {
-            track
-                .strip_prefix("ch")
-                .and_then(|index| index.parse::<usize>().ok())
-                .expect("fixture track id")
-                .is_multiple_of(2)
-        };
-        let mut builtin_lane_sets: Vec<Vec<String>> = Vec::new();
-        for bank in artifact.prepared_builtin_banks() {
-            let tracks: Vec<String> = bank
-                .members
-                .iter()
-                .map(|node| match node {
-                    GraphNodeId::TrackStage { track_id, .. } => track_id.as_str().to_owned(),
-                    other => panic!("a builtin bank named {other:?}"),
-                })
-                .collect();
-            assert!(
-                tracks.iter().all(|track| mono(track)) || tracks.iter().all(|track| !mono(track)),
-                "a builtin bank mixed the two pool classes: {tracks:?}"
+            // Every builtin bank is class-homogeneous, which is the strip-stage planner's half.
+            let mut builtin_lane_sets: Vec<Vec<String>> = Vec::new();
+            for bank in artifact.prepared_builtin_banks() {
+                let tracks: Vec<String> = bank
+                    .members
+                    .iter()
+                    .map(|node| match node {
+                        GraphNodeId::TrackStage { track_id, .. } => track_id.as_str().to_owned(),
+                        other => panic!("a builtin bank named {other:?}"),
+                    })
+                    .collect();
+                assert!(
+                    same_pool(&tracks),
+                    "{row}: a builtin bank mixed the two pool classes: {tracks:?}"
+                );
+                builtin_lane_sets.push(tracks);
+            }
+            assert_eq!(
+                builtin_lane_sets.len(),
+                3 * (count / lanes),
+                "{row}: three strip stages"
             );
-            builtin_lane_sets.push(tracks);
+
+            // And every effect bank covers one of those lane sets, in the same lane order. This
+            // is the agreement in the only form the merge can use.
+            let mut effect_lane_sets: Vec<Vec<String>> = Vec::new();
+            for bank in artifact.graph().effect_bank_members() {
+                let tracks: Vec<String> = bank
+                    .iter()
+                    .map(|member| member.track_id.as_str().to_owned())
+                    .collect();
+                assert!(
+                    same_pool(&tracks),
+                    "{row}: an effect bank mixed the two pool classes: {tracks:?}"
+                );
+                assert!(
+                    builtin_lane_sets.contains(&tracks),
+                    "{row}: an effect bank's lane set matches no strip-stage bank's: {tracks:?}"
+                );
+                effect_lane_sets.push(tracks);
+            }
+            assert_eq!(
+                effect_lane_sets.len(),
+                3 * (count / lanes),
+                "{row}: eq, comp, limiter"
+            );
+
+            // The consequence, counted: the whole strip is still one chain per cohort.
+            let (pcm, transposes, chains, slots, _, _, _) =
+                render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+            assert_eq!(
+                chains,
+                (count / lanes) as u64,
+                "{row}: one chain per cohort, on a session whose cohorts are pooled by class"
+            );
+            assert_eq!(slots, 6 * chains, "{row}: six slots per cohort");
+            assert_eq!(
+                transposes,
+                BLOCKS * chains,
+                "{row}: G5 holds under class pooling"
+            );
+            assert!(pcm.iter().flatten().any(|sample| *sample != 0.0), "{row}");
         }
-        assert_eq!(
-            builtin_lane_sets.len(),
-            3 * (64 / lanes),
-            "three strip stages"
-        );
-
-        // And every effect bank covers one of those lane sets, in the same lane order. This is the
-        // agreement in the only form the merge can use.
-        let mut effect_lane_sets: Vec<Vec<String>> = Vec::new();
-        for bank in artifact.graph().effect_bank_members() {
-            let tracks: Vec<String> = bank
-                .iter()
-                .map(|member| member.track_id.as_str().to_owned())
-                .collect();
-            assert!(
-                tracks.iter().all(|track| mono(track)) || tracks.iter().all(|track| !mono(track)),
-                "an effect bank mixed the two pool classes: {tracks:?}"
-            );
-            assert!(
-                builtin_lane_sets.contains(&tracks),
-                "an effect bank's lane set matches no strip-stage bank's: {tracks:?}"
-            );
-            effect_lane_sets.push(tracks);
-        }
-        assert_eq!(
-            effect_lane_sets.len(),
-            3 * (64 / lanes),
-            "eq, comp, limiter"
-        );
-
-        // The consequence, counted: the whole strip is still one chain per cohort.
-        let (pcm, transposes, chains, slots, _, _, _) =
-            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-        assert_eq!(
-            chains,
-            (64 / lanes) as u64,
-            "one chain per cohort, on a session whose cohorts are pooled by class"
-        );
-        assert_eq!(slots, 6 * chains, "six slots per cohort");
-        assert_eq!(transposes, BLOCKS * chains, "G5 holds under class pooling");
-        assert!(pcm.iter().flatten().any(|sample| *sample != 0.0));
     }
 
-    /// Mono-collapse M1, then issues #971 and #1098: a single odd track strands no pool remainder.
+    /// Mono-collapse M1, then issues #971, #1098 and #2137: a single odd track's padded bank takes
+    /// the mono remainder that fits beside it.
     ///
-    /// # What M1 measured here
+    /// # The history
     ///
-    /// An effect bank bound only when its group was **full**, so pooling by class had a remainder
-    /// cost that pooling by rack and level did not: a class whose pool is not a multiple of the lane
-    /// width stranded its tail on the per-node path. Under M1 alone, 63 mono tracks and one stereo
-    /// one bound seven full eight-lane cohorts and stranded seven tracks, and the lone stereo track
-    /// stranded too: 21 effect banks against the unsplit session's 24.
+    /// Under M1 alone an effect bank bound only when its group was full, so 63 mono tracks and one
+    /// stereo one stranded both remainders. #971 pooled the stranded mono remainder as stereo,
+    /// where it filled the odd track's cohort. #1098 padded every console group, so no remainder
+    /// stranded and none moved: `ceil(63 / W)` mono cohorts and the odd track alone in a padded
+    /// stereo one, one more bank per slot than the unsplit session.
     ///
-    /// # What issue #971 changed, and what #1098 changes
+    /// # What #2137 changes
     ///
-    /// #971 pooled the mono remainder as stereo, where it filled the odd track's cohort: pools of 56
-    /// and 8, and 24 banks. The strip is the session's console, and since #1098 every console group
-    /// binds, padded when partial, so no remainder strands and none is moved: the mono pool keeps
-    /// all 63 tracks, `ceil(63 / W)` cohorts, every one of which collapses, and the odd track banks
-    /// alone in a padded stereo cohort. That is one more group per slot than the unsplit session,
-    /// `3 * (ceil(63 / W) + 1)` banks: the padded bank the owner accepted (decision 12, H5), paid
-    /// for the collapse of the seven tracks #971 used to move.
+    /// The two remainders, `W - 1` mono tracks and the odd one, fit one bank. A padded mono bank
+    /// costs 0.61 of a stereo one (`MONO_BANK_WEIGHT`), so merging them saves 0.61 of a bank per
+    /// slot and the rule moves the mono remainder to the stereo pool: `64 / W` cohorts again, the
+    /// unsplit session's count, of which `64 / W - 1` are mono and collapse.
     ///
     /// It regroups lanes and never changes what a lane computes, so the digest assertions stand:
     /// both sessions render the bits the `Scalar` oracle renders.
@@ -8412,8 +8433,12 @@ mod tests {
     /// section's witness; the second arm keeps the mono source and inverts one side's polarity,
     /// which only the compile's `input_channel_symmetry()` conjoin reports. It groups alike, and
     /// asserts the grouping only: the bit claim is the first arm's.
+    ///
+    /// Red when the planner pads two remainders that fit one bank: with the #2137 move removed
+    /// (`console_remainder_tracks` returning no track) the split session binds
+    /// `3 * (ceil(63 / W) + 1)` banks, not `3 * 64 / W`.
     #[test]
-    fn a_single_odd_track_no_longer_strands_a_pool_remainder() {
+    fn the_console_remainder_rule_merges_a_fitting_pair() {
         const BLOCKS: u64 = 12;
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             return;
@@ -8436,38 +8461,42 @@ mod tests {
             3 * (64 / lanes),
             "every cohort of 64 is full"
         );
-        let assert_odd_track_pools_alone = |artifact: &PreparedGraphBuiltinsArtifact, lever| {
+        // The mono remainder: the last `lanes - 1` mono tracks, the cohort the odd track's
+        // removal left partial.
+        let remainder: BTreeSet<String> = (65 - lanes..64)
+            .map(|index| format!("ch{index:02}"))
+            .collect();
+        let assert_the_remainder_merges = |artifact: &PreparedGraphBuiltinsArtifact, lever| {
             assert_eq!(
                 artifact.graph().prepared_bank_count(),
-                3 * (63_usize.div_ceil(lanes) + 1),
-                "{lever}: every mono cohort, the padded remainder's included, and the odd \
-                 track's padded one"
+                3 * (64 / lanes),
+                "{lever}: the mono remainder merged into the odd track's bank"
             );
-            let pooled = pooled_tracks(artifact);
+            let [mono, stereo] = pooled_tracks(artifact);
             assert_eq!(
-                pooled[0],
-                BTreeSet::from_iter(
-                    (0..64)
-                        .filter(|index| *index != 7)
-                        .map(|index| format!("ch{index:02}"))
-                ),
-                "{lever}: the mono pool keeps every mono track"
+                stereo,
+                remainder
+                    .iter()
+                    .cloned()
+                    .chain(["ch07".to_owned()])
+                    .collect::<BTreeSet<_>>(),
+                "{lever}: the stereo pool is the odd track and the mono remainder"
             );
             assert_eq!(
-                pooled[1],
-                BTreeSet::from(["ch07".to_owned()]),
-                "{lever}: the stereo pool is the odd track alone"
+                mono.len(),
+                64 - lanes,
+                "{lever}: whole mono cohorts stay mono"
             );
         };
-        assert_odd_track_pools_alone(&split, "source mapping");
+        assert_the_remainder_merges(&split, "source mapping");
 
         // The second lever: a mono source whose input section is asymmetric (issue #969).
         let mut odd_input = uniform.clone();
         odd_input.tracks[7].builtins.left.polarity_invert = true;
         let split_input = compile_console_model_with_builtins(&odd_input, 2_099, &[], registry);
-        assert_odd_track_pools_alone(&split_input, "input section");
+        assert_the_remainder_merges(&split_input, "input section");
 
-        // Class A: splitting the pools regroups lanes and moves no bit.
+        // Class A: moving the remainder regroups lanes and moves no bit.
         let (unsplit_pcm, _, unsplit_chains, unsplit_shape_slots, ..) =
             render_console_builtins_blocks(unsplit, BLOCKS, Vec::new());
         let scalar = compile_console_oracle(&uniform, 2_076, &[]);
@@ -8480,11 +8509,10 @@ mod tests {
             [unsplit_chains, unsplit_shape_slots],
             [cohorts, STRIP_SLOTS_PER_COHORT * cohorts]
         );
-        let cohorts = (63_usize.div_ceil(lanes) + 1) as u64;
         assert_eq!(
             [split_chains, split_shape_slots],
             [cohorts, STRIP_SLOTS_PER_COHORT * cohorts],
-            "both planners pooled the tracks alike: one strip chain per cohort, padded ones too"
+            "both planners pooled the tracks alike: one strip chain per cohort"
         );
         let scalar_split = compile_console_oracle(&odd, 2_077, &[]);
         let (scalar_split_pcm, ..) =

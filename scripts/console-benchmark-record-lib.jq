@@ -158,6 +158,10 @@ def floor_pins:
       [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"],
     "sixty_four_track_console_half_mono":
       [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"],
+    # #2137: the mixed-class row is the half-mono row's strip and fixture, 37 mono + 27 stereo
+    # tracks; its merged remainders make eight full banks, so it carries the same inventory.
+    "sixty_four_track_console_mixed":
+      [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"],
     # The metered console row (#881). Its strip is the standing console's, but its meters are
     # arithmetic no ruling has inventoried, so it states no floor rather than the unmetered strip's,
     # and names no control rather than isolating the meters against a floor nobody derived.
@@ -230,13 +234,14 @@ def floor_shape:
    end);
 
 
-# The twenty-six session workloads, sorted: `WORKLOADS`'s fourteen (in emission order), the
+# The twenty-seven session workloads, sorted: `WORKLOADS`'s fourteen (in emission order), the
 # gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`), its
 # live-producer twin (#938, `LIVE_FED_WORKLOADS`), the metered console row (#881, `METERED_WORKLOADS`), the bus-and-send
 # row (#1227, `BUS_SEND_WORKLOADS`), the five console-strip rows (#1085,
-# `CONSOLE_STRIP_WORKLOADS`), the two packing rows (#1783, `PACKING_WORKLOADS`), and the
-# bypass-skip row it emits last (#2129, `BYPASS_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixteen_track_strip_bypassed","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_one_per_bank","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_console_toggle","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_live","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
+# `CONSOLE_STRIP_WORKLOADS`), the two packing rows (#1783, `PACKING_WORKLOADS`), the
+# bypass-skip row (#2129, `BYPASS_WORKLOADS`), and the mixed-class row it emits last (#2137,
+# `MIXED_CLASS_WORKLOADS`).
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixteen_track_strip_bypassed","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mixed","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_one_per_bank","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_console_toggle","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_live","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
 
 # #928, #965: how a session row's track inputs reach the graph. `played_planes` is a prepared
 # source set whose driver copies each claim's block on request and lends its played planes in
@@ -430,7 +435,9 @@ def session_kind_shape:
     .fixture_id == mono_console_fixture
   # The mixed-cohort row, derived in code from the mono fixture by putting the standing fixture's
   # stereo source mapping back on the odd tracks.
-  elif .workload_kind == "sixty_four_track_console_half_mono" then
+  # #2137: the mixed-class row, derived the same way with the stereo mapping on the last 27 tracks.
+  elif .workload_kind == "sixty_four_track_console_half_mono" or
+       .workload_kind == "sixty_four_track_console_mixed" then
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "eq+compressor+limiter" and
     .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and

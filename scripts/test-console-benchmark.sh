@@ -2,7 +2,7 @@
 # Console validator mutation suite. Hermetic: no workload, no timing, no binary.
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
-# mutated in turn and asserted red, so the aggregate's guarantees -- eighty records, both
+# mutated in turn and asserted red, so the aggregate's guarantees -- eighty-two records, both
 # rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, every
 # session row's pinned source feed, the class-A statements that neither the stationary smoother nor
 # a meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
@@ -1441,9 +1441,15 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" --argjson
   # with every console slot bypassed, rendering bits of its own.
   + [ (1, 2) as $round | $session
       | .workload_kind = "sixteen_track_strip_bypassed" | .tracks = 16
-      | .synthetic_fixture = true | .round = $round | .output_sha256 = ($a[0:62] + "72") ]')
+      | .synthetic_fixture = true | .round = $round | .output_sha256 = ($a[0:62] + "72") ]
+  # #2137: the mixed-class row of each round, appended last: 80-81. The mono fixture with the
+  # stereo mapping on its last 27 tracks, rendering bits of its own.
+  + [ (1, 2) as $round | $session
+      | .workload_kind = "sixty_four_track_console_mixed" | .fixture_id = mono_fixture
+      | .synthetic_fixture = true | .round = $round | .output_sha256 = ($a[0:62] + "73") ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the eighty-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the eighty-two-record set'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_mixed")] | .[]')" 'a set missing the mixed-class row'
 # #938: the live row renders the ring row bits in both rounds, and it is a row of the set. Both of
 # its rounds move together, so only the pair pin can refuse the first edit.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[72].output_sha256 = $c | .[73].output_sha256 = $c | .[]')" 'a live-producer row that rendered other bits than the ring row'
@@ -1592,7 +1598,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
     "sixteen_track_strip": 1.10, "sixty_four_track_app_shape": 2.90,
     "sixty_four_track_console_sparse": 4.10,
     "sixty_four_track_console_toggle": 4.20, "sixty_four_track_console_one_per_bank": 3.90,
-    "sixteen_track_strip_bypassed": 0.40
+    "sixteen_track_strip_bypassed": 0.40, "sixty_four_track_console_mixed": 4.39
   }[.workload_kind];
   def rescale:
     scale as $k |
@@ -1614,7 +1620,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
                  / .isolated_cycles_per_lane_sample)
         else . end ]')
 
-expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the eighty-record set with floor accounting'
+expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the eighty-two-record set with floor accounting'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_cycles_per_lane_sample = 3.0 | .[]')" 'an isolate that is not the subtraction it names'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_percent_of_floor = 88.0 | .[]')" 'an isolate percentage that does not follow from the two rows floors'
 # The control row moving is the same defect seen from the other side: the subtraction stops being

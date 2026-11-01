@@ -412,110 +412,23 @@ pub(crate) fn plan_rack_banks_placed<E: AsProjected>(
         .map(|(index, group)| bind_group(index, group))
         .collect::<Result<_, _>>()?;
 
-    // Issue #971: keep the mono pool a whole number of cohorts. The plan above is the trial.
-    // A mono track every one of whose effect groups is a *partial* mono group that is not padded
-    // banks nowhere in it, so it is moved to the stereo pool, where it renders dual but can fill a
-    // bank; the classes are then re-read and the session is planned again. A console group is
-    // always padded and always binds (#1098), so a track carrying a console slot banks somewhere
-    // and is never moved: see [`stranded_mono_tracks`] for why the demotion is retired there.
-    //
-    // The move is kept only if the new plan **binds** more effect banks than the trial did, and
-    // both counts are the banks the factories actually bound, not the slots the planner formed:
-    // a factory may decline a full group (the delay never banks; an effect built for another
-    // width declines that width), so a planned slot proves nothing. The check exists because a
-    // move can cost: a track in the stereo pool gives up its builtin stages' collapse, and it can
-    // join a stereo cohort in a way that loses a bank (a longer program taking the leader of
-    // stereo tracks whose programs are disjoint subsequences of it). The check is one decision
-    // for the whole move set, not one per stranded track (a follow-up recorded in #971's spec).
-    // Either way the map is updated **before** the builtin-stage planner reads it, so both
-    // planners still see one class per track.
+    // Issue #971: keep the mono pool a whole number of cohorts. A mono track every one of whose
+    // effect groups is a *partial* mono group that is not padded banks nowhere in this trial, so
+    // it is moved to the stereo pool, where it renders dual but can fill a bank
+    // ([`try_pool_move`]). A console group is always padded and always binds (#1098), so a track
+    // carrying a console slot banks somewhere and is never in this set: see
+    // [`stranded_mono_tracks`]. Issue #2137's console remainder move is decided by the compile
+    // over two whole plans, not here ([`moved_plan_is_better`]).
     let stranded = stranded_mono_tracks(&plan, width);
-    if !stranded.is_empty() {
-        let mut demoted = classes.clone();
-        for track in &stranded {
-            demoted.pool_as_stereo(track);
-        }
-        for level in &mut levels_in {
-            for candidate in &mut level.candidates {
-                candidate.class = demoted.class_of(&candidate.id.track_id);
-            }
-        }
-        let replan = plan_bank_groups(&levels_in, width)
-            .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
-
-        // Issue #1002: only the groups the move changed are bound for the comparison. A re-plan
-        // group equal to a trial group (same level, rack, class, leader program, members in the
-        // same lanes and the same active slots) binds to the same banks: the bind reads nothing
-        // but the group, the chains, the levels, the prepared entries, the width and the
-        // dispatch, and none of those moved. So the trial's banks for such a group are reused,
-        // and the two plans' bank counts differ only by the changed groups: the re-plan's new
-        // ones (bound here) against the trial's vanished ones (bound above). That is the
-        // comparison #971 made over whole plans, without binding the unchanged majority twice.
-        // Every member of a plan sits in exactly one group, so a group's first member finds the
-        // one trial group it could equal.
-        let trial_group_of: BTreeMap<&RackChainId, usize> = plan
-            .groups
-            .iter()
-            .enumerate()
-            .filter_map(|(index, group)| Some((group.members.first()?.as_ref()?, index)))
-            .collect();
-        let unchanged: Vec<Option<usize>> = replan
-            .groups
-            .iter()
-            .map(|group| {
-                let first = group.members.first()?.as_ref()?;
-                trial_group_of
-                    .get(first)
-                    .copied()
-                    .filter(|index| plan.groups[*index] == *group)
-            })
-            .collect();
-        // Issue #1001: the re-plan is speculative, and the trial above is already bound and
-        // valid, so a factory error while binding the re-plan's changed groups keeps the unmoved
-        // plan and its banks rather than failing the compile. This is the one exception to #95's
-        // rule that an `Err` fails the compile, and it rests on #95's own reasoning (a planner
-        // bug must not cost the user their session) applied to a plan that was only ever
-        // speculative. The banks bound before the error are dropped with it, and `classes` is
-        // still the unmoved map: only the clone was changed.
-        let fresh: Result<Vec<Option<BoundGroup>>, GraphDiagnostic> = replan
-            .groups
-            .iter()
-            .zip(&unchanged)
-            .enumerate()
-            .map(|(index, (group, unchanged))| match unchanged {
-                Some(_) => Ok(None),
-                None => bind_group(index, group).map(Some),
-            })
-            .collect();
-        if let Ok(mut fresh) = fresh {
-            let reused: BTreeSet<usize> = unchanged.iter().flatten().copied().collect();
-            let gained: usize = fresh.iter().flatten().map(Vec::len).sum();
-            let lost: usize = bound
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| !reused.contains(index))
-                .map(|(_, group)| group.len())
-                .sum();
-            if gained > lost {
-                let mut trial = core::mem::take(&mut bound);
-                for (index, (unchanged, fresh)) in unchanged.iter().zip(&mut fresh).enumerate() {
-                    let mut group = match unchanged {
-                        Some(trial_index) => core::mem::take(&mut trial[*trial_index]),
-                        None => fresh.take().unwrap_or_default(),
-                    };
-                    let cohort_group = u32::try_from(index)
-                        .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
-                    for (bank, slot) in &mut group {
-                        bank.cohort.group = cohort_group;
-                        slot.group = index;
-                    }
-                    bound.push(group);
-                }
-                *classes = demoted;
-                plan = replan;
-            }
-        }
-    }
+    try_pool_move(
+        &stranded,
+        &mut levels_in,
+        &mut plan,
+        &mut bound,
+        classes,
+        width,
+        &bind_group,
+    )?;
     // Issue #2138: the leftover pass, over the insert nodes the chain pass left per node.
     let mut windows = windows;
     let mut leftover_levels = BTreeMap::new();
@@ -1006,8 +919,10 @@ enum PlacementKey {
 /// it for placement or placed it as a follower. So the set counted at a (planner key, level) is the
 /// members the planner will group there, minus the nodes later stabs place at that level; the
 /// report's `planned_levels` exposes it and `bank_levels.rs` checks it against the plan. One limit:
-/// #971 may move a stranded mono track to the stereo pool after placement, which the count, taken
-/// on the classes before the move, does not see. With no bank width nothing merges.
+/// #971 may move a stranded mono track to the stereo pool inside the rack planner, after this
+/// placement, which the count, taken on the classes before that move, does not see. Issue #2137's
+/// console remainder move has no such limit: the compile places again with the moved classes
+/// before it plans the moved arm. With no bank width nothing merges.
 ///
 /// `chains` and `programs` are [`rack_chains`]' candidates.
 ///
@@ -1298,6 +1213,210 @@ fn route_fold_targets(model: &session::SessionModel) -> BTreeMap<String, Vec<Str
     targets
 }
 
+/// Binds one plan group's slots: the chain pass's binder, as [`try_pool_move`] calls it.
+type BindGroup<'a> =
+    dyn Fn(usize, &BankGroup<RackChainId>) -> Result<BoundGroup, GraphDiagnostic> + 'a;
+
+/// The cost of one mono-class effect bank, in hundredths of a stereo bank (issue #2137).
+///
+/// A mono bank collapses to one plane. Measured on the 64-track mono row-pair of the accepted
+/// console benchmark record `artifacts/steps/b13-2133/main/console-benchmark.accepted.jsonl`
+/// (p50 61.5 us collapsed against 100.2 us dual), a collapsed bank costs 0.61 of a dual one. Any
+/// weight in `(0, 1)` decides a plain remainder pair alike (`0.61 + 1.0 > 1.0`); the measured one
+/// decides a move that also changes a full group. Integers keep the compare exact.
+const MONO_BANK_WEIGHT: u64 = 61;
+/// The cost of one stereo-class effect bank, in the same unit as [`MONO_BANK_WEIGHT`].
+const STEREO_BANK_WEIGHT: u64 = 100;
+
+/// A whole rack plan's class-weighted bank cost (issue #2137): every bound slot of `report`, the
+/// chain pass's and the leftover pass's, at [`MONO_BANK_WEIGHT`] or [`STEREO_BANK_WEIGHT`].
+fn rack_plan_cost(report: &GraphRackBankReport) -> u64 {
+    report
+        .bound_slots
+        .iter()
+        .map(
+            |slot| match report.plan.groups.get(slot.group).map(|group| group.class) {
+                Some(CohortPoolClass::MonoSymmetricAtPrepare) => MONO_BANK_WEIGHT,
+                _ => STEREO_BANK_WEIGHT,
+            },
+        )
+        .sum()
+}
+
+/// Issue #2137's one decision: whether the whole plan built with the moved classes (`moved`) is
+/// better than the whole plan built without the move (`unmoved`). Both are complete -- placed,
+/// through the chain pass, #971's demotion and the leftover pass (#2138).
+///
+/// It is when its banks cost **strictly less** ([`rack_plan_cost`]) and **every** effect node
+/// `unmoved` banks is banked in `moved`: checked per node, so a move never sends one banked effect
+/// node to the per-node path, whatever it banks elsewhere. The weight prices banks only, so this
+/// is what keeps it from being paid for with per-node work it does not price.
+pub(crate) fn moved_plan_is_better(
+    unmoved: &GraphRackBankReport,
+    moved: &GraphRackBankReport,
+) -> bool {
+    let banked = |report: &GraphRackBankReport| -> BTreeSet<EffectNodeId> {
+        report
+            .bound_slots
+            .iter()
+            .flat_map(|slot| slot.members.iter().cloned())
+            .collect()
+    };
+    rack_plan_cost(moved) < rack_plan_cost(unmoved) && banked(unmoved).is_subset(&banked(moved))
+}
+
+/// Moves `candidates` to the stereo pool, re-plans, and keeps the re-plan only when it binds
+/// **more** effect banks than the trial `plan` (issue #971: a stranded remainder banks nowhere, so
+/// a move that lets it bind gains banks); otherwise `plan`, `bound`, `classes` and `levels_in` are left
+/// as they were. An empty `candidates` is a no-op.
+///
+/// Both counts are the banks the factories actually bound, not the slots the planner formed: a
+/// factory may decline a full group (the delay never banks; an effect built for another width
+/// declines that width), so a planned slot proves nothing. A move can cost: a track in the stereo
+/// pool gives up its builtin stages' collapse, and it can join a stereo cohort in a way that loses
+/// a bank (a longer program taking the leader of stereo tracks whose programs are disjoint
+/// subsequences of it). The decision is one for the whole move set, not one per track (a
+/// follow-up recorded in #971's spec). Either way `classes` is updated **before** the builtin-stage
+/// planner reads it.
+#[allow(clippy::too_many_arguments)]
+fn try_pool_move(
+    candidates: &[String],
+    levels_in: &mut [CohortLevel<RackChainId>],
+    plan: &mut BankPlan<RackChainId>,
+    bound: &mut Vec<BoundGroup>,
+    classes: &mut SessionPoolClasses,
+    width: BankWidth,
+    bind_group: &BindGroup<'_>,
+) -> Result<(), GraphDiagnostic> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let mut moved = classes.clone();
+    for track in candidates {
+        moved.pool_as_stereo(track);
+    }
+    let reclass = |levels_in: &mut [CohortLevel<RackChainId>], map: &SessionPoolClasses| {
+        for level in levels_in {
+            for candidate in &mut level.candidates {
+                candidate.class = map.class_of(&candidate.id.track_id);
+            }
+        }
+    };
+    reclass(levels_in, &moved);
+    let replan = plan_bank_groups(levels_in, width)
+        .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
+
+    // Issue #1002: only the groups the move changed are bound for the comparison. A re-plan
+    // group equal to a trial group (same level, rack, class, leader program, members in the
+    // same lanes and the same active slots) binds to the same banks: the bind reads nothing
+    // but the group, the chains, the levels, the prepared entries, the width and the
+    // dispatch, and none of those moved. So the trial's banks for such a group are reused,
+    // and the two plans' bank counts differ only by the changed groups: the re-plan's new
+    // ones (bound here) against the trial's vanished ones (bound above). That is the
+    // comparison #971 made over whole plans, without binding the unchanged majority twice.
+    // Every member of a plan sits in exactly one group, so a group's first member finds the
+    // one trial group it could equal.
+    let trial_group_of: BTreeMap<&RackChainId, usize> = plan
+        .groups
+        .iter()
+        .enumerate()
+        .filter_map(|(index, group)| Some((group.members.first()?.as_ref()?, index)))
+        .collect();
+    let unchanged: Vec<Option<usize>> = replan
+        .groups
+        .iter()
+        .map(|group| {
+            let first = group.members.first()?.as_ref()?;
+            trial_group_of
+                .get(first)
+                .copied()
+                .filter(|index| plan.groups[*index] == *group)
+        })
+        .collect();
+    // Issue #1001: the re-plan is speculative, and the trial above is already bound and
+    // valid, so a factory error while binding the re-plan's changed groups keeps the unmoved
+    // plan and its banks rather than failing the compile. This is the one exception to #95's
+    // rule that an `Err` fails the compile, and it rests on #95's own reasoning (a planner
+    // bug must not cost the user their session) applied to a plan that was only ever
+    // speculative. The banks bound before the error are dropped with it, and `classes` is
+    // still the unmoved map: only the clone was changed.
+    let fresh: Result<Vec<Option<BoundGroup>>, GraphDiagnostic> = replan
+        .groups
+        .iter()
+        .zip(&unchanged)
+        .enumerate()
+        .map(|(index, (group, unchanged))| match unchanged {
+            Some(_) => Ok(None),
+            None => bind_group(index, group).map(Some),
+        })
+        .collect();
+    let Ok(mut fresh) = fresh else {
+        reclass(levels_in, classes);
+        return Ok(());
+    };
+    let reused: BTreeSet<usize> = unchanged.iter().flatten().copied().collect();
+    let vanished = || {
+        bound
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !reused.contains(index))
+            .map(|(index, banks)| (plan.groups[index].class, banks))
+    };
+    let gained = || {
+        replan
+            .groups
+            .iter()
+            .zip(&fresh)
+            .filter_map(|(group, banks)| Some((group.class, banks.as_ref()?)))
+    };
+    let keep = gained().map(|(_, banks)| banks.len()).sum::<usize>()
+        > vanished().map(|(_, banks)| banks.len()).sum::<usize>();
+    if !keep {
+        reclass(levels_in, classes);
+        return Ok(());
+    }
+    let mut trial = core::mem::take(bound);
+    for (index, (unchanged, fresh)) in unchanged.iter().zip(&mut fresh).enumerate() {
+        let mut group = match unchanged {
+            Some(trial_index) => core::mem::take(&mut trial[*trial_index]),
+            None => fresh.take().unwrap_or_default(),
+        };
+        let cohort_group = u32::try_from(index)
+            .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
+        for (bank, slot) in &mut group {
+            bank.cohort.group = cohort_group;
+            slot.group = index;
+        }
+        bound.push(group);
+    }
+    *classes = moved;
+    *plan = replan;
+    Ok(())
+}
+
+/// The console tracks issue #2137's cost-weighted rule may move to the stereo pool: those in a
+/// fitting mono remainder of **any** console group ([`BankPlan::class_remainder_moves`]).
+///
+/// A track's class is global -- one per track, read by every rack and by the builtin-stage planner
+/// -- so a move changes every group the track sits in, not only the one that fits. The candidate
+/// is therefore named by any one fitting console remainder, and the compile's whole-plan
+/// comparison ([`moved_plan_is_better`]) decides. A track whose `pre_insert` remainder fits while
+/// its `post_insert` group does not (the post-insert level splits whenever only some tracks carry
+/// inserts) is a candidate. Insert remainders are not candidates here: they keep #971's rule
+/// ([`stranded_mono_tracks`]).
+pub(crate) fn console_remainder_tracks(
+    plan: &BankPlan<RackChainId>,
+    width: BankWidth,
+) -> Vec<String> {
+    let tracks: BTreeSet<String> = plan
+        .class_remainder_moves(width)
+        .into_iter()
+        .filter(|id| is_console_rack(rack_location(id.rack)))
+        .map(|id| id.track_id)
+        .collect();
+    tracks.into_iter().collect()
+}
+
 /// The mono-class tracks the trial `plan` strands (issue #971): every effect group each one sits in
 /// is a **partial** group of the mono pool that is not padded, so none of its effect slots binds.
 ///
@@ -1313,23 +1432,15 @@ fn route_fold_targets(model: &session::SessionModel) -> BTreeMap<String, Vec<Str
 ///
 /// A console group is padded ([`pads`]), so a partial mono console group binds one padded mono
 /// bank per slot: its members bank there, and a track that carries a console slot -- in a session
-/// with a console, every track -- is never stranded and never moved. That retires the demotion for
-/// console slots, rather than restating its objective, for three reasons:
+/// with a console, every track -- is never stranded and never moved by this rule. Its objective,
+/// bind count, also measures nothing for console groups (M3): moving a console remainder can only
+/// merge console groups, so their count never rises, and a merge that saves a padded bank scores
+/// as a loss.
 ///
-/// * **Its premise cannot hold.** The demotion rescues a track that banks nowhere. Under padding a
-///   console slot always banks, so no console track is ever in that state.
-/// * **Its objective measures nothing for console groups** (M3). The move is kept when it binds
-///   more banks. Moving a console remainder can only merge console groups -- the mono remainder
-///   leaves one padded bank per slot and the stereo pool gains at most one -- so their count never
-///   rises, and a merge that saves a padded bank scores as a loss. The count rises only when the
-///   move also fills an insert group, and that trades the track's collapse on every console slot
-///   for an insert remainder, which renders per node below [`min_padded_insert_members`] by choice
-///   and is padded from it (#888).
-/// * **The mono pool is the larger win.** A padded mono bank collapses to one plane, and the pool
-///   is worth about 36 % on the standing console row (M3). A restated objective (planes x banks)
-///   would move a mono remainder only when it fits in the stereo pool's padding at every slot and
-///   builtin stage, to save one one-plane padded bank per stage; weighing that against an insert
-///   remainder the move might fill needs a per-node cost that nothing has measured at four lanes.
+/// Issue #2137 decides console remainders instead, in the compile and over two whole plans: a
+/// mono remainder that fits the stereo remainder of its slot moves when the moved plan's banks cost
+/// less, a mono bank weighing [`MONO_BANK_WEIGHT`], and it banks every effect node the unmoved
+/// plan banks ([`console_remainder_tracks`], [`moved_plan_is_better`]).
 ///
 /// A session with no console keeps #971's rule for an insert remainder below
 /// [`min_padded_insert_members`]: it still renders per node, so a stranded mono track still banks
