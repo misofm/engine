@@ -1247,6 +1247,19 @@ impl GraphProjection {
         &self.front.nodes
     }
 
+    /// The graph's edges: the compiled plan's `spec.edges` (issue #2232).
+    #[must_use]
+    pub fn edges(&self) -> &[GraphEdge] {
+        &self.front.edges
+    }
+
+    /// The graph's deterministic topological order: the compiled plan's `sequential_schedule`
+    /// (issue #2232).
+    #[must_use]
+    pub fn schedule(&self) -> &[GraphNodeId] {
+        &self.front.schedule
+    }
+
     /// The graph's prepared routes.
     #[must_use]
     pub fn routes(&self) -> &[PreparedRoute] {

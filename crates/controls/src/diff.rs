@@ -2,10 +2,12 @@
 
 use session::SessionModel;
 
+use crate::automation::AutomationIndex;
 use crate::descriptor::{ControlDescriptor, ControlScope};
 use crate::effective::MonitorOverlay;
+use crate::effective::{Effective, effective};
 use crate::lane::Side;
-use crate::registry::{ControlRow, Source, list, resolve_in};
+use crate::registry::{ControlRow, Source, owner_count, owner_rows_in, resolve_in};
 use crate::view::ModelView;
 use crate::{ControlClass, strip};
 use session::{ControlAddress, Owner, Section};
@@ -34,7 +36,9 @@ pub struct ChangedControl {
 /// through its active flag, which is not a value. The host-local monitor values (solo) are not in
 /// a session, so they are the same in both.
 ///
-/// Allocation: the list of each model and the result, on the control thread.
+/// Allocation: one owner's rows of each model at a time, their VCA rows and the result, on the
+/// control thread (issue #2232: before, both whole lists were held at once, about 190 KB per
+/// console strip).
 #[must_use]
 pub fn changed_controls(
     current: &SessionModel,
@@ -42,40 +46,123 @@ pub fn changed_controls(
     sample_rate: u32,
 ) -> Option<Vec<ChangedControl>> {
     let overlay = MonitorOverlay::default();
-    let is_vca = |row: &ControlRow| matches!(row.address.owner, Owner::Vca(_));
-    let (before_vca, before): (Vec<_>, Vec<_>) =
-        list(current, &overlay, sample_rate).partition(is_vca);
-    let (after_vca, after): (Vec<_>, Vec<_>) = list(next, &overlay, sample_rate).partition(is_vca);
+    let (before_effective, after_effective) =
+        (effective(current, &overlay), effective(next, &overlay));
+    let (before_automation, after_automation) =
+        (AutomationIndex::of(current), AutomationIndex::of(next));
+    let mut before = OwnerRows::new(
+        ModelView::whole(current).indexed(&before_automation),
+        &before_effective,
+        &overlay,
+        sample_rate,
+    );
+    let mut after = OwnerRows::new(
+        ModelView::whole(next).indexed(&after_automation),
+        &after_effective,
+        &overlay,
+        sample_rate,
+    );
     let mut changed = Vec::new();
+    loop {
+        match (before.next(), after.next()) {
+            (Some(old), Some(new)) => note(&mut changed, old, new)?,
+            (None, None) => break,
+            // The two lists hold a different number of rows: their structure differs.
+            _ => return None,
+        }
+    }
     // The VCA rows are the same addresses, or no VCA row is compared.
-    let vca_rows = (before_vca.len() == after_vca.len()
-        && before_vca
+    if before.vca.len() == after.vca.len()
+        && before
+            .vca
             .iter()
-            .zip(&after_vca)
-            .all(|(old, new)| old.address == new.address))
-    .then_some((before_vca, after_vca));
-    if before.len() != after.len() {
+            .zip(&after.vca)
+            .all(|(old, new)| old.address == new.address)
+    {
+        for (old, new) in before.vca.into_iter().zip(after.vca) {
+            note(&mut changed, old, new)?;
+        }
+    }
+    Some(changed)
+}
+
+/// One pair of rows at the same position of the two lists: `None` when their addresses differ,
+/// else `new` joins `changed` when it is not derived and its value bits differ.
+fn note(changed: &mut Vec<ChangedControl>, old: ControlRow, new: ControlRow) -> Option<()> {
+    if old.address != new.address {
         return None;
     }
-    for (old, new) in before.into_iter().zip(after).chain(
-        vca_rows
-            .into_iter()
-            .flat_map(|(old, new)| old.into_iter().zip(new)),
-    ) {
-        if old.address != new.address {
-            return None;
-        }
-        if new.descriptor.class == ControlClass::Derived
-            || old.value.to_bits() == new.value.to_bits()
-        {
-            continue;
-        }
+    if new.descriptor.class != ControlClass::Derived && old.value.to_bits() != new.value.to_bits() {
         changed.push(ChangedControl {
             address: new.address,
             descriptor: new.descriptor,
         });
     }
-    Some(changed)
+    Some(())
+}
+
+/// [`list`]'s rows of one model, read one owner at a time through one buffer (issue #2232, as
+/// the provider catalog reads them since #1400b): [`Iterator::next`] yields the rows that are not
+/// a VCA's, in list order, and keeps the VCA rows in `vca`, in list order.
+struct OwnerRows<'m> {
+    view: ModelView<'m>,
+    effective: &'m Effective,
+    overlay: &'m MonitorOverlay,
+    sample_rate: u32,
+    owner: usize,
+    owners: usize,
+    /// The current owner's rows not yet yielded, last first.
+    pending: Vec<ControlRow>,
+    vca: Vec<ControlRow>,
+}
+
+impl<'m> OwnerRows<'m> {
+    fn new(
+        view: ModelView<'m>,
+        effective: &'m Effective,
+        overlay: &'m MonitorOverlay,
+        sample_rate: u32,
+    ) -> Self {
+        Self {
+            owners: owner_count(view.structure()),
+            view,
+            effective,
+            overlay,
+            sample_rate,
+            owner: 0,
+            pending: Vec::new(),
+            vca: Vec::new(),
+        }
+    }
+}
+
+impl Iterator for OwnerRows<'_> {
+    type Item = ControlRow;
+
+    fn next(&mut self) -> Option<ControlRow> {
+        loop {
+            if let Some(row) = self.pending.pop() {
+                if matches!(row.address.owner, Owner::Vca(_)) {
+                    self.vca.push(row);
+                    continue;
+                }
+                return Some(row);
+            }
+            if self.owner >= self.owners {
+                return None;
+            }
+            owner_rows_in(
+                self.view,
+                self.effective,
+                self.overlay,
+                self.owner,
+                self.sample_rate,
+                &mut self.pending,
+            );
+            self.pending.reverse();
+            self.owner += 1;
+        }
+    }
 }
 
 /// Whether any control row's `active` flag differs between `current` and `next` (#1631 D1).
