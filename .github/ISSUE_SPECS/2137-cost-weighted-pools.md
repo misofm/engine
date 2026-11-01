@@ -102,7 +102,7 @@ updated before the builtin planner reads it.
 - `the_console_remainder_rule_merges_a_fitting_pair` (graph-compiler, the 63 + 1 test rewritten):
   red when the move is removed (27 banks for 24 at W=8), when the remainder objective is bind count,
   or when the builtin planner reads the pre-move map. Bits equal the Scalar oracle.
-- `the_remainder_rule_never_trades_banked_work_for_per_node_work` (new): red when the weighted
+- `the_remainder_rule_never_trades_banked_work_for_per_node_work` (new; deleted in attempt 3): red when the weighted
   objective compares bank cost alone.
 - `a_console_track_stays_mono_when_filling_a_bank_costs_more` (doc updated): red when the remainder
   objective is bind count.
@@ -210,3 +210,60 @@ cases as in attempt 1.
 graph-compiler, host-core and capi; `realtime_policy`; `build-web-audioworklet.sh` and
 `check-web-audioworklet.sh`. All pass. I did not run the browser matrix again: no qualification
 fixture has a fitting remainder, so the browser plan output did not change beyond attempt 1.
+
+## Amendment (attempt 3, 2026-11-01)
+
+Verdict 2 was FAIL with one MAJOR: the members guard ran before the #2138 leftover pass. A move
+could therefore unbank leftover insert nodes. The verifier's shape at W=8 is 10 mono + 1 stereo
+with inserts by `index % 3`: base banks 33 members, attempt 2 banks 31. The re-placement compare
+also never compared against the plan with no move.
+
+**Root ruling: decide on the whole plan.** There is now one decision point, in the compile:
+
+1. Build the whole plan without the move: placement, chain pass, #971 and the leftover pass.
+2. If a console mono remainder fits, move those tracks to the stereo pool. Then build the whole
+   plan again: place again, then the chain pass, #971 and the leftover pass.
+3. Keep the moved plan only if its weighted bank cost is **strictly lower** and **every** effect
+   node that the unmoved plan banks is still banked. This is checked per node
+   (`moved_plan_is_better`).
+4. In every other case, keep the unmoved plan. If the moved plan fails to build, the unmoved plan
+   stands (#1001), and the compile does not fail.
+
+This replaces the in-planner weighted `try_pool_move` (now #971's alone) and attempt 2's
+re-placement loop. The stale `placement_levels` doc and the class-map comment are fixed. A
+test-only hook (`compile::set_remainder_move`) can compile with the move disabled or forced.
+
+### Tests (attempt 3)
+
+- `a_move_that_unbanks_a_leftover_node_is_refused` (new). First shape: the verifier's. `ch08` and
+  `ch09` stay mono, and 33 nodes are banked at W=8. It is red on attempt 2's head (`ch08` and
+  `ch09` move). Second shape: 1 mono + 9 stereo with multiband inserts. There the move banks
+  the same number of nodes, but not the same nodes. It is red under a total-count guard.
+- `the_remainder_rule_never_trades_banked_work_for_per_node_work` is deleted. The new test
+  supersedes it: every mutation that failed it also fails the new test.
+- `every_console_slot_binds_banked_at_every_track_count` expects each track's own class again,
+  except for tracks the compile moved. The test compiles each shape a second time with the move
+  disabled, and holds every move to that plan (cost strictly lower, every banked node kept). The
+  check is written out in the test, not called from the planner. It stays green under an
+  always-move mutation, because none of its shapes has a move the decision refuses. The
+  dedicated tests catch that mutation.
+- `a_track_moves_when_any_console_remainder_fits` stays green: 5 banks at W=8.
+
+### Sweep (attempt 3)
+
+The verifier's 4,620 shapes compiled at head, with the move disabled and with the move forced:
+
+- 1,603 shapes take a move. 311 shapes refuse a move whose plan builds.
+- **0** shapes lose a banked member, and **0** shapes cost more.
+- In 122 shapes, a total-count guard would have kept a move that loses a member. That is why the
+  check is per node.
+
+### Bits and checks (attempt 3)
+
+The full digest set, including the tap, send and meter shape, was compared at head `9186a4897`
+against base `263c27651`. All outputs, meters and 3,566 taps are identical. The bank counts are
+unchanged from attempt 2: 10 + 6: 6 → 4; 37 + 27: 18 → 16; insert + send + meter: 9 → 7; the
+verifier's insert shape: 7 → 5 at W=8.
+
+**Checks (attempt 3):** fmt, clippy (CI flags), release tests of rack-compiler, graph-compiler
+(`--all-features`), host-core, capi and wasm-gates, and `realtime_policy`: all pass.
