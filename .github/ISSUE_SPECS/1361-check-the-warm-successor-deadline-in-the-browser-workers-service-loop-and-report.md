@@ -2,7 +2,7 @@
 
 Stream C of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-8 (round-5 amendment), D15-10, D15-17).
 Slice of *Grow latency during playback by adopting a primed warm successor* (#1287). Code anchors
-verified on `main` at `6fb211594`.
+refreshed on `main` at `7d89eecc5` (#1360 attempt 1).
 
 ## Product outcome
 
@@ -29,7 +29,7 @@ cross-origin isolation.
 - *Publish the applied-revision watermark in the browser status* (#1349): `WebStatus`'s watermark
   words.
 - The browser feeds sources from its PCM pump, which fills every ring until it is full
-  (`pumpUntilFull`, `hosts/host-web/web/stem-store/pcm-pump.js:189`). Ring headroom covers `P_MAX`
+  (`pumpUntilFull`, `hosts/host-web/web/stem-store/pcm-pump.js:241`). Ring headroom covers `P_MAX`
   plus one quantum, and the browser host's per-source in-flight bound follows that ring (*Grow the
   default source ring by the warm-prime headroom*, #1406 D2 and D4), so a pump that keeps up keeps
   the `P + q` frames that an exact growth needs queued.
@@ -37,8 +37,8 @@ cross-origin isolation.
   statically and at runtime*, #1333 D1-D3) spans all of `miso_engine_web_v1_render`, so it covers
   the readiness check and the prime.
 - The browser qualification runs `npm run qualify` in `hosts/host-web/qualification` (the
-  `browser` job of `.github/workflows/qualification.yml:362`); result mutations live in `mutate()`
-  (`hosts/host-web/qualification/run.mjs:616`).
+  `browser` job of `.github/workflows/qualification.yml:460`); result mutations live in `mutate()`
+  (`hosts/host-web/qualification/run.mjs:1337`).
 
 ## Decisions frozen for this slice
 
@@ -132,3 +132,18 @@ cross-origin isolation.
 - *Replace the running browser session in the Rust host* (#1290).
 - *Export transaction apply and anchored seek from the browser engine module* (#1293).
 - *Send a session transaction to the browser control plane* (#1294).
+
+## Amendment (#1360 attempt 1, 2026-11-01: root rulings Q2, Q3)
+
+- **Deliverable 3 is dropped.** #1360 D1 is central (root ruling Q2): the control plane's public
+  `compile_children` passes `host_core::warm::production_config` for the session's rate and
+  quantum, and the browser boots through it (`hosts/host-web/src/lib.rs`), so every browser session
+  already holds the production `WarmConfig` and this slice adds no browser wiring. Gates 1 and 2
+  stay; their red without the config is now #1360's.
+- **Firefox is out** (owner ruling 2026-10-25): gate 4's qualification runs Chromium and WebKit
+  only. Gates 1 and 2 read "two engines".
+- **The browser already runs the deadline step.** The Worker's service loop and the single-mode tick
+  call `SessionState::service` (`hosts/host-web/src/lib.rs:2010`), which runs #1360 D2's step. A rig
+  that feeds each source only the block it renders and services after each block takes the
+  transition at the deadline (#1360's evidence: `the_plan_latency_record_follows_the_active_plan`).
+
