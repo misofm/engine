@@ -237,6 +237,12 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   source submit, plan resource and watermark queries, render, session and plan destroy), each with
   the handle and storage contract stated beside it; the allocator it runs under is
   `bench_support::alloc`'s.
+- `crates/capi/tests/latency_growth.rs` (#1360): the exported-C evidence that a latency-growing
+  edit is adopted exact by render, with no session call after the submit, and falls back only at a
+  session call past its deadline. Its unsafe is the C calls themselves (engine create and destroy,
+  compile, command submit, event dequeue, service, source submit, watermark query, render, session
+  and plan destroy), each with the handle and storage contract stated beside it, and the `Send`
+  impls of its session and plan halves, each used by one thread at a time.
 - `crates/capi/tests/resource_lifecycle.rs` (issue 119): the exported-C retained-allocation and
   disposal evidence. It calls the C entries, including the render entry, and owns
   `LifecycleAllocator`, a `GlobalAlloc` that delegates the original pointer and layout unchanged
@@ -396,8 +402,8 @@ Approved unsafe code that runs on a render thread, per entry:
   `dispose` and asserts it is zero, so a boot-time allocation inside a window fails it as a
   render-time one does.
 - Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs`,
-  `input_design_bounds.rs`, `empty_boot.rs`, `control_parity.rs` and `tools/audit/src/capi.rs` call the C
-  render entry from threads of their own. Their own unsafe is
+  `input_design_bounds.rs`, `empty_boot.rs`, `latency_growth.rs`, `control_parity.rs` and
+  `tools/audit/src/capi.rs` call the C render entry from threads of their own. Their own unsafe is
   the caller side of the C contract, apart from `resource_lifecycle.rs`'s `LifecycleAllocator`,
   which runs on the same test thread as its render calls.
 
