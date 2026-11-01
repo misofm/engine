@@ -247,7 +247,7 @@ use effect_contract::{
 use lane::Lane;
 use lane::kernels::{
     IndexedRamp, mix2x2_block, ordered_accumulate_block, pdc_delay_block, pdc_delay_move_block,
-    route_mix_column_ramps_block, route_mix_ramp_block, sum_into_block,
+    route_mix_column_ramps_block, sum_into_block,
 };
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort, ResidentFoldCohort};
 
@@ -1028,18 +1028,22 @@ impl RouteActivity {
     }
 }
 
-/// One live route's render state (issue #1220 D3-D6): the indexed ramp it mixes by, how far into
-/// that ramp it is, whether it is muted once the ramp ends, and its lane.
+/// One live route's render state (issue #1220 D3-D6): the indexed ramps it mixes by, how far into
+/// them it is, whether it is muted once they end, and its lane.
 ///
-/// At bind the ramp is settled on the route's prepared, gated coefficients, `position` is 0 and
-/// `mute` is the gate's `silences()`, so an idle live route mixes exactly the bits its
-/// `NodeKind::Route` would ([`route_mix_ramp_block`] of a settled ramp is [`mix2x2_block`] of its
-/// target) and is inactive exactly when that route would be.
+/// At bind both columns are settled on the route's prepared, gated coefficients at position 0
+/// and `mute` is the gate's `silences()`, so an idle live route mixes exactly the bits its
+/// `NodeKind::Route` would ([`route_mix_column_ramps_block`] of a settled ramp is
+/// [`mix2x2_block`] of its target) and is inactive exactly when that route would be.
+///
+/// A six-word route's own changes (a record, a fade) move both columns on one ramp at one
+/// position, which mixes [`lane::kernels::route_mix_ramp_block`] of that ramp bit for bit. Its columns part only
+/// when it takes a following predecessor's column ramps at a plan swap (#1713): each column then
+/// keeps its own move in flight, as the never-swapped route's would.
 pub(crate) struct LiveRoute {
-    /// The current ramp; `ramp.coefficients_at(position)` are the last mixed frame's coefficients.
-    ramp: IndexedRamp,
-    /// The ramp index of the last frame mixed, saturated at `ramp.length`; never wraps.
-    position: u32,
+    /// The current ramps, preallocated in the route's box; [`ColumnRamps::coefficients`] are the
+    /// last mixed frame's coefficients.
+    ramps: ColumnRamps,
     /// Whether the last applied record (or the prepared gate) silences the route.
     mute: bool,
     /// Whether the route's one consumer input carries a compensation delay (its `InputRef.delay`).
@@ -1073,8 +1077,7 @@ impl LiveRoute {
         control: Option<Box<crate::RouteControlLane>>,
     ) -> Self {
         Self {
-            ramp: IndexedRamp::settled(prepared),
-            position: 0,
+            ramps: ColumnRamps::settled(prepared),
             mute,
             delayed: false,
             route: u32::MAX,
@@ -1095,12 +1098,11 @@ impl LiveRoute {
             return false;
         }
         self.armed = Some(RouteArm {
-            target: self.ramp.target,
+            target: self.ramps.target(),
             mute: self.mute,
             ramp_samples,
         });
-        self.ramp = IndexedRamp::settled([0.0; 4]);
-        self.position = 0;
+        self.ramps = ColumnRamps::settled([0.0; 4]);
         self.mute = true;
         true
     }
@@ -1143,13 +1145,8 @@ impl LiveRoute {
                 test_only_count_route_drained(self.route as usize, applied, snapshot);
                 return applied;
             }
-            self.ramp = IndexedRamp::new(
-                self.ramp.coefficients_at(self.position),
-                record.target(),
-                record.length(),
-            );
+            self.ramps.restart(record.target(), record.length());
             self.mute = record.mute();
-            self.position = 0;
         }
         #[cfg(any(test, feature = "test-support"))]
         test_only_count_route_drained(self.route as usize, applied, snapshot);
@@ -1170,13 +1167,8 @@ impl LiveRoute {
             if self.mute && arm.mute {
                 return;
             }
-            self.ramp = IndexedRamp::new(
-                self.ramp.coefficients_at(self.position),
-                arm.target,
-                arm.ramp_samples,
-            );
+            self.ramps.restart(arm.target, arm.ramp_samples);
             self.mute = arm.mute;
-            self.position = 0;
         }
     }
 
@@ -1207,8 +1199,10 @@ impl LiveRoute {
     /// #1652 D3, MAJOR-3: [`Self::apply_pending`] at a six-word successor's first block after a
     /// following predecessor, with the columns its heard curve zeroed (`zeroed`) zeroed in the
     /// record's target, as the uninterrupted plan's block entry composes a record with the curve
-    /// before the curve's events. Returns the record's own target and mute, which the curve's
-    /// removal then reopens to ([`finish_six_word_carry`]); `None` with no new value.
+    /// before the curve's events. As that block entry does (R18-5, #1713), only a column whose
+    /// target bits change retargets, over the record's own length; a column whose bits hold keeps
+    /// its move. Returns the record's own target and mute, which the curve's removal then reopens
+    /// to ([`finish_six_word_carry`]); `None` with no new value.
     fn apply_pending_heard(
         &mut self,
         snapshot: LiveSnapshot,
@@ -1226,13 +1220,10 @@ impl LiveRoute {
                 }
             }
         }
-        self.ramp = IndexedRamp::new(
-            self.ramp.coefficients_at(self.position),
-            target,
-            record.length(),
-        );
+        for column in 0..COLUMNS.len() {
+            self.ramps.retarget_column(column, target, record.length());
+        }
         self.mute = record.mute() || zeroed == [true; 2];
-        self.position = 0;
         Some((record.target(), record.mute()))
     }
 
@@ -1241,49 +1232,45 @@ impl LiveRoute {
     /// ramp ends is mixed whole, and a delayed route keeps feeding its line.
     #[inline]
     const fn active(&self) -> bool {
-        !(self.mute && self.position >= self.ramp.length && !self.delayed)
+        !(self.mute && self.ramps.is_settled() && !self.delayed)
     }
 
-    /// D3: mix one block by the indexed ramp, then advance and saturate `position`.
+    /// D3: mix one block by the indexed ramps, then advance and saturate each position.
     #[inline]
     fn mix(&mut self, left: &mut [f32], right: &mut [f32]) {
-        route_mix_ramp_block::<FrameLane>(left, right, &self.ramp, self.position);
-        let frames = u32::try_from(left.len()).unwrap_or(u32::MAX);
-        self.position = core::cmp::min(self.position.saturating_add(frames), self.ramp.length);
+        self.ramps.mix(left, right);
     }
 
     /// Take the ramp state of `from`, the live route of the same ID in the plan this one displaces
-    /// (#1284 D2): the ramp, how far into it the route is, and its mute. The caller has applied the
+    /// (#1284 D2): the ramps, how far into them the route is, and its mute. The caller has applied the
     /// predecessor's pending value ([`Self::apply_pending`] under every snapshot) first, so the successor
     /// continues exactly where the predecessor's next block would have. The lane, the route index
     /// and the compensation flag stay: they are this plan's own, and so does its fade-in arm
     /// (#1877 D6): one this plan's preparation re-armed wins over the displaced arm, which
     /// [`carry_route`] fires first only when this plan holds none. A bounded copy of three fields.
     fn adopt(&mut self, from: &Self) {
-        self.ramp = from.ramp;
-        self.position = from.position;
+        self.ramps = from.ramps;
         self.mute = from.mute;
     }
 
-    /// Take a following predecessor's ramp state (#1652 D3, the curve removed): the ramp, its
-    /// position and its mute, as [`Self::adopt`] takes a six-word one's.
-    fn adopt_state(&mut self, ramp: IndexedRamp, position: u32, mute: bool) {
-        self.ramp = ramp;
-        self.position = position;
+    /// Take a following predecessor's ramp state (#1652 D3, #1713, the curve removed): its column
+    /// ramps verbatim, their positions and its mute, as [`Self::adopt`] takes a six-word one's.
+    /// A bounded copy into the route's own box.
+    fn adopt_state(&mut self, ramps: ColumnRamps, mute: bool) {
+        self.ramps = ramps;
         self.mute = mute;
     }
 
-    /// #1652 D3: at the first block after a following predecessor's ramp was adopted, retarget to
-    /// this plan's own prepared target `prepared` (gate `mute`) from the coefficients the route is
-    /// at over `length`, only when the bits differ. A send the removed curve held muted reopens
-    /// over the session mute length, as the curve's own jump would have.
-    fn retarget_carried(&mut self, prepared: [f32; 4], mute: bool, length: u32) {
+    /// #1652 D3, #1713: at the first block after a following predecessor's ramps were adopted,
+    /// retarget each column to this plan's own `target` (gate `mute`) from the coefficients it is
+    /// at over `length`, only when that column's bits differ ([`ColumnRamps::retarget_column`]):
+    /// a column whose bits hold keeps its move in flight. A column the removed curve held muted
+    /// reopens over the session mute length, as the curve's own jump would have.
+    fn retarget_carried(&mut self, target: [f32; 4], mute: bool, length: u32) {
         self.mute = mute;
-        if prepared.map(f32::to_bits) == self.ramp.target.map(f32::to_bits) {
-            return;
+        for column in 0..COLUMNS.len() {
+            self.ramps.retarget_column(column, target, length);
         }
-        self.ramp = IndexedRamp::new(self.ramp.coefficients_at(self.position), prepared, length);
-        self.position = 0;
     }
 }
 
@@ -1342,7 +1329,7 @@ struct FollowRouteArm {
 /// its right input (`lr`, `rr`, indices 1 and 3). A gate change of one source lane retargets its
 /// column alone, so an open column's move in flight keeps its own start, length and position,
 /// across an in-plan curve event and across a plan swap. A ramp's entries of the other column are
-/// never read. Mixed by [`route_mix_column_ramps_block`], which is [`route_mix_ramp_block`] bit
+/// never read. Mixed by [`route_mix_column_ramps_block`], which is [`lane::kernels::route_mix_ramp_block`] bit
 /// for bit when both columns hold one ramp at one position, so a settled following route mixes
 /// exactly what a prepared route of its target mixes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1432,6 +1419,14 @@ impl ColumnRamps {
         }
     }
 
+    /// Restart both columns on one ramp from the coefficients they are at to `target` over
+    /// `length`: a six-word route's record or fade (#1220 D3, #1363 D3), whatever bits change.
+    /// With both columns on one ramp at one position this is the one-ramp restart
+    /// `IndexedRamp::new(ramp.coefficients_at(position), target, length)` exactly.
+    fn restart(&mut self, target: [f32; 4], length: u32) {
+        *self = Self::shared(IndexedRamp::new(self.coefficients(), target, length), 0);
+    }
+
     /// Mix `left.len()` frames by both columns, then advance and saturate each position.
     #[inline]
     fn mix(&mut self, left: &mut [f32], right: &mut [f32]) {
@@ -1440,36 +1435,6 @@ impl ColumnRamps {
         for (position, ramp) in self.positions.iter_mut().zip(&self.ramps) {
             *position = core::cmp::min(position.saturating_add(frames), ramp.length);
         }
-    }
-
-    /// The one ramp a six-word successor holds (#1652 D3, the curve removed). Exact when both
-    /// columns have settled, or hold ramps of one length at one position (the composite of their
-    /// own entries is then the ramp both columns follow). Columns in different moves have no
-    /// one-ramp form: the successor ramps from the coefficients they are at to their targets
-    /// over the longer remaining length, which re-times the shorter move (a six-word route has
-    /// one ramp; recorded in #1652's U2a fold record).
-    fn one_ramp(&self) -> (IndexedRamp, u32) {
-        let [zero, one] = &self.ramps;
-        if self.is_settled() {
-            return (IndexedRamp::settled(self.target()), 0);
-        }
-        if zero.length == one.length && self.positions[0] == self.positions[1] {
-            let ramp = IndexedRamp {
-                start: by_column(zero.start, one.start),
-                step: by_column(zero.step, one.step),
-                target: self.target(),
-                length: zero.length,
-            };
-            return (ramp, self.positions[0]);
-        }
-        let remaining = core::cmp::max(
-            zero.length.saturating_sub(self.positions[0]),
-            one.length.saturating_sub(self.positions[1]),
-        );
-        (
-            IndexedRamp::new(self.coefficients(), self.target(), remaining),
-            0,
-        )
     }
 }
 // REALTIME_POLICY_END
@@ -5924,22 +5889,21 @@ fn mix_keeps_positive_zero(c: [f32; 4]) -> bool {
         && (keeps_positive_zero(c[2]) || keeps_positive_zero(c[3]))
 }
 
-/// Issue #2133: [`mix_keeps_positive_zero`] for every frame a live route's indexed ramp can mix.
-/// A settled ramp mixes by `target` alone. A ramping column's coefficient `fma(k, step, start)` is
-/// only bounded near its target, not signed (`IndexedRamp`'s subnormal-step note), so a column
-/// counts while ramping only when it does not move (`step` a zero, which leaves `start`) and keeps
-/// `+0.0` at both ends.
+/// Issue #2133: [`mix_keeps_positive_zero`] for every frame a live route's indexed ramps can mix,
+/// coefficient `c` read from its column's ramp (#1713). A ramping coefficient `fma(k, step,
+/// start)` is only bounded near its target, not signed (`IndexedRamp`'s subnormal-step note), so it
+/// counts only when it does not move (`step` a zero, which leaves `start`) and keeps `+0.0` at
+/// both ends. A settled ramp (`step` zero, `start` its target) mixes by `target` alone, which the
+/// same test decides.
 #[inline]
-fn ramp_keeps_positive_zero(ramp: &IndexedRamp) -> bool {
-    if ramp.length == 0 {
-        return mix_keeps_positive_zero(ramp.target);
-    }
-    let column = |c: usize| {
+fn ramps_keep_positive_zero(ramps: &ColumnRamps) -> bool {
+    let coefficient = |c: usize| {
+        let ramp = &ramps.ramps[c % 2];
         keeps_positive_zero(ramp.target[c])
             && ramp.step[c] == 0.0
             && keeps_positive_zero(ramp.start[c])
     };
-    (column(0) || column(1)) && (column(2) || column(3))
+    (coefficient(0) || coefficient(1)) && (coefficient(2) || coefficient(3))
 }
 
 /// Issue #2133: whether every input a reduction mixes this block is flagged silent. A route
@@ -5980,7 +5944,7 @@ fn sum_silent(inputs: &[u32], gated: Option<GatedInputs<'_>>, silent: &[bool]) -
 /// * A plain reduction (`sum`: an [`Runtime`] `silent_sum` op, or a bank member) is
 ///   [`sum_silent`].
 /// * A route is silent when it mixed, its one input is silent and its coefficients keep `+0.0`
-///   ([`mix_keeps_positive_zero`], [`ramp_keeps_positive_zero`]). A route that did not mix wrote
+///   ([`mix_keeps_positive_zero`], [`ramps_keep_positive_zero`]). A route that did not mix wrote
 ///   nothing: `false`, and its destination leaves it out of its sum instead.
 /// * A host processor with no graph input is the one writer whose words no engine fact describes
 ///   (no shipped host binds one, #965: a source set feeds every track input); its output is read,
@@ -6026,7 +5990,7 @@ fn op_output_silent(
                 || live.active(),
                 |activity| activity.is_active(live.route as usize),
             );
-            mixed && single(silent) && ramp_keeps_positive_zero(&live.ramp)
+            mixed && single(silent) && ramps_keep_positive_zero(&live.ramps)
         }
         NodeKind::Bound(_) if op.inputs.is_empty() => {
             let (left, right) = arena.read_stereo(op.output);
@@ -7460,8 +7424,10 @@ struct SixWordCarryCheck {
 /// a record (the join's, this plan's own value) composes with the curve the predecessor had
 /// heard and retargets over its own ramp, as a block entry before the curve's events would; then
 /// the curve's removal reopens the route to the record's own target (or, with no record, to the
-/// prepared target) over the session mute length, only on a bits change. A six-word route holds
-/// one ramp, so that reopening restarts it whole. Allocation-, lock- and panic-free.
+/// prepared target) over the session mute length, column by column and only on a bits change
+/// (#1713). The route holds its column ramps, so a record's column keeps the record's own length
+/// and only a column the curve zeroed reopens over the mute length. Allocation-, lock- and
+/// panic-free.
 fn finish_six_word_carry(
     live: &mut LiveRoute,
     check: SixWordCarryCheck,
@@ -7494,7 +7460,8 @@ fn finish_six_word_carry(
 /// * either -> seven: [`LiveFollowRoute::adopt`] (a following predecessor's cursors by column and
 ///   role, #1654 D3); its first block applies its cell with the heard values, places the cursors
 ///   that do not continue at its own node time and compares ([`LiveFollowRoute::begin_block`]).
-/// * seven -> six: [`LiveRoute::adopt_state`] of [`ColumnRamps::one_ramp`]; when the adopted
+/// * seven -> six: [`LiveRoute::adopt_state`] of the predecessor's column ramps verbatim (#1713),
+///   so each column keeps its own move in flight; when the adopted
 ///   target's bits differ from the successor's prepared target, or the heard curve zeroes a
 ///   column (a record the join wrote must compose with it), the comparison is left in `check` for
 ///   the successor's first block, which knows the block's jump lengths. Returns whether it left
@@ -7522,11 +7489,7 @@ fn carry_route(
                 into.adopt(from);
                 return false;
             }
-            (
-                ColumnRamps::shared(from.ramp, from.position),
-                from.mute,
-                None,
-            )
+            (from.ramps, from.mute, None)
         }
         CarriedRoute::Seven(from) => {
             from.apply_cell(LiveSnapshot::ALL, None);
@@ -7550,11 +7513,10 @@ fn carry_route(
             if into.armed.is_some() {
                 return false;
             }
-            // A six-word successor has rendered no block at the swap: its ramp is the settled
+            // A six-word successor has rendered no block at the swap: its ramps are the settled
             // prepared target bind gave it, and its mute is the prepared gate's.
-            let (prepared, prepared_mute) = (into.ramp.target, into.mute);
-            let (ramp, position) = ramps.one_ramp();
-            into.adopt_state(ramp, position, mute);
+            let (prepared, prepared_mute) = (into.ramps.target(), into.mute);
+            into.adopt_state(ramps, mute);
             let Some(from) = follow else {
                 return false;
             };
@@ -7565,7 +7527,9 @@ fn carry_route(
                 .iter()
                 .flatten()
                 .any(|column| column.roles.vca_count > 0);
-            if prepared.map(f32::to_bits) == ramp.target.map(f32::to_bits) && zeroed == [false; 2] {
+            if prepared.map(f32::to_bits) == ramps.target().map(f32::to_bits)
+                && zeroed == [false; 2]
+            {
                 into.mute = prepared_mute;
                 return false;
             }
@@ -21717,7 +21681,6 @@ mod follow_route_op_tests {
     //! not banked and mixes at `FrameLane`, so no case depends on a bank width.
     use super::{
         ColumnRamps, FrameLane, IndexedRamp, LiveFollowRoute, route_mix_column_ramps_block,
-        route_mix_ramp_block,
     };
     use crate::follow_route_tests::{mute_source, steps};
     use crate::{
@@ -21726,6 +21689,7 @@ mod follow_route_op_tests {
         TimelineStep, gated_route_coefficients,
     };
     use engine::realtime::{GatePin, LiveValuesSuperseded, RevisionGate};
+    use lane::kernels::route_mix_ramp_block;
 
     /// The session's mute jump length in these cases.
     const MUTE: u32 = 48;
@@ -22098,9 +22062,23 @@ mod follow_route_op_tests {
             bits((&left, &right)),
             bits((&expected_left, &expected_right))
         );
+        let ramps = route.route.ramps;
+        let [zero, one] = ramps.ramps;
         assert_eq!(
-            route.route.ramps.one_ramp(),
-            (ramp, frames as u32),
+            (
+                super::by_column(zero.start, one.start),
+                super::by_column(zero.step, one.step),
+                ramps.target(),
+                [zero.length, one.length],
+                ramps.positions,
+            ),
+            (
+                ramp.start,
+                ramp.step,
+                ramp.target,
+                [ramp.length; 2],
+                [frames as u32; 2]
+            ),
             "the ramp in flight is kept"
         );
     }
@@ -22374,10 +22352,7 @@ mod follow_route_op_tests {
                 !route.block(&mut left, &mut right),
                 "an armed route that read a record still waits silent"
             );
-            assert_eq!(
-                route.route.ramp.coefficients_at(route.route.position),
-                [0.0; 4]
-            );
+            assert_eq!(route.route.ramps.coefficients(), [0.0; 4]);
             route.route.fire_fade_in();
             let (mut left, mut right) = input(AFTER);
             assert!(route.block(&mut left, &mut right), "the fired route mixes");
@@ -22407,8 +22382,8 @@ mod follow_route_op_tests {
             assert!(!muted.block(&mut left, &mut right), "it waits silent");
             muted.route.fire_fade_in();
             assert_eq!(
-                (muted.route.ramp, muted.route.mute),
-                (IndexedRamp::settled([0.0; 4]), true),
+                (muted.route.ramps, muted.route.mute),
+                (ColumnRamps::settled([0.0; 4]), true),
                 "the fire to a mute leaves the route settled at rest, muted"
             );
             let (mut left, mut right) = input(AFTER);
@@ -22658,8 +22633,11 @@ mod follow_route_op_tests {
         fn six_to_seven_keeps_the_ramp_state_by_route_id() {
             let open = steps(&[0], &[0.0], 1 << 20);
             let mut predecessor = six_mid_ramp();
-            let ramp = predecessor.route.ramp;
-            assert_eq!(predecessor.route.position, BEFORE as u32);
+            let ramp = predecessor.route.ramps.ramps[0];
+            assert_eq!(
+                predecessor.route.ramps,
+                ColumnRamps::shared(ramp, BEFORE as u32)
+            );
             let expected = twin_block(ramp);
 
             let mut successor = Fixture::new([Some(&open), None], 0, MOVED);
@@ -22682,8 +22660,8 @@ mod follow_route_op_tests {
             // (b) The curve stepped on at timeline 500, before the swap block at 1100.
             let on = steps(&[0, 500], &[0.0, 1.0], 1 << 20);
             let mut predecessor = six_mid_ramp();
-            let at = predecessor.route.ramp.coefficients_at(BEFORE as u32);
-            let moving = predecessor.route.ramp;
+            let at = predecessor.route.ramps.coefficients();
+            let moving = predecessor.route.ramps.ramps[0];
             let mut successor = Fixture::new([Some(&on), None], 0, MOVED);
             carry_route(
                 CarriedRoute::Seven(&mut successor.route),
@@ -22722,9 +22700,15 @@ mod follow_route_op_tests {
             let open = steps(&[0], &[0.0], 1 << 20);
             let mut predecessor = seven_mid_ramp(&open);
             let ramps = predecessor.route.ramps;
-            let (ramp, position) = ramps.one_ramp();
-            assert_eq!(position, BEFORE as u32);
-            let expected = twin_block(ramp);
+            assert_eq!(ramps.positions, [BEFORE as u32; 2]);
+            let (mut twin_left, mut twin_right) = input(AFTER);
+            route_mix_column_ramps_block::<FrameLane>(
+                &mut twin_left,
+                &mut twin_right,
+                &ramps.ramps,
+                ramps.positions,
+            );
+            let expected = bits((&twin_left, &twin_right));
 
             let mut successor = Fixture::new([Some(&open), None], 0, MOVED);
             let (mut left, mut right) = input(AFTER);
@@ -22872,7 +22856,7 @@ mod follow_route_op_tests {
             use super::{
                 AFTER, BEFORE, CarriedRoute, ColumnRamps, FIRST, Fixture, FrameLane, IndexedRamp,
                 MOVED, MUTE, OPEN, RECORD_RAMP, Six, bits, carry_route, finish_six_word_carry,
-                gated, input, route_mix_column_ramps_block, route_mix_ramp_block, steps,
+                gated, input, route_mix_column_ramps_block, steps,
             };
             use crate::GraphBlockTime;
             use core::num::NonZeroUsize;
@@ -23269,20 +23253,31 @@ mod follow_route_op_tests {
                 );
             }
 
-            /// MAJOR-3 gate, six-word successor (record wins, the curve removed). A following
-            /// route whose left column the curve holds muted is carried into a six-word
-            /// successor, and the join writes the successor's record (a move to `MOVED` over
-            /// 256) for its first block. In the uninterrupted order the record composes with the
-            /// heard curve (left column still zero) and then the curve's removal reopens the
-            /// route to the record's own target over the mute length; a six-word route holds one
-            /// ramp, so that reopening restarts it: `IndexedRamp::new(at, record, 48)`.
+            /// MAJOR-3 gate, six-word successor (record wins, the curve removed; #1713 (a)). A
+            /// following route whose left column the curve holds muted is carried into a
+            /// six-word successor, and the join writes the successor's record (a move to `MOVED`
+            /// over 256) for its first block. In the uninterrupted order the record composes with
+            /// the heard curve (left column still zero), so only the open right column moves,
+            /// over the record's own 256; then the curve's removal reopens the zeroed left column
+            /// to the record's own target over the mute length. The swap block equals the
+            /// never-rebuilt twin's, whose curve turns off at the swap and whose record arrives
+            /// in the same block, and the columns hold lengths 48 and 256.
             ///
             /// Test value: red if the record governs alone (the six-word successor ramps to the
             /// record over 256 and the curve's removal never reopens the left column over the
-            /// mute length; mutation M1 of the brief), or if the record skips the heard curve.
+            /// mute length; mutation M1 of the brief), if the record skips the heard curve, or if
+            /// the reopening restarts the open column over the mute length (#1713 (a)).
             #[test]
             fn a_six_word_successors_record_composes_with_the_heard_curve_then_reopens() {
                 let on = steps(&[0], &[1.0], 1 << 20);
+                let off_at_swap = steps(&[0, FIRST + BEFORE as u64], &[1.0, 0.0], 1 << 20);
+                let mut twin = Fixture::new([Some(&off_at_swap), None], 0, OPEN);
+                let (mut left, mut right) = input(BEFORE);
+                assert!(twin.block(FIRST, None, &mut left, &mut right));
+                twin.write(MOVED, RECORD_RAMP);
+                let (mut twin_left, mut twin_right) = input(AFTER);
+                assert!(twin.block(FIRST + BEFORE as u64, None, &mut twin_left, &mut twin_right));
+
                 let mut predecessor = Fixture::new([Some(&on), None], 0, OPEN);
                 let (mut left, mut right) = input(BEFORE);
                 assert!(predecessor.block(FIRST, None, &mut left, &mut right));
@@ -23306,11 +23301,74 @@ mod follow_route_op_tests {
                 );
                 let (mut left, mut right) = input(AFTER);
                 assert!(successor.block(&mut left, &mut right));
+                assert_eq!(
+                    bits((&left, &right)),
+                    bits((&twin_left, &twin_right)),
+                    "the never-rebuilt twin"
+                );
                 let reopened = IndexedRamp::new(at, target, MUTE);
+                let record = IndexedRamp::new(at, target, RECORD_RAMP);
                 let (mut want_left, mut want_right) = input(AFTER);
-                route_mix_ramp_block::<FrameLane>(&mut want_left, &mut want_right, &reopened, 0);
+                route_mix_column_ramps_block::<FrameLane>(
+                    &mut want_left,
+                    &mut want_right,
+                    &[reopened, record],
+                    [0, 0],
+                );
                 assert_eq!(bits((&left, &right)), bits((&want_left, &want_right)));
-                assert_eq!(successor.route.ramp, reopened);
+                let ramps = successor.route.ramps;
+                assert_eq!(
+                    [ramps.ramps[0].length, ramps.ramps[1].length],
+                    [MUTE, RECORD_RAMP]
+                );
+            }
+
+            /// #1713 (b), seven -> six with columns in different moves. Both source lanes are
+            /// muted from the start; the left curve turns off at 40 and the right at 70, so at
+            /// the swap (80 frames in) each column is mid-way through its own reopening, at
+            /// positions 40 and 10 of the mute length. The rebuild removes both curves and the
+            /// successor is a six-word route of the same open target, so nothing retargets: it
+            /// takes the column ramps verbatim, and its swap block equals the never-rebuilt
+            /// twin's, each column ending at its own length.
+            ///
+            /// Test value: red if a six-word successor folds the two column moves into one ramp
+            /// (the removed `one_ramp`, which restarted both over the longer remaining length and
+            /// stretched the left column's last 8 frames to 38), or if it restarts them at all.
+            #[test]
+            fn a_six_word_successor_keeps_each_columns_move_in_flight() {
+                const SWAP: usize = 80;
+                let left_off = steps(&[0, FIRST + 40], &[1.0, 0.0], 1 << 20);
+                let right_off = steps(&[0, FIRST + 70], &[1.0, 0.0], 1 << 20);
+                let lanes = [Some(&left_off[..]), Some(&right_off[..])];
+                let opening = |route: &mut Fixture| {
+                    let (mut left, mut right) = input(SWAP);
+                    assert!(route.block(FIRST, None, &mut left, &mut right));
+                };
+                let mut twin = Fixture::new(lanes, 0, OPEN);
+                opening(&mut twin);
+                assert_eq!(twin.route.ramps.positions, [40, 10], "two moves in flight");
+                let (mut twin_left, mut twin_right) = input(AFTER);
+                assert!(twin.block(FIRST + SWAP as u64, None, &mut twin_left, &mut twin_right));
+
+                let mut predecessor = Fixture::new(lanes, 0, OPEN);
+                opening(&mut predecessor);
+                let carried = predecessor.route.ramps;
+                let mut successor = Six::new(gated(OPEN, [false; 2]), false);
+                let mut check = None;
+                assert!(!carry_route(
+                    CarriedRoute::Six(&mut successor.route),
+                    CarriedRoute::Seven(&mut predecessor.route),
+                    Some(&mut check),
+                ));
+                assert!(check.is_none(), "no column retargets");
+                assert_eq!(successor.route.ramps, carried, "the ramps verbatim");
+                let (mut left, mut right) = input(AFTER);
+                assert!(successor.block(&mut left, &mut right));
+                assert_eq!(
+                    bits((&left, &right)),
+                    bits((&twin_left, &twin_right)),
+                    "the never-rebuilt twin"
+                );
             }
         }
     }
