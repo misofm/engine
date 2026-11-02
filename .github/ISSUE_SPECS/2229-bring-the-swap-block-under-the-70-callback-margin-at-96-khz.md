@@ -62,3 +62,10 @@ So every structural edit during playback at 96 kHz / 128 takes a block near or o
   the 34 digests are equal at base `d201e3082` and at head. The swap subject at the frozen shape
   rendered untimed (9,281 blocks, 32 moves, 128 adoptions, 0 refusals) has one digest,
   `bf3b72b3c736e51b`, at both. Both harnesses are scratch only.
+- **Gate: passes.** One runner invocation each (one warmup, two rounds, controlled). p99 of the
+  32 observations, round 1 / round 2, against 933,333 ns. Base
+  (`artifacts/steps/swap-carry-2229-profile`, 82b899157): move 1,048,156 / 1,041,043; first
+  adoption 1,016,576 / 998,532. Head (`artifacts/steps/swap-carry-2229`): move 723,738 / 729,729;
+  adoption, growths 1-4, at most 817,397. At both, every swap block has at most 2 minor faults
+  and 0 allocator events. One invocation before each record was refused at the load precondition,
+  with no workload launched.
