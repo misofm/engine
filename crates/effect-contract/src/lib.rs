@@ -2633,6 +2633,71 @@ pub trait PreparedNativeEffectBank: Send {
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError>;
 
+    /// This bank as [`core::any::Any`], so that [`copy_lane_from`](Self::copy_lane_from) can find
+    /// a predecessor of its own type (issue #2229). The default is `None`: a bank that does not
+    /// name its type has no direct copy, and the carry takes the payload path.
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
+    }
+
+    /// The plan-swap carry's direct lane copy (issue #2229): copy lane `from_lane` of `from` into
+    /// this bank's lane `lane` without the state payload.
+    ///
+    /// `from` is the displaced plan's live bank, never a payload from outside, so a bank of this
+    /// bank's own type needs no encode, no validation and no redesign: it copies its words. The
+    /// contract is exactness against the payload path. After `Some`, this bank is bit for bit what
+    /// `from.snapshot_track_state_payload(from_lane)` and then
+    /// `self.restore_track_state_payload(lane)` would have left (every state word, every derived
+    /// flag), and the value is what [`payload_sections_agree`] would have said of that payload's
+    /// left and right sections. The caller has disengaged `from`'s chain, as for the payload path.
+    ///
+    /// `None` changes nothing and sends the caller to the payload path: the default, and an
+    /// implementation's answer for a predecessor of another type or sample rate, a lane the
+    /// payload path refuses (a padded one), or a state whose payload answer the copy does not
+    /// reproduce.
+    ///
+    /// Render-safe at a block boundary: allocation-free, lock-free and syscall-free, and bounded
+    /// by one lane's state size.
+    fn copy_lane_from(
+        &mut self,
+        lane: usize,
+        from: &dyn PreparedNativeEffectBank,
+        from_lane: usize,
+    ) -> Option<bool> {
+        let _ = (lane, from, from_lane);
+        None
+    }
+
+    /// This bank as mutable [`core::any::Any`], so that
+    /// [`swap_lanes_direct`](Self::swap_lanes_direct) can find a peer of its own type (issue
+    /// #2229). The default is `None`.
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        None
+    }
+
+    /// The lane swap's direct path (issue #2229): exchange lane `lane` with lane `peer_lane` of
+    /// `peer` (`None`: of this bank) without the state payload, as
+    /// [`copy_lane_from`](Self::copy_lane_from) copies without one.
+    ///
+    /// The contract is exactness against [`swap_bank_lanes`]'s payload path: after `true`, both
+    /// lanes, both banks' prepared defaults and every derived flag are bit for bit what its two
+    /// snapshots, its defaults rotation and its two restores would have left. `false` changes
+    /// nothing and sends the caller to the payload path: the default, and an implementation's
+    /// answer for a peer of another type or sample rate, a lane the payload path refuses (a
+    /// padded one), or a state whose payload answer the swap does not reproduce.
+    ///
+    /// Render-safe at a block boundary: allocation-free, lock-free and syscall-free, and bounded
+    /// by two lanes' state size.
+    fn swap_lanes_direct(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn PreparedNativeEffectBank>,
+        peer_lane: usize,
+    ) -> bool {
+        let _ = (lane, peer, peer_lane);
+        false
+    }
+
     /// Whether every designed per-lane word this bank's kernel reads for `lane` compares
     /// **bit-equal** between the left and the right channel.
     ///

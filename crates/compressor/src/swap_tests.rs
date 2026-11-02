@@ -161,3 +161,18 @@ fn a_swapped_lane_renders_as_its_unswapped_twin() {
         }
     });
 }
+
+/// Issue #2229 (`conformance::swap_probe::check_copy`): a lane the plan-swap carry copies directly
+/// from a compressor bank, with its ramps in flight and, on some seeds, under another link mode,
+/// holds, answers and renders exactly what the payload round trip leaves, and the copy reaches
+/// the allocator zero times. At `Simd4` and `Simd8`.
+#[test]
+fn a_directly_copied_lane_is_the_payload_round_trip() {
+    bench_support::alloc::assert_installed();
+    lane::each_vector_lane!(|L| {
+        for seed in 0..4_u64 {
+            let seed = 0x2229_c000 + seed;
+            swap_probe::check_copy(&mut CompressorProbe::<L>::new(seed), seed);
+        }
+    });
+}

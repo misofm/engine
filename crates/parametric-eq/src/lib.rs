@@ -3194,7 +3194,151 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             self.refresh_identity(section);
         }
     }
+
+    /// Per-lane vector `index` of this channel, in the order [`LANE_VECTORS`] counts (issue
+    /// #2229): the silence counter, then per section the two integrators and the six
+    /// coefficient, step and target words.
+    fn lane_vector(&self, index: usize) -> L {
+        let Some(index) = index.checked_sub(1) else {
+            return self.silence;
+        };
+        let slot = &self.sections[(index / VECTORS_PER_SECTION).min(EQ_SECTION_COUNT - 1)];
+        match index % VECTORS_PER_SECTION {
+            0 => slot.state.ic1,
+            1 => slot.state.ic2,
+            word @ 2..8 => coef_word(&slot.coef, word - 2),
+            word @ 8..14 => step_word(&slot.step, word - 8),
+            word => coef_word(&slot.target, word - 14),
+        }
+    }
+
+    /// [`lane_vector`](Self::lane_vector), mutably.
+    fn lane_vector_mut(&mut self, index: usize) -> &mut L {
+        let Some(index) = index.checked_sub(1) else {
+            return &mut self.silence;
+        };
+        let slot = &mut self.sections[(index / VECTORS_PER_SECTION).min(EQ_SECTION_COUNT - 1)];
+        match index % VECTORS_PER_SECTION {
+            0 => &mut slot.state.ic1,
+            1 => &mut slot.state.ic2,
+            word @ 2..8 => coef_word_mut(&mut slot.coef, word - 2),
+            word @ 8..14 => step_word_mut(&mut slot.step, word - 8),
+            word => coef_word_mut(&mut slot.target, word - 14),
+        }
+    }
+
+    /// Lane `track`'s targets as a restore commits them (issue #2229): under `prepared`, the
+    /// lane's prepared targets, the dedicated cuts keep their fixed families as
+    /// [`decode_configuration`](Self::decode_configuration) keeps them, and every numeric field's
+    /// zero is normalized as [`decode_track`](Self::decode_track) normalizes it.
+    fn settle_lane_targets(&mut self, track: usize, prepared: &[BandTarget; EQ_SECTION_COUNT]) {
+        for (section, target) in self.targets[track].iter_mut().enumerate() {
+            if section == HPF_SECTION || section == LPF_SECTION {
+                target.kind = prepared[section].kind;
+            }
+            for (index, value) in target.numeric().into_iter().enumerate() {
+                target.set_numeric(index, normalize_zero(value));
+            }
+        }
+    }
+
+    /// Every section's identity flags, refreshed as [`commit_track`](Self::commit_track) does.
+    fn refresh_identities(&mut self) {
+        for section in 0..EQ_SECTION_COUNT {
+            self.refresh_identity(section);
+        }
+    }
+
+    /// Copies lane `from_lane` of `from` into lane `track` directly (issue #2229): the words
+    /// [`commit_track`](Self::commit_track) would commit from `from`'s snapshot. The target
+    /// words are `from`'s own: live words of this effect at the one sample rate the caller has
+    /// checked, so they are the design `decode_track` would redo. `prepared` is this lane's
+    /// prepared targets ([`settle_lane_targets`](Self::settle_lane_targets)).
+    fn copy_lane_from(
+        &mut self,
+        track: usize,
+        from: &Self,
+        from_lane: usize,
+        prepared: &[BandTarget; EQ_SECTION_COUNT],
+    ) {
+        for index in 0..LANE_VECTORS {
+            lane_set(
+                self.lane_vector_mut(index),
+                track,
+                lane_get(from.lane_vector(index), from_lane),
+            );
+        }
+        for section in 0..EQ_SECTION_COUNT {
+            self.remaining[section][track] = from.remaining[section][from_lane];
+        }
+        self.targets[track] = from.targets[from_lane];
+        self.settle_lane_targets(track, prepared);
+        self.refresh_identities();
+    }
+
+    /// Exchanges lanes `a` and `b` of this channel directly (issue #2229), as two restores of
+    /// each other's snapshots would leave them: each lane's words as
+    /// [`copy_lane_from`](Self::copy_lane_from) states, with `prepared` the two lanes' prepared
+    /// targets after the defaults traded places.
+    fn swap_lanes_within(
+        &mut self,
+        a: usize,
+        b: usize,
+        prepared: [&[BandTarget; EQ_SECTION_COUNT]; 2],
+    ) {
+        for index in 0..LANE_VECTORS {
+            let vector = self.lane_vector_mut(index);
+            let mut words = [0.0_f32; MAX_LANES];
+            vector.store(&mut words[..L::WIDTH]);
+            words.swap(a, b);
+            *vector = L::load(&words[..L::WIDTH]);
+        }
+        for remaining in &mut self.remaining {
+            remaining.swap(a, b);
+        }
+        self.targets.swap(a, b);
+        self.settle_lane_targets(a, prepared[0]);
+        self.settle_lane_targets(b, prepared[1]);
+        self.refresh_identities();
+    }
+
+    /// [`swap_lanes_within`](Self::swap_lanes_within) between lane `a` of this channel and lane
+    /// `b` of `other`.
+    fn swap_lanes_across(
+        &mut self,
+        a: usize,
+        other: &mut Self,
+        b: usize,
+        prepared: [&[BandTarget; EQ_SECTION_COUNT]; 2],
+    ) {
+        for index in 0..LANE_VECTORS {
+            let (own, theirs) = (self.lane_vector_mut(index), other.lane_vector_mut(index));
+            let mut own_words = [0.0_f32; MAX_LANES];
+            let mut their_words = [0.0_f32; MAX_LANES];
+            own.store(&mut own_words[..L::WIDTH]);
+            theirs.store(&mut their_words[..L::WIDTH]);
+            core::mem::swap(&mut own_words[a], &mut their_words[b]);
+            *own = L::load(&own_words[..L::WIDTH]);
+            *theirs = L::load(&their_words[..L::WIDTH]);
+        }
+        for (own, theirs) in self.remaining.iter_mut().zip(&mut other.remaining) {
+            core::mem::swap(&mut own[a], &mut theirs[b]);
+        }
+        core::mem::swap(&mut self.targets[a], &mut other.targets[b]);
+        self.settle_lane_targets(a, prepared[0]);
+        other.settle_lane_targets(b, prepared[1]);
+        self.refresh_identities();
+        other.refresh_identities();
+    }
 }
+
+/// The per-lane vectors of one section of a channel: two integrators and six coefficient, six
+/// step and six target words (issue #2229).
+const VECTORS_PER_SECTION: usize = 2 + 3 * EQ_COEFFICIENT_WORDS;
+
+/// The per-lane vectors of one channel: the silence counter and every section's (issue #2229).
+/// [`Channel::lane_vector`] numbers them.
+const LANE_VECTORS: usize = 1 + EQ_SECTION_COUNT * VECTORS_PER_SECTION;
 // REALTIME_POLICY_END
 
 /// Stateless native factory for prepared parametric EQs.
@@ -4347,6 +4491,100 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
             self.silent_fixed_point = false;
         }
         result
+    }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
+    /// Issue #2229: a predecessor EQ bank of this width and lane type, at this sample rate, into
+    /// an active lane, by [`Channel::copy_lane_from`]. The answer is whether its two channels'
+    /// snapshot words agree, which is what the payload's sections would say. The rest claim is
+    /// withdrawn as a restore withdraws it.
+    fn copy_lane_from(
+        &mut self,
+        lane: usize,
+        from: &dyn PreparedNativeEffectBank,
+        from_lane: usize,
+    ) -> Option<bool> {
+        let from = from.as_any()?.downcast_ref::<Self>()?;
+        if lane >= W || from_lane >= W || !self.active[lane] || from.sample_rate != self.sample_rate
+        {
+            return None;
+        }
+        let mut left = [0_u32; STATE_LANE_WORDS];
+        let mut right = [0_u32; STATE_LANE_WORDS];
+        from.left.snapshot_track(from_lane, &mut left);
+        from.right.snapshot_track(from_lane, &mut right);
+        let [prepared_left, prepared_right] = &self.initial[lane];
+        self.left
+            .copy_lane_from(lane, &from.left, from_lane, prepared_left);
+        self.right
+            .copy_lane_from(lane, &from.right, from_lane, prepared_right);
+        self.silent_fixed_point = false;
+        Some(left == right)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
+    /// Issue #2229: two active lanes of this bank, or of a peer EQ bank of this type at this
+    /// sample rate. The prepared defaults trade places as the payload swap rotates them, then
+    /// each lane takes the other's words under its new defaults
+    /// ([`Channel::swap_lanes_within`], [`Channel::swap_lanes_across`]), and the rest claims are
+    /// withdrawn as the two restores withdraw them.
+    fn swap_lanes_direct(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn PreparedNativeEffectBank>,
+        peer_lane: usize,
+    ) -> bool {
+        if lane >= W || peer_lane >= W || !self.active[lane] {
+            return false;
+        }
+        match peer {
+            None => {
+                if !self.active[peer_lane] {
+                    return false;
+                }
+                self.initial.swap(lane, peer_lane);
+                self.initial_words.swap(lane, peer_lane);
+                let [own_left, own_right] = &self.initial[lane];
+                let [peer_left, peer_right] = &self.initial[peer_lane];
+                self.left
+                    .swap_lanes_within(lane, peer_lane, [own_left, peer_left]);
+                self.right
+                    .swap_lanes_within(lane, peer_lane, [own_right, peer_right]);
+            }
+            Some(peer) => {
+                let Some(peer) = peer.as_any_mut().and_then(|any| any.downcast_mut::<Self>())
+                else {
+                    return false;
+                };
+                if !peer.active[peer_lane] || peer.sample_rate != self.sample_rate {
+                    return false;
+                }
+                core::mem::swap(&mut self.initial[lane], &mut peer.initial[peer_lane]);
+                core::mem::swap(
+                    &mut self.initial_words[lane],
+                    &mut peer.initial_words[peer_lane],
+                );
+                let [own_left, own_right] = &self.initial[lane];
+                let [peer_left, peer_right] = &peer.initial[peer_lane];
+                self.left
+                    .swap_lanes_across(lane, &mut peer.left, peer_lane, [own_left, peer_left]);
+                self.right.swap_lanes_across(
+                    lane,
+                    &mut peer.right,
+                    peer_lane,
+                    [own_right, peer_right],
+                );
+                peer.silent_fixed_point = false;
+            }
+        }
+        self.silent_fixed_point = false;
+        true
     }
 
     fn lane_default_bytes(&self) -> Option<usize> {

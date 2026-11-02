@@ -393,3 +393,92 @@ pub fn check<P: Probe>(probe: &mut P, seed: u64) {
     rig.block(1 + below(quantum), nothing);
     rig.assert_payloads("after a full reset");
 }
+
+/// Runs the carry-copy case on `probe` (issue #2229).
+///
+/// The claim, stated per lane: a lane that
+/// `PreparedNativeEffectBank::copy_lane_from` copies from a bank of its own type holds, answers
+/// and renders exactly what the payload round trip of the plan-swap carry
+/// (`snapshot_track_state_payload`, then `restore_track_state_payload`) leaves, and the copy
+/// reaches the allocator zero times.
+///
+/// The schedule: `WARM` blocks of random lengths and random automation, and one block shorter
+/// than the ramps on which every strip automates every parameter. Then lane `i` of A, with a ramp
+/// in flight, is copied into lane `j` of B directly and into lane `j` of B's twin through the
+/// payload; the two answers (the copy's and `effect_contract::payload_sections_agree` of the
+/// payload), both banks' rest masks and the lane's designed symmetry must agree, and every
+/// strip's payload must equal its twin's. Then one block that automates nothing and `AFTER`
+/// random blocks, each strip's output bits and report equal to its twin's.
+///
+/// # Panics
+///
+/// Panics when the copy declines, when any of those differ, when the copy reaches the allocator,
+/// or when the schedule does not reach the copied lane with a ramp in flight.
+pub fn check_copy<P: Probe>(probe: &mut P, seed: u64) {
+    let lanes = probe.lanes();
+    let quantum = probe.quantum() as usize;
+    let sizes = probe.sizes();
+    let version = probe.state_layout_version();
+    let banks = [probe.bind(0), probe.bind(1), probe.bind(0), probe.bind(1)];
+    let mut draw = SplitMix64::new(seed);
+    let mut below = |bound: usize| (draw.next_u64() % bound.max(1) as u64) as usize;
+    let mut rig = Rig {
+        probe,
+        banks,
+        place: (0..2 * lanes).map(|s| (s / lanes, s % lanes)).collect(),
+        lanes,
+        sizes,
+        scratch: Vec::new(),
+        first_sample: 0,
+        block: 0,
+        context: format!("W{lanes} seed {seed:#x} copy"),
+    };
+    for _ in 0..WARM {
+        rig.block(1 + below(quantum), |_| Automate::Random);
+    }
+    rig.block(1 + below(SHORT.min(quantum)), |_| Automate::Every);
+    let (from, into) = (below(lanes), below(lanes));
+    assert!(
+        rig.in_flight(0, from),
+        "{}: lane {from} of A has no ramp in flight at the copy",
+        rig.context
+    );
+    let context = format!("{} (0, {from}) -> (1, {into})", rig.context);
+
+    // The payload round trip, into B's twin.
+    let [common, left, right] = payload(rig.banks[0].as_ref(), from, sizes);
+    let restored = rig.banks[3].restore_track_state_payload(
+        into as u32,
+        version,
+        effect_contract::StatePayloadInput::new(&common, &left, &right, sizes)
+            .expect("the prepared sizes"),
+    );
+    assert_eq!(restored, Ok(()), "{context}: the payload restore");
+    let agree = effect_contract::payload_sections_agree(&left, &right);
+
+    // The direct copy, into B, measured after a warm-up copy that writes the same words.
+    let [a, b, ..] = &mut rig.banks;
+    let mut answer = None;
+    let mut call = || answer = b.copy_lane_from(into, a.as_ref(), from);
+    call();
+    let heap = rig.probe.heap_calls(&mut call);
+    assert_eq!(answer, Some(agree), "{context}: the copy's answer");
+    assert_eq!(heap, 0, "{context}: the copy reached the allocator");
+
+    assert_eq!(
+        rig.banks[1].lanes_at_rest(),
+        rig.banks[3].lanes_at_rest(),
+        "{context}: the rest masks"
+    );
+    assert_eq!(
+        rig.banks[1].lane_channel_symmetry(into),
+        rig.banks[3].lane_channel_symmetry(into),
+        "{context}: the designed symmetry"
+    );
+    rig.assert_payloads("after the copy");
+    rig.block(1 + below(quantum), |_| Automate::Nothing);
+    for _ in 0..AFTER {
+        rig.block(1 + below(quantum), |_| Automate::Random);
+    }
+    rig.assert_payloads("at the end");
+}
