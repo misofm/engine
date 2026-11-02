@@ -1099,6 +1099,10 @@ thread_local! {
     static TEST_NEXT_SOURCE_READ_OFFSET: core::cell::Cell<Option<u64>> =
         const { core::cell::Cell::new(None) };
     static FORCE_FULL_PREPARATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// Whether this thread's structural rebuilds charge no transition row and skip the
+    /// admission before preparation (issue #2234), as `(no_row, no_pre_check)`.
+    static TEST_TRANSITION_ADMISSION: core::cell::Cell<(bool, bool)> =
+        const { core::cell::Cell::new((false, false)) };
     /// Whether the next transition re-preparation across a donor refuses (#1397 deliverable 3).
     static TEST_REFUSE_REPREPARE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     /// The strips the next `warm_lead` answer restarts whole with a zero lead, in place of the
@@ -1192,6 +1196,15 @@ pub(crate) fn take_test_next_source_read_offset() -> Option<u64> {
 #[cfg(feature = "test-support")]
 pub fn test_force_full_preparation(force: bool) {
     FORCE_FULL_PREPARATION.with(|state| state.set(force));
+}
+
+/// Makes this thread's structural rebuilds charge no transition-planning row when `no_row`, and
+/// skip the replacement admission before preparation when `no_pre_check` (issue #2234). A test
+/// bisects one replace's smallest admitting peak with and without each, so the two admissions'
+/// rows are seen apart.
+#[cfg(feature = "test-support")]
+pub fn test_transition_admission(no_row: bool, no_pre_check: bool) {
+    TEST_TRANSITION_ADMISSION.with(|state| state.set((no_row, no_pre_check)));
 }
 
 /// Makes this thread's service steps leave every displaced plan in the retirement queue while
@@ -5835,10 +5848,17 @@ where
             debug_assert!(core::ptr::eq(compiled.normalized_model(), base.committed));
             host_core::strip_transition_ceiling(compiled)
         };
+        #[cfg(feature = "test-support")]
+        let (transition_bytes, pre_check) = {
+            let (no_row, no_pre_check) = TEST_TRANSITION_ADMISSION.with(core::cell::Cell::get);
+            (if no_row { 0 } else { transition_bytes }, !no_pre_check)
+        };
+        #[cfg(not(feature = "test-support"))]
+        let pre_check = true;
         // Issue #2194: the candidate's projected effect bytes beside every plan and model held,
         // before any of it is prepared. The transition across a donor is not admitted again (the
         // donor's submit admitted it, below).
-        if !fallback {
+        if !fallback && pre_check {
             self.admit_prospective_projection(
                 prospective,
                 base,

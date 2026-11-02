@@ -820,13 +820,16 @@ impl RuntimePreparer for CountingPreparer {
 /// Issue #2234: a `SESSION_REPLACE` that adds a bus to 64 tracks, under a replacement peak that
 /// holds the candidate's rows but not the transition the commit plans after preparation
 /// (`host_core::strip_transition_ceiling` of the committed model), is refused
-/// `control.resource.replacement_peak` before the candidate is prepared. The smallest peak that
-/// admits the replace is found by bisection; half the ceiling below it, the admission before
-/// preparation refuses, as the exact admission after preparation does (#2199 D3).
+/// `control.resource.replacement_peak` before the candidate is prepared. The smallest peaks that
+/// admit the replace are found by bisection. With the admission before preparation skipped, the
+/// exact admission's smallest peak falls by exactly the row when the row is not charged; with both
+/// admissions, half the row below the smallest peak, the admission before preparation refuses, as
+/// the exact admission after preparation does (#2199 D3).
 ///
-/// Test value: red when the admission before preparation leaves the transition out (the replace
-/// is then prepared and refused only after), which no other test sees: the C ABI's exact-boundary
-/// tests leave the replacement peak unbounded.
+/// Test value: red when the row is left out of the admission before preparation (the replace is
+/// then prepared and refused only after), of the exact admission after it, or of the shared
+/// replacement-peak fit (a near-budget replace then plans its transition past the budget), which
+/// no other test sees: the C ABI's exact-boundary tests leave the replacement peak unbounded.
 #[test]
 fn a_replace_whose_transition_cannot_fit_is_refused_before_it_is_prepared() {
     let booted_model = model(&delay_document(64, 0));
@@ -896,16 +899,26 @@ fn a_replace_whose_transition_cannot_fit_is_refused_before_it_is_prepared() {
             Err(error) => panic!("{error:?}"),
         }
     };
-    let (mut refused, mut admitted) = (0_u64, 1_u64 << 40);
-    assert!(attempt(admitted).0, "the replace fits a roomy peak");
-    while admitted - refused > 1 {
-        let middle = refused + (admitted - refused) / 2;
-        if attempt(middle).0 {
-            admitted = middle;
-        } else {
-            refused = middle;
+    // The smallest replacement peak that admits the replace, with or without the row and the
+    // admission before preparation (`control_plane::test_transition_admission`).
+    let smallest = |no_row: bool, no_pre_check: bool| {
+        control_plane::test_transition_admission(no_row, no_pre_check);
+        let (mut refused, mut admitted) = (0_u64, 1_u64 << 40);
+        assert!(attempt(admitted).0, "the replace fits a roomy peak");
+        while admitted - refused > 1 {
+            let middle = refused + (admitted - refused) / 2;
+            if attempt(middle).0 {
+                admitted = middle;
+            } else {
+                refused = middle;
+            }
         }
-    }
+        control_plane::test_transition_admission(false, false);
+        admitted
+    };
+    let exact = smallest(false, true);
+    let exact_without_row = smallest(true, true);
+    let admitted = smallest(false, false);
     let committed = compile_session(
         &booted_model,
         session::CompileCaps {
@@ -919,10 +932,15 @@ fn a_replace_whose_transition_cannot_fit_is_refused_before_it_is_prepared() {
     )
     .expect("the booted session compiles");
     let transition = host_core::strip_transition_ceiling(&committed);
-    let (fits, prepared, diagnostic) = attempt(admitted - transition / 2);
     eprintln!(
-        "#2234 smallest admitting peak {admitted} bytes; transition ceiling {transition} bytes"
+        "#2234 smallest admitting peak {admitted} bytes; exact admission alone {exact} bytes, \
+         {exact_without_row} without the row; transition ceiling {transition} bytes"
     );
+    // The exact admission after preparation charges the row, once, to the byte.
+    assert_eq!(exact - exact_without_row, transition);
+    // The admission before preparation charges it too: half the row below the smallest admitting
+    // peak, the replace is refused before it is prepared.
+    let (fits, prepared, diagnostic) = attempt(admitted - transition / 2);
     assert!(!fits);
     assert_eq!(diagnostic, b"control.resource.replacement_peak\t$\n");
     assert_eq!(

@@ -11,10 +11,10 @@
 
 use bench_support::alloc as audited_allocator;
 use host_core::{
-    CompiledSession, DuckOverlay, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
-    PreparedHost, SuccessorBase, WarmConfig, compile_host_model, plan_strip_transition,
-    prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_successor,
-    project_effects, stall_ring_frames, strip_transition_ceiling, warm_lead,
+    CompiledSession, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    SuccessorBase, WarmConfig, compile_host_model, prepare_host_runtime_with_live_controls,
+    prepare_host_runtime_with_live_controls_successor, project_effects, stall_ring_frames,
+    warm_lead,
 };
 use session::{
     ConsoleEntry, ConsoleLinkMode, ConsoleSlot, Effect, EffectIdentity, EffectQuality, LinkMode,
@@ -216,8 +216,10 @@ fn warm_lead_on_the_console_bus_add_prepares_no_effect() {
 /// classifier's canonical documents, which hold most of it at 64 and 256 tracks, or the row diff's
 /// owner buffers, which hold most of it at one track. Every strip restarts, so the step ducks them
 /// all and reaches the classifier.
+#[cfg(feature = "control-provider")]
 #[test]
 fn the_transition_of_the_console_bus_add_stays_under_its_ceiling() {
+    use host_core::{DuckOverlay, plan_strip_transition, strip_transition_ceiling};
     audited_allocator::assert_installed();
     let caps = caps();
     for tracks in [1, TRACKS, 4 * TRACKS] {

@@ -100,7 +100,7 @@ pub use control::{
     EffectCellRow, ProviderEpoch, TestObservationWindows, TestOwnerCounters, TestOwnerState,
     TestStructuralFaultPhase, TestTransactionSnapshot, test_force_full_preparation,
     test_hold_reclamation, test_lifecycle_counters, test_reset_lifecycle_observer,
-    test_take_in_place_counts, test_verify_catalog_stages,
+    test_take_in_place_counts, test_transition_admission, test_verify_catalog_stages,
 };
 
 pub(crate) use compile::*;
