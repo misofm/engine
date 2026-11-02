@@ -258,7 +258,9 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 /// A warm successor whose transaction ducks strips or routes is published `Primed` no earlier
 /// than this `S` (#1397 D1), so the same holds for it.
 ///
-/// Control thread only: it clones the base model twice and allocates the lists.
+/// Control thread only: it clones the base model twice and allocates the lists. What it holds at
+/// once is at most [`strip_transition_ceiling`] of the compiled `base.committed`, which both
+/// replacement admissions charge (issue #2234).
 ///
 /// # Errors
 ///
@@ -510,6 +512,152 @@ pub fn plan_strip_transition(
         transition.route_records.push(route.record);
     }
     Ok(transition)
+}
+
+/// A ceiling of the heap [`plan_strip_transition`] holds at once on a running plan whose committed
+/// model is `committed`'s, for any overlay, successor model and restarted set (issue #2234). Both
+/// replacement admissions charge it against the replacement peak with this one value: the check
+/// before the candidate is prepared and the exact admission after it (#2199 D3).
+///
+/// The step copies the committed model only; it reads the successor model and never copies it. The
+/// ceiling is the sum of these terms, each from the committed model alone:
+///
+/// * three copies of the model (the base with the overlay, the same with the new mutes, and the
+///   classifier's masked copy), each at most `compiled_model_bytes - canonical_bytes` (the model
+///   estimate without its canonical text; a copy allocates no index);
+/// * the classifier's two canonical documents, `3 * canonical_bytes`: each copy differs from the
+///   committed model only in mutes set to `true`, whose text is not longer than `false`, so each
+///   document is at most the committed text's length; one is held at that length while the other
+///   grows by doubling to less than twice it;
+/// * the row diff's buffers for each of the two models ([`controls::changed_controls`]): one
+///   owner's rows at a time, at most twice the largest owner's row count plus four rows, with that
+///   owner's address text, and every VCA row (the same capacity rule) with its text;
+/// * the changed rows: at most two lanes of a mute on each strip and each route, each with its
+///   owner's ID;
+/// * the records and lists the step builds: per strip a delta record, a transition record and its
+///   ID twice; per route a delta record, a send record, a list slot, a changed-owner slot and its
+///   ID; per source its ID twice. Every list has at most twice its length plus four entries.
+///
+/// The rest (both models' effective values and automation indexes, and the classifier's change
+/// set) is a fixed-size record per strip, route or automation entry. It is held only after the
+/// documents and the masked copy are freed, so their bytes cover it.
+///
+/// Control thread only: it walks the model's owners through one buffer, as the row diff does.
+#[must_use]
+pub fn strip_transition_ceiling(committed: &session::CompiledSession) -> u64 {
+    use core::mem::size_of;
+    let model = committed.normalized_model();
+    let estimate = committed.resource_estimate();
+    let wide = |count: usize| u64::try_from(count).unwrap_or(u64::MAX);
+    // A list grown by doubling holds at most twice its length plus four entries.
+    let grown = |count: usize, entry: usize| {
+        wide(count)
+            .saturating_mul(2)
+            .saturating_add(4)
+            .saturating_mul(wide(entry))
+    };
+    let copy = estimate
+        .compiled_model_bytes
+        .saturating_sub(estimate.canonical_bytes);
+    // The row diff's walk, counted.
+    let overlay = controls::MonitorOverlay::default();
+    let effective = controls::effective(model, &overlay);
+    let automation = controls::AutomationIndex::of(model);
+    let view = controls::ModelView::whole(model).indexed(&automation);
+    let mut rows = Vec::new();
+    let (mut largest_rows, mut largest_text, mut vca_rows, mut vca_text) = (0, 0_u64, 0, 0_u64);
+    for owner in 0..controls::owner_count(model) {
+        rows.clear();
+        controls::owner_rows_in(
+            view,
+            &effective,
+            &overlay,
+            owner,
+            model.sample_rate_hz,
+            &mut rows,
+        );
+        let text = rows
+            .iter()
+            .map(|row| address_text(&row.address))
+            .fold(0, u64::saturating_add);
+        largest_rows = largest_rows.max(rows.len());
+        largest_text = largest_text.max(text);
+        if rows
+            .first()
+            .is_some_and(|row| matches!(row.address.owner, session::Owner::Vca(_)))
+        {
+            vca_rows += rows.len();
+            vca_text = vca_text.saturating_add(text);
+        }
+    }
+    let row = size_of::<controls::ControlRow>();
+    let diff_buffers = grown(largest_rows, row)
+        .saturating_add(largest_text)
+        .saturating_add(grown(vca_rows, row))
+        .saturating_add(vca_text)
+        .saturating_mul(2);
+    let strips = model.strips().count();
+    let routes = model.routes.len();
+    let ids = |text: u64| text.saturating_mul(2);
+    let strip_ids = ids(model
+        .strips()
+        .map(|strip| wide(strip.id.as_str().len()))
+        .fold(0, u64::saturating_add));
+    let route_ids = model
+        .routes
+        .iter()
+        .map(|route| wide(route.id.as_str().len()))
+        .fold(0, u64::saturating_add);
+    let source_ids = model
+        .sources
+        .iter()
+        .map(|source| wide(source.id.as_str().len()))
+        .fold(0, u64::saturating_add);
+    let changed = grown(
+        strips.saturating_add(routes).saturating_mul(2),
+        size_of::<controls::ChangedControl>(),
+    )
+    .saturating_add(strip_ids)
+    .saturating_add(ids(route_ids));
+    let records = grown(
+        strips,
+        size_of::<crate::live_delta::LiveStripRecords<'_>>()
+            + size_of::<DuckStripRecords>()
+            + size_of::<Box<str>>(),
+    )
+    .saturating_add(strip_ids)
+    .saturating_add(grown(
+        routes,
+        size_of::<crate::live_delta::LiveRouteRecord<'_>>()
+            + size_of::<SendRecord>()
+            + size_of::<Box<str>>()
+            + size_of::<&Route>()
+            + size_of::<usize>(),
+    ))
+    .saturating_add(route_ids)
+    .saturating_add(grown(model.sources.len(), size_of::<Box<str>>()).saturating_mul(2))
+    .saturating_add(ids(source_ids))
+    .saturating_add(grown(strips, size_of::<usize>()));
+    copy.saturating_mul(3)
+        .saturating_add(estimate.canonical_bytes.saturating_mul(3))
+        .saturating_add(diff_buffers)
+        .saturating_add(changed)
+        .saturating_add(records)
+}
+
+/// The heap text of a control address: its owner's ID and its section's.
+fn address_text(address: &session::ControlAddress) -> u64 {
+    let owner = match &address.owner {
+        session::Owner::Session => 0,
+        session::Owner::Strip(id) | session::Owner::Route(id) | session::Owner::Vca(id) => {
+            id.as_str().len()
+        }
+    };
+    let section = match &address.section {
+        session::Section::Own | session::Section::Builtins => 0,
+        session::Section::Console(id) | session::Section::Inserts(id) => id.as_str().len(),
+    };
+    u64::try_from(owner + section).unwrap_or(u64::MAX)
 }
 
 /// The transition fallback's duck set (#1397 D2 step 4): every strip of both `committed` (the
