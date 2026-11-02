@@ -391,11 +391,33 @@ fn prepare(
 /// One rendered block.
 struct Block {
     nanoseconds: u64,
+    /// What the timed render call cost besides time (#2229 slice 1); zero for an untimed block.
+    cost: CallCost,
     /// The absolute sample the block started at.
     start: u64,
     swap: SwapOutcome,
     carry: CarryOutcome,
     peak: f32,
+}
+
+/// The non-time cost of one timed render call (#2229 slice 1).
+#[derive(Clone, Copy, Debug, Default)]
+struct CallCost {
+    /// The render thread's minor page faults over the call: `None` where the host does not
+    /// report them.
+    minor_faults: Option<u64>,
+    /// The render thread's allocations and frees over the call (realloc counts as an
+    /// allocation): render's contract is zero.
+    allocator_events: u64,
+}
+
+/// The calling thread's minor page faults so far (`minflt`, `/proc/thread-self/stat` field 10),
+/// read off the clock; `None` where the host has no such file.
+fn minor_faults() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/thread-self/stat").ok()?;
+    // Field 2, the command, is parenthesized and may hold spaces: count from its close.
+    let (_, fields) = stat.rsplit_once(')')?;
+    fields.split_whitespace().nth(7)?.parse().ok()
 }
 
 struct Stream {
@@ -507,10 +529,22 @@ impl Stream {
                 start,
             )
         };
-        let (nanoseconds, report) = if timed {
-            timing::timed(render)
+        let (nanoseconds, cost, report) = if timed {
+            // #2229: the page faults and allocator events of the timed call, read on both sides
+            // of it and outside the clock; render itself holds no probe.
+            let faults = minor_faults();
+            let allocator = bench_alloc::current_thread_counters();
+            let (nanoseconds, report) = timing::timed(render);
+            let allocator = bench_alloc::current_thread_delta_since(allocator);
+            let cost = CallCost {
+                minor_faults: faults
+                    .zip(minor_faults())
+                    .map(|(before, after)| after.saturating_sub(before)),
+                allocator_events: allocator.allocations + allocator.deallocations,
+            };
+            (nanoseconds, cost, report)
         } else {
-            (0, timing::untimed(render))
+            (0, CallCost::default(), timing::untimed(render))
         };
         let report = report.unwrap_or_else(|error| panic!("render at {start}: {error:?}"));
         if report.swap == SwapOutcome::Applied {
@@ -527,6 +561,7 @@ impl Stream {
             .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
         Block {
             nanoseconds,
+            cost,
             start,
             swap: report.swap,
             carry: report.carry,
@@ -621,6 +656,7 @@ impl Stream {
 #[derive(Clone, Copy)]
 struct MoveSwap {
     nanoseconds: u64,
+    cost: CallCost,
     carry: CarryOutcome,
     restarted_strips: usize,
 }
@@ -629,6 +665,7 @@ struct MoveSwap {
 #[derive(Clone, Copy)]
 struct Adoption {
     nanoseconds: u64,
+    cost: CallCost,
     carry: CarryOutcome,
     /// Blocks between `not_before` and the adopting block.
     late_blocks: u64,
@@ -645,6 +682,7 @@ struct Growth {
 pub(crate) struct Measurement {
     shape: Shape,
     ordinary: Vec<u64>,
+    ordinary_cost: Vec<CallCost>,
     moves: Vec<MoveSwap>,
     growths: Vec<Growth>,
     /// `ΣP` after the fourth growth of every cycle (equal in every cycle, asserted).
@@ -667,6 +705,7 @@ impl Measurement {
         let mut measured = Self {
             shape,
             ordinary: Vec::new(),
+            ordinary_cost: Vec::new(),
             moves: Vec::new(),
             growths: (0..GROWTHS)
                 .map(|_| Growth {
@@ -728,6 +767,7 @@ impl Measurement {
             );
             self.moves.push(MoveSwap {
                 nanoseconds: block.nanoseconds,
+                cost: block.cost,
                 carry: block.carry,
                 restarted_strips,
             });
@@ -735,6 +775,7 @@ impl Measurement {
                 let block = stream.block(timed);
                 self.observe(&block, timed, true);
                 self.ordinary.push(block.nanoseconds);
+                self.ordinary_cost.push(block.cost);
             }
         }
         let last = if self.shape.move_swaps % 2 == 1 {
@@ -821,6 +862,7 @@ impl Measurement {
                     self.observe(&block, timed, true);
                     break Adoption {
                         nanoseconds: block.nanoseconds,
+                        cost: block.cost,
                         carry: block.carry,
                         late_blocks: (block.start - not_before) / u64::from(QUANTUM),
                     };
@@ -858,7 +900,8 @@ impl Measurement {
                     concat!(
                         "{{\"step\":{step},\"lead_samples\":{lead},\"sum_lead_samples\":{sum},",
                         "\"prime_bytes\":{bytes},\"adoptions\":{adoptions},\"carried\":{carried},",
-                        "\"late_adoptions\":{late},\"adoption_ns\":{ns}}}"
+                        "\"late_adoptions\":{late},\"adoption_ns\":{ns},",
+                        "\"adoption_cost\":{cost}}}"
                     ),
                     step = step + 1,
                     lead = growth.lead_samples,
@@ -872,6 +915,7 @@ impl Measurement {
                         .filter(|a| a.late_blocks != 0)
                         .count(),
                     ns = distribution(&ns),
+                    cost = cost_json(growth.adoptions.iter().map(|a| a.cost)),
                 )
             })
             .collect();
@@ -890,7 +934,8 @@ impl Measurement {
                 "\"interval_blocks\":{interval},",
                 "\"move\":{{\"swaps\":{swaps},\"carried\":{move_carried},",
                 "\"restarted_strips\":{restarted},\"carry_refusal_count\":{move_refusals},",
-                "\"ordinary_ns\":{ordinary},\"move_ns\":{move_ns}}},",
+                "\"ordinary_ns\":{ordinary},\"move_ns\":{move_ns},",
+                "\"ordinary_cost\":{ordinary_cost},\"move_cost\":{move_cost}}},",
                 "\"prime\":{{\"cycles\":{cycles},",
                 "\"carry_refusal_count\":{prime_refusals},\"growths\":[{growths}]}},",
                 "\"timed_blocks\":{timed_blocks},\"silent_timed_blocks\":{silent},",
@@ -920,6 +965,8 @@ impl Measurement {
             move_refusals = self.move_carry_refusals,
             ordinary = distribution(&self.ordinary),
             move_ns = distribution(&move_ns),
+            ordinary_cost = cost_json(self.ordinary_cost.iter().copied()),
+            move_cost = cost_json(self.moves.iter().map(|swap| swap.cost)),
             cycles = self.shape.prime_cycles,
             prime_refusals = self.prime_carry_refusals,
             growths = growths.join(","),
@@ -957,6 +1004,17 @@ fn distribution(samples: &[u64]) -> String {
         summary.p99,
         summary.max
     )
+}
+
+/// The non-time cost of a class of timed calls (#2229 slice 1): the minor faults' distribution
+/// (`null` when any call's count is unknown) and the allocator events' total.
+fn cost_json(costs: impl Iterator<Item = CallCost> + Clone) -> String {
+    let faults: Option<Vec<u64>> = costs.clone().map(|cost| cost.minor_faults).collect();
+    let faults = faults
+        .filter(|faults| !faults.is_empty())
+        .map_or_else(|| "null".to_owned(), |faults| distribution(&faults));
+    let events: u64 = costs.map(|cost| cost.allocator_events).sum();
+    format!("{{\"minor_faults\":{faults},\"allocator_events\":{events}}}")
 }
 
 /// D3 over one round's numbers: item 3's `PRIME_BYTES_MAX`, and items 1-2's values at every
@@ -1137,6 +1195,7 @@ mod tests {
             ordinary: (0..(swaps * (FROZEN.interval_blocks - 1)) as u64)
                 .map(|block| ordinary_ns + block % 97)
                 .collect(),
+            ordinary_cost: vec![super::CallCost::default(); swaps * (FROZEN.interval_blocks - 1)],
             moves: (0..swaps as u64)
                 .map(|swap| MoveSwap {
                     nanoseconds: ordinary_ns + 10_000 + swap,
