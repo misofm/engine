@@ -1481,6 +1481,11 @@ pub(crate) struct ProspectivePlan {
     pub(crate) carried: CarriedSourceBytes,
     /// The capi resources it was prepared with.
     pub(crate) capi: CapiResources,
+    /// The transition-planning transient the commit allocates beside it, before the commit
+    /// (issue #2234): [`host_core::strip_transition_ceiling`] of the model the plan it displaces
+    /// was committed from, or 0 when no transition is planned (a declared discontinuity). Both
+    /// admissions charge the same value, once per peak, in the replacement peak.
+    pub(crate) transition_bytes: u64,
 }
 
 /// The replacement admission (#1042, #1398 D4): may the prospective plan live beside every plan
@@ -1493,7 +1498,8 @@ pub(crate) struct ProspectivePlan {
 /// held plans plus the candidate, against its own cap: graph plus models, the source totals and
 /// overheads (a carried ring counted once, in the oldest held plan that holds it: the candidate's
 /// and every held epoch's but the oldest one's carried bytes leave their rows), the
-/// replacement peak (graph, models and allocated source bytes, #1290a D3), effect state and
+/// replacement peak (graph, models and allocated source bytes, #1290a D3, and the candidate's
+/// transition-planning transient, issue #2234), effect state and
 /// scratch, builtins, and the control plane's retained bytes (the newest plan's row, which holds
 /// the session's fixed rows once, every older held epoch's own rows, and the candidate's epoch and
 /// prepared-protocol rows). The largest-allocation check folds every held row.
@@ -1606,6 +1612,8 @@ pub(crate) fn projected_plan<A: ControlAdapter>(
         },
         carried,
         capi,
+        // The caller's: it knows whether the commit plans a transition (issue #2234).
+        transition_bytes: 0,
     })
 }
 
@@ -1724,9 +1732,12 @@ fn replacement_peak_fits(
     {
         return Err(diagnostic("source.resource.limit"));
     }
-    // #1290a D3: the categories above each fit alone; their sum must fit an adapter's one budget.
+    // #1290a D3: the categories above each fit alone; their sum must fit an adapter's one budget,
+    // beside the transition the commit plans after preparation (issue #2234), once: it is planned
+    // for one candidate at a time.
     if graph_peak
         .checked_add(source_total)
+        .and_then(|peak| peak.checked_add(prospective.transition_bytes))
         .ok_or_else(arithmetic)?
         > limits.maximum_replacement_peak_bytes
     {
@@ -3241,6 +3252,7 @@ mod admission_tests {
             resources: epoch.report,
             carried: CarriedSourceBytes::default(),
             capi: epoch.capi,
+            transition_bytes: 0,
         }
     }
 

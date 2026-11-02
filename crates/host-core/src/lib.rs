@@ -254,7 +254,7 @@ pub use spectrum_service::{
 #[cfg(feature = "control-provider")]
 pub use transition::{
     DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError, grown_strips,
-    plan_strip_transition,
+    plan_strip_transition, strip_transition_ceiling,
 };
 #[cfg(feature = "control-provider")]
 pub use warm::{PrimedCandidate, fall_back_to_transition, publish_primed};

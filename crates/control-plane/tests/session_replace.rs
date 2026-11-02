@@ -786,3 +786,147 @@ fn a_replace_whose_graph_cannot_fit_is_refused_before_it_is_prepared() {
     assert_eq!((revision(&session), snapshot(&session)), before);
     assert_eq!(reliable_events(&mut session), 0);
 }
+
+thread_local! {
+    /// How many times [`CountingPreparer`] prepared a plan on this thread.
+    static PREPARED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// [`Preparer`], counting its preparations: a projection is not one.
+struct CountingPreparer;
+
+impl RuntimePreparer for CountingPreparer {
+    fn prepare(
+        &self,
+        compiled: &CompiledSession,
+        caps: &HostPrepareCaps,
+        lanes: HostLiveLanes,
+        spectrum: Option<&host_core::SpectrumPreparation>,
+        successor: Option<SuccessorBase<'_>>,
+        superseded: &LiveValuesSuperseded,
+    ) -> Result<
+        (
+            PreparedHost,
+            HostLiveControlHandles,
+            Option<host_core::PreparedSpectrumCaptures>,
+        ),
+        PrepareDiagnostics,
+    > {
+        PREPARED.with(|count| count.set(count.get() + 1));
+        Preparer.prepare(compiled, caps, lanes, spectrum, successor, superseded)
+    }
+}
+
+/// Issue #2234: a `SESSION_REPLACE` that adds a bus to 64 tracks, under a replacement peak that
+/// holds the candidate's rows but not the transition the commit plans after preparation
+/// (`host_core::strip_transition_ceiling` of the committed model), is refused
+/// `control.resource.replacement_peak` before the candidate is prepared. The smallest peak that
+/// admits the replace is found by bisection; half the ceiling below it, the admission before
+/// preparation refuses, as the exact admission after preparation does (#2199 D3).
+///
+/// Test value: red when the admission before preparation leaves the transition out (the replace
+/// is then prepared and refused only after), which no other test sees: the C ABI's exact-boundary
+/// tests leave the replacement peak unbounded.
+#[test]
+fn a_replace_whose_transition_cannot_fit_is_refused_before_it_is_prepared() {
+    let booted_model = model(&delay_document(64, 0));
+    let booted = json(&booted_model);
+    let mut next = booted_model.clone();
+    let output = next.routes[0].clone();
+    next.submixes
+        .push(session::Submix::unity(id("bus"), &next.console));
+    next.routes.push(session::Route {
+        id: id("bus-main"),
+        source: RouteSource::Submix {
+            submix_id: id("bus"),
+            tap: session::SendTap::PostPan,
+        },
+        ..output.clone()
+    });
+    for index in 0..booted_model.tracks.len() {
+        next.routes.push(session::Route {
+            id: id(&format!("track-{index:03}-bus")),
+            source: RouteSource::Track {
+                track_id: id(&format!("track-{index:03}")),
+                tap: session::SendTap::PostFader,
+            },
+            destination: RouteDestination::SubmixInput {
+                submix_id: id("bus"),
+            },
+            mute: true,
+            ..output.clone()
+        });
+    }
+    let candidate = json(&next);
+    let limits = ControlLimits {
+        maximum_tracks: u64::MAX,
+        maximum_routes: u64::MAX,
+        maximum_graph_session_plus_plan_bytes: u64::MAX,
+        maximum_source_total_bytes: u64::MAX,
+        maximum_source_overhead_bytes: u64::MAX,
+        maximum_control_retained_bytes: u64::MAX,
+        maximum_named_allocation_bytes: u64::MAX,
+        ..limits(u64::try_from(candidate.len()).expect("a bounded document"))
+    };
+    // The replace under a replacement peak of `peak`: whether it is admitted, how many plans it
+    // prepared, and the refusal's diagnostic.
+    let attempt = |peak: u64| {
+        let CompiledChildren {
+            mut session,
+            plan: _plan,
+        } = compile_children::<Adapter>(&booted, limits, Box::new(CountingPreparer))
+            .expect("boot compile");
+        session.set_replacement_peak_limit(peak);
+        reliable_events(&mut session);
+        let before = (revision(&session), snapshot(&session));
+        let frame = replace_frame(1, before.0, candidate.as_bytes());
+        PREPARED.with(|count| count.set(0));
+        let result = session.command_with_document(&frame, candidate.as_bytes(), 16_384);
+        let prepared = PREPARED.with(core::cell::Cell::get);
+        match result {
+            Ok(length) => {
+                let reply = reply(session.command_response(length));
+                assert_eq!(reply.status, StatusCode::Ok, "{reply:?}");
+                (true, prepared, Vec::new())
+            }
+            Err(control_plane::CommandError::CompileRejected(failure)) => {
+                assert_eq!((revision(&session), snapshot(&session)), before);
+                (false, prepared, failure.diagnostic().into_owned())
+            }
+            Err(error) => panic!("{error:?}"),
+        }
+    };
+    let (mut refused, mut admitted) = (0_u64, 1_u64 << 40);
+    assert!(attempt(admitted).0, "the replace fits a roomy peak");
+    while admitted - refused > 1 {
+        let middle = refused + (admitted - refused) / 2;
+        if attempt(middle).0 {
+            admitted = middle;
+        } else {
+            refused = middle;
+        }
+    }
+    let committed = compile_session(
+        &booted_model,
+        session::CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("the booted session compiles");
+    let transition = host_core::strip_transition_ceiling(&committed);
+    let (fits, prepared, diagnostic) = attempt(admitted - transition / 2);
+    eprintln!(
+        "#2234 smallest admitting peak {admitted} bytes; transition ceiling {transition} bytes"
+    );
+    assert!(!fits);
+    assert_eq!(diagnostic, b"control.resource.replacement_peak\t$\n");
+    assert_eq!(
+        prepared, 0,
+        "the replace was prepared before it was refused"
+    );
+}

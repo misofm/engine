@@ -5,13 +5,16 @@
 //! of the session: on the console's bus add each pass held the whole effect state a second time,
 //! covered by no admission (217 MB at 256 tracks natively; a trap at the 512 MiB Wasm cap). The
 //! graph projection holds the same rows and prepares no processor.
+//!
+//! Issue #2234: the transition the same bus add plans after preparation (`plan_strip_transition`)
+//! holds no more than `strip_transition_ceiling`, the row both replacement admissions charge.
 
 use bench_support::alloc as audited_allocator;
 use host_core::{
-    CompiledSession, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
-    SuccessorBase, WarmConfig, compile_host_model, prepare_host_runtime_with_live_controls,
-    prepare_host_runtime_with_live_controls_successor, project_effects, stall_ring_frames,
-    warm_lead,
+    CompiledSession, DuckOverlay, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
+    PreparedHost, SuccessorBase, WarmConfig, compile_host_model, plan_strip_transition,
+    prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_successor,
+    project_effects, stall_ring_frames, strip_transition_ceiling, warm_lead,
 };
 use session::{
     ConsoleEntry, ConsoleLinkMode, ConsoleSlot, Effect, EffectIdentity, EffectQuality, LinkMode,
@@ -207,4 +210,41 @@ fn warm_lead_on_the_console_bus_add_prepares_no_effect() {
         peak < projected,
         "warm_lead peaked at {peak} bytes, over the session's {projected} projected effect-state bytes"
     );
+}
+
+/// Test value: red when `strip_transition_ceiling` leaves out a term the transition allocates: the
+/// classifier's canonical documents, which hold most of it at 64 and 256 tracks, or the row diff's
+/// owner buffers, which hold most of it at one track. Every strip restarts, so the step ducks them
+/// all and reaches the classifier.
+#[test]
+fn the_transition_of_the_console_bus_add_stays_under_its_ceiling() {
+    audited_allocator::assert_installed();
+    let caps = caps();
+    for tracks in [1, TRACKS, 4 * TRACKS] {
+        let a = compile(&console(tracks), &caps);
+        let committed = a.normalized_model();
+        let b = compile(&bus_add(committed.clone()), &caps);
+        let host_a: PreparedHost =
+            prepare_host_runtime_with_live_controls(&a, &caps, &HostLiveControlRequest::default())
+                .unwrap_or_else(|failure| panic!("predecessor: {failure:?}"))
+                .0;
+        let base = SuccessorBase::new(&host_a.inventory, committed, 2);
+        let mut restarted: Vec<Box<str>> = committed
+            .strips()
+            .map(|strip| Box::from(strip.id.as_str()))
+            .collect();
+        restarted.sort_unstable();
+        let ceiling = strip_transition_ceiling(&a);
+        audited_allocator::current_thread_peak_reset();
+        let transition =
+            plan_strip_transition(&base, &DuckOverlay::new(), b.normalized_model(), &restarted)
+                .unwrap_or_else(|failure| panic!("transition: {failure:?}"));
+        let peak = audited_allocator::current_thread_peak().peak_bytes;
+        assert_eq!(transition.strips().len(), tracks, "every strip ducks");
+        eprintln!("#2234 tracks={tracks} transition peak={peak} ceiling={ceiling}");
+        assert!(
+            peak <= ceiling,
+            "the transition peaked at {peak} bytes, over its {ceiling}-byte ceiling"
+        );
+    }
 }

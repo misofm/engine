@@ -3669,12 +3669,15 @@ where
     /// projection of the preparation it is about to run with `base` and `spectrum`, and the
     /// control plane's rows for it), with the retryable or permanent split of the
     /// post-preparation admission: a refusal that fits beside the newest plan and the committed
-    /// model alone is backpressure a render frees, and any other is permanent.
+    /// model alone is backpressure a render frees, and any other is permanent. The candidate
+    /// charges `transition_bytes`, the transition-planning transient the exact admission charges
+    /// too (issue #2234).
     fn admit_prospective_projection(
         &self,
         prospective: &session::CompiledSession,
         base: host_core::SuccessorBase<'_>,
         spectrum: Option<&host_core::SpectrumPreparation>,
+        transition_bytes: u64,
     ) -> Result<(), CommandError> {
         let lanes: host_core::HostLiveLanes =
             controls::live_lanes(prospective.normalized_model()).into();
@@ -3698,6 +3701,10 @@ where
             spectrum.is_some(),
         )
         .map_err(CommandError::CompileRejected)?;
+        let candidate = ProspectivePlan {
+            transition_bytes,
+            ..candidate
+        };
         let held = self.held_epochs()?;
         let models = self.held_models()?;
         let admit = |held: &[LiveEpochResources], models: &[session::ResourceEstimate]| {
@@ -5810,6 +5817,24 @@ where
             )
             .map_err(spectrum_invariant)
         };
+        // Issue #2234: the transition planned after preparation copies the model of the plan the
+        // successor displaces (`base.committed`), so both admissions charge its ceiling from that
+        // model, known now. A declared discontinuity plans none.
+        let transition_bytes = if declared {
+            0
+        } else {
+            let compiled = if withdrawn_base.is_some() {
+                &self
+                    .kept_holder()
+                    .and_then(|holder| holder.kept.as_ref())
+                    .ok_or(CommandError::Internal)?
+                    .model
+            } else {
+                self.controller.session().compiled()
+            };
+            debug_assert!(core::ptr::eq(compiled.normalized_model(), base.committed));
+            host_core::strip_transition_ceiling(compiled)
+        };
         // Issue #2194: the candidate's projected effect bytes beside every plan and model held,
         // before any of it is prepared. The transition across a donor is not admitted again (the
         // donor's submit admitted it, below).
@@ -5820,6 +5845,7 @@ where
                 spectrum_configuration
                     .as_ref()
                     .map(|configuration| &configuration.preparation),
+                transition_bytes,
             )?;
         }
         let mut prepared_runtime = prepare(base)?;
@@ -5916,6 +5942,9 @@ where
         // The duck set is the strips the edit removes plus every strip the successor restarts:
         // the warm successor's (#1397 D1), or the transition's, its forced restarts (D2 step 4).
         if replanned {
+            // The first plan's result is freed before the second is planned, so one planning is
+            // held at a time, as the ceiling counts it (issue #2234).
+            drop(transition.take());
             transition = Some(plan_transition(
                 prepared_runtime.inventory.restarted_strips(),
             )?);
@@ -6020,6 +6049,7 @@ where
                     resources,
                     carried,
                     capi: prospective_capi,
+                    transition_bytes,
                 },
                 compiled_model_admission_over(models, prospective.resource_estimate())?,
                 limits,
