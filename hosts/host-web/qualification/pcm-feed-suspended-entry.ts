@@ -130,6 +130,7 @@ async function livePlayback(instanceMode: "worker" | "single") {
       return reply.report;
     };
     const underrun = async () => (await report(sourceId)).cumulativeUnderrunFrames;
+    const seeksApplied = () => Atomics.load(new Int32Array(feed!.rings[0]!, 0, MSB1_CONTROL_BYTES / 4), MSB1_CONTROL.SEEKS_APPLIED);
     const button = document.createElement("button");
     button.setAttribute("data-live-seek-resume", instanceMode);
     button.textContent = `Resume live seek: ${instanceMode}`;
@@ -152,7 +153,7 @@ async function livePlayback(instanceMode: "worker" | "single") {
         renderAllocations: await live.host.renderAllocationCount(),
       };
     };
-    return { engine: live, writer, pen, fill, report, underrun, counters, close, sourceId };
+    return { engine: live, writer, pen, fill, report, underrun, seeksApplied, counters, close, sourceId };
   } catch (error) {
     await close();
     throw error;
@@ -161,11 +162,37 @@ async function livePlayback(instanceMode: "worker" | "single") {
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The longest a seek row waits for its seek to land before it fails (#2230). */
+const LANDING_DEADLINE_MS = 4_000;
+/** The shortest window a seek row measures its underrun frames over (the fixed wait it replaced). */
+const SEEK_WINDOW_MS = 300;
+
+/**
+ * #2230: read `read()` every 10 ms until `landed` holds and at least `SEEK_WINDOW_MS` have passed
+ * since `since` (a `performance.now()` time), and return that read. A seek lands when the audio
+ * clock has rendered enough blocks, not after a fixed wall-clock time, so a row waits for the
+ * condition itself. If it does not hold within `LANDING_DEADLINE_MS`, this throws a message that
+ * names `what` did not land, the elapsed time and `describe` of the last read.
+ */
+async function untilLanded<T>(what: string, since: number, read: () => Promise<T>,
+  landed: (value: T) => boolean, describe: (value: T) => string): Promise<T> {
+  for (;;) {
+    const elapsedMs = performance.now() - since;
+    const value = await read();
+    if (landed(value) && elapsedMs >= SEEK_WINDOW_MS) return value;
+    if (elapsedMs >= LANDING_DEADLINE_MS) {
+      throw new Error(`${what} did not land within ${Math.round(elapsedMs)} ms (deadline ${LANDING_DEADLINE_MS} ms): ${describe(value)}`);
+    }
+    await wait(10);
+  }
+}
+
 /**
  * #2185: plain ring seeks while audio plays, in one instance mode, on this isolated page. Each seek
  * publishes a plain seek with `Msb1RingWriter.seek` while the ring holds the old generation, and the
  * writer then feeds the new one. Each row is the engine's own missing in-region frames for the
- * source (its seek report) over the seek: from just before it to 300 ms after.
+ * source (its seek report) over the seek: from just before it to 300 ms after, or to the poll that
+ * sees the feed apply the seek if that is later (#2230).
  * `baselineUnderrunFrames` is the same count over 500 ms of steady play before the first seek, so a
  * red seek row on a sink that underruns anyway is told apart. The page resumes the context inside
  * a trusted click on the button `data-live-seek-resume` (WebKit needs one).
@@ -180,8 +207,13 @@ export async function runLivePcmFeedSeek(instanceMode: "worker" | "single", seek
       live.pen.next = BigInt(seek + 1) * 480_000n;
       live.writer.seek(live.pen.generation, live.pen.next);
       live.fill();
-      await wait(300);
-      rows.push({ generation: live.pen.generation.toString(), underrunFrames: (await live.underrun() - before).toString() });
+      const since = performance.now();
+      const generation = live.pen.generation;
+      const seen = await untilLanded(`the feed's ring seek ${generation}`, since,
+        async () => ({ applied: live.seeksApplied(), underrun: await live.underrun() }),
+        (value) => value.applied >= seek + 1,
+        (value) => `seeks applied ${value.applied}, expected ${seek + 1}`);
+      rows.push({ generation: generation.toString(), underrunFrames: (seen.underrun - before).toString() });
     }
     return { ...(await live.counters()), seeks: rows };
   } finally {
@@ -210,7 +242,8 @@ export interface TransportSeekRow {
  * mode on this isolated page. The producer repositions its ring at once and publishes the new
  * position only after a 20 ms delay (a pump's window read), so the engine must keep the old
  * position playing until the new one has its runway. Each row is the source's underrun frames over
- * the seek (from just before it to 300 ms after), the block the source and the timeline landed in,
+ * the seek (from just before it to 300 ms after, or to the poll that sees it land if that is later,
+ * #2230), the block the source and the timeline landed in,
  * and the added latency against the render sample at accept.
  */
 export async function runLiveTransportSeek(instanceMode: "worker" | "single", seeks = 5) {
@@ -230,10 +263,12 @@ export async function runLiveTransportSeek(instanceMode: "worker" | "single", se
       const frame = BigInt(seek + 1) * 480_000n;
       const { generation } = await live.engine.seek(frame, { producers: [producer] });
       const accept = (await live.engine.position()).atSample;
-      await wait(300);
-      const source = await live.report(live.sourceId);
+      const since = performance.now();
+      const source = await untilLanded(`the source's seek ${generation}`, since,
+        () => live.report(live.sourceId), (report) => report.generation === generation,
+        (report) => `source generation ${report.generation}`);
+      // The timeline lands in the source's block, so it is read once, after the source landed.
       const timeline = await live.report("$timeline");
-      if (source.generation !== generation) throw new Error(`the source did not land seek ${generation}`);
       rows.push({
         generation: generation.toString(),
         underrunFrames: (source.cumulativeUnderrunFrames - before).toString(),
@@ -271,7 +306,8 @@ export interface StoppedSeekRow {
  * first block rendered after resume, every source and the timeline together, so no block of the
  * stopped position plays after resume: the source's and the timeline's landing sample is the
  * render sample the host reported between `stop()` and `play()`; and the target is queued then,
- * so the source underruns no frame.
+ * so the source underruns no frame. The row waits for the landing (#2230), at least 300 ms after
+ * `play()`, and measures the underrun frames to that read.
  */
 export async function runLiveStoppedSeek(instanceMode: "worker" | "single", seeks = 5) {
   const live = await livePlayback(instanceMode);
@@ -293,10 +329,11 @@ export async function runLiveStoppedSeek(instanceMode: "worker" | "single", seek
       await wait(50);
       const resume = (await live.engine.host.status()).nextAbsoluteSample;
       await live.engine.play();
-      await wait(300);
-      const source = await live.report(live.sourceId);
+      const source = await untilLanded(`the source's seek ${generation} after play()`,
+        performance.now(), () => live.report(live.sourceId), (report) => report.generation === generation,
+        (report) => `source generation ${report.generation}`);
+      // The timeline lands in the source's block, so it is read once, after the source landed.
       const timeline = await live.report("$timeline");
-      if (source.generation !== generation) throw new Error(`the source did not land seek ${generation}`);
       rows.push({
         generation: generation.toString(),
         underrunFrames: (source.cumulativeUnderrunFrames - before).toString(),
