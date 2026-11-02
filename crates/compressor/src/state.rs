@@ -27,13 +27,14 @@ use effect_contract::{
     LINK_GLIDE_MAX_SAMPLES, LinkMode, StatePayloadError, StatePayloadOutput, StatePayloadSizes,
 };
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
+use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
     RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, write_f32, write_ramp,
 };
 use lane::Lane;
 
 use crate::design::{
-    ALL_PARAMETERS, COEF_ATTACK, COEF_RELEASE, MAX_WIDTH, PARAMETER_SPECS, RAMP_COUNT,
+    ALL_PARAMETERS, COEF_ATTACK, COEF_COUNT, COEF_RELEASE, MAX_WIDTH, PARAMETER_SPECS, RAMP_COUNT,
     SMOOTHING_SAMPLES, design_lane,
 };
 use crate::kernel::Channel;
@@ -221,6 +222,93 @@ pub(crate) fn commit_channel<L: Lane>(
     );
     channel.words[COEF_ATTACK][lane] = channel.rate_ramps[0][lane].current;
     channel.words[COEF_RELEASE][lane] = channel.rate_ramps[1][lane].current;
+}
+
+/// One lane of one channel as plain words (issue #2229): every word [`write_channel`] writes for
+/// it, plus its coefficient words, which a restore redesigns.
+#[derive(Clone, Copy)]
+pub(crate) struct LaneWords {
+    reduction: f32,
+    ramps: [LinearRamp; RAMP_COUNT],
+    rate_ramps: [LinearRamp; RATE_RAMPS],
+    link_ramps: [LinearRamp; LINK_RAMPS],
+    words: [f32; COEF_COUNT],
+}
+
+impl LaneWords {
+    /// Lane `lane`'s words in `channel`.
+    pub(crate) fn read<L: Lane>(channel: &Channel<L>, lane: usize) -> Self {
+        let mut reduction = [0.0_f32; MAX_WIDTH];
+        channel.gain_reduction_db.store(&mut reduction);
+        Self {
+            reduction: reduction[lane],
+            ramps: core::array::from_fn(|index| channel.ramps[index][lane]),
+            rate_ramps: core::array::from_fn(|index| channel.rate_ramps[index][lane]),
+            link_ramps: core::array::from_fn(|index| channel.link_ramps[index][lane]),
+            words: core::array::from_fn(|index| channel.words[index][lane]),
+        }
+    }
+
+    /// The link mode these weights glide to, as [`validate_channel`] reads it from a payload:
+    /// `None` for a pair of targets no supported mode rests at, which a restore refuses.
+    pub(crate) fn link_mode(&self) -> Option<LinkMode> {
+        effect_contract::link_glide_mode(self.link_ramps.map(|ramp| ramp.target)).filter(|mode| {
+            crate::COMPRESSOR_DESCRIPTOR
+                .supported_link_modes
+                .contains(*mode)
+        })
+    }
+
+    /// Writes these words into lane `lane` of `channel` as [`commit_channel`] commits a payload
+    /// section: the envelope's zero normalized, and the weights only when `carried`. The
+    /// coefficient words are the words' own: live words of this effect at this sample rate, the
+    /// design of their current values (attack and release: their coefficient ramps' currents),
+    /// which is what `commit_channel` redesigns.
+    pub(crate) fn write<L: Lane>(&self, channel: &mut Channel<L>, lane: usize, carried: bool) {
+        let mut reduction = [0.0_f32; MAX_WIDTH];
+        channel.gain_reduction_db.store(&mut reduction);
+        reduction[lane] = normalize_zero(self.reduction);
+        channel.gain_reduction_db = L::load(&reduction);
+        for (ramps, ramp) in channel.ramps.iter_mut().zip(self.ramps) {
+            ramps[lane] = ramp;
+        }
+        for (ramps, ramp) in channel.rate_ramps.iter_mut().zip(self.rate_ramps) {
+            ramps[lane] = ramp;
+        }
+        if carried {
+            for (ramps, ramp) in channel.link_ramps.iter_mut().zip(self.link_ramps) {
+                ramps[lane] = ramp;
+            }
+        }
+        for (words, word) in channel.words.iter_mut().zip(self.words) {
+            words[lane] = word;
+        }
+    }
+}
+
+/// The invariant the direct copy and swap rest on where a restore redesigns (issue #2229): lane
+/// `lane`'s coefficient words are bit for bit what [`commit_channel`] designs from its current
+/// values at `sample_rate` (attack and release: its coefficient ramps' currents).
+/// Allocation-free; debug builds assert it.
+pub(crate) fn words_are_designed<L: Lane>(
+    channel: &Channel<L>,
+    lane: usize,
+    sample_rate: u32,
+) -> bool {
+    let mut designed = channel.words;
+    design_lane(
+        &channel.current_values(lane),
+        sample_rate,
+        DESIGNED_ON_RESTORE,
+        &mut designed,
+        lane,
+    );
+    designed[COEF_ATTACK][lane] = channel.rate_ramps[0][lane].current;
+    designed[COEF_RELEASE][lane] = channel.rate_ramps[1][lane].current;
+    designed
+        .iter()
+        .zip(&channel.words)
+        .all(|(designed, held)| designed[lane].to_bits() == held[lane].to_bits())
 }
 
 pub(crate) fn snapshot_lane<L: Lane>(

@@ -3298,6 +3298,13 @@ pub fn swap_bank_lanes(
     if second.is_none() && first_lane == second_lane {
         return Ok(());
     }
+    // Issue #2229: a bank that swaps its own type directly does so, to the same bits.
+    let peer = second
+        .as_mut()
+        .map(|bank| &mut **bank as &mut dyn PreparedNativeEffectBank);
+    if first.swap_lanes_direct(first_lane, peer, second_lane) {
+        return Ok(());
+    }
     let payload = usize::try_from(sizes.total().unwrap_or(0)).unwrap_or(0);
     let (first_payload, rest) = scratch.split_at_mut(payload);
     let (second_payload, rest) = rest.split_at_mut(payload);

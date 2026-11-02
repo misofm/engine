@@ -973,6 +973,118 @@ impl<L: Lane> Instance<L> {
         Ok(())
     }
 
+    /// Lane `lane`'s words on both channels and the link mode they glide to, or `None` where
+    /// the two channels disagree on it or a restore would refuse it (issue #2229).
+    fn lane_words(&self, lane: usize) -> Option<([state::LaneWords; 2], LinkMode)> {
+        let words = [
+            state::LaneWords::read(&self.left, lane),
+            state::LaneWords::read(&self.right, lane),
+        ];
+        let mode = words[0].link_mode()?;
+        (words[1].link_mode()? == mode).then_some((words, mode))
+    }
+
+    /// Writes `words`, whose weights glide to `mode`, into lane `lane` as
+    /// [`restore`](Self::restore) commits a payload (issue #2229): the weights carried only under
+    /// the lane's own mode and otherwise seated at rest, and the rest claim withdrawn.
+    fn write_lane_words(&mut self, lane: usize, words: &[state::LaneWords; 2], mode: LinkMode) {
+        let carried = mode == self.link_modes[lane];
+        words[0].write(&mut self.left, lane, carried);
+        words[1].write(&mut self.right, lane, carried);
+        if !carried {
+            let own = self.link_modes[lane];
+            self.left.rest_link(lane, own);
+            self.right.rest_link(lane, own);
+        }
+        self.silent_fixed_point = false;
+        debug_assert!(
+            state::words_are_designed(&self.left, lane, self.sample_rate)
+                && state::words_are_designed(&self.right, lane, self.sample_rate),
+            "a live compressor lane's words are its current values' design"
+        );
+    }
+
+    /// Copies lane `from_lane` of `from` into lane `lane` directly (issue #2229), exactly as
+    /// [`snapshot`](Self::snapshot) on `from` and then [`restore`](Self::restore) here would.
+    /// Returns whether the two channels' payload sections would agree, or `None`, changing
+    /// nothing, where the payload path's answer is not this copy's: another sample rate, or link
+    /// targets a restore refuses.
+    fn copy_lane_from(&mut self, lane: usize, from: &Self, from_lane: usize) -> Option<bool> {
+        if from.sample_rate != self.sample_rate {
+            return None;
+        }
+        let (words, mode) = from.lane_words(from_lane)?;
+        let mut left = [0_u8; state::STATE_HEADER_WORDS * 4];
+        let mut right = [0_u8; state::STATE_HEADER_WORDS * 4];
+        state::write_channel(&mut left, &from.left, from_lane);
+        state::write_channel(&mut right, &from.right, from_lane);
+        self.write_lane_words(lane, &words, mode);
+        Some(left == right)
+    }
+
+    /// Lane `lane`'s prepared defaults (both channels' values and the link mode) traded with
+    /// `peer`'s lane `peer_lane`, as the payload swap's defaults rotation trades them, and both
+    /// link laws rebuilt (issue #2229).
+    fn trade_defaults(&mut self, lane: usize, peer: &mut Self, peer_lane: usize) {
+        core::mem::swap(
+            &mut self.left.defaults[lane],
+            &mut peer.left.defaults[peer_lane],
+        );
+        core::mem::swap(
+            &mut self.right.defaults[lane],
+            &mut peer.right.defaults[peer_lane],
+        );
+        core::mem::swap(&mut self.link_modes[lane], &mut peer.link_modes[peer_lane]);
+        self.links = kernel::Links::per_lane(&self.link_modes);
+        peer.links = kernel::Links::per_lane(&peer.link_modes);
+    }
+
+    /// [`trade_defaults`](Self::trade_defaults) between two lanes of this instance.
+    fn trade_own_defaults(&mut self, lane: usize, other: usize) {
+        self.left.defaults.swap(lane, other);
+        self.right.defaults.swap(lane, other);
+        self.link_modes.swap(lane, other);
+        self.links = kernel::Links::per_lane(&self.link_modes);
+    }
+
+    /// Swaps lane `lane` with `peer`'s lane `peer_lane` (`None`: this instance's) directly
+    /// (issue #2229), exactly as the payload swap does: the defaults trade places, then each lane
+    /// takes the other's words under its new defaults. `false`, changing nothing, where the
+    /// payload path's answer is not this swap's: another sample rate, or link targets a restore
+    /// refuses.
+    fn swap_lanes_direct(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut Self>,
+        peer_lane: usize,
+    ) -> bool {
+        let Some((own, own_mode)) = self.lane_words(lane) else {
+            return false;
+        };
+        match peer {
+            None => {
+                let Some((theirs, their_mode)) = self.lane_words(peer_lane) else {
+                    return false;
+                };
+                self.trade_own_defaults(lane, peer_lane);
+                self.write_lane_words(lane, &theirs, their_mode);
+                self.write_lane_words(peer_lane, &own, own_mode);
+            }
+            Some(peer) => {
+                if peer.sample_rate != self.sample_rate {
+                    return false;
+                }
+                let Some((theirs, their_mode)) = peer.lane_words(peer_lane) else {
+                    return false;
+                };
+                self.trade_defaults(lane, peer, peer_lane);
+                self.write_lane_words(lane, &theirs, their_mode);
+                peer.write_lane_words(peer_lane, &own, own_mode);
+            }
+        }
+        true
+    }
+
     /// Exchanges lane `lane`'s prepared defaults with `bytes` in place (issue #1747): the left
     /// channel's seven preparation values, then the right's, each `f32` little-endian, then the
     /// lane's link mode as one word (issue #1368, `effect_contract::exchange_lane_link_word`). The values are
@@ -1602,6 +1714,67 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, L::WIDTH, self.active)?;
         self.instance.restore(state_layout_version, input, track)
+    }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
+    /// Issue #2229: a predecessor compressor bank of this lane type, both lanes active (the two
+    /// lanes the payload path's snapshot and restore check), by [`Instance::copy_lane_from`].
+    fn copy_lane_from(
+        &mut self,
+        lane: usize,
+        from: &dyn PreparedNativeEffectBank,
+        from_lane: usize,
+    ) -> Option<bool> {
+        let from = from.as_any()?.downcast_ref::<Self>()?;
+        let lane = checked_track(u32::try_from(lane).ok()?, L::WIDTH, self.active).ok()?;
+        let from_lane =
+            checked_track(u32::try_from(from_lane).ok()?, L::WIDTH, from.active).ok()?;
+        self.instance
+            .copy_lane_from(lane, &from.instance, from_lane)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
+    /// Issue #2229: two active lanes of this bank or of a peer compressor bank of this lane type,
+    /// by [`Instance::swap_lanes_direct`].
+    fn swap_lanes_direct(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn PreparedNativeEffectBank>,
+        peer_lane: usize,
+    ) -> bool {
+        let checked = |lane: usize, active: u32| {
+            u32::try_from(lane)
+                .ok()
+                .and_then(|lane| checked_track(lane, L::WIDTH, active).ok())
+        };
+        let Some(lane) = checked(lane, self.active) else {
+            return false;
+        };
+        match peer {
+            None => {
+                let Some(peer_lane) = checked(peer_lane, self.active) else {
+                    return false;
+                };
+                self.instance.swap_lanes_direct(lane, None, peer_lane)
+            }
+            Some(peer) => {
+                let Some(peer) = peer.as_any_mut().and_then(|any| any.downcast_mut::<Self>())
+                else {
+                    return false;
+                };
+                let Some(peer_lane) = checked(peer_lane, peer.active) else {
+                    return false;
+                };
+                self.instance
+                    .swap_lanes_direct(lane, Some(&mut peer.instance), peer_lane)
+            }
+        }
     }
 
     fn lane_default_bytes(&self) -> Option<usize> {

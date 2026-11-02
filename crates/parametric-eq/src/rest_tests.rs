@@ -631,3 +631,18 @@ fn swapped_eq_lanes_render_exactly_as_unswapped_ones() {
         }
     });
 }
+
+/// Issue #2229 for the EQ (`conformance::swap_probe::check_copy`): a lane the plan-swap carry
+/// copies directly from an EQ bank, with its ramps in flight, holds, answers and renders exactly
+/// what the payload round trip leaves, and the copy reaches the allocator zero times.
+#[test]
+fn a_directly_copied_eq_lane_is_the_payload_round_trip() {
+    bench_support::alloc::assert_installed();
+    bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);
+    lane::each_vector_lane!(|L, W| {
+        for seed in 0..3_u64 {
+            let seed = 0x2229_0101 + seed * 0x9e37;
+            swap_probe::check_copy(&mut EqSwapProbe::<L, W>::new(seed), seed);
+        }
+    });
+}

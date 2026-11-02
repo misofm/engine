@@ -1010,9 +1010,10 @@ fn payload_sections(
     Some((common, left, right))
 }
 
-/// The payload move of a plan swap's effect carry (#1279 D3), for both stage types: snapshot
-/// `predecessor`'s lane `predecessor_lane` into `scratch` and restore it into `into`'s lane
-/// `lane`. Returns whether the restored payload's left and right sections agree, or `None` when a
+/// The payload move of a plan swap's effect carry (#1279 D3), for both stage types: the bank's
+/// direct copy where it has one ([`PreparedNativeEffectBank::copy_lane_from`], #2229), else
+/// snapshot `predecessor`'s lane `predecessor_lane` into `scratch` and restore it into `into`'s
+/// lane `lane`. Returns whether the restored payload's left and right sections agree, or `None` when a
 /// step refused (a restore validates the whole payload before it commits, so a refused one changes
 /// nothing). Allocation-free and bounded by the prepared state size.
 fn carry_payload(
@@ -1023,6 +1024,11 @@ fn carry_payload(
     layout: &EffectLaneLayout,
     scratch: &mut [u8],
 ) -> Option<bool> {
+    // Issue #2229: a bank of the predecessor's own type copies the lane directly, to the same
+    // bits; any other pair takes the payload.
+    if let Some(agree) = into.copy_lane_from(lane, predecessor, predecessor_lane) {
+        return Some(agree);
+    }
     let sizes = layout.state_sizes;
     let (common, left, right) = payload_sections(scratch, sizes)?;
     predecessor
