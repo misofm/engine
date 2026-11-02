@@ -69,3 +69,13 @@ So every structural edit during playback at 96 kHz / 128 takes a block near or o
   adoption, growths 1-4, at most 817,397. At both, every swap block has at most 2 minor faults
   and 0 allocator events. One invocation before each record was refused at the load precondition,
   with no workload launched.
+- **Review MINORs (folded).** The direct paths rest on two invariants that a restore checked on
+  every call. Debug builds now assert both after every direct copy and swap: an EQ lane's target
+  words are its targets' design (`Channel::targets_are_designed`), and a compressor lane's words
+  are its current values' design (`state::words_are_designed`). Both checks run on stack
+  arrays. `realtime_policy` passes, and the debug tests of parametric-eq, compressor and
+  host-core pass with the copy, swap and swap-block allocation counts still 0.
+  `swap_block_realtime.rs` now states what only it reaches. A `Box` in the EQ's direct swap
+  leaves `successor_swap` gate 5 green and turns this test red. #1269 (closed) has a comment: its
+  "whole-bank move" condition was met, and #2229 solves it with direct lane copies and swaps
+  instead.

@@ -997,6 +997,11 @@ impl<L: Lane> Instance<L> {
             self.right.rest_link(lane, own);
         }
         self.silent_fixed_point = false;
+        debug_assert!(
+            state::words_are_designed(&self.left, lane, self.sample_rate)
+                && state::words_are_designed(&self.right, lane, self.sample_rate),
+            "a live compressor lane's words are its current values' design"
+        );
     }
 
     /// Copies lane `from_lane` of `from` into lane `lane` directly (issue #2229), exactly as

@@ -286,6 +286,31 @@ impl LaneWords {
     }
 }
 
+/// The invariant the direct copy and swap rest on where a restore redesigns (issue #2229): lane
+/// `lane`'s coefficient words are bit for bit what [`commit_channel`] designs from its current
+/// values at `sample_rate` (attack and release: its coefficient ramps' currents).
+/// Allocation-free; debug builds assert it.
+pub(crate) fn words_are_designed<L: Lane>(
+    channel: &Channel<L>,
+    lane: usize,
+    sample_rate: u32,
+) -> bool {
+    let mut designed = channel.words;
+    design_lane(
+        &channel.current_values(lane),
+        sample_rate,
+        DESIGNED_ON_RESTORE,
+        &mut designed,
+        lane,
+    );
+    designed[COEF_ATTACK][lane] = channel.rate_ramps[0][lane].current;
+    designed[COEF_RELEASE][lane] = channel.rate_ramps[1][lane].current;
+    designed
+        .iter()
+        .zip(&channel.words)
+        .all(|(designed, held)| designed[lane].to_bits() == held[lane].to_bits())
+}
+
 pub(crate) fn snapshot_lane<L: Lane>(
     output: &mut StatePayloadOutput<'_>,
     left: &Channel<L>,

@@ -3249,6 +3249,23 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         }
     }
 
+    /// The invariant the direct copy and swap rest on where a restore redesigns (issue #2229):
+    /// lane `track`'s target words in every section are bit for bit the design of its target at
+    /// `sample_rate`, as `decode_track` would redo it. Allocation-free; debug builds assert it.
+    fn targets_are_designed(&self, track: usize, sample_rate: SampleRateHz) -> bool {
+        (0..EQ_SECTION_COUNT).all(|section| {
+            self.targets[track][section]
+                .words(sample_rate)
+                .is_ok_and(|designed| {
+                    designed
+                        .to_array()
+                        .iter()
+                        .zip(self.target_words(section, track).to_array())
+                        .all(|(designed, held)| designed.to_bits() == held.to_bits())
+                })
+        })
+    }
+
     /// Copies lane `from_lane` of `from` into lane `track` directly (issue #2229): the words
     /// [`commit_track`](Self::commit_track) would commit from `from`'s snapshot. The target
     /// words are `from`'s own: live words of this effect at the one sample rate the caller has
@@ -4146,6 +4163,16 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         Ok(())
     }
 
+    /// Debug builds: lane `lane` holds the target words a restore would design
+    /// ([`Channel::targets_are_designed`], issue #2229).
+    fn debug_assert_designed(&self, lane: usize) {
+        debug_assert!(
+            self.left.targets_are_designed(lane, self.sample_rate())
+                && self.right.targets_are_designed(lane, self.sample_rate()),
+            "a live EQ lane's target words are its targets' design"
+        );
+    }
+
     /// Exchanges lane `lane`'s prepared defaults with `bytes` in place (issue #1747): for the left
     /// channel then the right, for every section in cascade order, the band's prepared target
     /// ([`BandTarget`]: enable and family as `u32`, then frequency, gain, Q and slope as `f32`
@@ -4522,6 +4549,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         self.right
             .copy_lane_from(lane, &from.right, from_lane, prepared_right);
         self.silent_fixed_point = false;
+        self.debug_assert_designed(lane);
         Some(left == right)
     }
 
@@ -4543,6 +4571,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         if lane >= W || peer_lane >= W || !self.active[lane] {
             return false;
         }
+        let across = peer.is_some();
         match peer {
             None => {
                 if !self.active[peer_lane] {
@@ -4581,9 +4610,14 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
                     [own_right, peer_right],
                 );
                 peer.silent_fixed_point = false;
+                peer.debug_assert_designed(peer_lane);
             }
         }
         self.silent_fixed_point = false;
+        self.debug_assert_designed(lane);
+        if !across {
+            self.debug_assert_designed(peer_lane);
+        }
         true
     }
 

@@ -4,6 +4,12 @@
 //! shifted successor lane, both by the effect's direct copy and swap rather than the state
 //! payload. A direct path that boxed, dropped or logged anything would move the counters here.
 //!
+//! What only this test reaches: a 64-track swap block whose predecessor lane packing has
+//! displaced, so `restore_home_lanes` runs its lane swaps and every effect lane is carried into a
+//! shifted successor lane. `successor_swap`'s gate 5 measures a swap block's allocations on a small
+//! session swapped after six blocks, and reaches no lane swap: a `Box` in the EQ's direct swap
+//! leaves it green and turns this test red.
+//!
 //! The subject is `bench swap`'s move (#1286): A is the fixture at 96 kHz, B is A plus one muted
 //! track whose ID sorts first, so every strip lands in another lane. Each plan renders
 //! [`BEFORE`] blocks, enough for lane packing to displace its lanes, before the next one is
