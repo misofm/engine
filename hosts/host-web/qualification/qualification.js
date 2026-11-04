@@ -1265,14 +1265,19 @@ async function runObservationRun(createHost, sessionDocument, armed) {
 /// when the page resumed a context any other way, offered another control, or did not offer one.
 /// The three SDK controls belong to `sdk-response-entry.ts`'s live track-response, collection and
 /// hop workloads, which run first and only when the SDK qualification does; then the growth row's
-/// [`resumeThroughClick`] button (#1332 S9); the last is the unsubscribe run's one
-/// [`resumeThroughClick`] button (#1535).
+/// [`resumeThroughClick`] button (#1332 S9); then the unsubscribe run's one
+/// [`resumeThroughClick`] button (#1535); the last are the suspend-then-resume row's two buttons per
+/// cycle, `first` and `again` (#2245).
 export function resumeClickPlan(sdkEnabled) {
   if (!WebAssembly.validate(SIMD128_PROBE)) return [];
   return [
     ...(sdkEnabled ? ["#track-response-resume", "#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
     resumeControlSelector(GROWTH_RESUME),
     resumeControlSelector(UNSUBSCRIBE_RESUME),
+    ...Array.from({ length: SUSPEND_RESUME_CYCLES }, (_, cycle) => [
+      resumeControlSelector(suspendResumeLabel(cycle, "first")),
+      resumeControlSelector(suspendResumeLabel(cycle, "again")),
+    ]).flat(),
   ];
 }
 
@@ -1741,6 +1746,178 @@ export function unsubscribeFailures(run) {
   return failures;
 }
 
+/// Issue #2245: the suspend-then-resume row. Each cycle is one fresh real `AudioContext`, because
+/// the path it guards is a boot: the studio console resumes a new context, renders a short first
+/// segment until its feed is attached, suspends it, and resumes it again on a click. #1531 saw that
+/// second resume leave Linux WebKit "running" with a frozen clock in 19 of 60 engine runs; ten
+/// cycles per leg run miss a 1-in-3 stall with probability (2/3)^10, under 2 %.
+const SUSPEND_RESUME_CYCLES = 10;
+/// The first segment the case aims for, in quanta: #1531 found the stall after a first segment of 6
+/// quanta or fewer, as the console renders. The page suspends at the first status read that reports
+/// a rendered quantum, but it cannot set the length: Chromium runs its first callbacks in a burst of
+/// 5 (sometimes 14) before the page can see one. So the length is reported per cycle, and the gate
+/// requires only that the suspend came after a rendered quantum.
+const SUSPEND_RESUME_FIRST_QUANTA = 6n;
+/// The quanta the context must render after the second resume. They exceed the capture window
+/// (`SUSPEND_RESUME_CAPTURE_FRAMES` / 128 = 16 quanta), so the capture holds only audio rendered
+/// after the resume; the first segment and these fit in the prefilled ring (40 blocks).
+const SUSPEND_RESUME_AFTER_QUANTA = 24n;
+const SUSPEND_RESUME_CAPTURE_FRAMES = 2048;
+/// The capture's peak must exceed this. The fed square wave is +-0.5 (`unsubscribePlanes`); the
+/// session's chain leaves about 0.07 at the node's output (measured on both browsers), and silence
+/// is exactly 0.
+const SUSPEND_RESUME_PEAK_FLOOR = 0.01;
+
+/// The label of one cycle's trusted-click resume: `first` starts the new context, `again` resumes
+/// it after the first segment's suspend. The click plan names the buttons by these labels.
+function suspendResumeLabel(cycle, which) {
+  return `suspend-resume cycle ${cycle} ${which}`;
+}
+
+/// One cycle of the suspend-then-resume row: boot suspended on the unsubscribe session with a
+/// prefilled ring and a meter lease (the console holds one), resume through a click, suspend as
+/// soon as a status read reports a rendered quantum, then resume through a second click and wait
+/// under the stall bound until both the clock and `renderedQuanta` have moved
+/// `SUSPEND_RESUME_AFTER_QUANTA` past the suspended values. The node's output passes through an
+/// `AnalyserNode`, the capture: its last `SUSPEND_RESUME_CAPTURE_FRAMES` samples are read after
+/// the wait, so they were all rendered after the second resume.
+async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
+  const step = (what) => `${what} (suspend-resume cycle ${cycle})`;
+  const context = new AudioContext({ sampleRate: SAMPLE_RATE });
+  void context.suspend().catch(() => {});
+  const stateBeforeBoot = await requireSuspended(context, step("the new context before boot"));
+  const host = await bounded("await", step("createHost"), context, () => createHost({
+    context,
+    document: sessionDocument,
+    options: bootOptions(STALL_RING_FRAMES, UNSUBSCRIBE_METER_BLOCKS),
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  }));
+  const capture = new AnalyserNode(context, { fftSize: SUSPEND_RESUME_CAPTURE_FRAMES });
+  host.node.connect(capture);
+  capture.connect(context.destination);
+  let meterFrames = 0;
+  const lease = await bounded("await", step("meters"), context, () => host.meters({
+    enabled: true,
+    onFrame: () => { meterFrames += 1; },
+  }));
+  for (let block = 0; block < RING_BLOCKS; block += 1) {
+    const acknowledgement = await bounded("await", step(`submitSource block ${block}`), context,
+      () => host.submitSource({
+        sourceId: "live-control-source",
+        generation: 1n,
+        startFrame: BigInt(block * QUANTUM_FRAMES),
+        sampleRateHz: SAMPLE_RATE,
+        planes: unsubscribePlanes(block),
+        frames: QUANTUM_FRAMES,
+        endOfRegion: false,
+      }));
+    if (acknowledgement.result !== RESULT_OK) {
+      throw new Error(`${step(`submitSource block ${block}`)} refused: ${diagnosticJson(acknowledgement)}`);
+    }
+  }
+  const status = (what) => bounded("await", step(what), context, () => host.status());
+  const describe = async () => ({
+    contextState: context.state,
+    currentTime: context.currentTime,
+    status: await host.status(),
+  });
+  const sample = async (what) => {
+    const reply = await status(what);
+    return {
+      state: context.state,
+      currentTime: context.currentTime,
+      renderedQuanta: reply.renderedQuanta.toString(),
+      lastResult: reply.lastResult,
+    };
+  };
+
+  // The first segment: suspend as soon as a status read reports a rendered quantum.
+  await resumeThroughClick(context, suspendResumeLabel(cycle, "first"));
+  let atSuspendCall;
+  await renderUntil(context, async () => {
+    atSuspendCall = await status("status (first segment)");
+    return atSuspendCall.renderedQuanta >= 1n;
+  }, suspendResumeLabel(cycle, "first"), describe, performance.now());
+  await bounded("suspend", step("the first segment's suspend"), context, () => context.suspend());
+  await requireSuspended(context, step("the first segment's suspend"));
+  const suspended = await sample("status (suspended)");
+
+  // The second resume: the clock and the render must both move, and the capture must hold audio.
+  await resumeThroughClick(context, suspendResumeLabel(cycle, "again"));
+  await renderUntil(context, async () => {
+    const reply = await status("status (after the resume)");
+    return reply.renderedQuanta >= BigInt(suspended.renderedQuanta) + SUSPEND_RESUME_AFTER_QUANTA
+      && context.currentTime > suspended.currentTime;
+  }, suspendResumeLabel(cycle, "again"), describe, performance.now());
+  const resumed = await sample("status (resumed)");
+  const captured = new Float32Array(SUSPEND_RESUME_CAPTURE_FRAMES);
+  capture.getFloatTimeDomainData(captured);
+  const capturePeak = captured.reduce((peak, value) => Math.max(peak, Math.abs(value)), 0);
+
+  const allocations = await bounded("await", step("renderAllocationCount"), context,
+    () => renderAllocationCount(host));
+  await bounded("await", step("dispose"), context, () => host.dispose());
+  await bounded("await", step("close"), context, () => context.close());
+  return {
+    cycle,
+    contextStateBeforeBoot: stateBeforeBoot,
+    meterLeaseResult: lease.result,
+    quantaAtSuspendCall: atSuspendCall.renderedQuanta.toString(),
+    suspended,
+    resumed,
+    capturePeak,
+    meterFrames,
+    renderAllocations: allocations,
+  };
+}
+
+/// Issue #2245: every cycle of the suspend-then-resume row, in order. A stall throws from the
+/// cycle's `renderUntil` with its stall signature, naming the cycle and the resume.
+async function runSuspendResumeQualification(createHost, sessionDocument) {
+  const cycles = [];
+  for (let cycle = 0; cycle < SUSPEND_RESUME_CYCLES; cycle += 1) {
+    cycles.push(await runSuspendResumeCycle(createHost, sessionDocument, cycle));
+  }
+  return { cycles };
+}
+
+/// Issue #2245: the `suspend-resume` gate's named failures, empty on a pass. `count`: not exactly
+/// `SUSPEND_RESUME_CYCLES` cycles. Per cycle: `context` (the new context was not suspended before
+/// boot, or the meter lease was refused), `first-segment` (the suspend was called before the status
+/// reported a rendered quantum), `suspended` (the context did not
+/// report "suspended" at the suspend), `resume-state`, `resume-clock` and `resume-render` (after
+/// the second resume the context was not "running", its clock did not move, or the engine did not
+/// render `SUSPEND_RESUME_AFTER_QUANTA` more quanta with result 0), and `capture` (the output after
+/// the resume was silent or not finite).
+export function suspendResumeFailures(run) {
+  if (run === null || typeof run !== "object" || !Array.isArray(run.cycles)) return ["result"];
+  const failures = new Set();
+  if (run.cycles.length !== SUSPEND_RESUME_CYCLES) failures.add("count");
+  const quanta = (value) => (typeof value === "string" && /^[0-9]+$/.test(value) ? BigInt(value) : null);
+  for (const cycle of run.cycles) {
+    if (cycle?.contextStateBeforeBoot !== "suspended" || cycle?.meterLeaseResult !== RESULT_OK) {
+      failures.add("context");
+    }
+    const first = quanta(cycle?.quantaAtSuspendCall);
+    if (first === null || first < 1n) failures.add("first-segment");
+    const suspendedQuanta = quanta(cycle?.suspended?.renderedQuanta);
+    const resumedQuanta = quanta(cycle?.resumed?.renderedQuanta);
+    if (cycle?.suspended?.state !== "suspended" || suspendedQuanta === null) failures.add("suspended");
+    if (cycle?.resumed?.state !== "running") failures.add("resume-state");
+    if (!(cycle?.resumed?.currentTime > cycle?.suspended?.currentTime)) failures.add("resume-clock");
+    if (resumedQuanta === null || suspendedQuanta === null
+        || resumedQuanta < suspendedQuanta + SUSPEND_RESUME_AFTER_QUANTA
+        || cycle?.resumed?.lastResult !== RESULT_OK) {
+      failures.add("resume-render");
+    }
+    if (!(Number.isFinite(cycle?.capturePeak) && cycle.capturePeak > SUSPEND_RESUME_PEAK_FLOOR)) {
+      failures.add("capture");
+    }
+  }
+  return [...failures];
+}
+
 /// Issue #143 E12: the observation row and its two offline runs.
 async function runObservationQualification(createHost, sessionDocument) {
   const armed = await runObservationRun(createHost, sessionDocument, true);
@@ -1982,6 +2159,7 @@ export async function runQualification() {
       consoleLimits: null,
       warmGrowth: null,
       observation: null,
+      suspendResume: null,
       stall: null,
       stagingReads: null,
       renderAllocations: null,
@@ -2110,6 +2288,15 @@ export async function runQualification() {
     if (error?.stallSignature !== undefined) failure.stallSignature = error.stallSignature;
     throw failure;
   }
+  let suspendResume;
+  try {
+    suspendResume = await runSuspendResumeQualification(createMisoAudioWorkletHost, unsubscribeDocument);
+  } catch (error) {
+    // #2245: the message and the stall signature only, as for the unsubscribe run.
+    const failure = new Error(`suspend-resume qualification failed: ${error?.message ?? String(error)}`);
+    if (error?.stallSignature !== undefined) failure.stallSignature = error.stallSignature;
+    throw failure;
+  }
   let stall;
   try {
     stall = await runStallQualification(createMisoAudioWorkletHost, stallDocument);
@@ -2151,6 +2338,7 @@ export async function runQualification() {
     consoleLimits,
     warmGrowth,
     observation,
+    suspendResume,
     stall,
     stagingReads,
     // Issue #1333 D3: every booted instance's render-locked allocator count, each read before
@@ -2172,6 +2360,9 @@ export async function runQualification() {
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },
+      ...suspendResume.cycles.map((cycle) => ({
+        workload: `suspend-resume-${cycle.cycle}`, count: cycle.renderAllocations,
+      })),
       { workload: "stall", count: stall.renderAllocations },
       { workload: "staging-reads", count: stagingReads.renderAllocations },
     ],
@@ -2191,6 +2382,9 @@ export const qualificationConstants = Object.freeze({
   sourceBitDepth: "32f",
   ringBlocks: RING_BLOCKS,
   unsubscribeSignalFrames: UNSUBSCRIBE_SIGNAL_FRAMES,
+  suspendResumeCycles: SUSPEND_RESUME_CYCLES,
+  suspendResumeFirstQuanta: SUSPEND_RESUME_FIRST_QUANTA,
+  suspendResumeAfterQuanta: SUSPEND_RESUME_AFTER_QUANTA,
 });
 
 // Issue #288: these are the existing qualification call sites, exposed only to the hermetic
