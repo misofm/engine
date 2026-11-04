@@ -327,7 +327,9 @@ frame 64 the section is the identity, as today. The same rule applies to the HPF
 
 1. **The exact identity** occurs only after a ramp ends, as today: the state holds and nothing is
    added. At frame 64 the recursion words jump from weight `delta_s` to 0, but the mix words are
-   exactly the identity's on that frame, so the output is `y = x`, as today.
+   exactly the identity's on that frame, so the output is `y = x`, as today. So the hold's largest
+   added step is that frame-64 drop, and it equals `|D63|`, the hold's difference from today on
+   frame 63: 0.036x the input amplitude at 44.1 kHz.
 2. **`omega >= delta_s`:** the certified constant is at most `1 - omega m(v)(1 - C/m - phi) +
    kappa u`, where `phi` is the walk loss of §7.1. At `omega = delta_s` this is `q_s` in the first
    table, below 1 at every rate for `phi` up to 0.85, 0.84, 0.71 and 0.68 (44.1, 48, 88.2,
@@ -377,9 +379,10 @@ Output bits move on these histories, and on no others:
    its resonance, whose own output is 15.8x the input), and on every lane it is no more than the
    difference today's engine makes when the same re-enable lands one to three frames earlier.
    After a disable that was restarted for a long time (a disabled band whose frequency is automated
-   every block), it reaches about 13x the input amplitude for the same kind of bell, near the
-   band's own output level: today's recursion weight has decayed toward 0 and the state has frozen,
-   while the hold has kept the state decaying and following the input at weight 1/16.
+   every block, the #2247 defect of §7.4), it reaches about 13x the input amplitude for the same
+   kind of bell, near the band's own output level: today's recursion weight has decayed toward 0
+   and the state has frozen, while the hold has kept the state decaying and following the input at
+   weight 1/16. This case goes away when #2247 is fixed.
 
 Nothing else moves: designs, ramps between designs, enables, settled sections and every frame on
 which today's recursion weight is at least 1/16 keep today's bits. In cases 1 and 2 the held state
@@ -396,8 +399,9 @@ of the disabled band also differs from today's, which the state payload shows.
 | 88.2 kHz | 1.076 | 0.030, 0.030 | 0.048 dB | 0.018, 0.151 |
 | 96 kHz | 1.077 | 0.029, 0.029 | 0.048 dB | 0.017, 0.150 |
 
-The hold's worst disable case is a +24 dB high shelf at 20 kHz. Its largest per-frame change is at
-most 1.064 times the largest per-frame change today's ramp makes on the same lane. Measured against
+The hold's worst disable difference is on a +24 dB high shelf at 20 kHz. Separately, its largest
+per-frame change is at most 1.064 times the largest per-frame change today's ramp makes on the same
+lane; that ratio is largest on a +24 dB, Q 18 bell at 20 kHz. Measured against
 today's own sensitivity to control timing, on every one of the 99,372 lanes:
 
 - disable (all four rates): the hold's difference is no larger than today's difference between a
@@ -417,11 +421,11 @@ step. That is an objective, relative bound. It is not a claim of inaudibility in
 no agent can run a listening test.
 
 Restarted disables are not covered by that bound: the hold's output differs by up to 0.19x the
-input before a re-enable and by about 13x after it. That is a behaviour choice, not a step: today
-revives a state frozen at an earlier moment, and the hold revives a state that kept decaying and
-following the input. Neither output has a discontinuity, and there is no reference a listening
-test could compare them against, so a listening check would not decide it either. The owner rules
-on the behaviour. The restart path is a finding of its own (§7.4).
+input before a re-enable and by about 13x after it. That case comes from the defect of §7.4 (issue
+#2247), not from the hold: today revives a state frozen at an earlier moment, and the hold revives a
+state that kept decaying and following the input. Neither output has a discontinuity. The case goes
+away when #2247 is fixed, because the disable then completes in 64 frames and P5 clears the state
+before any re-enable.
 
 The end snap would need a listening check before it could be accepted; this note rejects it on its
 step and its P5 change instead.
@@ -480,17 +484,17 @@ state lets the section be elided. It also changes the payload and the rest and e
 So it is a class-B question too. #1372 has to decide it for its rest bound; it is outside the decay
 question.
 
-### 7.4 A disabled band's parameter change restarts its disable ramp
+### 7.4 A disabled band's parameter change restarts its disable ramp (#2247)
 
 By P4, every touched row of a disabled band restarts its ramp toward the identity. Under automation
 with a quantum below 64, the disable never completes: the recursion weight decays toward 0, the
-state freezes, P5 never fires, and a later re-enable revives the frozen state. That is today's
-behaviour, with or without the hold. A target whose words equal the target already in flight could
-keep the ramp instead (a target-side stationary hoist); that is a separate class-B question. It
-would remove Theorem B2's witness, but not the conclusion: the enable-disable cycle of the #1372
-note (one frame toward a design, 63 back) still grows in the standard model at 88.2 and 96 kHz
-(model product per 64-frame cycle `1 + 1.1e-6` and `1 + 1.4e-6` at the witness; it contracts at
-44.1 and 48 kHz).
+state freezes, P5 never fires, and a later re-enable revives the frozen state. That is a defect on
+`main` today, with or without the hold, and it is filed as #2247. A fix (for example, a target
+whose words equal the target already in flight keeps the ramp) also removes the hold's 13x case of
+§6.5 and §6.7. It would remove Theorem B2's witness, but not the conclusion: the enable-disable
+cycle of the #1372 note (one frame toward a design, 63 back) still grows in the standard model at
+88.2 and 96 kHz (model product per 64-frame cycle `1 + 1.1e-6` and `1 + 1.4e-6` at the witness; it
+contracts at 44.1 and 48 kHz).
 
 ## 8. Gate record
 
