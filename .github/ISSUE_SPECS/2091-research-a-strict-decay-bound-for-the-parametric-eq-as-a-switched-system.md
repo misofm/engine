@@ -74,9 +74,16 @@ Blocks: #1372, and through it #1378.
 - **Listening check:** not needed for the hold's normal cases; on every lane its differences are no
   larger than today's own sensitivity to a one-to-three-frame shift of the same edit. The restarted
   case is a behaviour choice (which held state a re-enable revives), not a step, and a listening
-  check would not decide it. No claim of absolute inaudibility is made.
+  check would not decide it. No claim of absolute inaudibility is made. The restarted case comes from
+  the defect filed as #2247 and goes away when it is fixed.
 - **MINORs folded:** "in the standard rounding model" in the answer; the `-0.0` sign effect of
   zeroing a held state; walks checked at every frame with a seed per rate; the corner tie explained
   as the norm optimum. New finding §7.4: a disabled band's parameter change restarts its disable
   ramp (P4), so under automation the disable never completes.
 
+### Attempt 2 verdict
+
+- PASS (hold). Three MINORs folded: the frame-64 drop is the hold's largest added step and equals
+  `|D63|` (0.036x at 44.1 kHz); the 1.064 ratio comes from the +24 dB, Q 18 bell at 20 kHz, not
+  from the shelf; the 13x restarted case is the #2247 defect, not a class-B question. The #2247 spec
+  is added on this branch.
