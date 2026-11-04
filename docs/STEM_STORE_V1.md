@@ -112,6 +112,12 @@ means the unindexed final is promote debris and the sweep removes it.
 An environment without `navigator.storage.getDirectory` refuses typed
 `storage.unavailable`; there is deliberately no RAM-resident degraded mode.
 
+WebKit coverage is a stated asymmetry (owner ruling on #284, 2026-11-04). Playwright WebKit on
+Linux, the CI stand-in for Safari, has no `navigator.storage.getDirectory`, so CI runs no
+stem-store browser gate on WebKit and the store refuses there with `storage.unavailable`. The
+store logic is covered in Node with fakes (`hosts/host-web/tests/stem-store-core-v1.mjs`), and
+real-device Safari probes are the WebKit evidence. No macOS CI leg is added for it.
+
 The local-store read/write deadline is 15 seconds. Resolver establishment,
 network delivery, and decoded-stream output use the 30-second ingest
 no-progress watchdog; both deadlines race the mix-switch abort signal, abandon

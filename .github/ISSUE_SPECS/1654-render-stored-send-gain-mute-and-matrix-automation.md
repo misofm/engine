@@ -14,9 +14,12 @@ head). Batch R2, after #1651-#1653.
 - **The route-op machinery shipped with batch 19b**: the following route op on K1's merged walk
   (T3), its carry, the U2 fold fixes and the conservative B19-R7/R8/R9 transition-fallback term.
   Its production callers are source-mute and VCA-mute following routes (#1652, #1655).
-- **This issue stays open in phase 2 behind #1718.** It turns send rows on (route cells, flags
-  bits 6-11, the send-gain offset and the gain law, the send-row gates) after #1718 lands the
-  cut exactly. The decision records below describe the batch 19 attempt; the B19-R10 record at
+- **This issue stays open in phase 2 (owner finish line A, 2026-10-17).** It turns send rows on
+  (route cells, flags bits 6-11, the send-gain offset and the gain law, the send-row gates).
+  #1718 closed on 2026-11-01 (PR #2231) with its false fallback flag deleted; its owed landing
+  moves here: this issue's reopening brief inherits #1718's gates G1, G1c and G1d (root Q2,
+  2026-11-01). #1713 (PR #2231) made a six-word route hold `ColumnRamps`; the "Anchors now"
+  cites below predate it and are re-read at reopening. The decision records below describe the batch 19 attempt; the B19-R10 record at
   the end lists what was removed.
 
 ## Product outcome
