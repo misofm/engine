@@ -9926,11 +9926,11 @@ mod restated_target {
         }
     }
 
-    /// One enabled bell is moved from +9 dB to +3 dB, and the +3 dB target is then written again
-    /// before every block of 16 frames. The ramp runs for four blocks and ends at frame 64, and
-    /// from then on the channel pair is on the stationary path; a restart per write would keep it
-    /// ramping for ever.
-    fn case<L: Lane, const W: usize>(width: &str) {
+    /// One enabled +9 dB bell is sent `first`, and then `again` before every later block of 16
+    /// frames. `again` designs the same words as `first`. The ramp runs for four blocks and ends
+    /// at frame 64, and from then on the channel pair is on the stationary path; a restart per
+    /// write would keep it ramping for ever.
+    fn case<L: Lane, const W: usize>(width: &str, first: BandTarget, again: BandTarget) {
         let mut sections = [BandTarget {
             enabled: false,
             ..bell(0.0)
@@ -9938,10 +9938,19 @@ mod restated_target {
         sections[BAND_SECTION_OFFSET] = bell(9.0);
         let mut left = Channel::<L, W>::new([sections; W], RATE).expect("legal");
         let mut right = Channel::<L, W>::new([sections; W], RATE).expect("legal");
-        let target = bell(3.0);
-        let words = target.words(RATE).expect("a legal bell");
+        let words = first.words(RATE).expect("a legal design");
+        assert_eq!(
+            again
+                .words(RATE)
+                .expect("a legal design")
+                .to_array()
+                .map(f32::to_bits),
+            words.to_array().map(f32::to_bits),
+            "{width}: the re-sent target designs the same words"
+        );
         let ramp_blocks = RAMP_SAMPLES as usize / FRAMES;
         for block in 0..ramp_blocks + 2 {
+            let target = if block == 0 { first } else { again };
             for lane in 0..W {
                 left.apply_prepared_target(lane, BAND_SECTION_OFFSET, target, words);
                 right.apply_prepared_target(lane, BAND_SECTION_OFFSET, target, words);
@@ -9966,9 +9975,21 @@ mod restated_target {
         }
     }
 
+    fn shelf(kind: EqBandKind) -> BandTarget {
+        BandTarget { kind, ..bell(0.0) }
+    }
+
+    /// The same value re-sent, and a family switch at 0 dB from a low to a high shelf, which
+    /// designs the same words and so targets the same filter.
     #[test]
     fn a_re_sent_enabled_target_ends_its_ramp_at_frame_64() {
-        case::<f32, 1>(&width_label(1));
-        lane::each_vector_lane!(|L, W| case::<L, W>(&width_label(W)));
+        let cases = [
+            (bell(3.0), bell(3.0)),
+            (shelf(EqBandKind::LowShelf), shelf(EqBandKind::HighShelf)),
+        ];
+        for (first, again) in cases {
+            case::<f32, 1>(&width_label(1), first, again);
+            lane::each_vector_lane!(|L, W| case::<L, W>(&width_label(W), first, again));
+        }
     }
 }
