@@ -1755,13 +1755,18 @@ const SUSPEND_RESUME_CYCLES = 10;
 /// The first segment the case aims for, in quanta: #1531 found the stall after a first segment of 6
 /// quanta or fewer, as the console renders. The page suspends at the first status read that reports
 /// a rendered quantum, but it cannot set the length: Chromium runs its first callbacks in a burst of
-/// 5 (sometimes 14) before the page can see one. So the length is reported per cycle, and the gate
+/// 5 to 18 quanta before the page can see one. So the length is reported per cycle, and the gate
 /// requires only that the suspend came after a rendered quantum.
 const SUSPEND_RESUME_FIRST_QUANTA = 6n;
 /// The quanta the context must render after the second resume. They exceed the capture window
 /// (`SUSPEND_RESUME_CAPTURE_FRAMES` / 128 = 16 quanta), so the capture holds only audio rendered
-/// after the resume; the first segment and these fit in the prefilled ring (40 blocks).
+/// after a good resume.
 const SUSPEND_RESUME_AFTER_QUANTA = 24n;
+/// The prefilled source ring, in blocks. It covers the longest first segment measured (Chromium
+/// suspended at up to 18 quanta, and the resume read reached quantum 44) plus the
+/// `SUSPEND_RESUME_AFTER_QUANTA` after the resume, with 20 blocks of margin, so no quantum the gate
+/// waits for renders an underrun.
+const SUSPEND_RESUME_RING_BLOCKS = 64;
 const SUSPEND_RESUME_CAPTURE_FRAMES = 2048;
 /// The capture's peak must exceed this. The fed square wave is +-0.5 (`unsubscribePlanes`); the
 /// session's chain leaves about 0.07 at the node's output (measured on both browsers), and silence
@@ -1775,12 +1780,15 @@ function suspendResumeLabel(cycle, which) {
 }
 
 /// One cycle of the suspend-then-resume row: boot suspended on the unsubscribe session with a
-/// prefilled ring and a meter lease (the console holds one), resume through a click, suspend as
+/// prefilled ring (`SUSPEND_RESUME_RING_BLOCKS`) and a meter lease (the console holds one), resume through a click, suspend as
 /// soon as a status read reports a rendered quantum, then resume through a second click and wait
 /// under the stall bound until both the clock and `renderedQuanta` have moved
 /// `SUSPEND_RESUME_AFTER_QUANTA` past the suspended values. The node's output passes through an
 /// `AnalyserNode`, the capture: its last `SUSPEND_RESUME_CAPTURE_FRAMES` samples are read after
-/// the wait, so they were all rendered after the second resume.
+/// the wait. After a good resume they were all rendered after it, so the capture check proves that
+/// audio is present there. It does not detect a stall: a stalled context's analyser keeps the audio
+/// from before the suspend (a WebKit stall read a peak of 0.462). The clock, render and stall checks
+/// catch a stall.
 async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
   const step = (what) => `${what} (suspend-resume cycle ${cycle})`;
   const context = new AudioContext({ sampleRate: SAMPLE_RATE });
@@ -1789,7 +1797,7 @@ async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
   const host = await bounded("await", step("createHost"), context, () => createHost({
     context,
     document: sessionDocument,
-    options: bootOptions(STALL_RING_FRAMES, UNSUBSCRIBE_METER_BLOCKS),
+    options: bootOptions(SUSPEND_RESUME_RING_BLOCKS * QUANTUM_FRAMES, UNSUBSCRIBE_METER_BLOCKS),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   }));
@@ -1801,7 +1809,7 @@ async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
     enabled: true,
     onFrame: () => { meterFrames += 1; },
   }));
-  for (let block = 0; block < RING_BLOCKS; block += 1) {
+  for (let block = 0; block < SUSPEND_RESUME_RING_BLOCKS; block += 1) {
     const acknowledgement = await bounded("await", step(`submitSource block ${block}`), context,
       () => host.submitSource({
         sourceId: "live-control-source",
