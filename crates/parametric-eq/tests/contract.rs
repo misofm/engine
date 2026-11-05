@@ -639,10 +639,10 @@ fn every_live_enable_or_family_ramp_is_contractive_and_bounded() {
                         }
                         for (to_index, &to) in states.iter().enumerate() {
                             // The next state of the seven-cycle whose words differ from `to`'s.
-                            // Two states can design the same words (a low and a high shelf at
-                            // 0 dB); a retarget to the same words keeps the ramp in flight
-                            // (#2250), so it is no family ramp and the walk below would not be
-                            // the lane's.
+                            // Two states can design the same words: at 0 dB a low and a high
+                            // shelf always do, and a bell does with both at some rates and Q. A
+                            // retarget to the same words keeps the ramp in flight (#2250), so it
+                            // is no family ramp and the walk below would not be the lane's.
                             let next = (1..states.len())
                                 .map(|offset| states[(to_index + offset) % states.len()])
                                 .find(|&state| {

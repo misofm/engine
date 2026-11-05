@@ -9926,8 +9926,8 @@ mod restated_target {
         }
     }
 
-    /// One enabled +9 dB bell is sent `first`, and then `again` before every later block of 16
-    /// frames. `again` designs the same words as `first`. The ramp runs for four blocks and ends
+    /// The band is prepared as an enabled +9 dB bell. It is sent `first`, and then `again` before
+    /// every later block of 16 frames. `again` designs the same words as `first`. The ramp runs for four blocks and ends
     /// at frame 64, and from then on the channel pair is on the stationary path; a restart per
     /// write would keep it ramping for ever.
     fn case<L: Lane, const W: usize>(width: &str, first: BandTarget, again: BandTarget) {

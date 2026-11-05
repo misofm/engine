@@ -53,7 +53,8 @@ Keep an in-flight ramp whose target words equal the new target words, for any de
   difference 0.046. In the last 100 frames the largest difference is 2.2e-7 and 2.7e-7: on base
   the ramp restarts each block, so the words approach the target but never snap to it.
 - **Word-identical family switch.** Bits also move when a family switch mid-ramp designs the
-  same six words, for example a low shelf to a high shelf at 0 dB. The first run of `contract.rs`
+  same six words. At 0 dB a low and a high shelf always tie, and a bell ties with both shelves
+  at some rates and Q (63 of the test's 315 changed retargets). The first run of `contract.rs`
   `every_live_enable_or_family_ramp_is_contractive_and_bounded` found it, release and debug
   ("44100 Hz 20 Hz 0 dB Q 0.1: 0 -> 2 -> next"): the rule keeps the ramp where base restarted it
   from the words in force. The end words are the same; only the path between differs. That test
@@ -65,6 +66,10 @@ Keep an in-flight ramp whose target words equal the new target words, for any de
   blocks and the held value is re-sent before every block in between. The time is target apply
   plus `process_bank` for all banks, mean per block, one warmup and two rounds, 1-minute load
   0.44. Base: 53,931 and 53,933 ns. Head: 54,225 and 54,144 ns (+0.5 %). The bench does not show
-  a saving. The cause was not investigated. A first bench run re-sent only the prepared value, so
+  a saving in time. The verifier counted the stationary path in 11,216 of 12,800 bank blocks at
+  head, against 128 of 12,800 at base. The likely reason for no time saving (inferred, not
+  timed): about 256 target applies per block dominate the bench, and each one runs
+  `validate_rounded_svf` (`control.rs:363`). The discarded first run also showed head at
+  +0.37 %, so +0.5 % is within code-layout noise. A first bench run re-sent only the prepared value, so
   no ramp started at base or at head; that run is discarded. The real gain of the fix is
   correctness: the ramp ends, so the stationary path, rest and elision are possible again.
