@@ -11,8 +11,8 @@ import { qualifySuspendedPcmFeed } from "./pcm-feed-suspended.mjs";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
 import {
-  classifyStallSignature, largeReplaceSource, qualificationConstants, requestFailure, suspendResumeFailures,
-  unsubscribeFailures,
+  classifyStallSignature, largeReplaceSource, qualificationConstants, requestFailure, SUSPEND_RESUME_SETUP_CHECKS,
+  suspendResumeFailures, unsubscribeFailures,
 } from "./qualification.js";
 import { worstReplaceDocument } from "./worst-replace-document.js";
 import { ARTIFACT_NAMES, exactArtifacts, startQualificationServer } from "./server.mjs";
@@ -45,6 +45,14 @@ const LEGS = Object.freeze({
 const caughtBy = (gate, ...mutations) => mutations.map((mutation) => ({ mutation, gate }));
 // Issue #1332 S9: a mutation of a claim only one leg makes runs on that leg alone.
 const onLeg = (leg, entries) => entries.map((entry) => ({ ...entry, leg }));
+// Issue #2245: a mutation of a claim only one browser gates runs on that browser alone.
+const onBrowser = (browser, entries) => entries.map((entry) => ({ ...entry, browser }));
+// Owner ruling 2026-11-05 (#2245): the browsers whose suspend-resume row is gated. Linux WebKit's
+// audio output stalls after the second resume under any processor that does 1 ms of work per call
+// (the no-engine repro in the #2245 spec), so its row is reported, not gated: only its setup checks
+// (`SUSPEND_RESUME_SETUP_CHECKS`) are held there.
+const SUSPEND_RESUME_GATED = new Set(["chromium"]);
+const browserOf = (label) => label.split(" ")[0];
 const MUTATIONS = Object.freeze([
   ...caughtBy("attestation", "attestation"),
   ...caughtBy("AudioWorklet-boot", "boot"),
@@ -143,8 +151,9 @@ const MUTATIONS = Object.freeze([
   // a harness that clicked fewer or more controls than the page declared.
   ...caughtBy("resume-clicks", "resume-clicks-direct", "resume-clicks-missing", "resume-clicks-extra"),
   // Issue #2245: a cycle whose second resume did nothing: the record after it is the suspended one,
-  // with a silent capture.
-  ...caughtBy("suspend-resume", "suspend-resume-skipped"),
+  // with a silent capture. Proved on Chromium only: the WebKit row is reported, not gated, so the
+  // same record passes there (owner ruling 2026-11-05).
+  ...onBrowser("chromium", caughtBy("suspend-resume", "suspend-resume-skipped")),
   // Issue #1530 gate 4: the browser observation wait, one predicate each.
   ...caughtBy("sdk-observation-wait", "sdk-observation-wait-unbounded", "sdk-observation-wait-late",
     "sdk-observation-wait-early", "sdk-observation-wait-untyped", "sdk-observation-wait-rendered",
@@ -674,7 +683,10 @@ function validate(browserName, result, leg) {
   // Issue #2245: on fresh real contexts, a short first segment, a suspend and a second trusted-click
   // resume, every cycle's clock and render moved on and its output after the resume was audible. A
   // resume that never restarted the render fails earlier, as a named stall with its signature.
-  const suspendResumeFailed = suspendResumeFailures(result.suspendResume);
+  // On WebKit the row is reported, not gated: only the setup checks are held (owner ruling 2026-11-05).
+  const suspendResumeGated = SUSPEND_RESUME_GATED.has(browserOf(browserName));
+  const suspendResumeFailed = suspendResumeFailures(result.suspendResume)
+    .filter((check) => suspendResumeGated || SUSPEND_RESUME_SETUP_CHECKS.includes(check));
   gate(browserName, "suspend-resume", suspendResumeFailed.length === 0,
     `${suspendResumeFailed.join(", ")}: ${JSON.stringify(result.suspendResume ?? null)}`);
 
@@ -1579,6 +1591,7 @@ function suspendResumeFailureProofs() {
     meterLeaseResult: 0,
     quantaAtSuspendCall: String(suspendResumeFirstQuanta),
     suspended: { state: "suspended", currentTime: 0.032, renderedQuanta: "9", lastResult: 0 },
+    stall: null,
     resumed: {
       state: "running", currentTime: 0.12, renderedQuanta: String(9n + suspendResumeAfterQuanta), lastResult: 0,
     },
@@ -1606,6 +1619,7 @@ function suspendResumeFailureProofs() {
     ["render short", lastCycle({ resumed: { ...cycle(0).resumed, renderedQuanta: String(8n + suspendResumeAfterQuanta) } }),
       ["resume-render"]],
     ["render result", lastCycle({ resumed: { ...cycle(0).resumed, lastResult: 6 } }), ["resume-render"]],
+    ["stalled", lastCycle({ stall: { full: true } }), ["stall"]],
     ["silent capture", lastCycle({ capturePeak: 0 }), ["capture"]],
     ["capture at the floor", lastCycle({ capturePeak: 0.01 }), ["capture"]],
     ["NaN capture", lastCycle({ capturePeak: Number.NaN }), ["capture"]],
@@ -1708,7 +1722,8 @@ function stallSignatureProofs() {
 function mutationProofs(browserName, result, leg) {
   const mutations = MUTATIONS
     .filter(({ mutation }) => result.sdkResponse !== null || !mutation.startsWith("sdk-"))
-    .filter((entry) => entry.leg === undefined || entry.leg === leg);
+    .filter((entry) => entry.leg === undefined || entry.leg === leg)
+    .filter((entry) => entry.browser === undefined || entry.browser === browserOf(browserName));
   for (const { mutation, gate: expected } of mutations) {
     assert.throws(
       () => validate(browserName, mutate(result, mutation, leg), leg),
@@ -2087,12 +2102,19 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
       })}\n`);
     }
     if (Array.isArray(result.suspendResume?.cycles)) {
-      // Issue #2245: what the suspend-resume gate just held, per cycle: the quanta at the first
-      // segment's suspend call, the quanta and clock at the suspend and after the second resume, and
-      // the capture's peak.
-      const short = result.suspendResume.cycles.filter((cycle) => BigInt(cycle.quantaAtSuspendCall)
+      // Issue #2245: what the suspend-resume row held (Chromium) or reports (WebKit), per cycle: the
+      // quanta at the first segment's suspend call, the quanta and clock at the suspend and after the
+      // second resume, and the capture's peak; then each stalled cycle's signature.
+      const cycles = result.suspendResume.cycles;
+      const short = cycles.filter((cycle) => BigInt(cycle.quantaAtSuspendCall)
         <= qualificationConstants.suspendResumeFirstQuanta).length;
-      process.stdout.write(`${label}: suspend-resume: ${short} of ${result.suspendResume.cycles.length} first segments at ${qualificationConstants.suspendResumeFirstQuanta} quanta or fewer; ${result.suspendResume.cycles.map((cycle) => `${cycle.cycle}:q${cycle.quantaAtSuspendCall}/${cycle.suspended.renderedQuanta}->${cycle.resumed.renderedQuanta},t${cycle.suspended.currentTime.toFixed(4)}->${cycle.resumed.currentTime.toFixed(4)},peak${cycle.capturePeak.toFixed(3)}`).join(" ")}\n`);
+      const stalled = cycles.filter((cycle) => cycle.stall !== null);
+      const reported = SUSPEND_RESUME_GATED.has(browserName) ? "" : " (reported, not gated)";
+      const failed = suspendResumeFailures(result.suspendResume);
+      process.stdout.write(`${label}: suspend-resume${reported}: ${stalled.length} of ${cycles.length} cycles stalled after the second resume${stalled.length === 0 ? "" : ` (cycles ${stalled.map((cycle) => cycle.cycle).join(", ")}; full signature ${stalled.filter((cycle) => cycle.stall.full === true).length})`}; failed checks: ${failed.length === 0 ? "none" : failed.join(", ")}; ${short} of ${result.suspendResume.cycles.length} first segments at ${qualificationConstants.suspendResumeFirstQuanta} quanta or fewer; ${cycles.map((cycle) => `${cycle.cycle}:q${cycle.quantaAtSuspendCall}/${cycle.suspended.renderedQuanta}->${cycle.resumed.renderedQuanta},t${cycle.suspended.currentTime.toFixed(4)}->${cycle.resumed.currentTime.toFixed(4)},peak${cycle.capturePeak.toFixed(3)}`).join(" ")}\n`);
+      for (const cycle of stalled) {
+        process.stdout.write(`${label}: suspend-resume cycle ${cycle.cycle}: stall-signature: ${JSON.stringify(cycle.stall)}\n`);
+      }
     }
     if (Array.isArray(result.sdkResponse?.renderAllocations)) {
       // Issue #1476 D4: the per-SDK-instance counts the sdk-render-allocations gate just held to zero.
@@ -2221,7 +2243,7 @@ async function main() {
     stallSignatureProofs();
     process.stdout.write("observation-unsubscribe: each named check is red past its bound; a dropout fails nothing\n");
     process.stdout.write("stall signature: each missing condition gives full=false\n");
-    process.stdout.write("suspend-resume: each named check is red alone\n");
+    process.stdout.write("suspend-resume: each named check is red alone; on WebKit only the setup checks are gated (reported, not gated, owner ruling 2026-11-05), so the skipped-resume mutation is proved on Chromium\n");
   }
 
   // Issue #1061: `--check-matrix` holds each browser's floor and outcome, the Playwright version

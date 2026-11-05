@@ -1844,12 +1844,21 @@ async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
   const suspended = await sample("status (suspended)");
 
   // The second resume: the clock and the render must both move, and the capture must hold audio.
+  // A stall here is recorded with its signature, not thrown: Linux WebKit stalls on this path (the
+  // owner's ruling of 2026-11-05 reports the row there), and the cycle still disposes its host and
+  // closes its context (a close of a stalled context returns; a `suspend()` would hang the page).
   await resumeThroughClick(context, suspendResumeLabel(cycle, "again"));
-  await renderUntil(context, async () => {
-    const reply = await status("status (after the resume)");
-    return reply.renderedQuanta >= BigInt(suspended.renderedQuanta) + SUSPEND_RESUME_AFTER_QUANTA
-      && context.currentTime > suspended.currentTime;
-  }, suspendResumeLabel(cycle, "again"), describe, performance.now());
+  let stall = null;
+  try {
+    await renderUntil(context, async () => {
+      const reply = await status("status (after the resume)");
+      return reply.renderedQuanta >= BigInt(suspended.renderedQuanta) + SUSPEND_RESUME_AFTER_QUANTA
+        && context.currentTime > suspended.currentTime;
+    }, suspendResumeLabel(cycle, "again"), describe, performance.now());
+  } catch (error) {
+    if (error?.stallSignature === undefined) throw error;
+    stall = error.stallSignature;
+  }
   const resumed = await sample("status (resumed)");
   const captured = new Float32Array(SUSPEND_RESUME_CAPTURE_FRAMES);
   capture.getFloatTimeDomainData(captured);
@@ -1866,6 +1875,7 @@ async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
     quantaAtSuspendCall: atSuspendCall.renderedQuanta.toString(),
     suspended,
     resumed,
+    stall,
     capturePeak,
     meterFrames,
     renderAllocations: allocations,
@@ -1888,8 +1898,12 @@ async function runSuspendResumeQualification(createHost, sessionDocument) {
 /// reported a rendered quantum), `suspended` (the context did not
 /// report "suspended" at the suspend), `resume-state`, `resume-clock` and `resume-render` (after
 /// the second resume the context was not "running", its clock did not move, or the engine did not
-/// render `SUSPEND_RESUME_AFTER_QUANTA` more quanta with result 0), and `capture` (the output after
-/// the resume was silent or not finite).
+/// render `SUSPEND_RESUME_AFTER_QUANTA` more quanta with result 0), `stall` (the wait after the
+/// second resume timed out; the cycle carries its stall signature), and `capture` (the output after
+/// the resume was silent or not finite). `SUSPEND_RESUME_SETUP_CHECKS` are the checks of the boot
+/// and the first segment; the others are the checks of the second resume.
+export const SUSPEND_RESUME_SETUP_CHECKS = Object.freeze(["result", "count", "context", "first-segment", "suspended"]);
+
 export function suspendResumeFailures(run) {
   if (run === null || typeof run !== "object" || !Array.isArray(run.cycles)) return ["result"];
   const failures = new Set();
@@ -1905,6 +1919,7 @@ export function suspendResumeFailures(run) {
     const resumedQuanta = quanta(cycle?.resumed?.renderedQuanta);
     if (cycle?.suspended?.state !== "suspended" || suspendedQuanta === null) failures.add("suspended");
     if (cycle?.resumed?.state !== "running") failures.add("resume-state");
+    if (cycle?.stall !== null) failures.add("stall");
     if (!(cycle?.resumed?.currentTime > cycle?.suspended?.currentTime)) failures.add("resume-clock");
     if (resumedQuanta === null || suspendedQuanta === null
         || resumedQuanta < suspendedQuanta + SUSPEND_RESUME_AFTER_QUANTA
