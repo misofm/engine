@@ -70,3 +70,51 @@ A diagnostic page (scratch, not committed; 10 cycles per run, fresh browser per 
 - The gate cannot pass on WebKit. Merging the row as is turns both WebKit legs of `qualification.yml` red.
 - Root decides: an owner ruling on a Linux WebKit exemption (the full-signature rule, now with a no-engine repro, which opens #1531's condition (2)), a CI audio change, an upstream report (needs owner consent), or an app-level recovery (re-create the context) in a new issue.
 - The studio console's boot path (suspend after the feed attaches, resume on a click) is exposed to this stall on Linux WebKit. Real Safari on macOS uses a different audio destination and was not measured.
+
+## Owner ruling (2026-11-05) and its application
+
+- **Cause (recorded):** Linux WebKit's audio output (WebKit 26.5, GStreamer, the PulseAudio null sink) stalls after the second resume under any processor that does about 1 ms of work per `process()` call. The engine package is not the cause. The no-engine repro below is the evidence.
+- **Ruling:** Chromium gates the `suspend-resume` row. WebKit reports it, "reported, not gated", like the other WebKit rows (`pcm-feed-suspended.mjs`'s live-seek rows). The owner checks real Safari on a Mac separately.
+- **Applied (`1e9818360`):**
+  - A stall after the second resume is now recorded in the cycle (`stall`, with its stall signature) instead of thrown, and the cycle still disposes its host and closes its context. A new `stall` check joins `suspendResumeFailures`.
+  - `run.mjs`: `SUSPEND_RESUME_GATED` is `chromium`. On WebKit, only the setup checks (`SUSPEND_RESUME_SETUP_CHECKS`: `result`, `count`, `context`, `first-segment`, `suspended`) are gated. The report line names the stalled cycles and the full-signature count, and prints each stalled cycle's signature.
+  - The mutation `suspend-resume-skipped` is proved on Chromium only (`onBrowser("chromium", ...)`). The proof output states that the WebKit row is not gated.
+- **Counts:** Chromium single 20/20 and Chromium worker 20/20 pass, with no rerun (attempt 1 record). With the ruling applied, one `--check-matrix --self-test-mutations` run per leg passes on all four legs:
+  - Chromium single and worker: 0 of 10 cycles stalled.
+  - WebKit single: 7 of 10 cycles stalled, all with the full signature (leg 124 s).
+  - WebKit worker: 4 of 10 cycles stalled, all with the full signature (leg 81 s).
+- **Checks after the ruling:** SDK checks, `check-web-audioworklet.sh` with the named twin, the hermetic web tests and `check-workspace-policy.sh` all pass.
+
+### The no-engine repro (recorded as text; the repository has no committed qualification diagnostics directory)
+The page: fresh browser per run, 10 cycles per run, under the private PulseAudio null sink. Each cycle does the following:
+1. Create a fresh 48 kHz `AudioContext`, call `suspend()`, wait for "suspended", `addModule` the processor below, then `new AudioWorkletNode(context, "diag-trivial", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2], processorOptions: { busyMs } })` connected to the destination.
+2. A trusted click calls `resume()`. Suspend at the first port message (the first rendered quantum), and wait for "suspended".
+3. A second trusted click calls `resume()`. The cycle passes when the processor's call count moves 24 past its suspended value and `currentTime` moves, within 5 s.
+
+```js
+class Trivial extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    this.calls = 0;
+    this.busyMs = options.processorOptions.busyMs;
+    this.port.onmessage = (e) => this.port.postMessage({ ping: e.data.ping, currentFrame, calls: this.calls });
+  }
+  process(_inputs, outputs) {
+    this.calls += 1;
+    const t = Date.now();
+    while (Date.now() - t < this.busyMs) {} // the work
+    for (const channel of outputs[0]) for (let i = 0; i < channel.length; i += 1) channel[i] = ((i >> 4) % 2 === 0) ? 0.5 : -0.5;
+    this.port.postMessage({ meter: this.calls });
+    return true;
+  }
+}
+registerProcessor("diag-trivial", Trivial);
+```
+
+- `busyMs: 0` (the control): WebKit 0 of 30 cycles stalled.
+- `busyMs: 1`: WebKit 8 of 10. `busyMs: 2`: WebKit 10 of 10. Chromium with `busyMs: 2`: 0 of 10.
+- A later run re-checks whether WebKit still stalls by running this page with `busyMs: 1` and `busyMs: 0`.
+
+### Open
+- The owner checks real Safari on a Mac. macOS uses a different audio output, and this tree did not measure it.
+- If Safari also stalls, the studio console's boot path (`studio-v2 src/studio/engine-client.ts:382` and `:654`) needs an app-level recovery in a new issue.
