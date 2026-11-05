@@ -2810,6 +2810,9 @@ fn admitted_blocks_over_the_block_limit_match_scalar_and_padded_banks() {
 /// Frames per block of the live enable and family scenarios (#1337).
 const LIVE_FRAMES: usize = 128;
 
+/// The quantum of the restated-disable leg of gate 4 (#2247): below the 64-frame ramp.
+const SMALL_FRAMES: usize = 16;
+
 /// Deterministic noise in `[-0.8, 0.8)`, distinct per block, frame, lane and channel.
 fn live_noise(block: usize, frame: usize, lane: usize, channel: usize) -> f32 {
     let mut x =
@@ -2849,8 +2852,9 @@ struct LiveEdit {
 }
 
 /// Each lane's output bits, block by block (left then right), rendered through one scalar
-/// instance per lane (`W = 1`). Lane `l` is fed noise stream `source(l)`.
+/// instance per lane (`W = 1`) in blocks of `frames`. Lane `l` is fed noise stream `source(l)`.
 fn live_scalar_lanes(
+    frames: usize,
     prepared: &[Vec<effect_contract::InitialParameterValue>],
     edits: &[LiveEdit],
     blocks: usize,
@@ -2875,10 +2879,10 @@ fn live_scalar_lanes(
                             targets[..count].to_vec()
                         })
                         .collect();
-                    let mut left: Vec<f32> = (0..LIVE_FRAMES)
+                    let mut left: Vec<f32> = (0..frames)
                         .map(|f| live_noise(block, f, source(lane), 0))
                         .collect();
-                    let mut right: Vec<f32> = (0..LIVE_FRAMES)
+                    let mut right: Vec<f32> = (0..frames)
                         .map(|f| live_noise(block, f, source(lane), 1))
                         .collect();
                     // Gate 8: applying the targets (an enable, a disable, a family change, a D4
@@ -2896,7 +2900,7 @@ fn live_scalar_lanes(
                             &mut left,
                             &mut right,
                             None,
-                            (block * LIVE_FRAMES) as u64,
+                            (block * frames) as u64,
                             &[],
                             LIVE_FRAMES as u32,
                         )
@@ -2919,6 +2923,7 @@ fn live_scalar_lanes(
 
 /// [`live_scalar_lanes`] through one full bank of the native width.
 fn live_bank_lanes(
+    frames: usize,
     width: BankWidth,
     backend: Backend,
     prepared: &[Vec<effect_contract::InitialParameterValue>],
@@ -2949,9 +2954,9 @@ fn live_bank_lanes(
                 &edit.changed,
             );
         }
-        let mut left = vec![0.0_f32; LIVE_FRAMES * lanes];
-        let mut right = vec![0.0_f32; LIVE_FRAMES * lanes];
-        for frame in 0..LIVE_FRAMES {
+        let mut left = vec![0.0_f32; frames * lanes];
+        let mut right = vec![0.0_f32; frames * lanes];
+        for frame in 0..frames {
             for lane in 0..lanes {
                 left[frame * lanes + lane] = live_noise(block, frame, source(lane), 0);
                 right[frame * lanes + lane] = live_noise(block, frame, source(lane), 1);
@@ -2962,9 +2967,9 @@ fn live_bank_lanes(
                 &mut left,
                 &mut right,
                 None,
-                LIVE_FRAMES as u32,
+                frames as u32,
                 width,
-                (block * LIVE_FRAMES) as u64,
+                (block * frames) as u64,
                 &[],
                 &offsets,
                 LIVE_FRAMES as u32,
@@ -2973,7 +2978,7 @@ fn live_bank_lanes(
         );
         for (lane, lane_out) in out.iter_mut().enumerate() {
             let column = |plane: &[f32]| {
-                (0..LIVE_FRAMES)
+                (0..frames)
                     .map(|frame| plane[frame * lanes + lane].to_bits())
                     .collect::<Vec<_>>()
             };
@@ -2990,11 +2995,15 @@ fn live_bank_lanes(
 /// re-enable block on, the same bits as a lane prepared disabled and enabled at that block: the
 /// frozen integrators of the old signal are cleared, not resumed. At `W = 1` and the native bank
 /// width, where each history lane sits beside a fresh one.
+///
+/// The second leg (#2247) renders blocks of [`SMALL_FRAMES`], below the 64-frame ramp, writes band
+/// 2's frequency on every block while it is disabled, and re-enables at the first block boundary
+/// after frame 64 of the disable. A restated disable keeps its ramp, so the disable completes at
+/// frame 64 and the re-enable starts from rest; if any write restarted the ramp, it is still in
+/// flight at the re-enable and the frozen state is resumed.
 #[test]
 fn a_live_re_enable_starts_from_rest() {
     const DISABLE: usize = 1;
-    const REENABLE: usize = DISABLE + 201;
-    const BLOCKS: usize = REENABLE + 6;
     let on = [
         (6, 1.0),
         (7, EqBandKind::Bell as u32 as f32),
@@ -3006,56 +3015,74 @@ fn a_live_re_enable_starts_from_rest() {
     let (enabled, _) = live_edit(&values(), &on);
     let (disabled, disable_changed) = live_edit(&enabled, &off);
     let (_, enable_changed) = live_edit(&disabled, &on);
-    let script = |lanes: usize| -> (Vec<Vec<_>>, Vec<LiveEdit>) {
-        let mut prepared = Vec::new();
-        let mut edits = Vec::new();
-        for lane in 0..lanes {
-            let history = lane % 2 == 0;
-            prepared.push(if history {
-                enabled.clone()
-            } else {
-                disabled.clone()
-            });
-            if history {
+    for (frames, reenable, touch) in [
+        (LIVE_FRAMES, DISABLE + 201, false),
+        (SMALL_FRAMES, DISABLE + 64 / SMALL_FRAMES, true),
+    ] {
+        let blocks = reenable + 6;
+        let script = |lanes: usize| -> (Vec<Vec<_>>, Vec<LiveEdit>) {
+            let mut prepared = Vec::new();
+            let mut edits = Vec::new();
+            for lane in 0..lanes {
+                let history = lane % 2 == 0;
+                prepared.push(if history {
+                    enabled.clone()
+                } else {
+                    disabled.clone()
+                });
+                if history {
+                    edits.push(LiveEdit {
+                        block: DISABLE,
+                        lane,
+                        values: disabled.clone(),
+                        changed: disable_changed.clone(),
+                    });
+                }
+                if touch {
+                    for block in DISABLE + 1..reenable {
+                        let (values, changed) =
+                            live_edit(&disabled, &[(8, 1_000.0 + 100.0 * block as f32)]);
+                        edits.push(LiveEdit {
+                            block,
+                            lane,
+                            values,
+                            changed,
+                        });
+                    }
+                }
                 edits.push(LiveEdit {
-                    block: DISABLE,
+                    block: reenable,
                     lane,
-                    values: disabled.clone(),
-                    changed: disable_changed.clone(),
+                    values: enabled.clone(),
+                    changed: enable_changed.clone(),
                 });
             }
-            edits.push(LiveEdit {
-                block: REENABLE,
-                lane,
-                values: enabled.clone(),
-                changed: enable_changed.clone(),
-            });
-        }
-        (prepared, edits)
-    };
-    let check = |rendered: &[Vec<Vec<u32>>], leg: &str| {
-        for pair in rendered.as_chunks::<2>().0 {
-            assert_ne!(pair[0][0], pair[1][0], "{leg}: the history lane filtered");
+            (prepared, edits)
+        };
+        let check = |rendered: &[Vec<Vec<u32>>], leg: &str| {
+            for pair in rendered.as_chunks::<2>().0 {
+                assert_ne!(pair[0][0], pair[1][0], "{leg}: the history lane filtered");
+                assert_eq!(
+                    pair[0][reenable..],
+                    pair[1][reenable..],
+                    "{leg}: a re-enabled lane renders as one prepared disabled"
+                );
+            }
+        };
+        let (prepared, edits) = script(2);
+        let pairs: fn(usize) -> usize = |lane| lane / 2;
+        let scalar = live_scalar_lanes(frames, &prepared, &edits, blocks, pairs);
+        check(&scalar, &format!("{frames} frames, W = 1"));
+        if let Some((width, backend)) = native_bank() {
+            let (prepared, edits) = script(width.lanes() as usize);
+            let banked = live_bank_lanes(frames, width, backend, &prepared, &edits, blocks, pairs);
+            check(&banked, &format!("{frames} frames, native bank"));
             assert_eq!(
-                pair[0][REENABLE..],
-                pair[1][REENABLE..],
-                "{leg}: a re-enabled lane renders as one prepared disabled"
+                banked[..2],
+                scalar[..],
+                "{frames} frames: the bank renders its per-node instances"
             );
         }
-    };
-    let (prepared, edits) = script(2);
-    let pairs: fn(usize) -> usize = |lane| lane / 2;
-    let scalar = live_scalar_lanes(&prepared, &edits, BLOCKS, pairs);
-    check(&scalar, "W = 1");
-    if let Some((width, backend)) = native_bank() {
-        let (prepared, edits) = script(width.lanes() as usize);
-        let banked = live_bank_lanes(width, backend, &prepared, &edits, BLOCKS, pairs);
-        check(&banked, "native bank");
-        assert_eq!(
-            banked[..2],
-            scalar[..],
-            "the bank renders its per-node instances"
-        );
     }
 }
 
@@ -3087,9 +3114,9 @@ fn live_enable_and_family_edits_stay_on_their_lane() {
         edit(12, 3, &[(13, EqBandKind::LowShelf as u32 as f32)]),
     ];
     let own: fn(usize) -> usize = |lane| lane;
-    let banked = live_bank_lanes(width, backend, &prepared, &edits, BLOCKS, own);
-    let plain = live_bank_lanes(width, backend, &prepared, &[], BLOCKS, own);
-    let scalar = live_scalar_lanes(&prepared, &edits, BLOCKS, own);
+    let banked = live_bank_lanes(LIVE_FRAMES, width, backend, &prepared, &edits, BLOCKS, own);
+    let plain = live_bank_lanes(LIVE_FRAMES, width, backend, &prepared, &[], BLOCKS, own);
+    let scalar = live_scalar_lanes(LIVE_FRAMES, &prepared, &edits, BLOCKS, own);
     for lane in 0..lanes {
         assert_eq!(
             banked[lane], scalar[lane],
