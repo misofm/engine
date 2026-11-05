@@ -566,8 +566,8 @@ fn a_live_enable_or_family_change_settles_on_the_new_design() {
 /// {20, 1000, 18000} Hz, gains {-24, 0, 24} dB and Q {0.1, 0.707, 18} (slope 1), band 1 is
 /// prepared at the first state and sent the second. The test walks the kernel's `f32` ramp
 /// (`step = (to - from) / 64`, one add per sample) and pins that walk to the real lane after 17
-/// frames, then retargets to the next state of the seven-cycle, walks the rest from the lane's
-/// words and pins that walk too, 32 samples in. Every word set of both walks that is not the
+/// frames, then retargets to the next state of the seven-cycle whose words differ, walks the rest
+/// from the lane's words and pins that walk too, 32 samples in. Every word set of both walks that is not the
 /// identity must pass the production ramp predicate (`validate_svf_within` at `RAMP_PATH_NORM_TOLERANCE`): each is a convex mix of two
 /// admitted designs (#1337 D3). The first walk is checked whole on purpose, not only its 17
 /// rendered word sets: without the retarget the lane renders all 64. Across the 128 noise frames
@@ -638,7 +638,17 @@ fn every_live_enable_or_family_ramp_is_contractive_and_bounded() {
                             set_initial(&mut configured, 0, channel, f32::from(u8::from(from.0)));
                         }
                         for (to_index, &to) in states.iter().enumerate() {
-                            let next = states[(to_index + 1) % states.len()];
+                            // The next state of the seven-cycle whose words differ from `to`'s.
+                            // Two states can design the same words: at 0 dB a low and a high
+                            // shelf always do, and a bell does with both at some rates and Q. A
+                            // retarget to the same words keeps the ramp in flight (#2250), so it
+                            // is no family ramp and the walk below would not be the lane's.
+                            let next = (1..states.len())
+                                .map(|offset| states[(to_index + offset) % states.len()])
+                                .find(|&state| {
+                                    design(state).map(f32::to_bits) != design(to).map(f32::to_bits)
+                                })
+                                .expect("an enabled state differs from the identity");
                             let point = format!(
                                 "{rate} Hz {frequency} Hz {gain} dB Q {q}: \
                                  {from_index} -> {to_index} -> next"
