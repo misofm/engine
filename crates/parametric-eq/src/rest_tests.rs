@@ -36,6 +36,7 @@ fn copy_channel<L: Lane, const W: usize>(channel: &Channel<L, W>) -> Channel<L, 
     Channel {
         sections: channel.sections,
         remaining: channel.remaining,
+        hold: channel.hold,
         targets: channel.targets,
         identity: channel.identity,
         dry: channel.dry,

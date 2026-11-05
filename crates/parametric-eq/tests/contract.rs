@@ -31,7 +31,7 @@ fn descriptor_is_frozen() {
     validate_descriptor(&PARAMETRIC_EQ_DESCRIPTOR).expect("descriptor");
     let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters;
     assert_eq!(parameters.len(), 30);
-    assert_eq!(PARAMETRIC_EQ_DESCRIPTOR.state_layout_version, 1);
+    assert_eq!(PARAMETRIC_EQ_DESCRIPTOR.state_layout_version, 2);
     for quality in PARAMETRIC_EQ_DESCRIPTOR.qualities {
         assert_eq!(quality.maximum_state.common_bytes, COMMON_BYTES as u32);
         assert_eq!(quality.maximum_state.left_bytes, LANE_BYTES as u32);
@@ -364,7 +364,7 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
         .expect("prepared target");
     let in_flight = snapshot(&effect);
     assert_eq!(word(&in_flight.1, 0), word(&before.1, 0));
-    assert_eq!(word(&in_flight.1, 114), 1);
+    assert_eq!(word(&in_flight.1, SECTIONS * WORDS_PER_BAND), 1);
 
     let mut first = [1.0_f32; 1];
     let mut first_right = [0.0_f32; 1];
@@ -379,7 +379,7 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
     restored
         .processor
         .restore_state_payload(
-            1,
+            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
             StatePayloadInput::new(
                 &mid_ramp.0,
                 &mid_ramp.1,
@@ -427,7 +427,7 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
     {
         assert_eq!(word(&settled.1, 2 + index), word_bits, "word {index}");
     }
-    assert_eq!(word(&settled.1, 114), 1);
+    assert_eq!(word(&settled.1, SECTIONS * WORDS_PER_BAND), 1);
 
     let mut response_left = [empty_response_section(); EQ_SECTION_COUNT];
     let mut response_right = [empty_response_section(); EQ_SECTION_COUNT];
@@ -466,7 +466,7 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
             .expect("disable ramp"),
     );
     let disabled_state = snapshot(&effect);
-    assert_eq!(word(&disabled_state.1, 114), 0);
+    assert_eq!(word(&disabled_state.1, SECTIONS * WORDS_PER_BAND), 0);
 }
 
 /// Gate 2 (#1337): a live change of a general band's enable or family settles on the new design.
@@ -787,7 +787,7 @@ fn a_payload_of_the_wrong_length_is_rejected() {
         };
         assert_eq!(
             effect.processor.restore_state_payload(
-                1,
+                PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
                 StatePayloadInput {
                     common: &resize(&common, common_len),
                     left: &resize(&left, left_len),
@@ -814,7 +814,11 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
         .prepare(request(&values, false))
         .expect("prepare");
     let (common, left, right) = snapshot(&effect);
-    assert_eq!(word(&common, 0), 1, "the layout version is stamped");
+    assert_eq!(
+        word(&common, 0),
+        PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+        "the layout version is stamped"
+    );
     assert_eq!(
         word(&common, 1),
         (SECTIONS * WORDS_PER_BAND * 2 + (3 + 2 * parametric_eq::EQ_BAND_COUNT) * 2) as u32,
@@ -825,7 +829,7 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     stale[0] = 0;
     assert_eq!(
         effect.processor.restore_state_payload(
-            1,
+            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
             StatePayloadInput::new(&stale, &left, &right, effect.metadata.state_sizes)
                 .expect("input"),
         ),
@@ -839,7 +843,7 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     miscounted[4] = 0xff;
     assert_eq!(
         effect.processor.restore_state_payload(
-            1,
+            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
             StatePayloadInput::new(&miscounted, &left, &right, effect.metadata.state_sizes)
                 .expect("input"),
         ),
@@ -1021,11 +1025,12 @@ fn a_negative_zero_automation_value_is_accepted_as_zero() {
 
     // A payload that carries `-0.0` remains malformed and state-preserving.
     let (common, mut stored, right) = snapshot(&effect);
-    stored[(19 + 16) * 4..(19 + 16) * 4 + 4].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
+    let at = (WORDS_PER_BAND + 16) * 4;
+    stored[at..at + 4].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
     let before = snapshot(&effect);
     assert_eq!(
         effect.processor.restore_state_payload(
-            1,
+            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
             StatePayloadInput::new(&common, &stored, &right, effect.metadata.state_sizes)
                 .expect("input"),
         ),

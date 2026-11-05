@@ -15,15 +15,15 @@ use effect_contract::{
 };
 use parametric_eq::{EQ_SECTION_COUNT, EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
-/// Bytes in each channel section of the current payload (114 section words, two cut enables, the
-/// input's silence counter, issue #1328 amendment A9, and each general band's enable and family,
-/// issue #1337).
-pub const LANE_BYTES: usize = 500;
+/// Bytes in each channel section of the current payload (126 section words, issue #1372's layout 2,
+/// two cut enables, the input's silence counter, issue #1328 amendment A9, and each general band's
+/// enable and family, issue #1337).
+pub const LANE_BYTES: usize = 548;
 /// Bytes in the common section: the shared codec's two-word header (version, data word count).
 /// The two channels share no state, so the effect adds no common words of its own.
 pub const COMMON_BYTES: usize = 8;
 /// Words one band occupies in a lane section.
-pub const WORDS_PER_BAND: usize = 19;
+pub const WORDS_PER_BAND: usize = 21;
 
 /// The four launch sample rates.
 pub const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
@@ -223,7 +223,7 @@ pub fn request_at_rate<'a>(
         // 100 MB over the C ABI and 16 MB in the web host), so 1,024 is a test-side headroom
         // number and not a contract change.
         limits: PrepareEffectLimits {
-            maximum_total_state_bytes: 1_024,
+            maximum_total_state_bytes: 2_048,
             // The two rest planes' declared scratch at this quantum (issue #1328).
             maximum_scratch_bytes: 128 * parametric_eq::REST_PLANE_BYTES_PER_FRAME,
             maximum_automation_spans_per_block: 48,

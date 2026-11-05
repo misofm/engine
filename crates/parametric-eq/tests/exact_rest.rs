@@ -21,7 +21,7 @@ use effect_contract::{
     EffectProcessBlock, InitialParameterValue, NativeEffectFactory, ParameterChannel,
     PreparedEffect,
 };
-use parametric_eq::{EqBandKind, ParametricEqFactory};
+use parametric_eq::{EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 use support::{band_word, request_at_rate, set_initial, single_section_values, snapshot, values};
 
 const RATE: u32 = 96_000;
@@ -431,7 +431,7 @@ fn a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms() {
     effect
         .processor
         .restore_state_payload(
-            1,
+            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
             StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("input"),
         )
         .expect("the payload restores");
@@ -516,7 +516,7 @@ fn the_joint_flush_arms_for_whichever_channel_and_section_holds_the_band() {
             effect
                 .processor
                 .restore_state_payload(
-                    1,
+                    PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
                     StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
                         .expect("input"),
                 )

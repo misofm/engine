@@ -24,7 +24,7 @@ use effect_contract::{
     PrepareEffectBankRequest, PreparedEffect, PreparedEffectBank, StatePayloadInput,
     StatePayloadOutput,
 };
-use parametric_eq::{EqBandKind, ParametricEqFactory};
+use parametric_eq::{EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 use support::{
     Payload, apply_prepared_targets, request, set_initial, single_section_values, snapshot,
 };
@@ -132,8 +132,8 @@ fn a_restore_refused_on_one_channel_moves_neither() {
     let ramp = &ramps()[0];
     let source = continuing(ramp, 9);
     let (common, left, mut right) = snapshot(&source);
-    // Band one's `remaining` counter (section 1, word 14 of 19) past the 64-sample ramp.
-    let at = 4 * (19 + 14);
+    // Band one's `remaining` counter (section 1, word 14 of 21) past the 64-sample ramp.
+    let at = 4 * (support::WORDS_PER_BAND + 14);
     right[at..at + 4].copy_from_slice(&65_u32.to_le_bytes());
     let mut receiver = ParametricEqFactory
         .prepare(request(&ramp.values, false))
@@ -230,7 +230,7 @@ fn a_malformed_silence_word_is_refused() {
                 target
                     .processor
                     .restore_state_payload(
-                        1,
+                        PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
                         StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
                             .expect("input"),
                     )
@@ -251,7 +251,7 @@ fn a_malformed_silence_word_is_refused() {
         target
             .processor
             .restore_state_payload(
-                1,
+                PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
                 StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("input"),
             )
             .expect("a counted word restores");
@@ -288,7 +288,7 @@ fn a_restore_takes_enable_and_family_from_the_payload() {
     restored
         .processor
         .restore_state_payload(
-            1,
+            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
             StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("input"),
         )
         .expect("a mid-ramp family change restores");
@@ -331,7 +331,7 @@ fn a_restore_takes_enable_and_family_from_the_payload() {
             let before = snapshot(&target);
             assert_eq!(
                 target.processor.restore_state_payload(
-                    1,
+                    PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
                     StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
                         .expect("input"),
                 ),

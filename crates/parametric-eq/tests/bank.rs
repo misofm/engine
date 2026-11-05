@@ -103,11 +103,13 @@ fn bank_prepared_target_updates_only_the_selected_lane() {
     bank.processor
         .apply_prepared_target_lane(0, &target)
         .expect("bank target");
+    // The HPF enable word follows every section's band words.
+    let hpf_enable = support::SECTIONS * support::WORDS_PER_BAND;
     let (_, selected_left, _) = snapshot_bank(&bank, 0);
-    assert_eq!(state_word(&selected_left, 114), 1);
+    assert_eq!(state_word(&selected_left, hpf_enable), 1);
     if lanes > 1 {
         let (_, untouched_left, _) = snapshot_bank(&bank, 1);
-        assert_eq!(state_word(&untouched_left, 114), 0);
+        assert_eq!(state_word(&untouched_left, hpf_enable), 0);
     }
 }
 

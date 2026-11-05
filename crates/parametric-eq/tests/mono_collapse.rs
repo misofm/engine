@@ -556,7 +556,7 @@ fn the_collapsed_body_arms_its_joint_flush() {
         bank.processor
             .restore_track_state_payload(
                 lane as u32,
-                1,
+                parametric_eq::PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
                 effect_contract::StatePayloadInput::new(&common, &left, &right, sizes)
                     .expect("state input"),
             )

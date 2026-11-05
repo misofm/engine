@@ -27,9 +27,11 @@
 //!
 //! # State layout
 //!
-//! Version 1. Per physical section and lane, 19 little-endian 32-bit words (114 words), followed
+//! Version 2. Per physical section and lane, 21 little-endian 32-bit words (126 words): the two
+//! integrators, the six coefficient and six increment words, the ramp countdown, the four numeric
+//! targets, and the recursion weight and its increment (issue #1372's hold). They are followed
 //! by the two dedicated-cut enable words, the input's silence counter, and each general band's
-//! enable and family (`0|1`, then `1..=6`, band by band: 125 words, 500 bytes per channel); the
+//! enable and family (`0|1`, then `1..=6`, band by band: 137 words, 548 bytes per channel); the
 //! common section is the shared codec's two-word header — the layout version and data word count — and
 //! nothing else, because the two channels share no state. The header makes a payload
 //! self-describing, so a stale or truncated restore is rejected on the payload's own evidence and
@@ -69,6 +71,8 @@ use lane::{Backend, Lane};
 
 mod control;
 #[cfg(test)]
+mod hold_tests;
+#[cfg(test)]
 mod randomized_restores;
 mod response;
 #[cfg(test)]
@@ -97,10 +101,17 @@ const EFFECTIVE_CASCADE_DEPTH: usize = 2;
 /// per-section surface the cascade kernel loads.
 const EQ_COEFFICIENT_WORDS: usize = 6;
 
-/// State payload layout version. This is the sole prelaunch layout identity.
-const STATE_LAYOUT_VERSION: u32 = 1;
+/// State payload layout version. This is the sole prelaunch layout identity. Layout 2 (issue #1372)
+/// adds each band's recursion weight and its increment ([`RecursionHold`]); the payload is held in
+/// memory across a plan replacement only, never persisted (R6b), so no layout-1 reader remains.
+const STATE_LAYOUT_VERSION: u32 = 2;
 /// Words one band occupies in a lane section of the payload.
-const STATE_WORDS_PER_BAND: usize = 19;
+const STATE_WORDS_PER_BAND: usize = 21;
+/// A band's recursion weight word in its payload words ([`RecursionHold::weight_now`]).
+const STATE_WEIGHT_WORD: usize = 19;
+/// A band's recursion weight increment word: the weight's step while the recursion words step,
+/// `+0.0` while they hold or no ramp is in flight.
+const STATE_WEIGHT_STEP_WORD: usize = 20;
 /// Effect-owned words in each channel section.
 const STATE_LANE_WORDS: usize = STATE_BAND_CONFIG_WORD + 2 * EQ_BAND_COUNT;
 const STATE_HPF_ENABLE_WORD: usize = EQ_SECTION_COUNT * STATE_WORDS_PER_BAND;
@@ -135,6 +146,11 @@ const STATE_SIZES: payload::StatePayloadSizes = payload::expected_sizes(&STATE_L
 const RAMP_SAMPLES: u32 = 64;
 /// `1 / RAMP_SAMPLES` as an exact power of two: the ramp multiplies, it never divides.
 const RAMP_SCALE: f32 = 1.0 / RAMP_SAMPLES as f32;
+/// The hold weight `delta_s = 1/16` (issue #1372; owner ruling of 2026-11-04, class B): on a ramp
+/// toward the identity section the recursion words `(c1, a2, a3)` stop stepping at the last frame
+/// whose recursion weight is at least this, while the mix words finish the 64-frame ramp
+/// ([`RecursionHold`]). `docs/derivations/2091-eq-switched-system-strict-decay.md` §6.
+const HOLD_WEIGHT: f32 = 1.0 / 16.0;
 /// Widest bank this crate binds; sizes the small fixed per-lane scratch arrays.
 const MAX_LANES: usize = 8;
 
@@ -1065,6 +1081,107 @@ struct Section<L: Lane> {
     state: SvfState<L>,
 }
 
+/// One lane's hold bookkeeping in one section (issue #1372; owner ruling of 2026-11-04, class B;
+/// `docs/derivations/2091-eq-switched-system-strict-decay.md` §6.3).
+///
+/// The **recursion weight** `omega` is the design weight of the recursion words `(c1, a2, a3)`:
+/// `1` on a settled design and on every ramp between designs, `0` on the identity section, and on a
+/// ramp it is walked like the words, one `f32` add of its increment per recursion step. The
+/// increment is `(1 - omega) / 64` toward a design and `(0 - omega) / 64` toward the identity,
+/// formed as `(target - omega) * RAMP_SCALE` like a word's.
+///
+/// The rules, in [`Channel::start_ramp`]:
+///
+/// 1. On a ramp toward the identity the recursion words step while the walked weight stays at or
+///    above [`HOLD_WEIGHT`], and then hold; the mix words step for all 64 frames. From a settled
+///    design that is 60 steps, so frames 61 to 63 repeat frame 60's recursion words.
+/// 2. A retarget toward the identity while one is in flight keeps the ramp (#2250's equal-target
+///    rule), so held words stay held.
+/// 3. A ramp toward the identity that starts while the weight is below [`HOLD_WEIGHT`] and rising
+///    (at most five frames after an enable from rest) keeps the recursion words' ramp toward the
+///    design until the weight reaches [`HOLD_WEIGHT`], then holds.
+/// 4. Everything else is unchanged: at frame 64 all six words take the target, as before.
+///
+/// The weight is evaluated lazily ([`weight_now`](Self::weight_now)), so a rendered segment pays
+/// only the countdown of `stepping`.
+#[derive(Clone, Copy, Debug)]
+struct RecursionHold {
+    /// Frames the recursion words still step: the ramp's `remaining` toward a design, fewer toward
+    /// the identity, `0` while they hold and when no ramp is in flight.
+    stepping: u32,
+    /// The recursion weight when `stepping` was `synced`.
+    weight: f32,
+    /// The weight's increment per recursion step.
+    step: f32,
+    /// `stepping` at the last sync.
+    synced: u32,
+}
+
+impl RecursionHold {
+    /// A lane with no ramp in flight at weight `weight` (`1` on a design, `0` on the identity).
+    const fn settled(weight: f32) -> Self {
+        Self {
+            stepping: 0,
+            weight,
+            step: 0.0,
+            synced: 0,
+        }
+    }
+
+    /// The settled hold of a lane whose words are `words`.
+    fn settled_at(words: EqSvfWords) -> Self {
+        Self::settled(if words_are_identity(words) { 0.0 } else { 1.0 })
+    }
+
+    /// The weight of the recursion words in force: [`weight`](Self::weight) walked by the steps
+    /// taken since the sync.
+    fn weight_now(self) -> f32 {
+        walk_weight(self.weight, self.step, self.synced - self.stepping)
+    }
+
+    /// The increment the payload carries: `step` while the recursion words step, else `+0.0`.
+    fn carried_step(self) -> f32 {
+        if self.stepping > 0 { self.step } else { 0.0 }
+    }
+
+    /// Bit equality, field by field.
+    fn same_bits(self, other: Self) -> bool {
+        self.stepping == other.stepping
+            && self.synced == other.synced
+            && self.weight.to_bits() == other.weight.to_bits()
+            && self.step.to_bits() == other.step.to_bits()
+    }
+}
+
+/// `weight` after `steps` `f32` adds of `step`, the words' own walk.
+fn walk_weight(weight: f32, step: f32, steps: u32) -> f32 {
+    let mut weight = weight;
+    for _ in 0..steps {
+        weight += step;
+    }
+    weight
+}
+
+/// The recursion steps a ramp toward the identity gives from weight `weight` with increment `step`,
+/// at most `cap`: descending (rule 1), the steps whose walked weight stays at or above
+/// [`HOLD_WEIGHT`]; rising (rule 3), the steps until it reaches it; `0` for a zero increment.
+fn hold_steps(weight: f32, step: f32, cap: u32) -> u32 {
+    let mut weight = weight;
+    let mut steps = 0;
+    if step < 0.0 {
+        while steps < cap && weight + step >= HOLD_WEIGHT {
+            weight += step;
+            steps += 1;
+        }
+    } else if step > 0.0 {
+        while steps < cap && weight < HOLD_WEIGHT {
+            weight += step;
+            steps += 1;
+        }
+    }
+    steps
+}
+
 /// Reads word `index` of a coefficient set in the pinned order.
 /// The words lane `track` of `section` is currently heading for.
 ///
@@ -1364,6 +1481,8 @@ struct Channel<L: Lane, const W: usize> {
     sections: [Section<L>; EQ_SECTION_COUNT],
     /// Samples still to be produced before each lane's ramp is at its target.
     remaining: [[u32; W]; EQ_SECTION_COUNT],
+    /// Per section and lane: the hold of the recursion words (issue #1372, [`RecursionHold`]).
+    hold: [[RecursionHold; W]; EQ_SECTION_COUNT],
     /// Live parameter targets, per track.
     targets: [[BandTarget; EQ_SECTION_COUNT]; W],
     /// Per section: this section's coefficient words are [`EqSvfWords::IDENTITY`] to the bit on
@@ -1451,6 +1570,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 state: SvfState::default(),
             }; EQ_SECTION_COUNT],
             remaining: [[0; W]; EQ_SECTION_COUNT],
+            hold: [[RecursionHold::settled(0.0); W]; EQ_SECTION_COUNT],
             targets,
             // Every `(section, track)` pair is settled below, and `settle` refreshes the flag.
             identity: [false; EQ_SECTION_COUNT],
@@ -1478,6 +1598,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             lane_put(step_word_mut(&mut slot.step, index), mask, 0.0);
         }
         self.remaining[section][track] = 0;
+        self.hold[section][track] = RecursionHold::settled_at(words);
         self.refresh_identity(section);
     }
 
@@ -1589,6 +1710,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// It moves bits only where a restart would have happened: a re-sent target while a ramp is
     /// in flight. At a quantum of 64 or more every ramp ends inside the block that starts it, so
     /// there `remaining` is `0` at the next boundary and this rule never fires.
+    ///
+    /// # The hold (issue #1372)
+    ///
+    /// After both early returns, the lane's [`RecursionHold`] is set: toward a design the
+    /// recursion words step all 64 frames; toward the identity they step while their weight stays
+    /// at or above [`HOLD_WEIGHT`] (rule 1) or, if it is below and rising, until it reaches it
+    /// (rule 3), and a lane that holds from the start gets `+0.0` recursion increments here. The
+    /// weight walk is at most 64 scalar `f32` adds, once per retarget, with no allocation.
     #[inline(never)]
     fn start_ramp(&mut self, section: usize, track: usize, words: EqSvfWords) {
         if self.remaining[section][track] != 0
@@ -1600,18 +1729,57 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             self.settle(section, track, words);
             return;
         }
+        // The hold (issue #1372, [`RecursionHold`]). Its writes come after both returns above, so a
+        // restated target and a hoisted one keep what they had.
+        let toward_identity = words_are_identity(words);
+        let held = self.hold[section][track];
+        let weight = held.weight_now();
+        // Rule 3: the recursion words keep their rising ramp toward the design up to the floor.
+        let rising =
+            toward_identity && weight < HOLD_WEIGHT && held.stepping > 0 && held.step > 0.0;
+        let hold = if !toward_identity {
+            RecursionHold {
+                stepping: RAMP_SAMPLES,
+                weight,
+                step: (1.0 - weight) * RAMP_SCALE,
+                synced: RAMP_SAMPLES,
+            }
+        } else if rising {
+            let stepping = hold_steps(weight, held.step, held.stepping);
+            RecursionHold {
+                stepping,
+                weight,
+                step: held.step,
+                synced: stepping,
+            }
+        } else {
+            let step = (0.0 - weight) * RAMP_SCALE;
+            let stepping = hold_steps(weight, step, RAMP_SAMPLES);
+            RecursionHold {
+                stepping,
+                weight,
+                step,
+                synced: stepping,
+            }
+        };
         let mask = lane_mask::<L>(track);
         let slot = &mut self.sections[section];
         for (index, word) in words.to_array().into_iter().enumerate() {
             let current = lane_get(coef_word(&slot.coef, index), track);
             lane_put(coef_word_mut(&mut slot.target, index), mask, word);
-            lane_put(
-                step_word_mut(&mut slot.step, index),
-                mask,
-                (word - current) * RAMP_SCALE,
-            );
+            let recursion = index < 3;
+            if recursion && hold.stepping == 0 {
+                lane_put(step_word_mut(&mut slot.step, index), mask, 0.0);
+            } else if !(recursion && rising) {
+                lane_put(
+                    step_word_mut(&mut slot.step, index),
+                    mask,
+                    (word - current) * RAMP_SCALE,
+                );
+            }
         }
         self.remaining[section][track] = RAMP_SAMPLES;
+        self.hold[section][track] = hold;
         // `coef` did not move here, so this cannot change the flag. It is refreshed anyway because
         // "every coefficient-change site refreshes" is a rule that is cheap to keep total and
         // expensive to keep partial.
@@ -1628,14 +1796,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// # Re-enable from rest (D4)
     ///
     /// A section whose words are exactly [`EqSvfWords::IDENTITY`] with no ramp in flight holds its
-    /// integrators frozen (`svf_step` integrates nothing through zero words), so after a live
-    /// disable they keep the state of a signal long gone. When such a lane is sent words that are
+    /// integrators frozen (`svf_step` integrates nothing through zero words), so a state it holds
+    /// is the state of a signal long gone. When such a lane is sent words that are
     /// not the identity, its two integrators are set to `+0.0` first, through its own lane mask:
     /// the state a section prepared disabled holds. The re-enabled lane then renders the same bits
-    /// as one prepared disabled and enabled at the same block, whatever its history. A disabled
-    /// section keeps its frozen words until then, so a live-disabled lane does not reach rest; that
-    /// is a cost (the silence skip and elision), never a bit, and the same one a live-disabled
-    /// HPF had before.
+    /// as one prepared disabled and enabled at the same block, whatever its history. Since issue
+    /// #1372 a disable that runs to its end clears the integrators itself
+    /// ([`snap_ended`](Self::snap_ended)), so this matters for a lane restored or prepared with a
+    /// state at the identity; the clear is kept because it is what makes the claim local.
     fn apply_prepared_target(
         &mut self,
         track: usize,
@@ -1714,6 +1882,10 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         slot.coef = slot.target;
         slot.step = SvfCoefStep::default();
         self.remaining[section] = [0; W];
+        for track in 0..W {
+            self.hold[section][track] =
+                RecursionHold::settled_at(self.target_words(section, track));
+        }
     }
 
     /// Runs the six physical sections over one block in place.
@@ -1753,12 +1925,20 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             let mut length = frames - position;
             let mut ramping = false;
             let mut was_ramping = [false; W];
-            for (track, was_ramping) in was_ramping.iter_mut().enumerate() {
+            let mut was_stepping = [false; W];
+            for track in 0..W {
                 let remaining = self.remaining[section][track];
                 if remaining > 0 {
                     ramping = true;
-                    *was_ramping = true;
+                    was_ramping[track] = true;
                     length = length.min(remaining as usize);
+                }
+                // The hold's cut (issue #1372): a segment also ends where a lane's recursion words
+                // stop stepping, so the frame after it holds them.
+                let stepping = self.hold[section][track].stepping;
+                if stepping > 0 {
+                    was_stepping[track] = true;
+                    length = length.min(stepping as usize);
                 }
             }
             debug_assert!(length > 0);
@@ -1805,9 +1985,18 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                     svf_block::<L, R>(block, length, &slot.coef, &mut slot.state, plane);
                 }
             }
-            for track in 0..W {
-                let remaining = &mut self.remaining[section][track];
+            let mut hold_ended = false;
+            for ((remaining, hold), &was) in self.remaining[section]
+                .iter_mut()
+                .zip(&mut self.hold[section])
+                .zip(&was_stepping)
+            {
                 *remaining = remaining.saturating_sub(length as u32);
+                hold.stepping = hold.stepping.saturating_sub(length as u32);
+                hold_ended |= was && hold.stepping == 0 && *remaining > 0;
+            }
+            if hold_ended {
+                self.hold_ended(section, &was_stepping);
             }
             // The kernel processes current coefficients, then advances them. Snap after a segment
             // consumes the final sample so the exact target is first used by sample A+64.
@@ -1847,6 +2036,8 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         for (track, &was) in was_ramping.iter().enumerate() {
             if was && self.remaining[section][track] == 0 {
                 ended = L::mask_or(ended, lane_mask::<L>(track));
+                self.hold[section][track] =
+                    RecursionHold::settled_at(self.target_words(section, track));
             }
         }
         let slot = &mut self.sections[section];
@@ -1857,6 +2048,25 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             let step = step_word_mut(&mut slot.step, index);
             *step = L::select(ended, L::zero(), *step);
         }
+    }
+
+    /// Zeroes the recursion words' increments on every lane of `section` whose recursion words
+    /// stepped in the segment just rendered and now hold while its ramp is still in flight (issue
+    /// #1372, [`RecursionHold`]): one mask, then one `select` per recursion increment word. The
+    /// mix words keep stepping. `#[inline(never)]` for [`snap_ended`](Self::snap_ended)'s reason.
+    #[inline(never)]
+    fn hold_ended(&mut self, section: usize, was_stepping: &[bool; W]) {
+        let mut held = empty_mask::<L>();
+        for (track, &was) in was_stepping.iter().enumerate() {
+            if was && self.hold[section][track].stepping == 0 && self.remaining[section][track] > 0
+            {
+                held = L::mask_or(held, lane_mask::<L>(track));
+            }
+        }
+        let step = &mut self.sections[section].step;
+        step.c1 = L::select(held, L::zero(), step.c1);
+        step.a2 = L::select(held, L::zero(), step.a2);
+        step.a3 = L::select(held, L::zero(), step.a3);
     }
 
     /// `true` when no lane of any section has a ramp in flight.
@@ -2059,6 +2269,8 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 lane_put(step_word_mut(&mut slot.step, index), mask, 0.0);
             }
             self.remaining[section][track] = 0;
+            self.hold[section][track] =
+                RecursionHold::settled_at(self.target_words(section, track));
             self.refresh_identity(section);
         }
     }
@@ -3001,6 +3213,8 @@ struct RestoredBand {
     target: BandTarget,
     /// `target`'s designed words, designed once while validating and committed as they are.
     words: EqSvfWords,
+    /// The recursion words' hold, its step count derived from the carried weight words.
+    hold: RecursionHold,
 }
 
 impl<L: Lane, const W: usize> Channel<L, W> {
@@ -3023,6 +3237,9 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             {
                 out[base + 15 + index] = value.to_bits();
             }
+            let hold = self.hold[section][track];
+            out[base + STATE_WEIGHT_WORD] = hold.weight_now().to_bits();
+            out[base + STATE_WEIGHT_STEP_WORD] = hold.carried_step().to_bits();
         }
         out[STATE_HPF_ENABLE_WORD] = u32::from(self.targets[track][HPF_SECTION].enabled);
         out[STATE_LPF_ENABLE_WORD] = u32::from(self.targets[track][LPF_SECTION].enabled);
@@ -3048,6 +3265,49 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 code: "effect.state.payload",
             })
         }
+    }
+
+    /// Decodes a band's hold from its weight word, its weight increment word and its ramp
+    /// countdown (issue #1372, [`RecursionHold`]): the recursion step count is derived, exactly as
+    /// [`start_ramp`](Self::start_ramp) set it, so it is never carried. `None` for words no history
+    /// leaves:
+    ///
+    /// * no ramp in flight: the weight is exactly `1` on a design and `0` on the identity, and the
+    ///   increment is `+0.0`;
+    /// * a ramp toward a design: a finite weight in `[0, 2]` and a finite increment; the recursion
+    ///   words step for the whole ramp;
+    /// * a ramp toward the identity: a descending weight at or above [`HOLD_WEIGHT`] (rule 1), a
+    ///   rising one below it (rule 3), or a held one (increment `+0.0`) at or above it. A weight that
+    ///   would hold below the floor is refused.
+    fn decode_hold(
+        weight: f32,
+        step: f32,
+        remaining: u32,
+        toward_identity: bool,
+    ) -> Option<RecursionHold> {
+        if !(weight.is_finite() && step.is_finite()) || weight.to_bits() >> 31 != 0 {
+            return None;
+        }
+        let stepping = if remaining == 0 {
+            let settled = if toward_identity { 0.0_f32 } else { 1.0 };
+            (weight.to_bits() == settled.to_bits() && step.to_bits() == 0).then_some(0)?
+        } else if !toward_identity {
+            // The walk toward `1` can land a rounding past it; any such weight only sets later
+            // hold counts, so the bound is loose.
+            (weight <= 2.0).then_some(remaining)?
+        } else if step < 0.0 {
+            (weight >= HOLD_WEIGHT).then(|| hold_steps(weight, step, remaining))?
+        } else if step > 0.0 {
+            (weight < HOLD_WEIGHT).then(|| hold_steps(weight, step, remaining))?
+        } else {
+            (step.to_bits() == 0 && weight >= HOLD_WEIGHT).then_some(0)?
+        };
+        Some(RecursionHold {
+            stepping,
+            weight,
+            step,
+            synced: stepping,
+        })
     }
 
     /// The lane's configuration as its payload states it: `prepared` (the lane's prepared
@@ -3118,6 +3378,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             remaining: 0,
             target: configuration[0],
             words: EqSvfWords::IDENTITY,
+            hold: RecursionHold::settled(0.0),
         }; EQ_SECTION_COUNT];
         for section in 0..EQ_SECTION_COUNT {
             let base = section * STATE_WORDS_PER_BAND;
@@ -3135,6 +3396,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                     target
                 },
                 words: EqSvfWords::IDENTITY,
+                hold: RecursionHold::settled(0.0),
             };
             let numeric = band.target.numeric();
             if !band.integrators.into_iter().all(f32::is_finite)
@@ -3155,18 +3417,39 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             {
                 return Err(invalid);
             }
+            band.hold = Self::decode_hold(
+                read(STATE_WEIGHT_WORD),
+                read(STATE_WEIGHT_STEP_WORD),
+                band.remaining,
+                words_are_identity(target_words),
+            )
+            .ok_or(invalid)?;
+            let stepping = band.hold.stepping;
+            if stepping == 0
+                && band.remaining > 0
+                && band.step[..3].iter().any(|value| value.to_bits() != 0)
+            {
+                // Held recursion words carry `+0.0` increments, as `hold_ended` leaves them.
+                return Err(invalid);
+            }
             if band.remaining > 0 {
                 // The current words are on a linear path between two validated designs. Validate
                 // every bounded future step, so a finite but unstable forged ramp cannot enter
-                // the render plane. Identity is the one valid settled endpoint with a2 == 0.
+                // the render plane. Identity is the one valid settled endpoint with a2 == 0. The
+                // recursion words step `stepping` frames and then hold (issue #1372).
                 let mut cursor = current_words;
-                for _ in 0..band.remaining {
+                for frame in 0..band.remaining {
                     if !words_are_identity(cursor) {
                         validate_svf_within(cursor, RAMP_PATH_NORM_TOLERANCE)
                             .map_err(|_| invalid)?;
                     }
                     cursor = EqSvfWords::from_array(core::array::from_fn(|index| {
-                        cursor.to_array()[index] + step_words.to_array()[index]
+                        let step = if index < 3 && frame >= stepping {
+                            0.0
+                        } else {
+                            step_words.to_array()[index]
+                        };
+                        cursor.to_array()[index] + step
                     }));
                 }
             } else if band.step.iter().any(|value| value.to_bits() != 0) {
@@ -3221,6 +3504,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 );
             }
             self.remaining[section][track] = band.remaining;
+            self.hold[section][track] = band.hold;
             self.targets[track][section] = band.target;
         }
         for section in 0..EQ_SECTION_COUNT {
@@ -3320,6 +3604,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         }
         for section in 0..EQ_SECTION_COUNT {
             self.remaining[section][track] = from.remaining[section][from_lane];
+            self.hold[section][track] = from.hold[section][from_lane];
         }
         self.targets[track] = from.targets[from_lane];
         self.settle_lane_targets(track, prepared);
@@ -3345,6 +3630,9 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         }
         for remaining in &mut self.remaining {
             remaining.swap(a, b);
+        }
+        for hold in &mut self.hold {
+            hold.swap(a, b);
         }
         self.targets.swap(a, b);
         self.settle_lane_targets(a, prepared[0]);
@@ -3372,6 +3660,9 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             *theirs = L::load(&their_words[..L::WIDTH]);
         }
         for (own, theirs) in self.remaining.iter_mut().zip(&mut other.remaining) {
+            core::mem::swap(&mut own[a], &mut theirs[b]);
+        }
+        for (own, theirs) in self.hold.iter_mut().zip(&mut other.hold) {
             core::mem::swap(&mut own[a], &mut theirs[b]);
         }
         core::mem::swap(&mut self.targets[a], &mut other.targets[b]);
@@ -3721,6 +4012,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// | `sections[s].coef` | the words the kernel loads. A ramp rewrites them per segment through the ramp kernel, and a collapsed block advances only the left channel's. |
     /// | `sections[s].step`, `sections[s].target` | the rest of the ramp: where the words are going and by how much per sample. |
     /// | `remaining[s][lane]` | the per-lane ramp countdown, which is what `no_ramp_in_flight` and the block-splitting rule read. |
+    /// | `hold[s][lane]` | the recursion words' hold (issue #1372): where a ramp's segment is cut and the weight a later retarget reads. |
     /// | `identity[s]` | the derived per-section identity flag the elision gate reads. It is a function of `coef`, so it must travel with it. |
     /// | `dry[s]` | the derived per-section dry mask the stationary cascades read (issue #1328). It is a function of `coef` and `remaining`, so it travels with them. |
     ///
@@ -3745,6 +4037,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     fn desymmetrize(&mut self) {
         self.right.sections = self.left.sections;
         self.right.remaining = self.left.remaining;
+        self.right.hold = self.left.hold;
         self.right.identity = self.left.identity;
         self.right.dry = self.left.dry;
         self.right.silence = self.left.silence;
@@ -4280,9 +4573,11 @@ const LANE_DEFAULT_BYTES: usize = 2 * EQ_SECTION_COUNT * DEFAULT_WORDS_PER_BAND 
 /// * `sections[s].coef`   -- 6 x 6 words, what this frame uses;
 /// * `sections[s].step`   -- 6 x 6 words, the increment, exactly `+0.0` on a settled lane;
 /// * `sections[s].target` -- 6 x 6 words, where the ramp lands;
-/// * `remaining[s][l]`    -- 6 counters, when it lands.
+/// * `remaining[s][l]`    -- 6 counters, when it lands;
+/// * `hold[s][l]`         -- 6 holds (issue #1372): when the recursion words stop stepping, and
+///   the weight a later retarget reads.
 ///
-/// Two channels that agree on all 114 of those words produce bit-identical output from
+/// Two channels that agree on all of those words produce bit-identical output from
 /// bit-identical input, and stay in agreement for as long as no per-channel write arrives:
 /// the ramp kernel applies the same increment to the same word, and `snap` assigns the same
 /// target on the same sample.
@@ -4332,7 +4627,9 @@ fn channels_symmetric<L: Lane, const W: usize>(
                 return false;
             }
         }
-        if left_channel.remaining[section][lane] != right_channel.remaining[section][lane] {
+        if left_channel.remaining[section][lane] != right_channel.remaining[section][lane]
+            || !left_channel.hold[section][lane].same_bits(right_channel.hold[section][lane])
+        {
             return false;
         }
     }
@@ -6820,7 +7117,7 @@ mod target_application {
             },
             initial_values: values,
             limits: effect_contract::PrepareEffectLimits {
-                maximum_total_state_bytes: 1_024,
+                maximum_total_state_bytes: 2_048,
                 // The two rest planes' declared scratch at this quantum (issue #1328).
                 maximum_scratch_bytes: 128 * REST_PLANE_BYTES_PER_FRAME,
                 maximum_automation_spans_per_block: 48,
