@@ -1561,8 +1561,24 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     ///
     /// The target and increment words are written with [`lane_put`] (issue #1007). `lane_get`
     /// stays: a narrow load from a wide store forwards.
+    ///
+    /// # A restated disable keeps its ramp (issue #2247)
+    ///
+    /// A touched row of a disabled band sends the identity again. When this lane is already
+    /// ramping toward the identity, the ramp keeps its increments and its remaining frames. A
+    /// restart would begin a new 64-frame window from the words in force, so under a quantum
+    /// below 64 with the band automated the disable would never end, D4's re-enable from rest
+    /// would never fire, and the lane would never reach rest. The rule is restricted to the
+    /// identity on purpose: an enabled design is never the identity (its `a2 > 0`), so this is
+    /// exactly the restated disable, and a restated enabled target keeps today's restart.
     #[inline(never)]
     fn start_ramp(&mut self, section: usize, track: usize, words: EqSvfWords) {
+        if words_are_identity(words)
+            && self.remaining[section][track] != 0
+            && words_are_identity(self.target_words(section, track))
+        {
+            return;
+        }
         if self.stationary_at(section, track, words) {
             self.settle(section, track, words);
             return;
