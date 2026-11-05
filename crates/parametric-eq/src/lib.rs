@@ -1223,6 +1223,14 @@ fn words_are_identity(words: EqSvfWords) -> bool {
         .all(|(word, bits)| word.to_bits() == bits)
 }
 
+/// `true` when every word of `left` has exactly the bits of the same word of `right`.
+fn words_bits_equal(left: EqSvfWords, right: EqSvfWords) -> bool {
+    left.to_array()
+        .into_iter()
+        .zip(right.to_array())
+        .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
 /// Reads the raw bits of one lane of a vector. Control plane only: it leaves the vector domain.
 fn lane_bits<L: Lane>(value: L, lane: usize) -> u32 {
     debug_assert!(L::WIDTH <= MAX_LANES);
@@ -1562,20 +1570,29 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// The target and increment words are written with [`lane_put`] (issue #1007). `lane_get`
     /// stays: a narrow load from a wide store forwards.
     ///
-    /// # A restated disable keeps its ramp (issue #2247)
+    /// # A restated target keeps its ramp (issues #2247, #2250)
     ///
-    /// A touched row of a disabled band sends the identity again. When this lane is already
-    /// ramping toward the identity, the ramp keeps its increments and its remaining frames. A
-    /// restart would begin a new 64-frame window from the words in force, so under a quantum
-    /// below 64 with the band automated the disable would never end, D4's re-enable from rest
-    /// would never fire, and the lane would never reach rest. The rule is restricted to the
-    /// identity on purpose: an enabled design is never the identity (its `a2 > 0`), so this is
-    /// exactly the restated disable, and a restated enabled target keeps today's restart.
+    /// A touched row can send a lane the target it is already ramping toward: a disabled band
+    /// sends the identity again, and automation that holds a value or a host that re-sends
+    /// unchanged values sends the same enabled design again. When this lane has a ramp in flight
+    /// and its target words are bit for bit the new words, the ramp keeps its increments and its
+    /// remaining frames. A restart would begin a new 64-frame window from the words in force, so
+    /// under a quantum below 64 with the band re-sent every block the ramp would never end: the
+    /// stationary path, the hoist, rest and elision would stay blocked for the whole bank, and a
+    /// disable would never let D4's re-enable from rest fire.
+    ///
+    /// The compare is on the six `f32` words' bits, not on `==`. Bits are what the ramp lands on
+    /// (the snap at its end copies `target`), so equal bits are exactly the case where keeping
+    /// the ramp and restarting it end on the same words; `==` would also match `-0.0` to `+0.0`,
+    /// which land on different bits. Six lane reads and integer compares, no allocation.
+    ///
+    /// It moves bits only where a restart would have happened: a re-sent target while a ramp is
+    /// in flight. At a quantum of 64 or more every ramp ends inside the block that starts it, so
+    /// there `remaining` is `0` at the next boundary and this rule never fires.
     #[inline(never)]
     fn start_ramp(&mut self, section: usize, track: usize, words: EqSvfWords) {
-        if words_are_identity(words)
-            && self.remaining[section][track] != 0
-            && words_are_identity(self.target_words(section, track))
+        if self.remaining[section][track] != 0
+            && words_bits_equal(self.target_words(section, track), words)
         {
             return;
         }
@@ -9886,5 +9903,72 @@ fn width_label(lanes: usize) -> String {
         "Scalar".to_owned()
     } else {
         format!("Simd{lanes}")
+    }
+}
+
+/// Issue #2250: re-sending an enabled band's own value keeps its ramp.
+#[cfg(test)]
+mod restated_target {
+    use super::*;
+
+    const RATE: SampleRateHz = SampleRateHz(48_000);
+    /// Below the 64-frame ramp, so a restart on every block would keep the ramp in flight.
+    const FRAMES: usize = 16;
+
+    fn bell(gain: f32) -> BandTarget {
+        BandTarget {
+            enabled: true,
+            kind: EqBandKind::Bell,
+            frequency: 1_000.0,
+            gain,
+            q: 1.0,
+            slope: 1.0,
+        }
+    }
+
+    /// One enabled bell is moved from +9 dB to +3 dB, and the +3 dB target is then written again
+    /// before every block of 16 frames. The ramp runs for four blocks and ends at frame 64, and
+    /// from then on the channel pair is on the stationary path; a restart per write would keep it
+    /// ramping for ever.
+    fn case<L: Lane, const W: usize>(width: &str) {
+        let mut sections = [BandTarget {
+            enabled: false,
+            ..bell(0.0)
+        }; EQ_SECTION_COUNT];
+        sections[BAND_SECTION_OFFSET] = bell(9.0);
+        let mut left = Channel::<L, W>::new([sections; W], RATE).expect("legal");
+        let mut right = Channel::<L, W>::new([sections; W], RATE).expect("legal");
+        let target = bell(3.0);
+        let words = target.words(RATE).expect("a legal bell");
+        let ramp_blocks = RAMP_SAMPLES as usize / FRAMES;
+        for block in 0..ramp_blocks + 2 {
+            for lane in 0..W {
+                left.apply_prepared_target(lane, BAND_SECTION_OFFSET, target, words);
+                right.apply_prepared_target(lane, BAND_SECTION_OFFSET, target, words);
+            }
+            let stationary = left.no_ramp_in_flight() && right.no_ramp_in_flight();
+            assert_eq!(
+                stationary,
+                block >= ramp_blocks,
+                "{width}: block {block} starts at frame {}; the ramp must run to frame 64 and \
+                 no further",
+                block * FRAMES
+            );
+            let mut l = vec![0.25_f32; FRAMES * W];
+            let mut r = vec![-0.25_f32; FRAMES * W];
+            process_channels_from_input(
+                (&mut left, &mut right),
+                &mut l,
+                &mut r,
+                FRAMES,
+                stationary,
+            );
+        }
+    }
+
+    #[test]
+    fn a_re_sent_enabled_target_ends_its_ramp_at_frame_64() {
+        case::<f32, 1>(&width_label(1));
+        lane::each_vector_lane!(|L, W| case::<L, W>(&width_label(W)));
     }
 }
