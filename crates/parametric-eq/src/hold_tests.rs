@@ -222,3 +222,51 @@ fn a_restore_refuses_a_weight_held_below_the_floor() {
     run::<f32, 1>(&width_label(1));
     lane::each_vector_lane!(|L, W| run::<L, W>(&width_label(W)));
 }
+
+/// The rest ruling. A lane filtering a signal through a +9 dB bell is disabled live and fed the
+/// signal past frame 64 of the disable, then one block of `+0.0`: the lane is at exact rest (its
+/// bit in `rest_lanes`), and its band's integrators are `+0.0`.
+///
+/// Red on a disabled band that keeps the state of a signal long gone and so never rests (base).
+#[test]
+fn a_finished_disable_reaches_exact_rest() {
+    fn run<L: Lane, const W: usize>(width: &str) {
+        let bell = BandTarget {
+            frequency: 1_000.0,
+            gain: 9.0,
+            q: 1.0,
+            ..extreme()
+        };
+        let lane = W - 1;
+        let (mut left, mut right) = pair::<L, W>(bell);
+        let noise = |n: usize| ((n * 7_919 % 1_013) as f32 / 1_013.0 - 0.5) * 0.8;
+        for n in 0..200 {
+            frame((&mut left, &mut right), noise(n));
+        }
+        left.apply_prepared_target(lane, SECTION, disabled(), EqSvfWords::IDENTITY);
+        right.apply_prepared_target(lane, SECTION, disabled(), EqSvfWords::IDENTITY);
+        for n in 200..300 {
+            frame((&mut left, &mut right), noise(n));
+        }
+        let stationary = left.no_ramp_in_flight() && right.no_ramp_in_flight();
+        assert!(stationary, "{width}: the disable has ended");
+        let mut l = vec![0.0_f32; 16 * W];
+        let mut r = vec![0.0_f32; 16 * W];
+        process_channels_from_input((&mut left, &mut right), &mut l, &mut r, 16, stationary);
+        for channel in [&left, &right] {
+            let state = channel.sections[SECTION].state;
+            assert_eq!(
+                [lane_bits(state.ic1, lane), lane_bits(state.ic2, lane)],
+                [0, 0],
+                "{width}: the band's integrators are +0.0"
+            );
+            assert_ne!(
+                channel.rest_lanes() & (1 << lane),
+                0,
+                "{width}: the lane is at exact rest"
+            );
+        }
+    }
+    run::<f32, 1>(&width_label(1));
+    lane::each_vector_lane!(|L, W| run::<L, W>(&width_label(W)));
+}

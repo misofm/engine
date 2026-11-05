@@ -2030,14 +2030,28 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// `#[inline(never)]` for the same reason as [`start_ramp`](Self::start_ramp): it runs once
     /// per ramp end, not per frame, and inlined into `process_section` it changed V8's register
     /// allocation of the ramped kernel's loop in the shipped module.
+    ///
+    /// # Rest of a band that finished turning off (issue #1372; owner ruling of 2026-11-05, class B)
+    ///
+    /// An ended lane whose target is the identity section has its two integrators set to `+0.0`
+    /// through the same kind of mask. The identity's mix words do not read the state and its
+    /// recursion words integrate nothing, so no output value changes; only the sign of a zero
+    /// output can (an executed identity section adds `0 * v1` and `0 * v2`, whose signs follow the
+    /// state), and the carried payload does. Without it a disabled band keeps the state of a signal
+    /// long gone, and the lane never reaches exact rest.
     #[inline(never)]
     fn snap_ended(&mut self, section: usize, was_ramping: &[bool; W]) {
         let mut ended = empty_mask::<L>();
+        let mut off = empty_mask::<L>();
         for (track, &was) in was_ramping.iter().enumerate() {
             if was && self.remaining[section][track] == 0 {
-                ended = L::mask_or(ended, lane_mask::<L>(track));
-                self.hold[section][track] =
-                    RecursionHold::settled_at(self.target_words(section, track));
+                let lane = lane_mask::<L>(track);
+                ended = L::mask_or(ended, lane);
+                let target = self.target_words(section, track);
+                if words_are_identity(target) {
+                    off = L::mask_or(off, lane);
+                }
+                self.hold[section][track] = RecursionHold::settled_at(target);
             }
         }
         let slot = &mut self.sections[section];
@@ -2048,6 +2062,8 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             let step = step_word_mut(&mut slot.step, index);
             *step = L::select(ended, L::zero(), *step);
         }
+        slot.state.ic1 = L::select(off, L::zero(), slot.state.ic1);
+        slot.state.ic2 = L::select(off, L::zero(), slot.state.ic2);
     }
 
     /// Zeroes the recursion words' increments on every lane of `section` whose recursion words
@@ -6072,7 +6088,9 @@ mod elision {
     }
 
     /// Issue #979 gate 2: a band switched on and off again on every lane of both channels leaves
-    /// its section at the identity with a frozen, non-zero state, and the bank keeps eliding.
+    /// its section at the identity, and the bank keeps eliding. (Since issue #1372 the ramp's end
+    /// clears the switched-off section's state, so the frozen state this gate once also held is no
+    /// longer reachable.)
     ///
     /// The transition goes through [`Channel::start_ramp`], the automation route: on at step 2,
     /// off at step 5, sixteen blocks, beside one live general band. Before issue #979 leg (b)
@@ -6149,13 +6167,6 @@ mod elision {
                             (0..EQ_SECTION_COUNT).all(|index| index == 1
                                 || (left_channel.identity[index] && right_channel.identity[index])),
                             "{width} section {section}: switched off, it is the identity again"
-                        );
-                        let frozen = left_channel.sections[section].state;
-                        assert!(
-                            !(effect_runtime::bank::lane_is_positive_zero::<L>(frozen.ic1)
-                                && effect_runtime::bank::lane_is_positive_zero::<L>(frozen.ic2)),
-                            "{width} section {section}: non-vacuity, the section holds a frozen \
-                             non-zero state"
                         );
                     }
                     rendered.extend(integrators(&left_channel, &right_channel));
