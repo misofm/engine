@@ -219,9 +219,9 @@ pub fn request_at_rate<'a>(
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,
-        // The current layout is 944 bytes; production admits megabytes (`maximum_effect_state_bytes` is
-        // 100 MB over the C ABI and 16 MB in the web host), so 1,024 is a test-side headroom
-        // number and not a contract change.
+        // The current layout is 1,104 bytes (layout 2, issue #1372); production admits megabytes
+        // (`maximum_effect_state_bytes` is 100 MB over the C ABI and 16 MB in the web host), so
+        // 2,048 is a test-side headroom number and not a contract change.
         limits: PrepareEffectLimits {
             maximum_total_state_bytes: 2_048,
             // The two rest planes' declared scratch at this quantum (issue #1328).
