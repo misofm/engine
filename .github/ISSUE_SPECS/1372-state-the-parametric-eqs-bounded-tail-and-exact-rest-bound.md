@@ -203,3 +203,85 @@ decision R4: the identity-vertex argument does not close, so no uniform hull bou
   checks it for the parametric EQ.
 - The margin box for `f32` ramp walks and retarget restarts cites the bounded-excess inductions
   of `multiband-compressor/src/tail.rs` and `RAMP_PATH_NORM_TOLERANCE`.
+
+## The hold design (owner rulings of 2026-11-04 and 2026-11-05)
+
+- **Rulings.** The hold (class B, 2026-11-04): on a ramp toward the identity, the recursion
+  words `(c1, a2, a3)` stop at weight `delta_s = 1/16`; the mix words finish the 64-frame ramp;
+  all six words are the identity at frame 64
+  (`docs/derivations/2091-eq-switched-system-strict-decay.md` §6.3). Rest (class B, 2026-11-05):
+  a band that finishes turning off at frame 64 has its state cleared to `+0.0` (§7.3). These
+  rulings replace the non-goal "any kernel or designer change" for this issue.
+- **Root rulings on the plan.** S5 is in #1372. The weight is one `f32` word, walked like the
+  words; the payload moves to layout 2. `T` uses `L*` only. `delta_s = 1/8` only if the walk
+  loss exceeds 0.68 at 96 kHz. Rule 3 stays.
+
+### Hold attempt 1 record (2026-11-05): S2, S5 and S4 delivered; stopped at S1
+
+- **S2, the hold** (`crates/parametric-eq/src/lib.rs`, `RecursionHold`). The writes come after
+  #2250's equal-target return and the stationary hoist in `start_ramp`. `process_section` cuts
+  a segment where a lane's recursion words stop and zeroes their increments (`hold_ended`, one
+  mask). The weight is evaluated lazily from its sync point. The payload is layout 2: 21 words
+  per band, the weight and its increment at words 19 and 20. The step count is derived on
+  restore, and a weight that would hold below the floor is refused. The kernel
+  (`lane::kernels`) is unchanged.
+- **S5, rest.** `snap_ended` sets `ic1, ic2` to `+0.0` on every ended lane whose target is the
+  identity. The #979 elision gate's non-vacuity leg (a frozen non-zero state after a switch-off)
+  is deleted, because that state is no longer reachable.
+- **Tests** (`crates/parametric-eq/src/hold_tests.rs`, `W = 1` and every vector width):
+  `a_disable_holds_the_recursion_words_at_one_sixteenth` (red on base at frame 61);
+  `a_disable_within_three_frames_of_an_enable_rises_to_the_floor` (red on base at frame
+  `d + 1`); `a_restore_refuses_a_weight_held_below_the_floor` (red when `decode_hold` drops its
+  floor check); `a_finished_disable_reaches_exact_rest` (red on base: the integrators are not
+  `+0.0`).
+- **Bit-move evidence (S4, scratch only).** Every preparable `fixtures/session/v1` session,
+  plain and live, at quanta 128, 64, 32 and 16 (`"quantum_frames"` rewritten, 38,400 frames):
+  136 digests, equal at base `8f46ab035` and head. The 34 digests at 128 frames equal the #2250
+  head's. A scratch EQ harness renders 180 band designs (6 kinds, 10 Hz to 20 kHz, -24 to +24
+  dB, Q 0.1 to 18, slope 0.1 and 1) with a unit sine at the design frequency and at 3 kHz,
+  3,072 frames after the event:
+  - disable from a settled design, quanta 64, 16, 3 and 1: only frames 61 to 63 move, largest
+    difference 0.0172 of the input amplitude (+24 dB high shelf at 20 kHz), nothing after;
+  - enable from rest, then disable 1, 2 or 3 frames later: frames `d + 1` to `d + 63` move,
+    largest difference 0.084, nothing after frame 66;
+  - re-enable at frame 61, 62 or 63: all later output moves, largest difference 0.80, 1.63 and
+    2.49 (a high pass at 1 kHz, Q 18, at its resonance), decaying at the band's rate;
+  - a `-0.0` input after a finished disable: no zero sign moved.
+  All are inside the plan's scope (0.036, 0.155, 2.80). Nothing else moved.
+- **Why S1 and S3 stopped.**
+  1. *The walk lemma of the plan is not a proof.* `phi = box(E_1) / m(v)` "independent of
+     `omega`" is false on a ramp toward the identity: the excess made while the weight was
+     high stays when the weight is at the floor. From a settled design it is about
+     `31.4 u |v|` at frame 60 against the margin `delta_s m(v)`, a ratio of about `502 u nu`,
+     8 times `box(E_1) / m(v)`. A retarget also carries the start's excess with the old mass:
+     a 63-frame ramp away from a heavily damped design adds about `2,079 u |v|` per unit of
+     that design's mass while the mass falls by 64 times. A sound bound must count the whole
+     chord. A per-piece lemma with a one-dimensional stale recursion is sound but gives
+     `phi` about 2.5 at 44.1 kHz, because it compares every stale excess with
+     `delta_s m_D`; a tight version needs the weight as a second dimension of the recursion.
+  2. *`T` is about 10 times `T_b`, not 1.55 times.* With a provisional `phi = 0.3` (not
+     proven), the six-section hull cascade in `L*` gives `T` = 20,718,306 (44.1 kHz) and
+     22,646,179 (48 kHz), against `T_b` = 2,212,870 at 48 kHz. `P*` is 1.6e32 and 2.8e32,
+     above the sanitizer limit, so `tail_every_peak = R(P*)` = 34,735,490 and 38,016,906. At
+     88.2 and 96 kHz the bound passes `HORIZON_LIMIT` (`TailBoundError::Horizon`). The cause:
+     each section's state invariant is about `6.2e5` per unit of its input
+     (`delta_s input / (1 - q_s)`), a band's output row is about 90 (the high shelf's `m1`
+     reaches 75), and six sections compound it, with a `t^5` coupling after `N`.
+  3. *Gate 1's tightness cannot hold for a sound domain-wide `T`.* `T` is one value over the
+     domain, and the domain holds cascades with repeated slow poles. Measured by brute force at
+     48 kHz (`f32` words, `f64` arithmetic, 24,000,000 frames): one extreme bell has
+     `T_b` = 2,212,870; four in series 4,104,275 (1.85 times); the HPF at 10 Hz and Q 18, four
+     extreme bells and the LPF at 10 Hz and Q 18 in series 4,848,611 (2.19 times). So every
+     sound `T` is above `2 T_b` of the single extreme band.
+- **Checks** (head `19a8f7c94` plus the capi budget): `cargo fmt --all --check`; workspace
+  clippy with CI's flags; release and debug tests of `parametric-eq`, `math` and
+  `effect-contract` (`--all-features`); release tests of `host-core`, `graph` and `capi`
+  (`--all-features`); `scripts/check-workspace-policy.sh`; `realtime_policy`; `audit capi`
+  (0 violations); `scripts/check-web-audioworklet.sh` (it builds the module); the aarch64 check
+  of `parametric-eq`. All pass. The capi `effect_scalar_state_bytes` ceiling rises from 9,280 to
+  9,936 for layout 2.
+- **Not done.** S1 (`math::tail::hull` weight floor, walk lemma, held contraction), S3 (the
+  EQ's `tail.rs`, the pinned table, `tests/tail_contract.rs`), the derivation's part 2 and
+  `dsp-research/filters.md`. `tail_and_rest` still declares `Infinite` and `Unstated`, so the
+  `live_lanes.rs` pin is unchanged. The S1/S3 work in progress is kept outside the tree as a
+  patch for the next attempt.

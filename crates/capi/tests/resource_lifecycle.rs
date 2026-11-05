@@ -1445,6 +1445,10 @@ impl Budget {
 /// plus 10 %, rounded up to 64: 464,620.2 -> 464,640 and 464,356.2 -> 464,384. The four-lane
 /// ceilings rise by the same +47,488 plus 10 % (52,236.8): 419,404.8 -> 419,456 and 419,276.8 ->
 /// 419,328, unmeasured until the next `aarch64-debug` print tightens them.
+///
+/// #1372 moves the parametric EQ's state payload to layout 2 (the hold's weight and its increment,
+/// two words per band and channel, 48 more bytes per channel section): `effect_scalar_state_bytes`
+/// 9,280 -> 9,936 on x86-64. The row is width-independent, so both ceilings are the new value.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1521,8 +1525,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "effect_scalar_state_bytes",
         value: |report| report.effect_scalar_state_bytes,
-        eight_lanes: 9_280,
-        four_lanes: 9_280,
+        eight_lanes: 9_936,
+        four_lanes: 9_936,
     },
     Budget {
         row: "effect_scalar_scratch_bytes",
