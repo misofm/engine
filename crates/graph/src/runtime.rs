@@ -8121,11 +8121,15 @@ impl crate::runtime::Runtime {
 
     /// Fire the armed fade of the live route in unit `unit`, of either kind (#1363 D3,
     /// [`LiveRoute::fire_fade_in`]; #2011, [`LiveFollowRoute::fire_fade_in`]). Render-thread
-    /// code: allocation-, lock- and syscall-free.
-    pub(crate) fn fire_route_fade_in(&mut self, unit: u32) {
-        if let Some(mut live) = carried_route_mut(&mut self.units, unit) {
-            live.fire_fade_in();
-        }
+    /// code: allocation-, lock- and syscall-free. Returns whether `unit` is a live route's, so
+    /// the fire reached it (#2257); `false` fires nothing.
+    #[must_use]
+    pub(crate) fn fire_route_fade_in(&mut self, unit: u32) -> bool {
+        let Some(mut live) = carried_route_mut(&mut self.units, unit) else {
+            return false;
+        };
+        live.fire_fade_in();
+        true
     }
 
     /// Run the live-send section of a carry program at the swap block (#1284 D2, #1652 D3): for
@@ -11422,6 +11426,23 @@ impl Runtime {
             },
             _ => at,
         }
+    }
+
+    /// The fader processor and lane that render, now, the strip bind placed at `home` (issues
+    /// #1782a, #2257): [`Self::current_location`] of `home`, resolved to a populated lane of a
+    /// builtin bank that holds fader strip state. `None` when it does not resolve.
+    ///
+    /// The one resolution of a fade arm's fader target: [`crate::install_fade_arms`] validates
+    /// and arms through it, and render fires through it, so the lane armed is the lane fired.
+    /// Allocation-free: a map lookup, a unit borrow and two downcasts.
+    pub(crate) fn fader_lane_mut(
+        &mut self,
+        home: crate::GraphLaneLocation,
+    ) -> Option<(&mut dyn GraphPreparedBuiltinBankProcessor, usize)> {
+        let at = self.current_location(home);
+        let (chain, slot, lane) =
+            strip_lane_mut(&mut self.units, crate::BuiltinStripOwner::Fader, at)?;
+        builtin_processor_mut(chain, slot).map(|processor| (processor, lane))
     }
 
     /// The member index of unit `unit`'s bank that now holds the strip bind placed at `member`
@@ -20925,6 +20946,9 @@ mod tests {
         fn into_any(self: Box<Self>) -> Box<dyn Any> {
             self
         }
+        fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+            Some(self)
+        }
         fn carried_strip_lanes(&self) -> Option<(crate::BuiltinStripStage, usize)> {
             Some((crate::BuiltinStripStage::Fader, self.lanes))
         }
@@ -21029,6 +21053,90 @@ mod tests {
         assert!(
             installed.1.fired(0) && installed.1.fired(1),
             "the watch saw both fire"
+        );
+    }
+
+    /// Issue #2257: a due fader arm whose lane does not resolve at render fires nothing, so it is
+    /// neither reported fired nor settled; it stays due, is counted once per block, and fires at
+    /// the first block its lane resolves again. The lane stops resolving here because its probe
+    /// bank shrinks below it after installation.
+    ///
+    /// Red if render moves an arm to settling, or raises its watch flag, without its fire
+    /// reaching the lane: the lane would wait, muted, while the plan reported the fade done.
+    #[test]
+    fn a_fade_arm_whose_lane_does_not_resolve_stays_unfired_and_counted() {
+        let shape = SourceShape {
+            stages: &[TrackStage::PostFader],
+            meters: &[],
+            fade_probe: true,
+            ..SourceShape::banked(BankWidth::Four, 2, 128)
+        };
+        let (plan, bindings, source_set) = source_fixture_parts(shape, &Published::default());
+        let (mut executor, _) = bind_executor(plan, bindings, Some(source_set));
+        let fader = executor
+            .runtime
+            .builtin_strip_lanes()
+            .iter()
+            .find(|(id, lane)| {
+                id.as_ref() == "track00" && lane.owner == crate::BuiltinStripOwner::Fader
+            })
+            .map(|(_, lane)| lane.location)
+            .expect("a fader lane");
+        let (_, watch) = executor
+            .install_fade_arms(vec![crate::GraphFadeArm {
+                target: crate::GraphFadeTarget::Fader(fader),
+                source: None,
+                delay_samples: 0,
+                ramp_samples: 64,
+                tail_samples: 0,
+            }])
+            .expect("installed");
+        fn probe(
+            executor: &mut crate::GraphExecutor,
+            at: crate::GraphLaneLocation,
+        ) -> &mut FadeProbe {
+            let RuntimeUnit::Bank { chain, .. } = &mut executor.runtime.units[at.unit as usize]
+            else {
+                panic!("a bank unit");
+            };
+            builtin_processor_mut(&mut *chain, usize::from(at.slot))
+                .and_then(GraphPreparedBuiltinBankProcessor::as_any_mut)
+                .and_then(|any| any.downcast_mut::<FadeProbe>())
+                .expect("the probe")
+        }
+        let full = probe(&mut executor, fader).lanes;
+        probe(&mut executor, fader).lanes = usize::from(fader.lane);
+        FADE_FIRES.with(|fires| fires.borrow_mut().clear());
+        let render = |executor: &mut crate::GraphExecutor, block: u64| {
+            let mut storage = vec![0.0_f32; 2 * 128];
+            render_host(
+                executor,
+                engine::realtime::PlanarBufferMut::try_new(&mut storage, 2, 128, 128)
+                    .expect("host output"),
+                block * 128,
+            )
+            .expect("render");
+        };
+        for block in 0..3_u64 {
+            render(&mut executor, block);
+            assert_eq!(
+                (watch.fired(0), watch.settled(0), executor.fade_arms_pending),
+                (false, false, 1),
+                "an unresolved arm after block {block}"
+            );
+        }
+        assert_eq!(executor.fade_arms_unresolved, 3, "one count per due block");
+        probe(&mut executor, fader).lanes = full;
+        render(&mut executor, 3);
+        assert!(watch.fired(0), "the arm fires once its lane resolves");
+        assert_eq!(
+            FADE_FIRES.with(|fires| fires.borrow().clone()),
+            vec![(usize::from(fader.lane), 384)],
+            "the one fire reached the lane at block 3"
+        );
+        assert_eq!(
+            executor.fade_arms_unresolved, 3,
+            "a resolved fire is not counted"
         );
     }
 
