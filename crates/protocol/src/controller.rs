@@ -3483,7 +3483,10 @@ impl<P: ControlProvider> ProtocolController<P> {
         // records a reply for its request ID, so a replay answers that reply and never executes
         // it again. A reply over the response bound (the caller's output holds at least the
         // bound) falls back to `INTERNAL` `protocol.encode` at the committed revision, as the
-        // owned path's reply does; the check above makes that fallback fit.
+        // owned path's reply does; the check above makes that fallback fit. A conforming provider
+        // cannot reach the fallback: the one legacy reply sized by its request, the
+        // `TELEMETRY_CONFIGURE` echo, is bounded before the provider stores it, so only a
+        // provider that breaks its persist-and-echo contract records `INTERNAL` here.
         let bounded = output.len().min(self.replay.config().max_response_bytes);
         let reply = &mut output[..bounded];
         let written = match self.encode_outcome_or_internal_into(
@@ -4591,8 +4594,17 @@ impl<P: ControlProvider> ProtocolController<P> {
                         path: TelemetryRefusalPath::Meter(index),
                     });
                 }
-                let mut configured = match self.provider.telemetry_configure(configuration.clone())
-                {
+                // #2254: the echo is the request with the provider's meter window, so its size is
+                // known before anything changes. An echo the replay cache cannot retain is
+                // refused here, at the unchanged revision, and the stored table stays.
+                let request_window = configuration.meter_window_blocks;
+                let mut echo = configuration.clone();
+                echo.meter_window_blocks = self.provider.meter_window_blocks();
+                if let Some(refusal) = self.telemetry_echo_refusal(&echo) {
+                    return self.telemetry_refusal_outcome(refusal);
+                }
+                echo.meter_window_blocks = request_window;
+                let mut configured = match self.provider.telemetry_configure(echo) {
                     Ok(configured) => configured,
                     // A refused configuration changes nothing: the stored one stays (#1351 D2).
                     Err(refusal) => return self.telemetry_refusal_outcome(refusal),
@@ -4789,6 +4801,22 @@ impl<P: ControlProvider> ProtocolController<P> {
                 code: "response.internal",
             }),
         }
+    }
+
+    /// The `LIMIT_EXCEEDED` `telemetry.reply_too_large` refusal when the `TELEMETRY_CONFIGURE`
+    /// success frame carrying `echo`, outer header included, would exceed the replay cache's
+    /// response bound, so the reply could not be retained (#2254). Checked before the provider
+    /// stores anything, so an unretainable reply is rejected before state changes.
+    fn telemetry_echo_refusal(&self, echo: &TelemetryConfiguration) -> Option<TelemetryRefusal> {
+        let fits = self
+            .codec
+            .encoded_telemetry_configuration_len(echo)
+            .is_ok_and(|length| length <= self.response_payload_budget());
+        (!fits).then_some(TelemetryRefusal {
+            error: ParameterProviderError::LimitExceeded,
+            code: Some("telemetry.reply_too_large"),
+            path: TelemetryRefusalPath::None,
+        })
     }
 
     /// The outcome of a `RESPONSE_GET` refusal: its status and one error diagnostic that carries

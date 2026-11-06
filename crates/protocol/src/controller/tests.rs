@@ -3635,18 +3635,9 @@ fn a_backpressure_outcome_is_cached_and_its_retry_executes_nothing() {
     );
 }
 
-/// #2254: a command the endpoint executed whose reply does not fit its response bound answers
-/// `INTERNAL` `protocol.encode` at the committed revision, records that reply for its request ID
-/// (a replay executes nothing a second time) and holds nothing, so the next new request runs.
-#[test]
-fn an_executed_command_whose_reply_overflows_the_bound_is_recorded_and_wedges_nothing() {
-    let mut endpoint = controller(4);
-    endpoint.replay = ReplayCache::new(ReplayCacheConfig {
-        entries: NonZeroUsize::new(4).expect("entries"),
-        bytes: NonZeroUsize::new(4096).expect("arena"),
-        max_response_bytes: 128,
-    });
-    let configuration = TelemetryConfiguration {
+/// #2254: a `TELEMETRY_CONFIGURE` whose echo would not fit the response bound.
+fn oversized_telemetry_configuration() -> TelemetryConfiguration {
+    TelemetryConfiguration {
         meters: vec![
             crate::MeterEntry {
                 target: crate::MeterTarget::Output,
@@ -3680,28 +3671,99 @@ fn an_executed_command_whose_reply_overflows_the_bound_is_recorded_and_wedges_no
         counter_period_blocks: 8,
         diagnostics_enabled: false,
         minimum_diagnostic_severity: crate::DiagnosticSeverity::Warning,
-    };
+    }
+}
+
+/// An endpoint whose replay cache retains replies of at most `max_response_bytes`.
+fn bounded_endpoint(max_response_bytes: usize) -> ProtocolController<MockProvider> {
+    let mut endpoint = controller(4);
+    endpoint.replay = ReplayCache::new(ReplayCacheConfig {
+        entries: NonZeroUsize::new(4).expect("entries"),
+        bytes: NonZeroUsize::new(4096).expect("arena"),
+        max_response_bytes,
+    });
+    endpoint
+}
+
+/// One request through the production prepared path, which every C-ABI and browser host takes.
+fn prepare_legacy(
+    endpoint: &mut ProtocolController<MockProvider>,
+    input: &[u8],
+) -> Result<Vec<u8>, CommandFrameProcessError> {
+    let mut fields = [0_u16; 1024];
+    match endpoint.prepare_command_frame(input, &[], &mut DecodeScratch::new(&mut fields), 4096) {
+        Ok(PreparedCommandFrame::Immediate(frame)) => Ok(frame.bytes),
+        Ok(_) => panic!("a legacy command prepares an immediate reply"),
+        Err(error) => Err(error),
+    }
+}
+
+/// The complete success frame a conforming provider's echo of `configuration` encodes to.
+fn telemetry_echo_frame_len(configuration: &TelemetryConfiguration) -> usize {
+    let mut echo = configuration.clone();
+    echo.meter_window_blocks = Some(core::num::NonZeroU32::MIN);
+    let mut output = vec![0_u8; 4096];
+    ProtocolCodec::default()
+        .encode_success_response_frame_into(
+            &TypedSuccessResponseFrame {
+                request_id: id(1),
+                revision: SessionRevision(7),
+                payload: SuccessResponsePayload::TelemetryConfiguration(echo),
+            },
+            &mut output,
+        )
+        .expect("echo frame")
+}
+
+/// #2254: a `TELEMETRY_CONFIGURE` whose echo the replay cache could not retain is refused
+/// `LIMIT_EXCEEDED` `telemetry.reply_too_large` before the provider stores anything, at the
+/// unchanged revision. The refusal is recorded (a replay answers the same bytes and still applies
+/// nothing) and holds nothing, so the next new request runs.
+#[test]
+fn a_telemetry_echo_over_the_bound_is_refused_before_anything_changes() {
+    // A bound that holds the refusal but not the echo.
+    let mut endpoint = bounded_endpoint(256);
+    let configuration = oversized_telemetry_configuration();
+    assert!(telemetry_echo_frame_len(&configuration) > 256);
+    let stored = endpoint.provider.telemetry_configuration.clone();
     let configure = full_command(
         1,
         ExpectedRevision::Exact(SessionRevision(7)),
         crate::CommandPayload::TelemetryConfigure(&configuration),
     );
-    let prepare = |endpoint: &mut ProtocolController<MockProvider>, input: &[u8]| {
-        let mut fields = [0_u16; 1024];
-        match endpoint.prepare_command_frame(input, &[], &mut DecodeScratch::new(&mut fields), 4096)
-        {
-            Ok(PreparedCommandFrame::Immediate(frame)) => Ok(frame.bytes),
-            Ok(_) => panic!("a legacy command prepares an immediate reply"),
-            Err(error) => Err(error),
-        }
-    };
 
-    let first = prepare(&mut endpoint, &configure);
-    // The configuration ran: the provider applied it, whatever the reply says.
-    assert_eq!(endpoint.telemetry_generation, 1);
-    // A held reservation answers every later new request `BACKPRESSURE`, whose frame does not
-    // even fit this bound: either way, the next request must run.
-    let next = prepare(
+    let first = prepare_legacy(&mut endpoint, &configure).expect("the command is answered");
+    assert!(first.len() <= 256, "the reply is within the response bound");
+    match ProtocolCodec::default()
+        .decode_typed_response(&first, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("bounded reply")
+    {
+        crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            assert_eq!(header.status, StatusCode::LimitExceeded);
+            assert_eq!(header.request_id, id(1));
+            assert_eq!(header.revision, SessionRevision(7));
+            assert_eq!(payload.diagnostics[0].code, "telemetry.reply_too_large");
+            assert!(payload.diagnostics[0].path.is_empty());
+        }
+        crate::DecodedTypedResponseFrame::Success { .. } => {
+            panic!("an echo larger than the bound was answered")
+        }
+    }
+    assert_eq!(endpoint.telemetry_generation, 0, "nothing was applied");
+    assert_eq!(
+        endpoint.provider.telemetry_configuration, stored,
+        "the provider's stored table is unchanged"
+    );
+
+    let replayed = prepare_legacy(&mut endpoint, &configure).expect("the replay is answered");
+    assert_eq!(replayed, first, "the replay returns the recorded refusal");
+    assert_eq!(
+        endpoint.telemetry_generation, 0,
+        "the replay applies nothing"
+    );
+    assert_eq!(endpoint.provider.telemetry_configuration, stored);
+
+    let next = prepare_legacy(
         &mut endpoint,
         &full_command(
             2,
@@ -3715,32 +3777,46 @@ fn an_executed_command_whose_reply_overflows_the_bound_is_recorded_and_wedges_no
         .decode_typed_response(&next, &mut DecodeScratch::new(&mut fields))
         .expect("transport reply")
     else {
-        panic!("the next new request is refused: the failed completion left the cache wedged");
+        panic!("the next new request is refused: the cache was left wedged");
     };
     assert_eq!(header.request_id, id(2));
+}
 
-    let first = first.expect("the executed command is answered");
-    assert!(first.len() <= 128, "the reply is within the response bound");
-    match ProtocolCodec::default()
-        .decode_typed_response(&first, &mut DecodeScratch::new(&mut [0_u16; 64]))
-        .expect("bounded reply")
-    {
-        crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
-            assert_eq!(header.status, StatusCode::Internal);
-            assert_eq!(header.request_id, id(1));
-            assert_eq!(header.revision, SessionRevision(7));
-            assert_eq!(payload.diagnostics[0].code, "protocol.encode");
-        }
-        crate::DecodedTypedResponseFrame::Success { .. } => {
-            panic!("an echo larger than the bound was answered")
-        }
-    }
-    let replayed = prepare(&mut endpoint, &configure).expect("the replay is answered");
-    assert_eq!(replayed, first, "the replay returns the recorded reply");
-    assert_eq!(
-        endpoint.telemetry_generation, 1,
-        "the replay executes nothing a second time"
+/// #2254: the echo bound is the whole reply frame, header included: an echo exactly at the
+/// bound executes, and the same echo one byte over it is refused.
+#[test]
+fn a_telemetry_echo_exactly_at_the_bound_executes() {
+    let configuration = oversized_telemetry_configuration();
+    let exact = telemetry_echo_frame_len(&configuration);
+    let configure = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::TelemetryConfigure(&configuration),
     );
+
+    let mut endpoint = bounded_endpoint(exact);
+    let reply = prepare_legacy(&mut endpoint, &configure).expect("the command is answered");
+    assert_eq!(reply.len(), exact);
+    let mut fields = [0_u16; 64];
+    let crate::DecodedTypedResponseFrame::Success { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+        .expect("echo")
+    else {
+        panic!("an echo exactly at the bound was refused");
+    };
+    assert_eq!(header.status, StatusCode::Ok);
+    assert_eq!(endpoint.telemetry_generation, 1);
+
+    let mut endpoint = bounded_endpoint(exact - 1);
+    let reply = prepare_legacy(&mut endpoint, &configure).expect("the command is answered");
+    let crate::DecodedTypedResponseFrame::NonOk { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+        .expect("refusal")
+    else {
+        panic!("an echo one byte over the bound was answered");
+    };
+    assert_eq!(header.status, StatusCode::LimitExceeded);
+    assert_eq!(endpoint.telemetry_generation, 0);
 }
 
 #[test]
