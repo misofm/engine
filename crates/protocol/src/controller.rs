@@ -261,8 +261,10 @@ impl Default for ProtocolControllerConfig {
 /// Result of deciding one canonical request against an endpoint replay cache.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReplayDecision {
-    /// The request is new and has reserved enough configured replay capacity to execute.
-    Execute,
+    /// The request is new and the cache has room for it and a reply of the response bound. The
+    /// admission is the plan of the entry the request will take; the cache holds nothing for it
+    /// (#2254), so a caller that never completes it leaves the cache exactly as it was.
+    Execute(ReplayAdmission),
     /// An exact same-ID/same-byte request returns this cached response with no execution.
     Cached(ReplayHit),
     /// Same request ID had different canonical bytes.
@@ -298,15 +300,22 @@ struct ReplayEntry {
     _resource_layout_reservation: [u8; 16],
 }
 
+/// The plan of the one replay entry an admitted new request will take (#2254).
+///
+/// Admission is read-only: the cache holds no reservation between [`ReplayCache::preflight`]
+/// and [`ReplayCache::complete`], so no exit of the caller -- a reply that fails to encode, an
+/// early return, a dropped token -- can leave a request held and refuse every later one. The
+/// admission names the cache, the cache's completion count when it was planned, the request ID
+/// and the request's bytes, and [`ReplayCache::complete`] checks all of them in every build:
+/// one made against another cache, or before any other completion, is refused with the cache
+/// unchanged, so a stale eviction plan is never applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ReplayReservation {
+pub struct ReplayAdmission {
+    cache_id: u64,
+    generation: u64,
     request_id: RequestId,
-    request_offset: usize,
     request_bytes: usize,
-}
-
-#[derive(Clone, Copy)]
-struct ReplayPreflightPlan {
+    request_digest: u64,
     evicted: usize,
     removed_bytes: usize,
 }
@@ -319,7 +328,8 @@ pub struct ReplayCache {
     config: ReplayCacheConfig,
     entries: Box<[ReplayEntry]>,
     storage: Box<[u8]>,
-    reservation: Option<ReplayReservation>,
+    /// Completions so far: an admission is valid only at the count it was planned at.
+    generation: u64,
 }
 
 impl ReplayCache {
@@ -369,7 +379,7 @@ impl ReplayCache {
             config,
             entries: entries.into_boxed_slice(),
             storage: storage.into_boxed_slice(),
-            reservation: None,
+            generation: 0,
         })
     }
 
@@ -379,7 +389,7 @@ impl ReplayCache {
         let mut cloned = Self::try_new(self.config)?;
         cloned.entries.copy_from_slice(&self.entries);
         cloned.storage.copy_from_slice(&self.storage);
-        cloned.reservation = self.reservation;
+        cloned.generation = self.generation;
         Ok(cloned)
     }
 
@@ -396,13 +406,9 @@ impl ReplayCache {
     }
 
     fn highest_new_id(&self) -> Option<RequestId> {
-        self.reservation
-            .map(|reservation| reservation.request_id)
-            .or_else(|| {
-                self.entries[..self.completed_len()]
-                    .last()
-                    .and_then(|entry| RequestId::new(entry.request_id))
-            })
+        self.entries[..self.completed_len()]
+            .last()
+            .and_then(|entry| RequestId::new(entry.request_id))
     }
 
     fn entry_index(&self, request_id: RequestId) -> Result<usize, usize> {
@@ -436,7 +442,7 @@ impl ReplayCache {
         &self,
         request_id: RequestId,
         request: &[u8],
-    ) -> Result<ReplayPreflightPlan, ReplayDecision> {
+    ) -> Result<ReplayAdmission, ReplayDecision> {
         if let Ok(index) = self.entry_index(request_id) {
             let entry = self.entries[index];
             return Err(
@@ -451,9 +457,6 @@ impl ReplayCache {
                     ReplayDecision::RequestIdReuse
                 },
             );
-        }
-        if self.reservation.is_some() {
-            return Err(ReplayDecision::Backpressure);
         }
         if self
             .highest_new_id()
@@ -484,43 +487,31 @@ impl ReplayCache {
             removed_bytes = removed_bytes.saturating_add(entry.byte_len());
             evicted += 1;
         }
-        Ok(ReplayPreflightPlan {
+        Ok(ReplayAdmission {
+            cache_id: self.cache_id,
+            generation: self.generation,
+            request_id,
+            request_bytes: request.len(),
+            request_digest: request_digest(request),
             evicted,
             removed_bytes,
         })
     }
 
-    /// Inspect/capacity-reserve a request before execution. An `Execute` result makes enough
-    /// room for `max_response_bytes`, so [`Self::complete`] cannot need an unbounded retry.
+    /// Decide a request before execution. An `Execute` admission plans room for the request and
+    /// `max_response_bytes`, so [`Self::complete`] cannot need an unbounded retry.
     ///
-    /// A `Backpressure` result is deliberately **unaccepted**: it neither advances the strictly
-    /// increasing new-request frontier nor creates a replay entry. This is the endpoint's one
-    /// replay-preflight policy, so the same ID remains reusable if capacity later permits it.
-    /// While an accepted request is pending completion, other new preflights return
-    /// `Backpressure` without replacing its exact-byte reservation.
-    pub fn preflight(&mut self, request_id: RequestId, request: &[u8]) -> ReplayDecision {
-        let plan = match self.plan_preflight(request_id, request) {
-            Ok(plan) => plan,
-            Err(decision) => return decision,
-        };
-        self.apply_preflight_plan(request_id, request, plan);
-        ReplayDecision::Execute
-    }
-
-    fn apply_preflight_plan(
-        &mut self,
-        request_id: RequestId,
-        request: &[u8],
-        plan: ReplayPreflightPlan,
-    ) {
-        self.evict_prefix(plan.evicted, plan.removed_bytes);
-        let request_offset = self.completed_retained_bytes();
-        self.storage[request_offset..request_offset + request.len()].copy_from_slice(request);
-        self.reservation = Some(ReplayReservation {
-            request_id,
-            request_offset,
-            request_bytes: request.len(),
-        });
+    /// Deciding is read-only (#2254): no result, `Execute` included, changes the cache. A
+    /// `Backpressure` result is deliberately **unaccepted**: it neither advances the strictly
+    /// increasing new-request frontier nor creates a replay entry, so the same ID remains reusable
+    /// if capacity later permits it. This is the endpoint's one replay-preflight policy. An
+    /// `Execute` admission takes effect only when [`Self::complete`] records its entry; until
+    /// then the ID is still new, and an admission left uncompleted holds nothing.
+    pub fn preflight(&self, request_id: RequestId, request: &[u8]) -> ReplayDecision {
+        match self.plan_preflight(request_id, request) {
+            Ok(admission) => ReplayDecision::Execute(admission),
+            Err(decision) => decision,
+        }
     }
 
     /// Whether this ID would reach new-request admission rather than an already-known replay
@@ -533,52 +524,59 @@ impl ReplayCache {
                 .is_none_or(|highest| request_id > highest)
     }
 
-    /// Cache the exact bytes from a request that previously received [`ReplayDecision::Execute`].
-    /// The response must fit the fixed reservation made by [`Self::preflight`]. An ID, length, or
-    /// byte mismatch leaves the original reservation intact so its exact completion can retry.
+    /// Record the exact request and response bytes of an admitted request: apply the admission's
+    /// eviction, store both and advance the new-request frontier to its ID, in one step.
+    ///
+    /// Every check runs before anything changes, so an error leaves the cache exactly as it was:
+    /// [`ReplayCacheError::ResponseTooLarge`] for a response over the configured bound, and
+    /// [`ReplayCacheError::ReservationMissing`] for an admission another cache made, one made
+    /// before a later completion (its plan is stale), or request bytes it does not name.
     pub fn complete(
         &mut self,
-        request_id: RequestId,
+        admission: ReplayAdmission,
         request: &[u8],
         response: &[u8],
     ) -> Result<(), ReplayCacheError> {
         if response.len() > self.config.max_response_bytes {
             return Err(ReplayCacheError::ResponseTooLarge);
         }
+        if admission.cache_id != self.cache_id
+            || admission.generation != self.generation
+            || admission.request_bytes != request.len()
+            || admission.request_digest != request_digest(request)
+        {
+            return Err(ReplayCacheError::ReservationMissing);
+        }
         let byte_len = request
             .len()
             .checked_add(response.len())
             .ok_or(ReplayCacheError::ResponseTooLarge)?;
-        let Some(reservation) = self.reservation else {
-            return Err(ReplayCacheError::ReservationMissing);
-        };
-        if reservation.request_id != request_id
-            || reservation.request_bytes != request.len()
-            || self
-                .storage
-                .get(reservation.request_offset..reservation.request_offset + request.len())
-                != Some(request)
-        {
-            return Err(ReplayCacheError::ReservationMissing);
-        }
         let len = self.completed_len();
         let retained_bytes = self.completed_retained_bytes();
-        if len >= self.entries.len() || retained_bytes.saturating_add(byte_len) > self.storage.len()
+        let kept = len.saturating_sub(admission.evicted);
+        if admission.evicted > len
+            || kept >= self.entries.len()
+            || retained_bytes
+                .saturating_sub(admission.removed_bytes)
+                .saturating_add(byte_len)
+                > self.storage.len()
         {
             return Err(ReplayCacheError::ReservationMissing);
         }
-        self.reservation = None;
-        let request_offset = reservation.request_offset;
+        self.evict_prefix(admission.evicted, admission.removed_bytes);
+        let request_offset = self.completed_retained_bytes();
         let response_offset = request_offset + request.len();
+        self.storage[request_offset..response_offset].copy_from_slice(request);
         self.storage[response_offset..response_offset + response.len()].copy_from_slice(response);
-        self.entries[len] = ReplayEntry {
-            request_id: request_id.get(),
+        self.entries[kept] = ReplayEntry {
+            request_id: admission.request_id.get(),
             request_offset,
             request_bytes: request.len(),
             response_offset,
             response_bytes: response.len(),
             _resource_layout_reservation: [0; 16],
         };
+        self.generation = self.generation.wrapping_add(1);
         Ok(())
     }
 
@@ -640,12 +638,12 @@ impl ReplayEntry {
 }
 
 /// A replay-cache invariant failure. Production controller use maps this to bounded internal
-/// failure because preflight reservation should make it unreachable for conforming providers.
+/// failure because a fresh admission and a reply within the bound make it unreachable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReplayCacheError {
     /// A provider exceeded the configured response-byte bound.
     ResponseTooLarge,
-    /// Completion was called without a sufficient preflight reservation.
+    /// The admission is not this cache's current one, or does not name the request bytes.
     ReservationMissing,
     /// A configured retained payload layout or checked sum is not representable.
     ResourceOverflow,
@@ -1347,7 +1345,7 @@ pub struct PreparedObservationRead {
     request_len: usize,
     /// [`request_digest`] of the prepared request's bytes.
     request_digest: u64,
-    replay_plan: ReplayPreflightPlan,
+    replay_plan: ReplayAdmission,
     armed: bool,
 }
 
@@ -1423,7 +1421,7 @@ pub struct PreparedSessionCommand {
     generation: u64,
     message_id: MessageId,
     request_id: RequestId,
-    replay_plan: ReplayPreflightPlan,
+    replay_plan: ReplayAdmission,
     request: Box<[u8]>,
     command: SessionCommand,
     armed: bool,
@@ -1474,7 +1472,7 @@ struct StructuralCommandPlan {
     request_id: RequestId,
     previous_revision: SessionRevision,
     prospective_session: PreparedSessionTransaction,
-    replay_plan: ReplayPreflightPlan,
+    replay_plan: ReplayAdmission,
     event_sequence: u64,
     required_events: usize,
     applied_operations: u32,
@@ -1490,7 +1488,7 @@ struct StructuralCommandPlan {
 enum StructuralCommandDisposition {
     Legacy,
     Immediate {
-        replay_plan: ReplayPreflightPlan,
+        replay_plan: ReplayAdmission,
         outcome: Outcome,
     },
     Structural(StructuralCommandPlan),
@@ -1509,7 +1507,7 @@ pub struct PreparedStructuralCommand {
     // The replay entry this transaction will take, planned against the committed cache (#1615): the
     // eviction the commit applies, and the request bytes it stores. The committed cache is not
     // cloned; nothing is written to it before the commit, so a dropped token has nothing to undo.
-    replay_plan: ReplayPreflightPlan,
+    replay_plan: ReplayAdmission,
     request: Box<[u8]>,
     response: Option<ControllerResponse>,
     event_reservations: Option<crate::ReliableEventReservations>,
@@ -1895,10 +1893,11 @@ impl<P: ControlProvider> ProtocolController<P> {
                 self.non_ok(StatusCode::Backpressure, None),
             );
         }
-        match self
+        let admission = match self
             .replay
             .preflight(request.request_id, request.canonical_bytes)
         {
+            ReplayDecision::Execute(admission) => admission,
             ReplayDecision::Cached(hit) => {
                 return self.compatibility_cached_response(message_id, request.request_id, hit);
             }
@@ -1923,12 +1922,20 @@ impl<P: ControlProvider> ProtocolController<P> {
                     self.replay_backpressure_outcome(request.canonical_bytes.len()),
                 );
             }
-            ReplayDecision::Execute => {}
+        };
+        if !self.encode_failure_fits_response_bound() {
+            return self.compatibility_response(
+                message_id,
+                request.request_id,
+                self.replay_backpressure_outcome(request.canonical_bytes.len()),
+            );
         }
         let outcome = self.execute(&request);
+        // A reply over the response bound has already fallen back to `INTERNAL`
+        // `protocol.encode`, which fits: the entry is recorded whatever the command did.
         let response = self.compatibility_response(message_id, request.request_id, outcome);
         match self.replay.complete(
-            request.request_id,
+            admission,
             request.canonical_bytes,
             response.complete_frame(),
         ) {
@@ -2312,7 +2319,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         // A cached, reused, expired or backpressured request takes the one-call path, which
         // answers it without executing anything.
-        if !is_new_request || self.replay.reservation.is_some() {
+        if !is_new_request {
             return self.process_immediate_command(input, scratch, output_capacity);
         }
         let Ok(replay_plan) = self.replay.plan_preflight(header.request_id, input) else {
@@ -2412,7 +2419,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 required: self.replay.config().max_response_bytes,
             });
         }
-        if !is_new_request || self.replay.reservation.is_some() {
+        if !is_new_request {
             return self.process_immediate_command(input, scratch, output_capacity);
         }
         let Ok(replay_plan) = self.replay.plan_preflight(header.request_id, input) else {
@@ -2714,7 +2721,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         let written = self.complete_planned(
             &prepared.owner,
             prepared.generation,
-            prepared.request_id,
             prepared.replay_plan,
             &request,
             output,
@@ -2749,7 +2755,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         let written = self.complete_planned(
             &prepared.owner,
             prepared.generation,
-            prepared.request_id,
             prepared.replay_plan,
             request,
             output,
@@ -2761,13 +2766,11 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// Encode a session-executed command's reply with `encode`, then record its replay entry with
     /// `request`'s bytes (#1594 D9); the token's generation ends here.
-    #[allow(clippy::too_many_arguments)]
     fn complete_planned(
         &mut self,
         owner: &Arc<AtomicU64>,
         generation: u64,
-        request_id: RequestId,
-        replay_plan: ReplayPreflightPlan,
+        replay_plan: ReplayAdmission,
         request: &[u8],
         output: &mut [u8],
         encode: impl FnOnce(&Self, &mut [u8]) -> Result<usize, EncodeError>,
@@ -2779,9 +2782,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         let written = encode(self, output).map_err(CommandFrameProcessError::Encode)?;
         self.replay
-            .apply_preflight_plan(request_id, request, replay_plan);
-        self.replay
-            .complete(request_id, request, &output[..written])
+            .complete(replay_plan, request, &output[..written])
             .expect("the plan reserved room for a reply of the endpoint's response bound");
         self.structural_generation
             .store(generation.saturating_add(1), Ordering::Release);
@@ -2906,7 +2907,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 required: self.replay.config().max_response_bytes,
             });
         }
-        if !is_new_request || self.replay.reservation.is_some() {
+        if !is_new_request {
             return Ok(StructuralCommandDisposition::Legacy);
         }
         if !self.config.provider_features.session_events
@@ -3132,9 +3133,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             .reserve_reliable_events(plan.required_events)
             .expect("read-only structural plan reserved exact reliable-event capacity");
         self.replay
-            .apply_preflight_plan(plan.request_id, input, plan.replay_plan);
-        self.replay
-            .complete(plan.request_id, input, &output[..written])
+            .complete(plan.replay_plan, input, &output[..written])
             .expect("planned replay reservation accepts the measured direct response");
 
         let commit = self.session.commit_prepared(plan.prospective_session);
@@ -3157,7 +3156,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         &mut self,
         input: &[u8],
         header: CommandHeader,
-        replay_plan: ReplayPreflightPlan,
+        replay_plan: ReplayAdmission,
         outcome: Outcome,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
@@ -3165,9 +3164,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             .encode_outcome_or_internal_into(header.message_id, header.request_id, outcome, output)
             .map_err(CommandFrameProcessError::Encode)?;
         self.replay
-            .apply_preflight_plan(header.request_id, input, replay_plan);
-        self.replay
-            .complete(header.request_id, input, &output[..written])
+            .complete(replay_plan, input, &output[..written])
             .expect("planned immediate replay reservation accepts measured response");
         Ok(written)
     }
@@ -3176,7 +3173,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         &mut self,
         input: &[u8],
         header: CommandHeader,
-        replay_plan: ReplayPreflightPlan,
+        replay_plan: ReplayAdmission,
         outcome: Outcome,
         output_capacity: usize,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
@@ -3416,13 +3413,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         // The replay entry is written here, in the same call that returns the reply: the reply
         // exists only after the entry does (the acked-batch rule). The cache is the one the plan was
         // made against: no entry point wrote it while the token was outstanding.
-        self.replay.apply_preflight_plan(
-            prepared.request_id,
-            &prepared.request,
-            prepared.replay_plan,
-        );
         self.replay
-            .complete(prepared.request_id, &prepared.request, &bytes)
+            .complete(prepared.replay_plan, &prepared.request, &bytes)
             .expect(
                 "the plan reserved room for the response, whose length the prepared frame fixed",
             );
@@ -3454,7 +3446,8 @@ impl<P: ControlProvider> ProtocolController<P> {
                 return Err(CommandFrameProcessError::OutputReservationTooSmall { required });
             }
         }
-        match self.replay.preflight(header.request_id, input) {
+        let admission = match self.replay.preflight(header.request_id, input) {
+            ReplayDecision::Execute(admission) => admission,
             ReplayDecision::Cached(hit) => {
                 return copy_complete_frame(self.replay.cached(hit), output)
                     .map_err(CommandFrameProcessError::Encode);
@@ -3472,7 +3465,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             ReplayDecision::Backpressure => {
                 return self.write_uncached_replay_backpressure_frame(header, input.len(), output);
             }
-            ReplayDecision::Execute => {}
+        };
+        // #2254: an executed command must always have a reply the cache can record. An endpoint
+        // whose response bound cannot hold even the `INTERNAL` fallback executes nothing: the
+        // request stays unaccepted, as a replay-capacity refusal leaves it.
+        if !self.encode_failure_fits_response_bound() {
+            return self.write_uncached_replay_backpressure_frame(header, input.len(), output);
         }
 
         #[cfg(test)]
@@ -3481,13 +3479,48 @@ impl<P: ControlProvider> ProtocolController<P> {
             Ok(decoded) => self.execute_decoded_command(header, decoded.payload),
             Err(error) => self.non_ok(error.status(), None),
         };
-        let (written, _, _) = self
-            .encode_outcome_or_internal_into(header.message_id, header.request_id, outcome, output)
-            .map_err(CommandFrameProcessError::Encode)?;
+        // From here the command has run, and whatever it changed stays changed: every exit
+        // records a reply for its request ID, so a replay answers that reply and never executes
+        // it again. A reply over the response bound (the caller's output holds at least the
+        // bound) falls back to `INTERNAL` `protocol.encode` at the committed revision, as the
+        // owned path's reply does; the check above makes that fallback fit.
+        let bounded = output.len().min(self.replay.config().max_response_bytes);
+        let reply = &mut output[..bounded];
+        let written = match self.encode_outcome_or_internal_into(
+            header.message_id,
+            header.request_id,
+            outcome,
+            reply,
+        ) {
+            Ok((written, _, _)) => written,
+            Err(EncodeError::OutputTooSmall { .. }) => self
+                .encode_outcome_into(
+                    header.message_id,
+                    header.request_id,
+                    self.encode_failure_outcome(),
+                    reply,
+                )
+                .map_err(CommandFrameProcessError::Encode)?,
+            Err(error) => return Err(CommandFrameProcessError::Encode(error)),
+        };
         self.replay
-            .complete(header.request_id, input, &output[..written])
+            .complete(admission, input, &output[..written])
             .map_err(|_| CommandFrameProcessError::Internal)?;
         Ok(written)
+    }
+
+    /// Whether the reply every executed command can fall back to, `INTERNAL` `protocol.encode`,
+    /// fits the endpoint's response bound (#2254).
+    fn encode_failure_fits_response_bound(&self) -> bool {
+        let Body::NonOk(payload) = self.encode_failure_outcome().body else {
+            return false;
+        };
+        self.codec
+            .encoded_non_ok_payload_len(&payload)
+            .is_ok_and(|length| {
+                length.saturating_add(crate::OUTER_HEADER_BYTES)
+                    <= self.replay.config().max_response_bytes
+            })
     }
 
     fn write_uncached_status_frame(

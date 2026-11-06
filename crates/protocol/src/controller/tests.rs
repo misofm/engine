@@ -28,8 +28,16 @@ fn replay_resource_projection_is_bounded_and_overflow_checked() {
     );
 }
 
+/// The admission of a request [`ReplayCache::preflight`] must admit.
+fn admit(cache: &ReplayCache, request_id: u64, request: &[u8]) -> ReplayAdmission {
+    match cache.preflight(id(request_id), request) {
+        ReplayDecision::Execute(admission) => admission,
+        other => panic!("request {request_id} must be admitted, got {other:?}"),
+    }
+}
+
 #[test]
-fn replay_prefix_derives_length_retained_bytes_and_highest_pending_id() {
+fn replay_prefix_derives_length_retained_bytes_and_highest_new_id() {
     let mut cache = ReplayCache::new(ReplayCacheConfig {
         entries: NonZeroUsize::new(2).expect("two entries"),
         bytes: NonZeroUsize::new(8).expect("eight bytes"),
@@ -38,33 +46,34 @@ fn replay_prefix_derives_length_retained_bytes_and_highest_pending_id() {
     assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
     assert_eq!(cache.highest_new_id(), None);
 
-    assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::Execute);
+    let first = admit(&cache, 1, b"aa");
     assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
-    assert_eq!(cache.highest_new_id(), Some(id(1)));
-    cache.complete(id(1), b"aa", b"x").expect("first");
+    assert_eq!(cache.highest_new_id(), None, "an admission holds nothing");
+    cache.complete(first, b"aa", b"x").expect("first");
     assert_eq!((cache.len(), cache.retained_bytes()), (1, 3));
     assert_eq!(cache.highest_new_id(), Some(id(1)));
 
-    assert_eq!(cache.preflight(id(2), b"c"), ReplayDecision::Execute);
+    let second = admit(&cache, 2, b"c");
     assert_eq!((cache.len(), cache.retained_bytes()), (1, 3));
-    assert_eq!(cache.highest_new_id(), Some(id(2)));
-    cache.complete(id(2), b"c", b"yy").expect("second");
+    assert_eq!(cache.highest_new_id(), Some(id(1)));
+    cache.complete(second, b"c", b"yy").expect("second");
     let ReplayDecision::Cached(second_hit) = cache.preflight(id(2), b"c") else {
         panic!("second request must hit");
     };
     assert_eq!((cache.len(), cache.retained_bytes()), (2, 6));
 
-    assert_eq!(cache.preflight(id(3), b"d"), ReplayDecision::Execute);
+    let third = admit(&cache, 3, b"d");
     assert_eq!(
         (cache.len(), cache.retained_bytes(), cache.highest_new_id()),
-        (1, 3, Some(id(3))),
-        "prefix eviction and pending bytes are derived without retained counters"
+        (2, 6, Some(id(2))),
+        "the admission's eviction waits for its completion"
     );
     assert_eq!(cache.cached(second_hit), b"yy");
-    cache.complete(id(3), b"d", b"zzz").expect("third");
+    cache.complete(third, b"d", b"zzz").expect("third");
     assert_eq!(
         (cache.len(), cache.retained_bytes(), cache.highest_new_id()),
-        (2, 7, Some(id(3)))
+        (2, 7, Some(id(3))),
+        "prefix eviction and retained bytes are derived without retained counters"
     );
     assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::ReplayExpired);
 }
@@ -78,13 +87,13 @@ fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
     });
     assert_eq!(cache.retained_storage_capacities(), (2, 18));
 
-    assert_eq!(cache.preflight(id(1), b"one"), ReplayDecision::Execute);
-    cache.complete(id(1), b"one", b"1111").expect("first");
+    let first = admit(&cache, 1, b"one");
+    cache.complete(first, b"one", b"1111").expect("first");
     let ReplayDecision::Cached(first_hit) = cache.preflight(id(1), b"one") else {
         panic!("first request must hit");
     };
-    assert_eq!(cache.preflight(id(2), b"two"), ReplayDecision::Execute);
-    cache.complete(id(2), b"two", b"22").expect("second");
+    let second = admit(&cache, 2, b"two");
+    cache.complete(second, b"two", b"22").expect("second");
 
     let ReplayDecision::Cached(second_hit) = cache.preflight(id(2), b"two") else {
         panic!("second request must hit");
@@ -95,8 +104,8 @@ fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
         ReplayDecision::RequestIdReuse
     );
 
-    assert_eq!(cache.preflight(id(3), b"three"), ReplayDecision::Execute);
-    cache.complete(id(3), b"three", b"333").expect("third");
+    let third = admit(&cache, 3, b"three");
+    cache.complete(third, b"three", b"333").expect("third");
     assert_eq!(cache.len(), 2);
     assert_eq!(cache.try_cached(first_hit), None, "evicted hit is stale");
     assert_eq!(cache.cached(first_hit), b"");
@@ -124,9 +133,9 @@ fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
         bytes: NonZeroUsize::new(18).expect("arena bytes"),
         max_response_bytes: 4,
     });
-    assert_eq!(other.preflight(id(2), b"two"), ReplayDecision::Execute);
+    let foreign = admit(&other, 2, b"two");
     other
-        .complete(id(2), b"two", b"xx")
+        .complete(foreign, b"two", b"xx")
         .expect("foreign same-ID entry");
     assert_eq!(
         other.try_cached(second_hit),
@@ -137,25 +146,33 @@ fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
 }
 
 #[test]
-fn replay_reservation_binds_exact_request_bytes() {
+fn replay_admission_binds_exact_request_bytes_and_one_completion() {
     let mut cache = ReplayCache::new(ReplayCacheConfig {
         entries: NonZeroUsize::new(1).expect("one entry"),
         bytes: NonZeroUsize::new(8).expect("arena bytes"),
         max_response_bytes: 4,
     });
-    assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::Execute);
+    let first = admit(&cache, 1, b"aa");
+    let second = admit(&cache, 2, b"cc");
     assert_eq!(
-        cache.preflight(id(2), b"cc"),
-        ReplayDecision::Backpressure,
-        "pending reservation cannot be overwritten"
+        cache.complete(first, b"bb", b"ok"),
+        Err(ReplayCacheError::ReservationMissing),
+        "other request bytes are refused"
     );
-    assert_eq!(
-        cache.complete(id(1), b"bb", b"ok"),
-        Err(ReplayCacheError::ReservationMissing)
-    );
+    assert!(cache.is_empty(), "a refused completion changes nothing");
     cache
-        .complete(id(1), b"aa", b"ok")
-        .expect("exact pending request remains retryable");
+        .complete(first, b"aa", b"ok")
+        .expect("the exact admitted request completes");
+    assert_eq!(
+        cache.complete(second, b"cc", b"no"),
+        Err(ReplayCacheError::ReservationMissing),
+        "an admission planned before a later completion cannot overwrite it"
+    );
+    assert_eq!(
+        cache.complete(first, b"aa", b"no"),
+        Err(ReplayCacheError::ReservationMissing),
+        "an admission completes once"
+    );
     let ReplayDecision::Cached(hit) = cache.preflight(id(1), b"aa") else {
         panic!("exact completed request hits");
     };
@@ -170,13 +187,16 @@ fn fixed_replay_arena_reports_response_and_reservation_bounds() {
         max_response_bytes: 4,
     };
     let mut cache = ReplayCache::new(config);
+    let admission = admit(&cache, 1, b"x");
     assert_eq!(
-        cache.complete(id(1), b"x", b"12345"),
+        cache.complete(admission, b"x", b"12345"),
         Err(ReplayCacheError::ResponseTooLarge)
     );
+    let foreign = admit(&ReplayCache::new(config), 1, b"x");
     assert_eq!(
-        cache.complete(id(1), b"123456789", b""),
-        Err(ReplayCacheError::ReservationMissing)
+        cache.complete(foreign, b"x", b""),
+        Err(ReplayCacheError::ReservationMissing),
+        "another cache's admission is refused"
     );
     assert_eq!(
         cache.preflight(id(1), b"12345"),
@@ -2636,7 +2656,7 @@ fn every_non_ok_status_has_a_canonical_common_response_payload() {
 
 #[test]
 fn replay_admission_rejects_before_provider_execution() {
-    let mut cache = ReplayCache::new(ReplayCacheConfig {
+    let cache = ReplayCache::new(ReplayCacheConfig {
         entries: NonZeroUsize::new(1).expect("one"),
         bytes: NonZeroUsize::new(8).expect("eight"),
         max_response_bytes: 8,
@@ -3612,6 +3632,114 @@ fn a_backpressure_outcome_is_cached_and_its_retry_executes_nothing() {
     assert!(
         controller.queues_mut().try_dequeue_event().is_err(),
         "the replay enqueued no event"
+    );
+}
+
+/// #2254: a command the endpoint executed whose reply does not fit its response bound answers
+/// `INTERNAL` `protocol.encode` at the committed revision, records that reply for its request ID
+/// (a replay executes nothing a second time) and holds nothing, so the next new request runs.
+#[test]
+fn an_executed_command_whose_reply_overflows_the_bound_is_recorded_and_wedges_nothing() {
+    let mut endpoint = controller(4);
+    endpoint.replay = ReplayCache::new(ReplayCacheConfig {
+        entries: NonZeroUsize::new(4).expect("entries"),
+        bytes: NonZeroUsize::new(4096).expect("arena"),
+        max_response_bytes: 128,
+    });
+    let configuration = TelemetryConfiguration {
+        meters: vec![
+            crate::MeterEntry {
+                target: crate::MeterTarget::Output,
+                metric: crate::MeterMetric::Peak,
+            },
+            crate::MeterEntry {
+                target: crate::MeterTarget::Master,
+                metric: crate::MeterMetric::GainReduction,
+            },
+            crate::MeterEntry {
+                target: crate::MeterTarget::Strip("vocal".into()),
+                metric: crate::MeterMetric::Peak,
+            },
+            crate::MeterEntry {
+                target: crate::MeterTarget::Strip("vocal".into()),
+                metric: crate::MeterMetric::GainReduction,
+            },
+        ],
+        meter_period_blocks: 4,
+        meter_window_blocks: None,
+        counter_ids: vec![
+            crate::CounterId::ControlCommandBackpressure,
+            crate::CounterId::ReliableResponseBackpressure,
+            crate::CounterId::ReliableEventBackpressure,
+            crate::CounterId::TelemetryCoalesced,
+            crate::CounterId::TelemetryDropped,
+            crate::CounterId::MalformedFrames,
+            crate::CounterId::ReplayHits,
+            crate::CounterId::RequestIdReuse,
+        ],
+        counter_period_blocks: 8,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: crate::DiagnosticSeverity::Warning,
+    };
+    let configure = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::TelemetryConfigure(&configuration),
+    );
+    let prepare = |endpoint: &mut ProtocolController<MockProvider>, input: &[u8]| {
+        let mut fields = [0_u16; 1024];
+        match endpoint.prepare_command_frame(input, &[], &mut DecodeScratch::new(&mut fields), 4096)
+        {
+            Ok(PreparedCommandFrame::Immediate(frame)) => Ok(frame.bytes),
+            Ok(_) => panic!("a legacy command prepares an immediate reply"),
+            Err(error) => Err(error),
+        }
+    };
+
+    let first = prepare(&mut endpoint, &configure);
+    // The configuration ran: the provider applied it, whatever the reply says.
+    assert_eq!(endpoint.telemetry_generation, 1);
+    // A held reservation answers every later new request `BACKPRESSURE`, whose frame does not
+    // even fit this bound: either way, the next request must run.
+    let next = prepare(
+        &mut endpoint,
+        &full_command(
+            2,
+            ExpectedRevision::Any,
+            crate::CommandPayload::TransportGet,
+        ),
+    )
+    .unwrap_or_else(|error| panic!("the next new request is refused ({error:?}): wedged"));
+    let mut fields = [0_u16; 64];
+    let crate::DecodedTypedResponseFrame::Success { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&next, &mut DecodeScratch::new(&mut fields))
+        .expect("transport reply")
+    else {
+        panic!("the next new request is refused: the failed completion left the cache wedged");
+    };
+    assert_eq!(header.request_id, id(2));
+
+    let first = first.expect("the executed command is answered");
+    assert!(first.len() <= 128, "the reply is within the response bound");
+    match ProtocolCodec::default()
+        .decode_typed_response(&first, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("bounded reply")
+    {
+        crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            assert_eq!(header.status, StatusCode::Internal);
+            assert_eq!(header.request_id, id(1));
+            assert_eq!(header.revision, SessionRevision(7));
+            assert_eq!(payload.diagnostics[0].code, "protocol.encode");
+        }
+        crate::DecodedTypedResponseFrame::Success { .. } => {
+            panic!("an echo larger than the bound was answered")
+        }
+    }
+    let replayed = prepare(&mut endpoint, &configure).expect("the replay is answered");
+    assert_eq!(replayed, first, "the replay returns the recorded reply");
+    assert_eq!(
+        endpoint.telemetry_generation, 1,
+        "the replay executes nothing a second time"
     );
 }
 

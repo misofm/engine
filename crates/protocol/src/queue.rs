@@ -517,18 +517,49 @@ impl ProtocolQueues {
         })
     }
 
+    /// Check, in every build and before anything changes, that a hold was issued by this queue
+    /// (#2254). A hold's units are counted in the shared count of the queue that issued it, and
+    /// only there; committing it anywhere else would take a unit from a count that never had it
+    /// (wrapping it, or hiding another holder's room) and push an event into room nobody
+    /// reserved. A misuse is a caller defect, so it panics with both queues unchanged, and the
+    /// hold, if it was moved in, returns its units to its own queue as it unwinds.
+    fn assert_issued_here(&self, generation: QueueGeneration, count: &Arc<AtomicUsize>) {
+        assert!(
+            Arc::ptr_eq(count, &self.reliable_event_reservations)
+                && generation == self.events.producer.generation(),
+            "a reliable-event hold is committed or released only by the queue that issued it"
+        );
+    }
+
+    /// Take one unit from this queue's shared count; the caller has checked that a hold of this
+    /// queue owns it, so the count cannot be zero.
+    fn take_reserved_unit(&self) {
+        let taken = self.reliable_event_reservations.try_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |count| count.checked_sub(1),
+        );
+        assert!(taken.is_ok(), "an issued hold's unit is counted");
+    }
+
     /// Commit one event from a prior multi-event reservation.
+    ///
+    /// # Panics
+    ///
+    /// When `reservations` was issued by another queue or has no unit left: both are caller
+    /// defects, refused in every build before anything changes.
     pub fn commit_reserved_reliable_event(
         &mut self,
         reservations: &mut ReliableEventReservations,
         value: ReliableSlot,
     ) {
-        debug_assert_eq!(reservations.generation, self.events.producer.generation());
-        debug_assert_ne!(reservations.remaining, 0);
-        debug_assert_ne!(self.reliable_event_reservations.load(Ordering::Acquire), 0);
-        reservations.remaining = reservations.remaining.saturating_sub(1);
-        self.reliable_event_reservations
-            .fetch_sub(1, Ordering::AcqRel);
+        self.assert_issued_here(reservations.generation, &reservations.reservations);
+        assert_ne!(
+            reservations.remaining, 0,
+            "a multi-event hold commits at most the events it reserved"
+        );
+        self.take_reserved_unit();
+        reservations.remaining -= 1;
         match self.events.producer.try_push(value) {
             Ok(()) => {}
             Err(_) => unreachable!("a reserved reliable-event slot must remain available"),
@@ -536,22 +567,29 @@ impl ProtocolQueues {
     }
 
     /// Release all uncommitted multi-event reservation capacity on a failed transaction.
+    ///
+    /// # Panics
+    ///
+    /// When `reservations` was issued by another queue (its units still return to that queue).
     pub fn release_reliable_events(&mut self, reservations: ReliableEventReservations) {
-        debug_assert_eq!(reservations.generation, self.events.producer.generation());
+        self.assert_issued_here(reservations.generation, &reservations.reservations);
         drop(reservations);
     }
 
     /// Publish the exact event covered by a prior reservation. The reservation makes a full
     /// outcome unreachable because `ProtocolQueues` has one exclusive control-side producer.
+    ///
+    /// # Panics
+    ///
+    /// When `reservation` was issued by another queue, refused in every build before anything
+    /// changes; the hold then returns its unit to its own queue.
     pub fn commit_reliable_event(
         &mut self,
         mut reservation: ReliableEventReservation,
         value: ReliableSlot,
     ) {
-        debug_assert_eq!(reservation.generation, self.events.producer.generation());
-        debug_assert_ne!(self.reliable_event_reservations.load(Ordering::Acquire), 0);
-        self.reliable_event_reservations
-            .fetch_sub(1, Ordering::AcqRel);
+        self.assert_issued_here(reservation.generation, &reservation.reservations);
+        self.take_reserved_unit();
         reservation.armed = false;
         match self.events.producer.try_push(value) {
             Ok(()) => {}
@@ -560,8 +598,12 @@ impl ProtocolQueues {
     }
 
     /// Release a pre-commit reservation when session validation rejects its transaction.
+    ///
+    /// # Panics
+    ///
+    /// When `reservation` was issued by another queue (its unit still returns to that queue).
     pub fn release_reliable_event(&mut self, reservation: ReliableEventReservation) {
-        debug_assert_eq!(reservation.generation, self.events.producer.generation());
+        self.assert_issued_here(reservation.generation, &reservation.reservations);
         drop(reservation);
     }
 
@@ -912,6 +954,59 @@ mod tests {
         ));
         queues.commit_reliable_event(reservation, event);
         assert_eq!(queues.try_dequeue_event().expect("reserved event"), event);
+    }
+
+    /// #2254: a reservation is committed only by the queue that issued it, checked in every build
+    /// before anything changes, so a misuse neither moves another queue's shared count nor
+    /// publishes an event into room nobody reserved.
+    #[test]
+    fn a_reservation_committed_to_another_queue_changes_neither_queue() {
+        let two = ProtocolQueueConfig {
+            reliable_event_slots: NonZeroUsize::new(2).expect("two"),
+            ..config()
+        };
+        let event = ReliableSlot::session_committed(
+            SessionRevision(8),
+            1,
+            request(1),
+            SessionRevision(7),
+            1,
+        );
+        let mut issuer = ProtocolQueues::prepare(two).expect("issuer");
+        let mut other = ProtocolQueues::prepare(two).expect("other");
+        let held = other
+            .reserve_reliable_event()
+            .expect("the other queue's own hold");
+
+        let mut many = issuer.reserve_reliable_events(1).expect("reserve");
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            other.commit_reserved_reliable_event(&mut many, event);
+        }));
+        assert!(refused.is_err(), "a foreign multi-event hold is refused");
+        let single = issuer.reserve_reliable_event().expect("reserve");
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            other.commit_reliable_event(single, event);
+        }));
+        assert!(refused.is_err(), "a foreign single hold is refused");
+
+        assert_eq!(
+            other.report(QueueKind::ReliableEvent).occupancy,
+            0,
+            "no event entered room the other queue never reserved"
+        );
+        assert!(
+            other.reserve_reliable_events(2).is_err(),
+            "the other queue's own hold still excludes its room"
+        );
+        drop(held);
+        drop(many);
+        let all = issuer
+            .reserve_reliable_events(2)
+            .expect("the issuer's holds return all of its room");
+        drop(all);
+        other
+            .reserve_reliable_events(2)
+            .expect("the other queue's room returns once its hold is released");
     }
 
     #[test]
