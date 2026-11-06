@@ -673,15 +673,36 @@ pub struct SpectrumService {
     sample_rate_hz: u32,
     quantum_frames: u32,
     hop: Option<SpectrumHop>,
-    caller_armed: bool,
-    /// A swap dropped the caller's arm: the next one-shot read answers `Dropped` (#1593 D6).
-    arm_dropped: bool,
-    stream_active: bool,
-    stream_cadence: Option<SpectrumCadence>,
-    stream_smoothing: Option<SpectrumSmoothingConfig>,
+    arm: CallerArm,
+    stream: ServiceStream,
     stream_metadata: SpectrumStreamMetadata,
     stream_window: Box<SpectrumContinuousWindow>,
-    stream_window_ready: bool,
+}
+
+/// Who holds the one-shot arm (decision 17 D7). The caller holds an arm only while no stream
+/// runs: a start refuses `Busy` while it does, and the capture refuses an arm while a stream runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CallerArm {
+    /// The caller holds no arm; an arm that `select` made is not the caller's.
+    Free,
+    /// The caller armed and has not read the window, cancelled or lost the arm to a swap.
+    Held,
+    /// A swap dropped the caller's arm: the next one-shot read answers `Dropped` (#1593 D6).
+    Dropped,
+}
+
+/// The service's half of the stream (issue #1592).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ServiceStream {
+    /// No stream runs.
+    Stopped,
+    /// A stream runs at `cadence` with `smoothing`. `window_ready` says whether
+    /// [`SpectrumService::stream_window`] holds the window the last read returned `Ready`.
+    Running {
+        cadence: SpectrumCadence,
+        smoothing: SpectrumSmoothingConfig,
+        window_ready: bool,
+    },
 }
 
 impl SpectrumService {
@@ -714,11 +735,8 @@ impl SpectrumService {
             sample_rate_hz,
             quantum_frames,
             hop,
-            caller_armed: false,
-            arm_dropped: false,
-            stream_active: false,
-            stream_cadence: None,
-            stream_smoothing: None,
+            arm: CallerArm::Free,
+            stream: ServiceStream::Stopped,
             stream_metadata: SpectrumStreamMetadata::default(),
             stream_window: Box::new(SpectrumContinuousWindow {
                 left: [0.0; SPECTRUM_WINDOW_FRAMES],
@@ -730,7 +748,6 @@ impl SpectrumService {
                 sequence: 0,
                 dropped_captures: 0,
             }),
-            stream_window_ready: false,
         }
     }
 
@@ -767,7 +784,7 @@ impl SpectrumService {
     /// and `carried` says whether the adoption carried (`CarryOutcome::Carried`); a refused
     /// hand-over (`PredecessorMismatch`) moved no observer, so every successor capture is fresh.
     /// A capture the pairing names keeps the reader the service already holds: that capture's
-    /// observer moved into the successor's plan, so its consumer, its shared mode word and its
+    /// observer moved into the successor's plan, so its consumer, its shared state words and its
     /// read counters stay valid, and the stream epoch, the sequence and an armed one-shot carry on
     /// unchanged (#1395 gate 3). Until this call, the service's captures are the predecessor's,
     /// which is correct for a carried capture and reads as pending for the others.
@@ -836,9 +853,10 @@ impl SpectrumService {
             _ => false,
         };
         if !kept {
-            self.arm_dropped |= self.caller_armed;
-            self.caller_armed = false;
-            if self.stream_active {
+            if self.arm == CallerArm::Held {
+                self.arm = CallerArm::Dropped;
+            }
+            if self.stream_active() {
                 self.end_stream_state(analysis);
             }
         }
@@ -855,9 +873,8 @@ impl SpectrumService {
     /// stream, and when a collection has no selected entry.
     pub fn arm(&mut self) -> Result<(), SpectrumServiceError> {
         self.captures.arm()?;
-        self.caller_armed = true;
         // A new arm supersedes the dropped one: its read is this arm's (#1593 D6).
-        self.arm_dropped = false;
+        self.arm = CallerArm::Held;
         Ok(())
     }
 
@@ -878,8 +895,8 @@ impl SpectrumService {
         &mut self,
         requested: SpectrumChannels,
     ) -> Result<Option<SpectrumSnapshot>, SpectrumServiceError> {
-        if self.arm_dropped {
-            self.arm_dropped = false;
+        if self.arm == CallerArm::Dropped {
+            self.arm = CallerArm::Free;
             return Err(SpectrumServiceError::Dropped);
         }
         let Some(selected) = self.captures.channels() else {
@@ -898,7 +915,7 @@ impl SpectrumService {
         match self.captures.try_read() {
             Ok(mut window) => {
                 self.token = token;
-                self.caller_armed = false;
+                self.arm = CallerArm::Free;
                 window.channels = requested;
                 Ok(Some(SpectrumSnapshot {
                     window,
@@ -909,11 +926,11 @@ impl SpectrumService {
             }
             Err(SpectrumCaptureReadError::Pending) => Ok(None),
             Err(SpectrumCaptureReadError::NotArmed) => {
-                self.caller_armed = false;
+                self.arm = CallerArm::Free;
                 Err(SpectrumServiceError::NotArmed)
             }
             Err(SpectrumCaptureReadError::Invalid) => {
-                self.caller_armed = false;
+                self.arm = CallerArm::Free;
                 Err(SpectrumServiceError::CaptureInvalid)
             }
         }
@@ -925,13 +942,12 @@ impl SpectrumService {
     ///
     /// [`SpectrumServiceError::StreamActive`] while a stream runs; nothing changes.
     pub fn cancel(&mut self) -> Result<(), SpectrumServiceError> {
-        if self.stream_active {
+        if self.stream_active() {
             return Err(SpectrumServiceError::StreamActive);
         }
         self.captures.cancel();
-        self.caller_armed = false;
         // The caller gave up its arm, the dropped one included (#1593 D6).
-        self.arm_dropped = false;
+        self.arm = CallerArm::Free;
         Ok(())
     }
 
@@ -953,7 +969,7 @@ impl SpectrumService {
         let would_change = collection
             .selection_would_change(target, channels)
             .map_err(selection_error)?;
-        if would_change && self.caller_armed {
+        if would_change && self.arm == CallerArm::Held {
             return Err(SpectrumServiceError::Busy);
         }
         Ok(would_change)
@@ -977,7 +993,7 @@ impl SpectrumService {
         target: SpectrumTargetRef<'_>,
         channels: SpectrumChannels,
     ) -> Result<bool, SpectrumServiceError> {
-        if self.stream_active {
+        if self.stream_active() {
             return Err(SpectrumServiceError::StreamActive);
         }
         self.select_entry(target, channels)
@@ -1019,7 +1035,7 @@ impl SpectrumService {
         smoothing: Option<SpectrumSmoothingConfig>,
         analysis: Option<&mut SpectrumAnalysis>,
     ) -> Result<bool, SpectrumServiceError> {
-        if !self.stream_active {
+        if !self.stream_active() {
             if smoothing.is_some() {
                 return Err(SpectrumServiceError::StreamInactive);
             }
@@ -1064,7 +1080,7 @@ impl SpectrumService {
     /// Whether the stream runs.
     #[must_use]
     pub const fn stream_active(&self) -> bool {
-        self.stream_active
+        matches!(self.stream, ServiceStream::Running { .. })
     }
 
     /// The facts of the stream and of its last read.
@@ -1077,13 +1093,28 @@ impl SpectrumService {
     /// changes the stream.
     #[must_use]
     pub fn stream_window(&self) -> Option<&SpectrumContinuousWindow> {
-        self.stream_window_ready.then_some(&*self.stream_window)
+        match self.stream {
+            ServiceStream::Running {
+                window_ready: true, ..
+            } => Some(&*self.stream_window),
+            _ => None,
+        }
     }
 
     /// The cadence of the running stream.
     #[must_use]
     pub const fn stream_cadence(&self) -> Option<SpectrumCadence> {
-        self.stream_cadence
+        match self.stream {
+            ServiceStream::Running { cadence, .. } => Some(cadence),
+            ServiceStream::Stopped => None,
+        }
+    }
+
+    /// Record whether [`Self::stream_window`] holds a ready window; a stopped stream holds none.
+    fn set_stream_window_ready(&mut self, ready: bool) {
+        if let ServiceStream::Running { window_ready, .. } = &mut self.stream {
+            *window_ready = ready;
+        }
     }
 
     /// The capture epoch of the running stream.
@@ -1117,7 +1148,7 @@ impl SpectrumService {
             return Err(SpectrumServiceError::Exhausted);
         }
         // An arm that the caller made keeps its window (decision 17 D4 of issue #1592).
-        if self.caller_armed {
+        if self.arm == CallerArm::Held {
             return Err(SpectrumServiceError::Busy);
         }
         let started = match self.hop {
@@ -1138,10 +1169,11 @@ impl SpectrumService {
             self.captures.stop_continuous();
             return Err(SpectrumServiceError::Exhausted);
         }
-        self.stream_active = true;
-        self.stream_cadence = Some(cadence);
-        self.stream_smoothing = Some(smoothing);
-        self.stream_window_ready = false;
+        self.stream = ServiceStream::Running {
+            cadence,
+            smoothing,
+            window_ready: false,
+        };
         self.stream_metadata = SpectrumStreamMetadata {
             status: SpectrumStreamStatus::Warming,
             target_kind: self.target_kind(),
@@ -1176,10 +1208,13 @@ impl SpectrumService {
         smoothing: Option<SpectrumSmoothingConfig>,
         mut analysis: Option<&mut SpectrumAnalysis>,
     ) -> Result<bool, SpectrumServiceError> {
-        if !self.stream_active {
+        let ServiceStream::Running {
+            smoothing: running, ..
+        } = self.stream
+        else {
             return Err(SpectrumServiceError::StreamInactive);
-        }
-        let smoothing_changed = smoothing.is_some() && self.stream_smoothing != smoothing;
+        };
+        let smoothing_changed = smoothing.is_some_and(|smoothing| smoothing != running);
         let selection_changed = self.selection_would_change(target, channels)?;
         if (selection_changed || smoothing_changed)
             && analysis
@@ -1202,7 +1237,12 @@ impl SpectrumService {
             return Err(SpectrumServiceError::Exhausted);
         }
         if let Some(smoothing) = smoothing {
-            self.stream_smoothing = Some(smoothing);
+            if let ServiceStream::Running {
+                smoothing: running, ..
+            } = &mut self.stream
+            {
+                *running = smoothing;
+            }
             self.stream_metadata.smoothing_ms = smoothing.smoothing_ms();
             if let Some(analysis) = analysis.as_deref_mut() {
                 analysis.smoothing = Some(smoothing);
@@ -1221,7 +1261,7 @@ impl SpectrumService {
         metadata.captured_sample = 0;
         metadata.end_sample = 0;
         metadata.source_underrun = false;
-        self.stream_window_ready = false;
+        self.set_stream_window_ready(false);
         self.refresh_analysis_facts(analysis.as_deref());
         Ok(true)
     }
@@ -1248,7 +1288,7 @@ impl SpectrumService {
         // path, so the metadata cannot keep the previous target.
         self.stream_metadata.target_kind = self.target_kind();
         self.stream_metadata.channels = self.channels().map_or(0, |channels| channels as u32);
-        self.stream_window_ready = false;
+        self.set_stream_window_ready(false);
         if let Some(analysis) = analysis.as_deref_mut() {
             analysis.window_known = false;
         }
@@ -1300,7 +1340,7 @@ impl SpectrumService {
     ) -> Result<(), SpectrumServiceError> {
         let epoch = Some(window.stream_epoch);
         let drops = Some(window.dropped_captures);
-        let facts = if self.stream_cadence.is_none() {
+        let facts = if !self.stream_active() {
             Err(SpectrumServiceError::StreamInactive)
         } else {
             match (window.sequence.checked_add(1), window.end_sample()) {
@@ -1326,7 +1366,7 @@ impl SpectrumService {
         metadata.end_sample = end_sample;
         metadata.source_underrun = window.source_underrun;
         *self.stream_window = window;
-        self.stream_window_ready = true;
+        self.set_stream_window_ready(true);
         if let Some(analysis) = analysis {
             analysis.window_known = true;
         }
@@ -1341,7 +1381,7 @@ impl SpectrumService {
         drops: Option<u64>,
     ) {
         self.stream_metadata.record_outcome(status, epoch, drops);
-        self.stream_window_ready = false;
+        self.set_stream_window_ready(false);
     }
 
     /// Copy the analysis facts into the metadata: zero without an analysis.
@@ -1361,10 +1401,7 @@ impl SpectrumService {
 
     /// End the stream's state in the service and in its analysis; the capture is the caller's.
     fn end_stream_state(&mut self, mut analysis: Option<&mut SpectrumAnalysis>) {
-        self.stream_active = false;
-        self.stream_cadence = None;
-        self.stream_smoothing = None;
-        self.stream_window_ready = false;
+        self.stream = ServiceStream::Stopped;
         self.stream_metadata.status = SpectrumStreamStatus::Stopped;
         if let Some(analysis) = analysis.as_deref_mut() {
             analysis.end_stream();
