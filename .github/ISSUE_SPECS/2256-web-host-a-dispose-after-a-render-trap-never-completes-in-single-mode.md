@@ -22,3 +22,35 @@ The single-mode AudioWorklet's lifecycle is spread over about eleven fields (`re
 - The SDK evals that read the shipped worklet source and need no artifact pass unchanged.
 
 ## Evidence
+### Attempt 1 (Terra, 2026-11-06)
+Base `8f46ab035`; implementation `4bf57a9ea`.
+
+**Mechanism, confirmed by reading.** `miso_engine_web_v1_render` runs `render_locked(|| with_render_mut(..))`; `with_render_mut` holds `LIVE_HOST.try_borrow_mut()` across the render, and `render_locked` clears its flag only on return (no guard, by design under `panic = "abort"`). A trap therefore leaves the `RefCell` borrowed and `RENDER_LOCKED` set; `miso_engine_web_v1_dispose` then refuses at `LIVE_HOST.try_borrow_mut()` with `RESULT_INVALID_ARGUMENT` on every call. Nothing on the JavaScript side told a trap from a returned 255: `process()` mapped the throw to `RESULT_INTERNAL` and kept no record, and the single-mode dispose called the export regardless. Worker mode already contained it: the worklet's release catches, the Worker disposes without the half, and the page tears down on any dispose outcome.
+
+**Phase model and transitions** (`hosts/host-web/web/miso-engine-v1-audio-worklet.js`, `PHASE_*`, writer `enter`):
+- `booting` -> `live`: `initialize` / `initializeWorker` posted ready.
+- `booting` -> `disposed` (single) / `released` (worker): `failInitialization`, once.
+- `booting | live | failed` -> `failed{code, posted, trapped}`: `fail` (from `process()` on a render refusal, a trap or a quantum mismatch; from a meter-set fault; from `sticky`). The latest code is kept; a trap is permanent.
+- `live | failed` -> `disposed` (single): `receiveDispose` on OK, or at once when trapped (no export called; answered 255), or when the dispose export itself traps (answered 255). Any other refusal keeps the phase; the host may retry.
+- `live | failed` -> `released` (worker): `releaseRenderHalf`; a trapped instance answers with token `0n` without calling `host_release`.
+- `released` and `disposed` are final: `process()` returns `false`, messages are ignored.
+
+Fields folded away: `handleDisposed` (equal to `handle === 0` at every site), `initializationErrorPosted` (`failInitialization` is now idempotent on the phase), `stickyPosted` (now `failurePosted`). `ready`, `disposed` and `stickyResult` remain only as the phase's published view, written by `enter` and read by nothing in the worklet: the SDK's PCM feed prelude subclasses the processor and reads them, and its eval sets them on an unconstructed instance, so they cannot become getters without an SDK change. Phases are interned string constants, so `process()` compares, never allocates; `enter`, `ended` and `fail` sit inside `PROCESS_POLICY_BEGIN/END` because `process()` calls them, and the source policy passes over them.
+
+**Host decision** (`miso-engine-v1-audio-worklet-host.js` `#disposeSingleMode`): a single-mode dispose that rejects with result 255 tears down, as a teardown does. 255 reaches a single-mode dispose only from a trapped worklet (the export itself never returns it), from a port that cannot take the request, or from a host failure while the dispose is in flight (a malformed worklet message, `processorerror`); in each, no retry can be answered. Result 3 (and any other code) is still retried; the existing tick test holds that.
+
+**Red on today's code** (`node scripts/test-web-audioworklet.mjs`, tests added before the fix):
+- Host row: `AssertionError [ERR_ASSERTION]: a 255 dispose disconnects the node ... actual: 0, expected: 1` (the dispose was dropped for retry). Red again with only the host change reverted (`MISO_ENGINE_WEB_HOST_TEST_MODULE=<base host>`), same assertion.
+- Processor row, render trap: `actual: { tag: 'miso.ack.v1', requestId: 1, result: 1 }, expected: { ... result: 255 }` (the export was called; its refusal is what the host retried).
+- Processor row, dispose trap: `Error: synthetic wasm trap from the dispose export` escapes the message handler (no answer; the host would wait out its 5 s bound).
+
+**Green** at `4bf57a9ea`:
+- `bash scripts/test-web-audioworklet.sh`: exit 0 (hermetic suite, the safe-integer host variants, source/clock/timer/capability policies and their mutations, call-graph self-test, parameter-metadata and session-map gates, UTF-8 mutation).
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- SDK evals without an artifact (`cd sdk && node --test 'test/*-evals.mjs'`): 710 tests, 340 pass, 22 fail, the identical failing set on base and on this change, every failure `MISO_ENGINE_SDK_ARTIFACTS_HEX must encode a directory built by scripts/build-web-audioworklet.sh`. `the prelude over the real engine worklet class` passes.
+- Not run here: the artifact-backed SDK evals and the Playwright browser legs (the pinned browser nightly is not installed, so no artifact can be built). No Rust changed, so `cargo test -p host-web`, clippy and fmt were not needed.
+
+**Test value.**
+- Processor test (`scripts/test-web-audioworklet.mjs`, "Issue #2256: a trap leaves the instance's memory..."): red if the worklet calls an export on a trapped instance or answers a dispose after a trap with anything but a final 255, or if a trap inside the dispose export escapes the handler unanswered; no existing test disposes after a trap.
+- Host row (the S8 single-mode teardown block, "the single-mode parity row of worker mode's `dispose255`"): red if a single-mode dispose answered 255 is dropped for retry instead of tearing down; the existing rows cover only a retryable 3 and an unanswered dispose.
+- The pre-existing `processor.ready = false` fixture now reads `processor.enter("booting")`: the same claim (pre-ready silence), stated through the phase the worklet reads.
