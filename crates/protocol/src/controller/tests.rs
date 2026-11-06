@@ -28,8 +28,16 @@ fn replay_resource_projection_is_bounded_and_overflow_checked() {
     );
 }
 
+/// The admission of a request [`ReplayCache::preflight`] must admit.
+fn admit(cache: &ReplayCache, request_id: u64, request: &[u8]) -> ReplayAdmission {
+    match cache.preflight(id(request_id), request) {
+        ReplayDecision::Execute(admission) => admission,
+        other => panic!("request {request_id} must be admitted, got {other:?}"),
+    }
+}
+
 #[test]
-fn replay_prefix_derives_length_retained_bytes_and_highest_pending_id() {
+fn replay_prefix_derives_length_retained_bytes_and_highest_new_id() {
     let mut cache = ReplayCache::new(ReplayCacheConfig {
         entries: NonZeroUsize::new(2).expect("two entries"),
         bytes: NonZeroUsize::new(8).expect("eight bytes"),
@@ -38,33 +46,34 @@ fn replay_prefix_derives_length_retained_bytes_and_highest_pending_id() {
     assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
     assert_eq!(cache.highest_new_id(), None);
 
-    assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::Execute);
+    let first = admit(&cache, 1, b"aa");
     assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
-    assert_eq!(cache.highest_new_id(), Some(id(1)));
-    cache.complete(id(1), b"aa", b"x").expect("first");
+    assert_eq!(cache.highest_new_id(), None, "an admission holds nothing");
+    cache.complete(first, b"aa", b"x").expect("first");
     assert_eq!((cache.len(), cache.retained_bytes()), (1, 3));
     assert_eq!(cache.highest_new_id(), Some(id(1)));
 
-    assert_eq!(cache.preflight(id(2), b"c"), ReplayDecision::Execute);
+    let second = admit(&cache, 2, b"c");
     assert_eq!((cache.len(), cache.retained_bytes()), (1, 3));
-    assert_eq!(cache.highest_new_id(), Some(id(2)));
-    cache.complete(id(2), b"c", b"yy").expect("second");
+    assert_eq!(cache.highest_new_id(), Some(id(1)));
+    cache.complete(second, b"c", b"yy").expect("second");
     let ReplayDecision::Cached(second_hit) = cache.preflight(id(2), b"c") else {
         panic!("second request must hit");
     };
     assert_eq!((cache.len(), cache.retained_bytes()), (2, 6));
 
-    assert_eq!(cache.preflight(id(3), b"d"), ReplayDecision::Execute);
+    let third = admit(&cache, 3, b"d");
     assert_eq!(
         (cache.len(), cache.retained_bytes(), cache.highest_new_id()),
-        (1, 3, Some(id(3))),
-        "prefix eviction and pending bytes are derived without retained counters"
+        (2, 6, Some(id(2))),
+        "the admission's eviction waits for its completion"
     );
     assert_eq!(cache.cached(second_hit), b"yy");
-    cache.complete(id(3), b"d", b"zzz").expect("third");
+    cache.complete(third, b"d", b"zzz").expect("third");
     assert_eq!(
         (cache.len(), cache.retained_bytes(), cache.highest_new_id()),
-        (2, 7, Some(id(3)))
+        (2, 7, Some(id(3))),
+        "prefix eviction and retained bytes are derived without retained counters"
     );
     assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::ReplayExpired);
 }
@@ -78,13 +87,13 @@ fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
     });
     assert_eq!(cache.retained_storage_capacities(), (2, 18));
 
-    assert_eq!(cache.preflight(id(1), b"one"), ReplayDecision::Execute);
-    cache.complete(id(1), b"one", b"1111").expect("first");
+    let first = admit(&cache, 1, b"one");
+    cache.complete(first, b"one", b"1111").expect("first");
     let ReplayDecision::Cached(first_hit) = cache.preflight(id(1), b"one") else {
         panic!("first request must hit");
     };
-    assert_eq!(cache.preflight(id(2), b"two"), ReplayDecision::Execute);
-    cache.complete(id(2), b"two", b"22").expect("second");
+    let second = admit(&cache, 2, b"two");
+    cache.complete(second, b"two", b"22").expect("second");
 
     let ReplayDecision::Cached(second_hit) = cache.preflight(id(2), b"two") else {
         panic!("second request must hit");
@@ -95,8 +104,8 @@ fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
         ReplayDecision::RequestIdReuse
     );
 
-    assert_eq!(cache.preflight(id(3), b"three"), ReplayDecision::Execute);
-    cache.complete(id(3), b"three", b"333").expect("third");
+    let third = admit(&cache, 3, b"three");
+    cache.complete(third, b"three", b"333").expect("third");
     assert_eq!(cache.len(), 2);
     assert_eq!(cache.try_cached(first_hit), None, "evicted hit is stale");
     assert_eq!(cache.cached(first_hit), b"");
@@ -124,9 +133,9 @@ fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
         bytes: NonZeroUsize::new(18).expect("arena bytes"),
         max_response_bytes: 4,
     });
-    assert_eq!(other.preflight(id(2), b"two"), ReplayDecision::Execute);
+    let foreign = admit(&other, 2, b"two");
     other
-        .complete(id(2), b"two", b"xx")
+        .complete(foreign, b"two", b"xx")
         .expect("foreign same-ID entry");
     assert_eq!(
         other.try_cached(second_hit),
@@ -137,25 +146,33 @@ fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
 }
 
 #[test]
-fn replay_reservation_binds_exact_request_bytes() {
+fn replay_admission_binds_exact_request_bytes_and_one_completion() {
     let mut cache = ReplayCache::new(ReplayCacheConfig {
         entries: NonZeroUsize::new(1).expect("one entry"),
         bytes: NonZeroUsize::new(8).expect("arena bytes"),
         max_response_bytes: 4,
     });
-    assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::Execute);
+    let first = admit(&cache, 1, b"aa");
+    let second = admit(&cache, 2, b"cc");
     assert_eq!(
-        cache.preflight(id(2), b"cc"),
-        ReplayDecision::Backpressure,
-        "pending reservation cannot be overwritten"
+        cache.complete(first, b"bb", b"ok"),
+        Err(ReplayCacheError::ReservationMissing),
+        "other request bytes are refused"
     );
-    assert_eq!(
-        cache.complete(id(1), b"bb", b"ok"),
-        Err(ReplayCacheError::ReservationMissing)
-    );
+    assert!(cache.is_empty(), "a refused completion changes nothing");
     cache
-        .complete(id(1), b"aa", b"ok")
-        .expect("exact pending request remains retryable");
+        .complete(first, b"aa", b"ok")
+        .expect("the exact admitted request completes");
+    assert_eq!(
+        cache.complete(second, b"cc", b"no"),
+        Err(ReplayCacheError::ReservationMissing),
+        "an admission planned before a later completion cannot overwrite it"
+    );
+    assert_eq!(
+        cache.complete(first, b"aa", b"no"),
+        Err(ReplayCacheError::ReservationMissing),
+        "an admission completes once"
+    );
     let ReplayDecision::Cached(hit) = cache.preflight(id(1), b"aa") else {
         panic!("exact completed request hits");
     };
@@ -170,13 +187,16 @@ fn fixed_replay_arena_reports_response_and_reservation_bounds() {
         max_response_bytes: 4,
     };
     let mut cache = ReplayCache::new(config);
+    let admission = admit(&cache, 1, b"x");
     assert_eq!(
-        cache.complete(id(1), b"x", b"12345"),
+        cache.complete(admission, b"x", b"12345"),
         Err(ReplayCacheError::ResponseTooLarge)
     );
+    let foreign = admit(&ReplayCache::new(config), 1, b"x");
     assert_eq!(
-        cache.complete(id(1), b"123456789", b""),
-        Err(ReplayCacheError::ReservationMissing)
+        cache.complete(foreign, b"x", b""),
+        Err(ReplayCacheError::ReservationMissing),
+        "another cache's admission is refused"
     );
     assert_eq!(
         cache.preflight(id(1), b"12345"),
@@ -2636,7 +2656,7 @@ fn every_non_ok_status_has_a_canonical_common_response_payload() {
 
 #[test]
 fn replay_admission_rejects_before_provider_execution() {
-    let mut cache = ReplayCache::new(ReplayCacheConfig {
+    let cache = ReplayCache::new(ReplayCacheConfig {
         entries: NonZeroUsize::new(1).expect("one"),
         bytes: NonZeroUsize::new(8).expect("eight"),
         max_response_bytes: 8,
@@ -3613,6 +3633,339 @@ fn a_backpressure_outcome_is_cached_and_its_retry_executes_nothing() {
         controller.queues_mut().try_dequeue_event().is_err(),
         "the replay enqueued no event"
     );
+}
+
+/// #2254: a `TELEMETRY_CONFIGURE` whose echo would not fit the response bound.
+fn oversized_telemetry_configuration() -> TelemetryConfiguration {
+    TelemetryConfiguration {
+        meters: vec![
+            crate::MeterEntry {
+                target: crate::MeterTarget::Output,
+                metric: crate::MeterMetric::Peak,
+            },
+            crate::MeterEntry {
+                target: crate::MeterTarget::Master,
+                metric: crate::MeterMetric::GainReduction,
+            },
+            crate::MeterEntry {
+                target: crate::MeterTarget::Strip("vocal".into()),
+                metric: crate::MeterMetric::Peak,
+            },
+            crate::MeterEntry {
+                target: crate::MeterTarget::Strip("vocal".into()),
+                metric: crate::MeterMetric::GainReduction,
+            },
+        ],
+        meter_period_blocks: 4,
+        meter_window_blocks: None,
+        counter_ids: vec![
+            crate::CounterId::ControlCommandBackpressure,
+            crate::CounterId::ReliableResponseBackpressure,
+            crate::CounterId::ReliableEventBackpressure,
+            crate::CounterId::TelemetryCoalesced,
+            crate::CounterId::TelemetryDropped,
+            crate::CounterId::MalformedFrames,
+            crate::CounterId::ReplayHits,
+            crate::CounterId::RequestIdReuse,
+        ],
+        counter_period_blocks: 8,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: crate::DiagnosticSeverity::Warning,
+    }
+}
+
+/// An endpoint whose replay cache retains replies of at most `max_response_bytes`.
+fn bounded_endpoint(max_response_bytes: usize) -> ProtocolController<MockProvider> {
+    let mut endpoint = controller(4);
+    endpoint.replay = ReplayCache::new(ReplayCacheConfig {
+        entries: NonZeroUsize::new(4).expect("entries"),
+        bytes: NonZeroUsize::new(4096).expect("arena"),
+        max_response_bytes,
+    });
+    endpoint
+}
+
+/// One request through the production prepared path, which every C-ABI and browser host takes.
+fn prepare_legacy(
+    endpoint: &mut ProtocolController<MockProvider>,
+    input: &[u8],
+) -> Result<Vec<u8>, CommandFrameProcessError> {
+    let mut fields = [0_u16; 1024];
+    match endpoint.prepare_command_frame(input, &[], &mut DecodeScratch::new(&mut fields), 4096) {
+        Ok(PreparedCommandFrame::Immediate(frame)) => Ok(frame.bytes),
+        Ok(_) => panic!("a legacy command prepares an immediate reply"),
+        Err(error) => Err(error),
+    }
+}
+
+/// One request through the one-call path, into a caller output larger than the response bound.
+fn process_one_call(
+    endpoint: &mut ProtocolController<MockProvider>,
+    input: &[u8],
+) -> Result<Vec<u8>, CommandFrameProcessError> {
+    let mut fields = [0_u16; 1024];
+    let mut output = vec![0_u8; 4096];
+    let written = endpoint.process_command_frame_into(
+        input,
+        &mut DecodeScratch::new(&mut fields),
+        &mut output,
+    )?;
+    output.truncate(written);
+    Ok(output)
+}
+
+/// The complete success frame a conforming provider's echo of `configuration` encodes to.
+fn telemetry_echo_frame_len(configuration: &TelemetryConfiguration) -> usize {
+    let mut echo = configuration.clone();
+    echo.meter_window_blocks = Some(core::num::NonZeroU32::MIN);
+    let mut output = vec![0_u8; 4096];
+    ProtocolCodec::default()
+        .encode_success_response_frame_into(
+            &TypedSuccessResponseFrame {
+                request_id: id(1),
+                revision: SessionRevision(7),
+                payload: SuccessResponsePayload::TelemetryConfiguration(echo),
+            },
+            &mut output,
+        )
+        .expect("echo frame")
+}
+
+/// #2254: a `TELEMETRY_CONFIGURE` whose echo the replay cache could not retain is refused
+/// `LIMIT_EXCEEDED` `telemetry.reply_too_large` before the provider stores anything, at the
+/// unchanged revision. The refusal is recorded (a replay answers the same bytes and still applies
+/// nothing) and holds nothing, so the next new request runs.
+#[test]
+fn a_telemetry_echo_over_the_bound_is_refused_before_anything_changes() {
+    // A bound that holds the refusal but not the echo.
+    let mut endpoint = bounded_endpoint(256);
+    let configuration = oversized_telemetry_configuration();
+    assert!(telemetry_echo_frame_len(&configuration) > 256);
+    let stored = endpoint.provider.telemetry_configuration.clone();
+    let configure = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::TelemetryConfigure(&configuration),
+    );
+
+    let first = prepare_legacy(&mut endpoint, &configure).expect("the command is answered");
+    assert!(first.len() <= 256, "the reply is within the response bound");
+    match ProtocolCodec::default()
+        .decode_typed_response(&first, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("bounded reply")
+    {
+        crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            assert_eq!(header.status, StatusCode::LimitExceeded);
+            assert_eq!(header.request_id, id(1));
+            assert_eq!(header.revision, SessionRevision(7));
+            assert_eq!(payload.diagnostics[0].code, "telemetry.reply_too_large");
+            assert!(payload.diagnostics[0].path.is_empty());
+        }
+        crate::DecodedTypedResponseFrame::Success { .. } => {
+            panic!("an echo larger than the bound was answered")
+        }
+    }
+    assert_eq!(endpoint.telemetry_generation, 0, "nothing was applied");
+    assert_eq!(
+        endpoint.provider.telemetry_configuration, stored,
+        "the provider's stored table is unchanged"
+    );
+
+    let replayed = prepare_legacy(&mut endpoint, &configure).expect("the replay is answered");
+    assert_eq!(replayed, first, "the replay returns the recorded refusal");
+    assert_eq!(
+        endpoint.telemetry_generation, 0,
+        "the replay applies nothing"
+    );
+    assert_eq!(endpoint.provider.telemetry_configuration, stored);
+
+    let next = prepare_legacy(
+        &mut endpoint,
+        &full_command(
+            2,
+            ExpectedRevision::Any,
+            crate::CommandPayload::TransportGet,
+        ),
+    )
+    .unwrap_or_else(|error| panic!("the next new request is refused ({error:?}): wedged"));
+    let mut fields = [0_u16; 64];
+    let crate::DecodedTypedResponseFrame::Success { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&next, &mut DecodeScratch::new(&mut fields))
+        .expect("transport reply")
+    else {
+        panic!("the next new request is refused: the cache was left wedged");
+    };
+    assert_eq!(header.request_id, id(2));
+}
+
+/// #2254: the catch-all for a provider that breaks persist-and-echo. Its echo is larger than the
+/// request the controller sized, so the reply overflows only after the command ran: the endpoint
+/// answers and records `INTERNAL` `protocol.encode` at the committed revision, a replay executes
+/// nothing a second time, and the next new request runs. Both legacy entry points: the prepared
+/// path, whose buffer is the bound, and the one-call path, whose caller output is larger.
+#[test]
+fn a_nonconforming_echo_over_the_bound_is_recorded_as_internal_and_executes_once() {
+    nonconforming_echo_is_recorded_as_internal(prepare_legacy);
+    nonconforming_echo_is_recorded_as_internal(process_one_call);
+}
+
+/// A legacy entry point: one request in, its reply frame out.
+type LegacyEntry =
+    fn(&mut ProtocolController<MockProvider>, &[u8]) -> Result<Vec<u8>, CommandFrameProcessError>;
+
+fn nonconforming_echo_is_recorded_as_internal(send: LegacyEntry) {
+    let mut endpoint = bounded_endpoint(256);
+    let configuration = TelemetryConfiguration {
+        meters: Vec::new(),
+        meter_period_blocks: 4,
+        meter_window_blocks: None,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 8,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: crate::DiagnosticSeverity::Warning,
+    };
+    assert!(
+        telemetry_echo_frame_len(&configuration) <= 256,
+        "the request's echo fits"
+    );
+    endpoint.provider.echo_override = Some(oversized_telemetry_configuration());
+    let configure = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::TelemetryConfigure(&configuration),
+    );
+
+    let first = send(&mut endpoint, &configure).expect("the executed command is answered");
+    assert_eq!(endpoint.telemetry_generation, 1, "the configuration ran");
+    assert!(first.len() <= 256, "the reply is within the response bound");
+    match ProtocolCodec::default()
+        .decode_typed_response(&first, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("bounded reply")
+    {
+        crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            assert_eq!(header.status, StatusCode::Internal);
+            assert_eq!(header.request_id, id(1));
+            assert_eq!(header.revision, SessionRevision(7));
+            assert_eq!(payload.diagnostics[0].code, "protocol.encode");
+        }
+        crate::DecodedTypedResponseFrame::Success { .. } => {
+            panic!("an echo larger than the bound was answered")
+        }
+    }
+    let replayed = send(&mut endpoint, &configure).expect("the replay is answered");
+    assert_eq!(replayed, first, "the replay returns the recorded reply");
+    assert_eq!(
+        endpoint.telemetry_generation, 1,
+        "the replay executes nothing a second time"
+    );
+    let next = prepare_legacy(
+        &mut endpoint,
+        &full_command(
+            2,
+            ExpectedRevision::Any,
+            crate::CommandPayload::TransportGet,
+        ),
+    )
+    .unwrap_or_else(|error| panic!("the next new request is refused ({error:?}): wedged"));
+    let mut fields = [0_u16; 64];
+    let crate::DecodedTypedResponseFrame::Success { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&next, &mut DecodeScratch::new(&mut fields))
+        .expect("transport reply")
+    else {
+        panic!("the next new request is refused: the cache was left wedged");
+    };
+    assert_eq!(header.request_id, id(2));
+}
+
+/// #2254: an endpoint whose response bound cannot hold even the `INTERNAL` fallback could record
+/// no reply, so it executes nothing, even a command whose own reply would fit. Through the
+/// prepared path the uncached replay `BACKPRESSURE` does not fit that bound either, so the call
+/// fails `OutputTooSmall`; the request stays unaccepted and its retry is refused the same way.
+/// The owned `process` path executes nothing either.
+#[test]
+fn a_bound_below_the_fallback_reply_refuses_before_dispatch() {
+    let mut endpoint = bounded_endpoint(100);
+    let play = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::TransportSet(TransportSetRequest {
+            state: TransportState::Playing,
+        }),
+    );
+    for attempt in 0..2 {
+        assert!(
+            matches!(
+                prepare_legacy(&mut endpoint, &play),
+                Err(CommandFrameProcessError::Encode(
+                    EncodeError::OutputTooSmall { .. }
+                ))
+            ),
+            "attempt {attempt} is refused"
+        );
+        assert_eq!(
+            endpoint.provider.transport_state,
+            TransportState::Stopped,
+            "nothing executed"
+        );
+        assert!(
+            endpoint.queues_mut().try_dequeue_event().is_err(),
+            "no transport event"
+        );
+    }
+    // The owned path takes the same pre-dispatch check. Its `BACKPRESSURE` refusal does not fit
+    // this bound either and falls back, unrecorded; what matters is that nothing ran.
+    for attempt in 0..2 {
+        let response = endpoint.process(ControllerRequest {
+            request_id: id(2),
+            expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
+            canonical_bytes: b"play",
+            command: ControlCommand::TransportSet {
+                request: TransportSetRequest {
+                    state: TransportState::Playing,
+                },
+            },
+        });
+        assert_ne!(response.status, StatusCode::Ok, "owned attempt {attempt}");
+        assert_eq!(endpoint.provider.transport_state, TransportState::Stopped);
+        assert!(endpoint.queues_mut().try_dequeue_event().is_err());
+    }
+}
+
+/// #2254: the echo bound is the whole reply frame, header included: an echo exactly at the
+/// bound executes, and the same echo one byte over it is refused.
+#[test]
+fn a_telemetry_echo_exactly_at_the_bound_executes() {
+    let configuration = oversized_telemetry_configuration();
+    let exact = telemetry_echo_frame_len(&configuration);
+    let configure = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::TelemetryConfigure(&configuration),
+    );
+
+    let mut endpoint = bounded_endpoint(exact);
+    let reply = prepare_legacy(&mut endpoint, &configure).expect("the command is answered");
+    assert_eq!(reply.len(), exact);
+    let mut fields = [0_u16; 64];
+    let crate::DecodedTypedResponseFrame::Success { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+        .expect("echo")
+    else {
+        panic!("an echo exactly at the bound was refused");
+    };
+    assert_eq!(header.status, StatusCode::Ok);
+    assert_eq!(endpoint.telemetry_generation, 1);
+
+    let mut endpoint = bounded_endpoint(exact - 1);
+    let reply = prepare_legacy(&mut endpoint, &configure).expect("the command is answered");
+    let crate::DecodedTypedResponseFrame::NonOk { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+        .expect("refusal")
+    else {
+        panic!("an echo one byte over the bound was answered");
+    };
+    assert_eq!(header.status, StatusCode::LimitExceeded);
+    assert_eq!(endpoint.telemetry_generation, 0);
 }
 
 #[test]

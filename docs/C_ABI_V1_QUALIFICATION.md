@@ -593,7 +593,9 @@ a block, on the strip meters' window grid at or after that block (a request the 
 computed from an older render clock, or on a grid render has since restarted, is moved onto it),
 so the gate moves only between blocks and the render call stays allocation-, lock- and
 syscall-free. The configure is all or nothing: an unknown strip is `NOT_FOUND`
-`meter.strip.unknown` (`meters[i]`); a period that is not a positive multiple of the window is
+`meter.strip.unknown` (`meters[i]`); a configure whose echo frame would exceed the maximum
+control frame is `LIMIT_EXCEEDED` `telemetry.reply_too_large`, before anything is stored (#2254);
+a period that is not a positive multiple of the window is
 `INVALID_FIELD` `meter.period`; and a table of more than 128 entries is `INVALID_FIELD`
 `meter.records` at its 129th entry, so a batch never needs more than its 256 records. Each `METER_BATCH` is
 `meter_period_blocks / meter_window_blocks` consecutive windows: `first_sample` is the first
