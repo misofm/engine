@@ -35,6 +35,11 @@ set -euo pipefail
 #                  the output directory (removed on exit), written as
 #                  `miso-engine-v1-render-lock-probe.wasm` and nothing else: never pinned, never a
 #                  twin, never delivered. `scripts/test-render-lock-probe.mjs` reads it.
+#   --soak-probe   issue #2243: not the shipped module. The full delivery set, built with
+#                  `--features host-web/soak-probe` (one leaked render-locked allocation per block),
+#                  so the on-demand soak (`hosts/host-web/qualification/soak.mjs --expect-red`) can
+#                  serve it as the exact artifact set and prove its gates turn red: printed as
+#                  `soak probe module <sha256>`, never pinned, never a twin, never delivered.
 #   --print-toolchain  issue #1334: print the browser artifact toolchain and exit, building nothing
 #                  and taking no directory. CI installs exactly what it prints.
 #
@@ -84,8 +89,14 @@ while (($# > 1)); do
       features=(--features host-web/render-lock-probe)
       shift
       ;;
+    --soak-probe)
+      [[ $mode == delivery && -z $named_dir ]] || break
+      mode=soak
+      features=(--features host-web/soak-probe)
+      shift
+      ;;
     --named-twin)
-      [[ -z $named_dir && -n ${2-} && $mode != probe ]] || break
+      [[ -z $named_dir && -n ${2-} && $mode != probe && $mode != soak ]] || break
       named_dir=$2
       shift 2
       ;;
@@ -95,6 +106,7 @@ done
 if (($# != 1)) || [[ $1 == -* ]]; then
   echo "usage: $0 [--module-only | --check-pin] [--named-twin EMPTY_DIRECTORY] EMPTY_OUTPUT_DIRECTORY" >&2
   echo "       $0 --render-lock-probe EMPTY_OUTPUT_DIRECTORY" >&2
+  echo "       $0 --soak-probe EMPTY_OUTPUT_DIRECTORY" >&2
   echo "       $0 --print-toolchain" >&2
   exit 2
 fi
@@ -204,7 +216,7 @@ module_flags+=" -C link-arg=--export=__stack_pointer"
   # above, so the same toolchain, std rebuild and flags (`+simd128` is what lets the `blake3`
   # crate's `wasm32_simd` kernels inline); its own cargo line, so no feature of its dependencies
   # unifies into the worklet module. --module-only and the probe build only the worklet module.
-  if [[ $mode == delivery || $mode == pinned ]]; then
+  if [[ $mode == delivery || $mode == pinned || $mode == soak ]]; then
     RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$simd_target" \
       RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
       cargo build --locked --release -Zbuild-std=std,panic_abort --target wasm32-unknown-unknown -p blake3-web
@@ -234,7 +246,11 @@ if [[ $mode == pinned ]]; then
   }
 fi
 
-printf 'AudioWorklet module %s\n' "$observed"
+if [[ $mode == soak ]]; then
+  printf 'soak probe module %s (not the shipped module)\n' "$observed"
+else
+  printf 'AudioWorklet module %s\n' "$observed"
+fi
 if [[ -n $named_dir ]]; then
   cp "$named" "$named_dir/miso-engine-v1-audio-worklet.simd128.named.wasm"
 fi

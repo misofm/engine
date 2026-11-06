@@ -70,6 +70,11 @@ test-support = [
 # Off by default and never in a shipped build: `build-web-audioworklet.sh --render-lock-probe`
 # builds a separately named, never-delivered module with it, and the native leg below needs it.
 render-lock-probe = []
+# Issue #2243: the on-demand soak's mutation, never in a shipped build. Every rendered block makes
+# one render-locked allocation and leaks it, so the soak's render-allocation and memory gates both
+# turn red. `build-web-audioworklet.sh --soak-probe` builds a full, never-pinned delivery set with
+# it; CI only `cargo check`s it so it cannot rot.
+soak-probe = []
 
 [[test]]
 name = "render_locked_positive_control"

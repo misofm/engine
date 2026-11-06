@@ -5634,6 +5634,8 @@ fn boxed_uninit_planes(channels: u32) -> Result<Box<[MaybeUninit<&'static [f32]>
 mod ffi;
 mod handoff;
 mod render_lock;
+#[cfg(feature = "soak-probe")]
+mod soak_probe;
 
 pub use ffi::*;
 pub use handoff::{

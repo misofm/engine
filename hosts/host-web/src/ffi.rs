@@ -1173,6 +1173,9 @@ fn seek_report_pointer(host: &AudioWorkletEngineHost) -> *const crate::WebSeekRe
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> u32 {
     render_locked(|| {
+        // Issue #2243: the soak's mutation, compiled only into the never-shipped probe module.
+        #[cfg(feature = "soak-probe")]
+        crate::soak_probe::leak_one_block();
         with_render_mut(handle, RESULT_INVALID_ARGUMENT, |target| match target {
             RenderTarget::Host(host) => {
                 if host.status().state == STATE_READY
