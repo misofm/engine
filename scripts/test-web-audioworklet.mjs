@@ -2086,6 +2086,22 @@ async function testMainRealm() {
       assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "no tick is restarted");
       for (const respond of heldAll.splice(0)) respond();
       await new Promise((resolve) => setImmediate(resolve));
+
+      // Issue #2256, the single-mode parity row of worker mode's `dispose255`: a dispose the
+      // worklet answers 255 (its instance trapped, in render or in the dispose) is final. It
+      // rejects with the engine's error and tears down: the node is disconnected, no tick is
+      // restarted, a later dispose returns the same rejection and no second dispose is sent.
+      const trappedHost = await create();
+      const trappedNode = FakeNode.latest;
+      const disposesBefore = events.filter((event) => event[1] === "miso.dispose.v1").length;
+      disposeResult = 255;
+      const trappedDispose = trappedHost.dispose();
+      await errorResult(trappedDispose, 255).finally(() => { disposeResult = 0; });
+      assert.equal(trappedNode.disconnectCount, 1, "a 255 dispose disconnects the node");
+      assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "and restarts no tick");
+      assert.equal(trappedHost.dispose(), trappedDispose, "a later dispose returns the same rejection");
+      assert.equal(events.filter((event) => event[1] === "miso.dispose.v1").length, disposesBefore + 1,
+        "one dispose is sent");
     }
 
     // Issue #1332 S7 (D1, D2, D6, D7): `worker` mode on an isolated page. A fake control Worker
@@ -3985,7 +4001,7 @@ async function testProcessor() {
 
     {
       const { processor, fake } = makeProcessor();
-      processor.ready = false;
+      processor.enter("booting");
       const left = new Float32Array(64).fill(-0);
       const right = new Float32Array(64).fill(1);
       assert.equal(processor.process([], [[left, right]]), true);
@@ -4188,6 +4204,38 @@ async function testProcessor() {
       const settled = processor.port.posts.at(-1).message;
       assert.equal(settled.tag, "miso.error.v1");
       assert.equal(settled.result, 255, "the trap is sticky for every later request");
+    }
+
+    {
+      // Issue #2256: a trap leaves the instance's memory as the trap left it (in the shipped
+      // module, `LIVE_HOST` still mutably borrowed), so its dispose export can never succeed. The
+      // fake models that: once render trapped, dispose refuses, as the held borrow does. A dispose
+      // after a render trap, and a dispose whose export itself traps, are each answered 255 (final)
+      // and end the instance; no export runs on a trapped instance.
+      for (const where of ["render", "dispose"]) {
+        const { processor, fake } = makeProcessor();
+        let trapped = false;
+        let disposeCalls = 0;
+        fake.exports.miso_engine_web_v1_dispose = () => {
+          disposeCalls += 1;
+          if (where === "dispose") throw new Error("synthetic wasm trap from the dispose export");
+          return trapped ? 1 : 0;
+        };
+        const block = () => processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+        if (where === "render") {
+          fake.exports.miso_engine_web_v1_render = () => {
+            trapped = true;
+            throw new Error("synthetic wasm trap from the render export");
+          };
+          block();
+        }
+        processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 1 } });
+        assert.deepEqual(processor.port.posts.at(-1).message,
+          { tag: "miso.ack.v1", requestId: 1, result: 255 }, `a ${where} trap: the dispose is final`);
+        assert.equal(disposeCalls, where === "render" ? 0 : 1,
+          `a ${where} trap: no export is called on a trapped instance`);
+        assert.equal(block(), false, `a ${where} trap: the instance ends`);
+      }
     }
 
     {
