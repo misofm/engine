@@ -3881,6 +3881,7 @@ fn nonconforming_echo_is_recorded_as_internal(send: LegacyEntry) {
 /// no reply, so it executes nothing, even a command whose own reply would fit. Through the
 /// prepared path the uncached replay `BACKPRESSURE` does not fit that bound either, so the call
 /// fails `OutputTooSmall`; the request stays unaccepted and its retry is refused the same way.
+/// The owned `process` path executes nothing either.
 #[test]
 fn a_bound_below_the_fallback_reply_refuses_before_dispatch() {
     let mut endpoint = bounded_endpoint(100);
@@ -3910,6 +3911,23 @@ fn a_bound_below_the_fallback_reply_refuses_before_dispatch() {
             endpoint.queues_mut().try_dequeue_event().is_err(),
             "no transport event"
         );
+    }
+    // The owned path takes the same pre-dispatch check. Its `BACKPRESSURE` refusal does not fit
+    // this bound either and falls back, unrecorded; what matters is that nothing ran.
+    for attempt in 0..2 {
+        let response = endpoint.process(ControllerRequest {
+            request_id: id(2),
+            expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
+            canonical_bytes: b"play",
+            command: ControlCommand::TransportSet {
+                request: TransportSetRequest {
+                    state: TransportState::Playing,
+                },
+            },
+        });
+        assert_ne!(response.status, StatusCode::Ok, "owned attempt {attempt}");
+        assert_eq!(endpoint.provider.transport_state, TransportState::Stopped);
+        assert!(endpoint.queues_mut().try_dequeue_event().is_err());
     }
 }
 
