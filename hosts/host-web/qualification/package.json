@@ -11,7 +11,8 @@
     "demo": "node ./server.mjs",
     "matrix": "node ./generate-matrix.mjs",
     "qualify": "node ./run.mjs",
-    "session-identities": "node ./session-identities.mjs"
+    "session-identities": "node ./session-identities.mjs",
+    "soak": "node ./soak.mjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"
