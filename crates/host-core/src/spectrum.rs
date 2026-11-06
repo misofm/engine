@@ -9,7 +9,7 @@ use core::num::NonZeroUsize;
 use std::cell::Cell;
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 
 use engine::realtime::{
@@ -38,14 +38,15 @@ const INVALID: u8 = 4;
 /// Bits of the one-shot state word that hold the phase; the arm generation fills the rest.
 const PHASE_BITS: u32 = 3;
 const PHASE_MASK: u64 = (1 << PHASE_BITS) - 1;
-/// The one-shot state word: the phase in bits 0-2 and the arm generation in bits 3-63.
-///
-/// Under `--cfg loom` the word is loom's atomic, so `spectrum_handoff_loom` explores the real
-/// transitions below.
+/// A shared word that `--cfg loom` models: loom's atomic under loom, `std`'s otherwise, so
+/// `spectrum_handoff_loom` explores the real transitions of the words below.
 #[cfg(not(loom))]
-type StateWord = AtomicU64;
+type ModelledWord = AtomicU64;
 #[cfg(loom)]
-type StateWord = loom::sync::atomic::AtomicU64;
+type ModelledWord = loom::sync::atomic::AtomicU64;
+
+/// The one-shot state word: the phase in bits 0-2 and the arm generation in bits 3-63.
+type StateWord = ModelledWord;
 
 /// Pack a phase and an arm generation into one state word.
 const fn state_word(generation: u64, phase: u8) -> u64 {
@@ -71,11 +72,59 @@ const fn word_with_phase(word: u64, phase: u8) -> u64 {
 fn new_state_word(phase: u8) -> Arc<StateWord> {
     Arc::new(StateWord::new(state_word(0, phase)))
 }
-const CONTINUOUS_WARMING: u8 = 0;
-const CONTINUOUS_CAPTURING: u8 = 1;
-const CONTINUOUS_WAITING: u8 = 2;
-const ONE_SHOT_MODE: u8 = 0;
-const CONTINUOUS_MODE: u8 = 1;
+
+// The continuous state word (issue #2255): one word holds the capture's mode, the continuous
+// stream's run state, whether a block of its epoch began, and the epoch. Bits 0-1 are the run
+// state, bit 2 the begun flag, bits 3-63 the epoch.
+//
+// Each transition has one writer, and every write is one read-modify-write:
+//
+// - start, `(e, OFF)` to `(e + 1, RUNNING)`: control, by compare-and-swap (control is the only
+//   writer of an off word, so it cannot fail);
+// - stop, cancel and the first half of a restart, any word to `(e, OFF)`: control, by one
+//   `fetch_and`, which returns the exact word it replaced;
+// - begun, `(e, RUNNING)` to `(e, RUNNING, begun)`: render, by compare-and-swap from its latch;
+// - failure, `(e, RUNNING, _)` to `(e + 1, RUNNING)`: render, by compare-and-swap from its latch;
+// - exhaustion, `(MAX, RUNNING, _)` to `(MAX, EXHAUSTED)`: render, by compare-and-swap from its
+//   latch, and, when render spent the last epoch while a restart stopped the stream,
+//   `(MAX, OFF)` to `(MAX, EXHAUSTED)`: control, by swap.
+//
+// A restart is a stop followed by a start, so render's compare-and-swap from the word it latched
+// fails once control ended that epoch: a render failure either lands first, and is a failure of
+// its epoch that the restart's fresh epoch then follows, or it is moot. No epoch is ever given to
+// two stream generations, and only render moves the epoch of a running stream, so the reader
+// reports `Failed` exactly when the epoch moved past the one it last saw.
+//
+// `EXHAUSTED` is the named end of a stream whose epoch cannot advance: it captures nothing, reads
+// `NotActive`, refuses a restart with `EpochOverflow`, and leaves through stop or cancel.
+const CONTINUOUS_OFF: u64 = 0;
+const CONTINUOUS_RUNNING: u64 = 1;
+const CONTINUOUS_EXHAUSTED: u64 = 2;
+const CONTINUOUS_RUN_MASK: u64 = 0b11;
+const CONTINUOUS_BEGUN: u64 = 1 << 2;
+const CONTINUOUS_EPOCH_SHIFT: u32 = 3;
+/// The largest representable continuous epoch.
+const CONTINUOUS_EPOCH_MAX: u64 = u64::MAX >> CONTINUOUS_EPOCH_SHIFT;
+
+/// Pack an epoch, a run state and the begun flag into one continuous state word.
+const fn continuous_word(epoch: u64, run: u64, begun: bool) -> u64 {
+    (epoch << CONTINUOUS_EPOCH_SHIFT) | run | if begun { CONTINUOUS_BEGUN } else { 0 }
+}
+
+/// The run state held in `word`.
+const fn continuous_run(word: u64) -> u64 {
+    word & CONTINUOUS_RUN_MASK
+}
+
+/// The epoch held in `word`.
+const fn continuous_epoch(word: u64) -> u64 {
+    word >> CONTINUOUS_EPOCH_SHIFT
+}
+
+/// Whether a block of `word`'s epoch began.
+const fn continuous_begun(word: u64) -> bool {
+    word & CONTINUOUS_BEGUN != 0
+}
 /// Slots in each capture's result queue. Every drain caps its count at entry with it.
 const SPECTRUM_RESULT_SLOTS: usize = 1;
 
@@ -417,7 +466,7 @@ fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureRe
     SpectrumCaptureResources {
         retained_bytes: observer_bytes
             .checked_add(queue_bytes)
-            .and_then(|value| value.checked_add(state_bytes))
+            // The one-shot state word; the mode lives in the continuous shared words (#2255).
             .and_then(|value| value.checked_add(state_bytes))
             .and_then(|value| value.checked_add(continuous_shared_bytes))
             .and_then(|value| value.checked_add(observer_binding_bytes))
@@ -542,9 +591,11 @@ impl SpectrumCapturedRecord {
 pub struct SpectrumCapture {
     consumer: Consumer<SpectrumCapturedRecord>,
     state: Arc<StateWord>,
-    mode: Arc<AtomicU8>,
     shared: Arc<SpectrumContinuousShared>,
-    seen_failures: u64,
+    /// The epoch the reader last saw: the one control started, or the one the last `Failed`
+    /// reported. Only render moves a running stream's epoch, so a word epoch past it is a
+    /// failure the reader has not reported.
+    seen_epoch: u64,
     seen_drops: u64,
     /// Whether the next continuous read gets one bounded queue recovery attempt after a Gap.
     ///
@@ -562,7 +613,7 @@ impl SpectrumCapture {
     /// Arming is a control-side operation.  The first successfully observed block establishes
     /// the returned window's absolute start sample.
     pub fn arm(&self) -> Result<(), SpectrumCaptureError> {
-        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE {
+        if self.continuous_run() != CONTINUOUS_OFF {
             return Err(SpectrumCaptureError::Busy);
         }
         // Only `arm` changes the generation, and it moves `(g, IDLE)` to `(g + 1, ARMED)` in one
@@ -605,15 +656,26 @@ impl SpectrumCapture {
     /// This holds no pop: [`Self::cancel`] and the collection's `cancel_except` drain first and
     /// call it second.
     fn reset_after_cancel(&mut self) {
-        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
-            self.shared.active.store(0, Ordering::Release);
-            self.shared
-                .phase
-                .store(CONTINUOUS_WAITING, Ordering::Release);
-            self.mode.store(ONE_SHOT_MODE, Ordering::Release);
-        }
+        let _ = self.end_continuous();
         self.park_idle();
         self.recovery_pending = false;
+    }
+
+    /// The run state of the continuous word. Control is the only writer of the off state, so
+    /// whether it reads off is exact on the control thread.
+    fn continuous_run(&self) -> u64 {
+        continuous_run(self.shared.word.load(Ordering::Acquire))
+    }
+
+    /// Move the continuous word to off at its epoch and return the word it replaced.
+    ///
+    /// One read-modify-write, so the returned word is exact: a render failure that landed first
+    /// is in its epoch, and one that comes later fails its compare-and-swap, because render moves
+    /// the word only from a running word it latched.
+    fn end_continuous(&self) -> u64 {
+        self.shared
+            .word
+            .fetch_and(!(CONTINUOUS_RUN_MASK | CONTINUOUS_BEGUN), Ordering::AcqRel)
     }
 
     /// Store `(g, IDLE)` at the word's current generation.
@@ -652,7 +714,7 @@ impl SpectrumCapture {
     pub(crate) fn try_read_record(
         &mut self,
     ) -> Result<SpectrumCapturedRecord, SpectrumCaptureReadError> {
-        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE {
+        if self.continuous_run() != CONTINUOUS_OFF {
             return Err(SpectrumCaptureReadError::NotArmed);
         }
         let word = self.state.load(Ordering::Acquire);
@@ -729,7 +791,7 @@ impl SpectrumCapture {
         sample_rate_hz: u32,
         quantum_frames: u32,
     ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
-        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE
+        if self.continuous_run() != CONTINUOUS_OFF
             || word_phase(self.state.load(Ordering::Acquire)) != IDLE
         {
             return Err(SpectrumContinuousCaptureError::Busy);
@@ -747,7 +809,7 @@ impl SpectrumCapture {
         quantum_frames: u32,
         hop: SpectrumHop,
     ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
-        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE
+        if self.continuous_run() != CONTINUOUS_OFF
             || word_phase(self.state.load(Ordering::Acquire)) != IDLE
         {
             return Err(SpectrumContinuousCaptureError::Busy);
@@ -763,48 +825,73 @@ impl SpectrumCapture {
         cadence: SpectrumCadence,
         replace_one_shot: bool,
     ) -> Result<(), SpectrumContinuousCaptureError> {
-        if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE
+        // Control is the only writer of an off word, so this load is the word the start replaces.
+        let off = self.shared.word.load(Ordering::Acquire);
+        if continuous_run(off) != CONTINUOUS_OFF
             || (!replace_one_shot && word_phase(self.state.load(Ordering::Acquire)) != IDLE)
         {
             return Err(SpectrumContinuousCaptureError::Busy);
         }
-        if self
-            .shared
-            .active
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(SpectrumContinuousCaptureError::Busy);
-        }
-        let Some(epoch) = self.shared.epoch.load(Ordering::Acquire).checked_add(1) else {
-            self.shared.active.store(0, Ordering::Release);
+        let Some(epoch) = continuous_epoch(off)
+            .checked_add(1)
+            .filter(|&epoch| epoch <= CONTINUOUS_EPOCH_MAX)
+        else {
             return Err(SpectrumContinuousCaptureError::EpochOverflow);
         };
         // Every fallible admission check is complete before the selected one-shot state is
         // cleared. Collection mode uses this path for an atomic mode replacement.
-        self.commit_continuous(cadence, epoch);
-        Ok(())
+        self.commit_continuous(cadence, off, epoch)
     }
 
     /// Restart the active continuous capture at one fresh epoch without a fallible stop/start
     /// pair. The caller has already validated the replacement configuration.
+    ///
+    /// A restart is one stop then one start: the stop's read-modify-write returns the exact
+    /// word, with any render failure that landed first, and the start takes the epoch after
+    /// it. A render failure that comes later is moot (issue #2255).
     pub fn restart_continuous(&mut self) -> Result<(), SpectrumContinuousCaptureError> {
-        if self.mode.load(Ordering::Acquire) != CONTINUOUS_MODE
-            || self.shared.active.load(Ordering::Acquire) == 0
-        {
-            return Err(SpectrumContinuousCaptureError::Busy);
+        let word = self.shared.word.load(Ordering::Acquire);
+        match continuous_run(word) {
+            CONTINUOUS_RUNNING => {}
+            CONTINUOUS_EXHAUSTED => return Err(SpectrumContinuousCaptureError::EpochOverflow),
+            _ => return Err(SpectrumContinuousCaptureError::Busy),
         }
-        let Some(epoch) = self.shared.epoch.load(Ordering::Acquire).checked_add(1) else {
+        // Refused here, the stream runs on unchanged.
+        if continuous_epoch(word) >= CONTINUOUS_EPOCH_MAX {
             return Err(SpectrumContinuousCaptureError::EpochOverflow);
-        };
+        }
         let Some(cadence) = self.cadence() else {
             return Err(SpectrumContinuousCaptureError::Busy);
         };
-        self.commit_continuous(cadence, epoch);
-        Ok(())
+        let ended = self.end_continuous();
+        let epoch = continuous_epoch(ended);
+        if continuous_run(ended) != CONTINUOUS_RUNNING || epoch >= CONTINUOUS_EPOCH_MAX {
+            // Render spent the last epoch between the load and the stop. The stream cannot run
+            // on: restoring it would lose a render failure that the stop made moot.
+            let _ = self.shared.word.swap(
+                continuous_word(epoch, CONTINUOUS_EXHAUSTED, false),
+                Ordering::AcqRel,
+            );
+            return Err(SpectrumContinuousCaptureError::EpochOverflow);
+        }
+        self.commit_continuous(
+            cadence,
+            continuous_word(epoch, CONTINUOUS_OFF, false),
+            epoch + 1,
+        )
     }
     // REALTIME_POLICY_BEGIN
-    fn commit_continuous(&mut self, cadence: SpectrumCadence, epoch: u64) {
+    /// Clear the one-shot state, install `cadence` and start `epoch` from the off word `off`.
+    ///
+    /// The word moves last, so render switches to the stream only after the queue was drained
+    /// and the one-shot word parked. The compare-and-swap cannot fail: control is the only
+    /// writer of an off word; were it to fail the capture stays off and the start is `Busy`.
+    fn commit_continuous(
+        &mut self,
+        cadence: SpectrumCadence,
+        off: u64,
+        epoch: u64,
+    ) -> Result<(), SpectrumContinuousCaptureError> {
         let available = self
             .consumer
             .available_at_entry()
@@ -815,7 +902,6 @@ impl SpectrumCapture {
             }
         }
         self.park_idle();
-        self.shared.epoch.store(epoch, Ordering::Release);
         self.shared
             .sample_rate_hz
             .store(u64::from(cadence.sample_rate_hz()), Ordering::Release);
@@ -825,47 +911,44 @@ impl SpectrumCapture {
         self.shared
             .hop_frames
             .store(u64::from(cadence.hop_frames()), Ordering::Release);
-        self.shared
-            .phase
-            .store(CONTINUOUS_WARMING, Ordering::Release);
-        self.shared.failures.store(0, Ordering::Release);
-        self.shared.failure_epoch.store(epoch, Ordering::Release);
-        self.shared.drops.store(0, Ordering::Release);
-        self.shared.drop_epoch.store(epoch, Ordering::Release);
-        self.seen_failures = 0;
+        self.seen_epoch = epoch;
         self.seen_drops = 0;
         self.recovery_pending = false;
-        self.mode.store(CONTINUOUS_MODE, Ordering::Release);
+        self.shared
+            .word
+            .compare_exchange(
+                off,
+                continuous_word(epoch, CONTINUOUS_RUNNING, false),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| SpectrumContinuousCaptureError::Busy)
     }
 
     /// Stop scheduled windows and discard queued continuous results.
     pub fn stop_continuous(&mut self) {
-        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
-            self.shared.active.store(0, Ordering::Release);
-            self.shared
-                .phase
-                .store(CONTINUOUS_WAITING, Ordering::Release);
-            self.mode.store(ONE_SHOT_MODE, Ordering::Release);
-            let available = self
-                .consumer
-                .available_at_entry()
-                .min(SPECTRUM_RESULT_SLOTS);
-            for _ in 0..available {
-                if self.consumer.try_pop().is_err() {
-                    break;
-                }
-            }
-            self.park_idle();
-            self.seen_failures = 0;
-            self.seen_drops = 0;
-            self.recovery_pending = false;
+        if continuous_run(self.end_continuous()) == CONTINUOUS_OFF {
+            return;
         }
+        let available = self
+            .consumer
+            .available_at_entry()
+            .min(SPECTRUM_RESULT_SLOTS);
+        for _ in 0..available {
+            if self.consumer.try_pop().is_err() {
+                break;
+            }
+        }
+        self.park_idle();
+        self.seen_drops = 0;
+        self.recovery_pending = false;
     }
     // REALTIME_POLICY_END
     /// Return the active continuous profile, when this handle is running continuously.
     #[must_use]
     pub fn cadence(&self) -> Option<SpectrumCadence> {
-        if self.mode.load(Ordering::Acquire) != CONTINUOUS_MODE {
+        if self.continuous_run() == CONTINUOUS_OFF {
             return None;
         }
         Some(SpectrumCadence {
@@ -880,10 +963,8 @@ impl SpectrumCapture {
     /// Return the current capture epoch for an active continuous stream.
     #[must_use]
     pub fn stream_epoch(&self) -> Option<u64> {
-        if self.mode.load(Ordering::Acquire) != CONTINUOUS_MODE {
-            return None;
-        }
-        Some(self.shared.epoch.load(Ordering::Acquire))
+        let word = self.shared.word.load(Ordering::Acquire);
+        (continuous_run(word) != CONTINUOUS_OFF).then_some(continuous_epoch(word))
     }
 
     /// Read one scheduled window and its stream-history metadata.
@@ -901,9 +982,8 @@ impl SpectrumCapture {
     pub(crate) fn try_read_continuous_record(
         &mut self,
     ) -> Result<SpectrumCapturedRecord, SpectrumContinuousReadError> {
-        if self.mode.load(Ordering::Acquire) != CONTINUOUS_MODE
-            || self.shared.active.load(Ordering::Acquire) == 0
-        {
+        let word = self.shared.word.load(Ordering::Acquire);
+        if continuous_run(word) != CONTINUOUS_RUNNING {
             return Err(SpectrumContinuousReadError::NotActive);
         }
         // Freeze the queue population before inspecting status or entering the pop loop. A
@@ -913,21 +993,35 @@ impl SpectrumCapture {
             .consumer
             .available_at_entry()
             .min(SPECTRUM_RESULT_SLOTS);
-        let failures = self.shared.failures.load(Ordering::Acquire);
-        if failures != self.seen_failures {
-            self.seen_failures = failures;
-            self.seen_drops = self.shared.drops.load(Ordering::Acquire);
+        let epoch = continuous_epoch(word);
+        // Render resets the drop count before it sets the begun flag of an epoch, and is the
+        // count's only writer. Before the flag no window of the epoch was offered, so it dropped
+        // none; after it the count is the epoch's when the word did not move around its load.
+        // A moved word leaves the count unknown until the next read.
+        let drops = self.shared.drops.load(Ordering::Acquire);
+        let epoch_drops = if !continuous_begun(word) {
+            Some(0)
+        } else if self.shared.word.load(Ordering::Acquire) == word {
+            Some(drops)
+        } else {
+            None
+        };
+        if epoch != self.seen_epoch {
+            self.seen_epoch = epoch;
+            self.seen_drops = epoch_drops.unwrap_or(0);
             self.recovery_pending = false;
             return Err(SpectrumContinuousReadError::Failed {
-                stream_epoch: self.shared.failure_epoch.load(Ordering::Acquire),
+                stream_epoch: epoch,
             });
         }
-        let drops = self.shared.drops.load(Ordering::Acquire);
-        if drops != self.seen_drops && !self.recovery_pending {
+        if let Some(drops) = epoch_drops
+            && drops != self.seen_drops
+            && !self.recovery_pending
+        {
             self.seen_drops = drops;
             self.recovery_pending = true;
             return Err(SpectrumContinuousReadError::Gap {
-                stream_epoch: self.shared.drop_epoch.load(Ordering::Acquire),
+                stream_epoch: epoch,
                 dropped_captures: drops,
             });
         }
@@ -935,33 +1029,29 @@ impl SpectrumCapture {
         // entry. A later producer publication belongs to a later read and cannot extend this
         // budget.
         self.recovery_pending = false;
-        // Control moves the epoch at a restart (`commit_continuous`) and render's failure path
-        // moves it forward before it publishes anything of the new epoch. One load covers the
-        // loop: it returns at the first record of this epoch, and a failure that lands during the
-        // loop is reported as `Failed` by the next read.
-        let epoch = self.shared.epoch.load(Ordering::Acquire);
+        // Render tags every record with the epoch it latched at the block's start, and moves the
+        // epoch forward only before it publishes anything of the new epoch. One word covers the
+        // loop: it returns at the first record of this epoch, and a failure that lands during
+        // the loop is reported as `Failed` by the next read.
         for _ in 0..available {
             match self.consumer.try_pop() {
                 // A record of another epoch is never a window of this stream: a one-shot window
                 // (epoch 0, below every continuous epoch) that render completed while control
-                // switched modes, a window of an epoch a failure or a restart ended, or a
-                // window published against an epoch read before a restart. Discarding it spends
-                // one pop of the bound frozen above, so it never delays a read past the next one.
+                // switched modes, or a window of an epoch a failure or a restart ended.
+                // Discarding it spends one pop of the bound frozen above, so it never delays a
+                // read past the next one.
                 Ok(record) if record.stream_epoch != epoch => {}
                 Ok(record) => {
                     return Ok(record);
                 }
-                Err(_) if self.shared.phase.load(Ordering::Acquire) == CONTINUOUS_WARMING => {
-                    return Err(SpectrumContinuousReadError::Warming);
-                }
-                Err(_) => return Err(SpectrumContinuousReadError::Pending),
+                Err(_) => break,
             }
         }
         Err(
-            if self.shared.phase.load(Ordering::Acquire) == CONTINUOUS_WARMING {
-                SpectrumContinuousReadError::Warming
-            } else {
+            if continuous_begun(self.shared.word.load(Ordering::Acquire)) {
                 SpectrumContinuousReadError::Pending
+            } else {
+                SpectrumContinuousReadError::Warming
             },
         )
     }
@@ -983,7 +1073,7 @@ impl SpectrumCapture {
     ///
     /// `pairs` is the successor's pairing list ([`PlanStateInventory::spectrum_pairing`]): when it
     /// names this single capture as the continuation of `predecessor` (entry 0 of both), the two
-    /// captures exchange places and `true` is returned. `self` then holds the consumer, the three
+    /// captures exchange places and `true` is returned. `self` then holds the consumer, the two
     /// shared words and the read counters that belong to the observer that now renders in the
     /// successor's plan, so a reader that held `predecessor` keeps receiving with no `Failed`
     /// epoch, no `Gap` and no restart; `predecessor` holds the successor's fresh capture, whose
@@ -1024,7 +1114,7 @@ impl SpectrumCapture {
     /// the word only from `ARMED` or `CAPTURING`), so it is safe while the successor's plan
     /// renders.
     pub fn settle_unpaired(&mut self, predecessor: &Self) -> bool {
-        if predecessor.mode.load(Ordering::Acquire) != ONE_SHOT_MODE {
+        if predecessor.continuous_run() != CONTINUOUS_OFF {
             return false;
         }
         let word = predecessor.state.load(Ordering::Acquire);
@@ -1091,7 +1181,7 @@ impl SpectrumCaptureCollection {
     ///
     /// `pairs` is the successor's pairing list ([`PlanStateInventory::spectrum_pairing`]): the
     /// capture at `successor` continues the one at `predecessor`, and the two exchange places, so
-    /// each paired entry of `self` holds the consumer, the three shared words and the read counters
+    /// each paired entry of `self` holds the consumer, the two shared words and the read counters
     /// of the observer that now renders in the successor's plan. A reader that held the
     /// predecessor's entry keeps receiving, whatever index the entry has now; `predecessor` is left
     /// holding the successor's fresh captures. The list is checked whole before anything moves: an
@@ -1607,13 +1697,12 @@ pub enum SpectrumContinuousCaptureError {
 }
 
 struct SpectrumContinuousShared {
-    active: AtomicU8,
-    phase: AtomicU8,
-    epoch: AtomicU64,
-    failures: AtomicU64,
-    failure_epoch: AtomicU64,
-    drops: AtomicU64,
-    drop_epoch: AtomicU64,
+    /// The continuous state word (see [`continuous_word`]): the capture's mode, the stream's run
+    /// state, its begun flag and its epoch.
+    word: ModelledWord,
+    /// Windows the bounded queue refused in the word's epoch. Render is the only writer: it
+    /// resets the count before it sets an epoch's begun flag and adds to it after.
+    drops: ModelledWord,
     sample_rate_hz: AtomicU64,
     quantum_frames: AtomicU64,
     hop_frames: AtomicU64,
@@ -1622,13 +1711,8 @@ struct SpectrumContinuousShared {
 impl SpectrumContinuousShared {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            active: AtomicU8::new(0),
-            phase: AtomicU8::new(CONTINUOUS_WARMING),
-            epoch: AtomicU64::new(0),
-            failures: AtomicU64::new(0),
-            failure_epoch: AtomicU64::new(0),
-            drops: AtomicU64::new(0),
-            drop_epoch: AtomicU64::new(0),
+            word: ModelledWord::new(continuous_word(0, CONTINUOUS_OFF, false)),
+            drops: ModelledWord::new(0),
             sample_rate_hz: AtomicU64::new(0),
             quantum_frames: AtomicU64::new(0),
             hop_frames: AtomicU64::new(0),
@@ -1666,6 +1750,10 @@ struct SpectrumOneShotState {
 
 struct SpectrumContinuousState {
     shared: Arc<SpectrumContinuousShared>,
+    /// The continuous word as render last loaded or wrote it: loaded at each block's start, and
+    /// moved only by render's own compare-and-swap from it. Every record of the block carries its
+    /// epoch, so a window is never tagged with an epoch a restart began after the block did.
+    latched: u64,
     started_epoch: u64,
     expected_block_sample: Option<u64>,
     next_window_start: Option<u64>,
@@ -1712,20 +1800,18 @@ fn prepare_capture_with_handle(
     )
     .map_err(|_| SpectrumPrepareError::QueueCapacity)?;
     let state = new_state_word(IDLE);
-    let mode = Arc::new(AtomicU8::new(ONE_SHOT_MODE));
     let shared = SpectrumContinuousShared::new();
     let capture = SpectrumCapture {
         consumer,
         state: Arc::clone(&state),
-        mode: Arc::clone(&mode),
         shared: Arc::clone(&shared),
-        seen_failures: 0,
+        seen_epoch: 0,
         seen_drops: 0,
         recovery_pending: false,
         target: request.target.clone(),
         channels: request.channels,
     };
-    let observer = SpectrumCaptureObserver::new(producer, state, mode, shared, request.channels);
+    let observer = SpectrumCaptureObserver::new(producer, state, shared, request.channels);
     let binding = GraphNodeObserverBinding::new(node, observer_handle, Box::new(observer));
     Ok((binding, capture))
 }
@@ -1800,7 +1886,6 @@ struct SpectrumCaptureObserver {
     left: [f32; SPECTRUM_WINDOW_FRAMES],
     right: [f32; SPECTRUM_WINDOW_FRAMES],
     channels: SpectrumChannels,
-    mode: Arc<AtomicU8>,
     one_shot: SpectrumOneShotState,
     continuous: SpectrumContinuousState,
 }
@@ -1819,19 +1904,12 @@ impl SpectrumCaptureObserver {
         state: Arc<StateWord>,
         channels: SpectrumChannels,
     ) -> Self {
-        Self::new(
-            producer,
-            state,
-            Arc::new(AtomicU8::new(ONE_SHOT_MODE)),
-            SpectrumContinuousShared::new(),
-            channels,
-        )
+        Self::new(producer, state, SpectrumContinuousShared::new(), channels)
     }
 
     fn new(
         producer: InPlaceProducer<SpectrumCapturedRecord>,
         state: Arc<StateWord>,
-        mode: Arc<AtomicU8>,
         shared: Arc<SpectrumContinuousShared>,
         channels: SpectrumChannels,
     ) -> Self {
@@ -1840,7 +1918,6 @@ impl SpectrumCaptureObserver {
             left: [0.0; SPECTRUM_WINDOW_FRAMES],
             right: [0.0; SPECTRUM_WINDOW_FRAMES],
             channels,
-            mode,
             one_shot: SpectrumOneShotState {
                 state,
                 filled: 0,
@@ -1854,6 +1931,7 @@ impl SpectrumCaptureObserver {
             },
             continuous: SpectrumContinuousState {
                 shared,
+                latched: continuous_word(0, CONTINUOUS_OFF, false),
                 started_epoch: 0,
                 expected_block_sample: None,
                 next_window_start: None,
@@ -1884,7 +1962,7 @@ impl SpectrumCaptureObserver {
             right: &mut self.right,
             channels: self.channels,
         };
-        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+        if continuous_latch(&mut self.continuous) {
             continuous_capture(
                 &mut self.continuous,
                 &mut buffers,
@@ -1912,7 +1990,7 @@ impl SpectrumCaptureObserver {
             right: &mut self.right,
             channels: self.channels,
         };
-        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+        if continuous_latch(&mut self.continuous) {
             continuous_capture_resident(&mut self.continuous, &mut buffers, block);
         } else {
             one_shot_capture_resident(&mut self.one_shot, &mut buffers, block);
@@ -1920,7 +1998,7 @@ impl SpectrumCaptureObserver {
     }
 
     fn invalidate(&mut self) {
-        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+        if continuous_latch(&mut self.continuous) {
             continuous_fail(&mut self.continuous);
         } else {
             one_shot_invalidate(&mut self.one_shot);
@@ -1929,7 +2007,7 @@ impl SpectrumCaptureObserver {
 
     /// Publish the window a block completed, now that the block rendered without failure.
     fn block_end(&mut self) {
-        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+        if continuous_latch(&mut self.continuous) {
             // Continuous mode shares the capture buffers: a window held from one-shot mode is
             // gone, and `cancel` already moved the word that held it.
             self.one_shot.held = false;
@@ -2224,20 +2302,13 @@ fn continuous_begin(
     frames: usize,
     validity: GraphObservationValidity,
 ) -> bool {
-    if state.shared.active.load(Ordering::Acquire) == 0 {
+    if continuous_run(state.latched) != CONTINUOUS_RUNNING {
         return false;
     }
-    let epoch = state.shared.epoch.load(Ordering::Acquire);
+    let epoch = continuous_epoch(state.latched);
     if state.started_epoch != epoch {
         state.started_epoch = epoch;
-        state.expected_block_sample = None;
-        state.next_window_start = None;
-        state.history_write_index = 0;
-        state.history_filled = 0;
-        state.history_first_sample = 0;
-        state.sequence = 0;
-        state.completed_sample = None;
-        state.completed_sequence = None;
+        continuous_reset_history(state);
     }
     let Ok(frames_u64) = u64::try_from(frames) else {
         continuous_fail(state);
@@ -2275,10 +2346,24 @@ fn continuous_begin(
         continuous_fail(state);
         return false;
     }
-    state
-        .shared
-        .phase
-        .store(CONTINUOUS_CAPTURING, Ordering::Release);
+    if !continuous_begun(state.latched) {
+        // The epoch's first accepted block: its drop count starts at zero, and the begun flag
+        // publishes the reset. A failed compare-and-swap means control ended the epoch.
+        state.shared.drops.store(0, Ordering::Release);
+        let begun = state.latched | CONTINUOUS_BEGUN;
+        match state.shared.word.compare_exchange(
+            state.latched,
+            begun,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => state.latched = begun,
+            Err(actual) => {
+                state.latched = actual;
+                return false;
+            }
+        }
+    }
     true
 }
 
@@ -2438,7 +2523,7 @@ fn continuous_publish(
     buffers: &mut SpectrumCaptureBuffers<'_>,
     window_start: u64,
 ) -> bool {
-    let stream_epoch = state.shared.epoch.load(Ordering::Acquire);
+    let stream_epoch = continuous_epoch(state.latched);
     let sequence = state.sequence;
     let Some(next_sequence) = sequence.checked_add(1) else {
         continuous_fail(state);
@@ -2516,30 +2601,17 @@ fn continuous_publish(
         probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
     });
     if pushed.is_err() {
-        if state
-            .shared
-            .drops
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                value.checked_add(1)
-            })
-            .is_err()
-        {
+        // Render is the count's only writer, so a load and a store add exactly one.
+        let Some(dropped) = dropped_captures.checked_add(1) else {
             continuous_fail(state);
             return false;
-        }
-        state
-            .shared
-            .drop_epoch
-            .store(stream_epoch, Ordering::Release);
+        };
+        state.shared.drops.store(dropped, Ordering::Release);
     }
     state.completed_sample = Some(window_start);
     state.completed_sequence = Some(sequence);
     state.sequence = next_sequence;
     state.next_window_start = Some(next_window_start);
-    state
-        .shared
-        .phase
-        .store(CONTINUOUS_WAITING, Ordering::Release);
     true
 }
 
@@ -2551,7 +2623,7 @@ fn continuous_capture(
     first_sample: u64,
     validity: GraphObservationValidity,
 ) {
-    if state.shared.active.load(Ordering::Acquire) == 0 {
+    if continuous_run(state.latched) != CONTINUOUS_RUNNING {
         return;
     }
     if left.len() != right.len() {
@@ -2604,7 +2676,7 @@ fn continuous_capture_lane(
     first_sample: u64,
     validity: GraphObservationValidity,
 ) {
-    if state.shared.active.load(Ordering::Acquire) == 0 {
+    if continuous_run(state.latched) != CONTINUOUS_RUNNING {
         return;
     }
     let words = frames.checked_mul(lanes);
@@ -2681,34 +2753,16 @@ fn selected_is_finite(values: &[f32]) -> bool {
     all_finite(values)
 }
 
-fn continuous_fail(state: &mut SpectrumContinuousState) {
-    if state.shared.active.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    let current_epoch = state.shared.epoch.load(Ordering::Acquire);
-    let Some(next_epoch) = current_epoch.checked_add(1) else {
-        state.shared.active.store(0, Ordering::Release);
-        return;
-    };
-    state.shared.epoch.store(next_epoch, Ordering::Release);
-    if state
-        .shared
-        .failures
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-            value.checked_add(1)
-        })
-        .is_err()
-    {
-        state.shared.active.store(0, Ordering::Release);
-        return;
-    }
-    state
-        .shared
-        .failure_epoch
-        .store(next_epoch, Ordering::Release);
-    state.shared.drops.store(0, Ordering::Release);
-    state.shared.drop_epoch.store(next_epoch, Ordering::Release);
-    state.started_epoch = next_epoch;
+/// Load the continuous word into `state`'s latch and say whether the capture runs a stream (its
+/// run state is not off). The observer calls it once at each entry: the one load decides the
+/// mode and starts every continuous transition of the call.
+fn continuous_latch(state: &mut SpectrumContinuousState) -> bool {
+    state.latched = state.shared.word.load(Ordering::Acquire);
+    continuous_run(state.latched) != CONTINUOUS_OFF
+}
+
+/// Forget the history of the epoch render captured: the next accepted block starts a window.
+fn continuous_reset_history(state: &mut SpectrumContinuousState) {
     state.expected_block_sample = None;
     state.next_window_start = None;
     state.history_write_index = 0;
@@ -2717,21 +2771,47 @@ fn continuous_fail(state: &mut SpectrumContinuousState) {
     state.sequence = 0;
     state.completed_sample = None;
     state.completed_sequence = None;
-    state
+}
+
+/// Fail the latched epoch: one compare-and-swap from the latch to the next epoch, unbegun, or
+/// to the exhausted state when the epoch cannot advance.
+///
+/// The history is discarded either way. A failed compare-and-swap means control stopped or
+/// restarted the stream after the latch, which ended the failed epoch first: the failure is
+/// moot and the next block starts from the word control left.
+fn continuous_fail(state: &mut SpectrumContinuousState) {
+    let latched = state.latched;
+    if continuous_run(latched) != CONTINUOUS_RUNNING {
+        return;
+    }
+    let epoch = continuous_epoch(latched);
+    let failed = if epoch < CONTINUOUS_EPOCH_MAX {
+        continuous_word(epoch + 1, CONTINUOUS_RUNNING, false)
+    } else {
+        continuous_word(epoch, CONTINUOUS_EXHAUSTED, false)
+    };
+    continuous_reset_history(state);
+    match state
         .shared
-        .phase
-        .store(CONTINUOUS_WARMING, Ordering::Release);
+        .word
+        .compare_exchange(latched, failed, Ordering::AcqRel, Ordering::Acquire)
+    {
+        Ok(_) => {
+            state.latched = failed;
+            state.started_epoch = continuous_epoch(failed);
+        }
+        Err(actual) => state.latched = actual,
+    }
 }
 // REALTIME_POLICY_END
 
 impl GraphRuntimeObserver for SpectrumCaptureObserver {
-    /// The capture ring and the mode, one-shot state and continuous shared words, each in full
+    /// The capture ring, the one-shot state word and the continuous shared words, each in full
     /// (#1074).
     fn retained_bytes(&self) -> u64 {
         use engine::realtime::retained::arc;
         self.producer
             .retained_bytes()
-            .saturating_add(arc(&self.mode))
             .saturating_add(arc(&self.one_shot.state))
             .saturating_add(arc(&self.continuous.shared))
     }
@@ -2767,7 +2847,7 @@ impl GraphRuntimeObserver for SpectrumCaptureObserver {
     }
 
     fn invalidate_after_failure(&mut self, _failed_sample: u64) {
-        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+        if continuous_latch(&mut self.continuous) {
             continuous_fail(&mut self.continuous);
         } else {
             one_shot_invalidate_after_failure(&mut self.one_shot);
@@ -3362,21 +3442,18 @@ mod tests {
         )
         .expect("capture queue");
         let state = super::new_state_word(super::IDLE);
-        let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::ONE_SHOT_MODE));
         let shared = super::SpectrumContinuousShared::new();
         let observer = SpectrumCaptureObserver::new(
             producer,
             std::sync::Arc::clone(&state),
-            std::sync::Arc::clone(&mode),
             std::sync::Arc::clone(&shared),
             channels,
         );
         let capture = SpectrumCapture {
             consumer,
             state,
-            mode,
             shared,
-            seen_failures: 0,
+            seen_epoch: 0,
             seen_drops: 0,
             recovery_pending: false,
             target: SpectrumTarget::Output("main-out".into()),
@@ -3414,7 +3491,7 @@ mod tests {
     }
 
     /// #1395b D3: a reordered collection pairs by key. The selection follows its entry to the new
-    /// index with its epoch, a stop reaches the observer that renders (the mode word moved with
+    /// index with its epoch, a stop reaches the observer that renders (the state words moved with
     /// the capture), the other entry arms its own observer, a lost selection advances the epoch,
     /// and a list that names a pair of two keys is a fault that pairs nothing.
     #[test]
@@ -3918,9 +3995,8 @@ mod tests {
         let capture = SpectrumCapture {
             consumer,
             state: super::new_state_word(super::IDLE),
-            mode: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::ONE_SHOT_MODE)),
             shared: super::SpectrumContinuousShared::new(),
-            seen_failures: 0,
+            seen_epoch: 0,
             seen_drops: 0,
             recovery_pending: false,
             target: SpectrumTarget::Output("main-out".into()),
@@ -3934,6 +4010,22 @@ mod tests {
             arm_generation: 0,
         };
         (producer, capture, record)
+    }
+
+    /// Put `capture`'s continuous word in the running state at its epoch.
+    fn run_continuously(capture: &SpectrumCapture) {
+        let word = capture
+            .shared
+            .word
+            .load(std::sync::atomic::Ordering::Acquire);
+        capture.shared.word.store(
+            super::continuous_word(
+                super::continuous_epoch(word),
+                super::CONTINUOUS_RUNNING,
+                false,
+            ),
+            std::sync::atomic::Ordering::Release,
+        );
     }
 
     /// The one-slot capture the concurrency tests race a producer against.
@@ -3982,13 +4074,7 @@ mod tests {
 
         // `stop_continuous` drains only an active continuous capture.
         let (_producer, mut capture) = queued_pair();
-        capture
-            .mode
-            .store(super::CONTINUOUS_MODE, std::sync::atomic::Ordering::Release);
-        capture
-            .shared
-            .active
-            .store(1, std::sync::atomic::Ordering::Release);
+        run_continuously(&capture);
         capture.stop_continuous();
         assert_eq!(capture.consumer.available_at_entry(), 1, "stop_continuous");
     }
@@ -4126,13 +4212,7 @@ mod tests {
             record,
             |capture| {
                 // `restart_continuous` needs an active continuous stream; it leaves one.
-                capture
-                    .mode
-                    .store(super::CONTINUOUS_MODE, std::sync::atomic::Ordering::Release);
-                capture
-                    .shared
-                    .active
-                    .store(1, std::sync::atomic::Ordering::Release);
+                run_continuously(capture);
             },
             |capture| {
                 capture
@@ -4154,13 +4234,7 @@ mod tests {
             record,
             |capture| {
                 // `stop_continuous` drains only in continuous mode, and leaves one-shot mode.
-                capture
-                    .mode
-                    .store(super::CONTINUOUS_MODE, std::sync::atomic::Ordering::Release);
-                capture
-                    .shared
-                    .active
-                    .store(1, std::sync::atomic::Ordering::Release);
+                run_continuously(capture);
             },
             SpectrumCapture::stop_continuous,
         );
@@ -4205,9 +4279,11 @@ mod tests {
     fn inactive_observer_does_no_validation_or_capture_work() {
         super::test_only_reset_spectrum_operation_counts();
         let (mut observer, _capture) = continuous_pair(SpectrumChannels::Stereo);
-        observer
-            .mode
-            .store(super::CONTINUOUS_MODE, std::sync::atomic::Ordering::Release);
+        // Continuous mode with no running stream: the named exhausted state.
+        observer.continuous.shared.word.store(
+            super::continuous_word(0, super::CONTINUOUS_EXHAUSTED, false),
+            std::sync::atomic::Ordering::Release,
+        );
         let left = [0.25_f32; 128];
         let right = [-0.5_f32; 128];
         observer.capture(&left, &right, 0, super::GraphObservationValidity::CLEAR);
@@ -4215,6 +4291,46 @@ mod tests {
             super::test_only_spectrum_operation_counts(),
             super::SpectrumOperationCounts::default()
         );
+    }
+
+    /// Issue #2255: a render failure at the last representable epoch moves the stream to the
+    /// named exhausted state, which captures nothing, reads `NotActive`, refuses a restart with
+    /// `EpochOverflow`, and leaves through a stop to an armable one-shot capture.
+    #[test]
+    fn a_failure_at_the_last_epoch_exhausts_the_stream_and_a_stop_leaves_it() {
+        use std::sync::atomic::Ordering;
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Stereo);
+        let cadence = SpectrumCadence::new(48_000, 128).expect("cadence");
+        capture
+            .begin_continuous(cadence, false)
+            .expect("continuous activation");
+        let last =
+            super::continuous_word(super::CONTINUOUS_EPOCH_MAX, super::CONTINUOUS_RUNNING, true);
+        capture.shared.word.store(last, Ordering::Release);
+        capture.seen_epoch = super::CONTINUOUS_EPOCH_MAX;
+        let left = [f32::NAN; 128];
+        let right = [0.0_f32; 128];
+        observer.capture(&left, &right, 0, super::GraphObservationValidity::CLEAR);
+        assert_eq!(
+            capture.shared.word.load(Ordering::Acquire),
+            super::continuous_word(
+                super::CONTINUOUS_EPOCH_MAX,
+                super::CONTINUOUS_EXHAUSTED,
+                false
+            )
+        );
+        assert_eq!(
+            capture.try_read_continuous().map(|window| window.sequence),
+            Err(SpectrumContinuousReadError::NotActive)
+        );
+        assert_eq!(
+            capture.restart_continuous(),
+            Err(super::SpectrumContinuousCaptureError::EpochOverflow)
+        );
+        assert_eq!(capture.arm(), Err(super::SpectrumCaptureError::Busy));
+        capture.stop_continuous();
+        assert_eq!(capture.stream_epoch(), None);
+        capture.arm().expect("a stopped capture arms one-shot");
     }
 
     /// One-shot capture pair: an observer, the control handle, the shared state word.
@@ -4929,6 +5045,8 @@ mod tests {
                     right: &mut observer.right,
                     channels: observer.channels,
                 };
+                // The observer's entry latches the continuous word before the lane path runs.
+                assert!(super::continuous_latch(&mut observer.continuous));
                 super::continuous_capture_lane(
                     &mut observer.continuous,
                     &mut buffers,
@@ -5986,11 +6104,10 @@ mod tests {
         /// Issue #1616: a mode switch racing a one-shot completion.
         ///
         /// Render completes and publishes an armed one-shot window while control replaces the
-        /// armed capture with a continuous stream (drain, park, epoch, mode store). The `mode`
-        /// word is a plain `std` atomic, but render reads it before its first modelled operation
-        /// and control stores it after its last, so loom still explores every position of the
-        /// push relative to the drain: before it, between it and the mode store, and after both.
-        /// The continuous read must never return the one-shot window, in any of them.
+        /// armed capture with a continuous stream (drain, park, then the continuous word's move
+        /// to running, which carries the mode since #2255). Loom explores every position of the
+        /// push relative to the drain: before it, between it and the word's move, and after
+        /// both. The continuous read must never return the one-shot window, in any of them.
         #[test]
         fn spectrum_mode_switch_loom() {
             loom::model(|| {
@@ -5998,6 +6115,64 @@ mod tests {
                     .join()
                     .expect("mode switch driver")
             });
+        }
+
+        /// Issue #2255: a stream restart racing a render failure.
+        ///
+        /// Control restarts a running stream while render fails a block of it (nonfinite input).
+        /// Exactly one of them may end the epoch the failure saw: a failure that wins is a failure
+        /// of that epoch and the restart then takes the epoch after it; a restart that wins makes
+        /// the failure moot. In every interleaving render's failure epoch is never the epoch
+        /// control committed, and no read of the fresh stream reports `Failed` for an epoch at
+        /// or below the one the restart committed.
+        #[test]
+        fn spectrum_continuous_restart_loom() {
+            loom::model(|| {
+                spawn_with_stack(restart_versus_failure)
+                    .join()
+                    .expect("restart driver")
+            });
+        }
+
+        fn restart_versus_failure() {
+            let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+            let cadence = crate::spectrum::SpectrumCadence::new(48_000, 128).expect("cadence");
+            capture
+                .begin_continuous(cadence, false)
+                .expect("continuous activation");
+            let render = spawn_with_stack(move || {
+                let left = [f32::NAN; 128];
+                let right = [0.0_f32; 128];
+                observer.capture(
+                    &left,
+                    &right,
+                    0,
+                    crate::spectrum::GraphObservationValidity::CLEAR,
+                );
+                observer
+            });
+            capture
+                .restart_continuous()
+                .expect("a running stream restarts");
+            let fresh = capture.stream_epoch().expect("the restarted stream runs");
+            let observer = render.join().expect("render thread");
+            assert_ne!(
+                observer.continuous.started_epoch, fresh,
+                "render's failure and control's restart claimed one epoch"
+            );
+            match capture.try_read_continuous() {
+                Err(crate::spectrum::SpectrumContinuousReadError::Failed { stream_epoch }) => {
+                    assert!(
+                        stream_epoch > fresh,
+                        "the fresh stream {fresh} read a failure of epoch {stream_epoch}"
+                    );
+                }
+                Err(crate::spectrum::SpectrumContinuousReadError::Warming) => {}
+                other => panic!(
+                    "the restarted stream read {:?}",
+                    other.map(|window| window.stream_epoch)
+                ),
+            }
         }
 
         fn mode_switch() {

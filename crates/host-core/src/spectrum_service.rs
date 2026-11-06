@@ -767,7 +767,7 @@ impl SpectrumService {
     /// and `carried` says whether the adoption carried (`CarryOutcome::Carried`); a refused
     /// hand-over (`PredecessorMismatch`) moved no observer, so every successor capture is fresh.
     /// A capture the pairing names keeps the reader the service already holds: that capture's
-    /// observer moved into the successor's plan, so its consumer, its shared mode word and its
+    /// observer moved into the successor's plan, so its consumer, its shared state words and its
     /// read counters stay valid, and the stream epoch, the sequence and an armed one-shot carry on
     /// unchanged (#1395 gate 3). Until this call, the service's captures are the predecessor's,
     /// which is correct for a carried capture and reads as pending for the others.
