@@ -3183,9 +3183,11 @@ pub(crate) struct FaderRampStage<L: Lane> {
     /// timed gain operation only remembers the gain.
     mute_ramp: [[bool; MAX_BANK_LANES]; 2],
     /// Whether each lane waits, muted, for the fade-in a plan swap armed, `[channel][lane]` (issue
-    /// #1288 D2). Set only by [`Self::arm_fade_in`] and cleared only by [`Self::fire_fade_in`]: a
-    /// mute or unmute record before the fire retargets [`Self::opens`] and keeps the arm (#2080
-    /// R1, the rule #2069 gave routes).
+    /// #1288 D2). Set only by [`Self::arm_fade_in`] and cleared only by [`Self::fire_fade_in`]
+    /// (a lane move or carry moves it with the lane's state): a mute or unmute record before the
+    /// fire retargets [`Self::opens`] and keeps the arm (#2080 R1, the rule #2069 gave routes).
+    /// The graph's fade entry for the lane reports fired only once its fire reached this lane
+    /// (#2257), so an entry the lane has is fired exactly when this flag is clear.
     armed: [[bool; MAX_BANK_LANES]; 2],
     /// Whether each armed lane's fire unmutes it, `[channel][lane]` (#2080 R1): the model's mute
     /// state of an armed lane, inverted, while the stage holds the lane at `+0.0`. Meaningless on

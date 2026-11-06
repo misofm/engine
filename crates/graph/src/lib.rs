@@ -4442,6 +4442,9 @@ struct GraphExecutor {
     fade_arms: Box<[FadeArm]>,
     /// How many of [`Self::fade_arms`] have not fired: render tests this one integer per block.
     fade_arms_pending: u32,
+    /// The due fires whose target did not resolve ([`FadeFire::Unresolved`], issue #2257):
+    /// each left its arm unfired and unreported. Read by [`fade_arm_unresolved_count`].
+    fade_arms_unresolved: u64,
     /// The fade-arm section of the hand-over (issue #1392 D3); empty (and never allocated) when
     /// no arm carries.
     fade_arm_carry: Box<[GraphFadeArmPair]>,
@@ -4778,6 +4781,50 @@ struct FadeArm {
     state: FadeArmState,
 }
 
+/// What firing one fade arm's target did (issue #2257). The arm's own state follows it: only
+/// [`Self::Fired`] makes it settling and raises its watch flag, so a fade is never reported fired
+/// while its fader lane (whose own `armed` flag only a fire clears) still waits, muted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
+enum FadeFire {
+    /// The fire reached the target's fader lane or live route op.
+    Fired,
+    /// The target resolved to no fader lane ([`runtime::Runtime::fader_lane_mut`]) or live
+    /// route, so nothing fired. Unreachable for an arm [`install_fade_arms`] accepted: it
+    /// resolved the target through the same lookup, a plan's units never change after bind, and
+    /// a lane move only trades two populated lanes of one fader slot of peer chains.
+    Unresolved,
+}
+
+impl FadeFire {
+    // REALTIME_POLICY_BEGIN
+    /// Fire `target`'s armed fade over `ramp_samples` at this block boundary. Render-thread code:
+    /// allocation-, lock- and syscall-free and bounded.
+    fn fire(runtime: &mut runtime::Runtime, target: GraphFadeTarget, ramp_samples: u32) -> Self {
+        let reached = match target {
+            // Issue #1782a: the arm names the lane bind gave the strip.
+            GraphFadeTarget::Fader(fader) => match runtime.fader_lane_mut(fader) {
+                Some((processor, lane)) => {
+                    processor.fire_fade_in(lane, ramp_samples);
+                    true
+                }
+                None => false,
+            },
+            // #1363 D3: before the route's op runs, so this block's live value drains after.
+            // #1953b: a fading copy's arm fires the same way, to silence.
+            GraphFadeTarget::Route(unit) | GraphFadeTarget::RouteOut(unit) => {
+                runtime.fire_route_fade_in(unit)
+            }
+        };
+        if reached {
+            Self::Fired
+        } else {
+            Self::Unresolved
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
 /// The bytes [`install_fade_arms`] and [`install_fade_arm_carry`] retain for a table of `arms`
 /// arms and `pairs` carried ones, for the plan's resource charge (issues #1288 D7, #1392 D8);
 /// `None` on overflow.
@@ -4815,8 +4862,9 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
 /// the session mutes arms too and gets an entry (#2069): its fire goes to its prepared mute and
 /// ramps nowhere unless a record before the fire unmutes it.
 ///
-/// Refused, arming nothing, when the plan is not a graph plan, a fader location is not a
-/// populated lane of a fader bank, a route unit is not a live route's, or a target repeats.
+/// Refused, arming nothing, when the plan is not a graph plan, a fader location does not resolve
+/// to a populated lane of a fader bank (through the lookup render fires through, #2257), a route
+/// unit is not a live route's, or a target repeats.
 pub fn install_fade_arms(
     plan: &mut PreparedRenderPlan,
     arms: Vec<GraphFadeArm>,
@@ -4835,9 +4883,8 @@ impl GraphExecutor {
     ) -> Result<(Vec<Option<u32>>, GraphFadeArmWatch), GraphCarryInstallError> {
         for (index, arm) in arms.iter().enumerate() {
             let exists = match arm.target {
-                GraphFadeTarget::Fader(fader) => {
-                    self.runtime.has_strip_lane(BuiltinStripOwner::Fader, fader)
-                }
+                // #2257: the resolution render fires through ([`FadeFire`]).
+                GraphFadeTarget::Fader(fader) => self.runtime.fader_lane_mut(fader).is_some(),
                 GraphFadeTarget::Route(unit) | GraphFadeTarget::RouteOut(unit) => {
                     self.runtime.has_live_route(unit)
                 }
@@ -4860,15 +4907,10 @@ impl GraphExecutor {
         let mut entries = Vec::with_capacity(arms.len());
         for arm in arms {
             let armed = match arm.target {
-                GraphFadeTarget::Fader(fader) => runtime::strip_lane_mut(
-                    &mut self.runtime.units,
-                    BuiltinStripOwner::Fader,
-                    fader,
-                )
-                .and_then(|(chain, slot, lane)| {
-                    runtime::builtin_processor_mut(chain, slot).map(|processor| (processor, lane))
-                })
-                .is_some_and(|(processor, lane)| processor.arm_fade_in(lane)),
+                GraphFadeTarget::Fader(fader) => self
+                    .runtime
+                    .fader_lane_mut(fader)
+                    .is_some_and(|(processor, lane)| processor.arm_fade_in(lane)),
                 GraphFadeTarget::Route(unit) => {
                     self.runtime.arm_route_fade_in(unit, arm.ramp_samples)
                 }
@@ -5045,11 +5087,13 @@ pub fn install_fade_arm_carry(
 /// its ramp or its copy's tail is still in flight) fires its own arm here, so the route never
 /// waits for a fire its table no longer holds; the live-send section that runs after this one
 /// then gives a carried route the displaced route's ramp. A strip's lane import, which runs
-/// before, already overwrote its arm. Bounded by `pairs`; allocation-free.
+/// before, already overwrote its arm. A route fire that reaches no route ([`FadeFire`], #2257)
+/// leaves its entry as installed and counts it. Bounded by `pairs`; allocation-free.
 fn carry_fade_arms(
     runtime: &mut runtime::Runtime,
     arms: &mut [FadeArm],
     pending: &mut u32,
+    unresolved: &mut u64,
     fired: &GraphFadeArmWatch,
     predecessor: &[FadeArm],
     pairs: &[GraphFadeArmPair],
@@ -5062,10 +5106,15 @@ fn carry_fade_arms(
             continue;
         };
         if !own.state.fired() && from.state.fired() {
-            fired.set(pair.successor as usize, WATCH_FIRED);
-            if let GraphFadeTarget::Route(unit) | GraphFadeTarget::RouteOut(unit) = own.target {
-                runtime.fire_route_fade_in(unit);
+            if let GraphFadeTarget::Route(unit) | GraphFadeTarget::RouteOut(unit) = own.target
+                && !runtime.fire_route_fade_in(unit)
+            {
+                // #2257: the fire reached no route, so the entry neither takes the fired state
+                // nor reports it: it stays as installed, and is counted.
+                *unresolved = unresolved.saturating_add(1);
+                continue;
             }
+            fired.set(pair.successor as usize, WATCH_FIRED);
         }
         if own.state != FadeArmState::Done && from.state == FadeArmState::Done {
             *pending = pending.saturating_sub(1);
@@ -5088,12 +5137,14 @@ fn carry_fade_arms(
 /// Advance every pending fade arm at the block that starts at `block_start` (issue #1288 D3):
 /// a waiting arm whose source played this block (or that waits for none) is scheduled
 /// `delay_samples` later, an arm whose sample has come fires its lane's fade (in, or out for a
-/// fading copy, #1953b), and a fired arm settles once its ramp and its tail have passed. Bounded
-/// by the table; allocation-free.
+/// fading copy, #1953b), and a fired arm settles once its ramp and its tail have passed. A fire
+/// whose target does not resolve ([`FadeFire::Unresolved`], #2257) leaves its arm due and
+/// unreported, and counts it in `unresolved`. Bounded by the table; allocation-free.
 fn step_fade_arms(
     runtime: &mut runtime::Runtime,
     arms: &mut [FadeArm],
     pending: &mut u32,
+    unresolved: &mut u64,
     fired: &GraphFadeArmWatch,
     block_start: u64,
     sources: Option<&dyn GraphSourcePlanes>,
@@ -5111,29 +5162,18 @@ fn step_fade_arms(
         if let FadeArmState::FireAt(at) = arm.state
             && at <= block_start
         {
-            match arm.target {
-                GraphFadeTarget::Fader(fader) => {
-                    // Issue #1782a: the arm names the lane bind gave the strip.
-                    let fader = runtime.current_location(fader);
-                    if let Some((chain, slot, lane)) =
-                        runtime::strip_lane_mut(&mut runtime.units, BuiltinStripOwner::Fader, fader)
-                        && let Some(processor) = runtime::builtin_processor_mut(chain, slot)
-                    {
-                        processor.fire_fade_in(lane, arm.ramp_samples);
-                    }
+            match FadeFire::fire(runtime, arm.target, arm.ramp_samples) {
+                FadeFire::Fired => {
+                    arm.state = FadeArmState::Settling(
+                        block_start
+                            .saturating_add(u64::from(arm.ramp_samples))
+                            .saturating_add(u64::from(arm.tail_samples)),
+                    );
+                    fired.set(entry, WATCH_FIRED);
                 }
-                // #1363 D3: before the route's op runs, so this block's live value drains after.
-                // #1953b: a fading copy's arm fires the same way, to silence.
-                GraphFadeTarget::Route(unit) | GraphFadeTarget::RouteOut(unit) => {
-                    runtime.fire_route_fade_in(unit);
-                }
+                // #2257: nothing fired, so the arm stays due and unreported; counted.
+                FadeFire::Unresolved => *unresolved = unresolved.saturating_add(1),
             }
-            arm.state = FadeArmState::Settling(
-                block_start
-                    .saturating_add(u64::from(arm.ramp_samples))
-                    .saturating_add(u64::from(arm.tail_samples)),
-            );
-            fired.set(entry, WATCH_FIRED);
         }
         if let FadeArmState::Settling(at) = arm.state
             && at <= block_start
@@ -5321,6 +5361,17 @@ pub fn carry_refusal_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
             .carry_refusal_count()
             .saturating_add(executor.node_carry_refused),
     )
+}
+
+/// The due fade-arm fires whose target resolved to no fader lane or live route (issue #2257),
+/// each of which left its arm unfired and unreported; saturating. `None` for any other plan.
+///
+/// Read after render, by whoever holds the plan: [`install_fade_arms`] resolved every target
+/// through the lookup render fires through, so a nonzero count is a defect.
+pub fn fade_arm_unresolved_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
+    plan.executor_any_mut()?
+        .downcast_mut::<GraphExecutor>()
+        .map(|executor| executor.fade_arms_unresolved)
 }
 
 /// The process-unique identity of a graph plan, taken at bind; `None` for any other plan.
@@ -6902,6 +6953,7 @@ impl GraphExecutor {
             jump_lengths: None,
             fade_arms: Box::default(),
             fade_arms_pending: 0,
+            fade_arms_unresolved: 0,
             fade_arm_carry: Box::default(),
             fade_fired: GraphFadeArmWatch::default(),
             automation_program: None,
@@ -7193,6 +7245,7 @@ impl PreparedPlanExecutor for GraphExecutor {
             jump_lengths,
             fade_arms,
             fade_arms_pending,
+            fade_arms_unresolved,
             fade_arm_carry: _,
             fade_fired,
             automation_program: _,
@@ -7285,6 +7338,7 @@ impl PreparedPlanExecutor for GraphExecutor {
                 runtime,
                 fade_arms,
                 fade_arms_pending,
+                fade_arms_unresolved,
                 fade_fired,
                 time.absolute_sample,
                 sources,
@@ -7619,6 +7673,7 @@ impl GraphExecutor {
                 &mut self.runtime,
                 &mut self.fade_arms,
                 &mut self.fade_arms_pending,
+                &mut self.fade_arms_unresolved,
                 &self.fade_fired,
                 &predecessor.fade_arms,
                 &self.fade_arm_carry,
