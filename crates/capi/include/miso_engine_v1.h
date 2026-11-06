@@ -357,7 +357,9 @@ extern "C" {
  * for the strip the master row names when the batch is staged, which follows every SET_CONTROL of
  * that row and every adopted plan, with no reconfigure; with no master, or a master that has no
  * reading, it has flags 0 and value 0.0, and it stays in the table. A configure is all or nothing: an
- * unknown strip is NOT_FOUND (meter.strip.unknown), a period that is not a whole number of windows
+ * unknown strip is NOT_FOUND (meter.strip.unknown), a configure whose echo frame would exceed the
+ * maximum control frame LIMIT_EXCEEDED (telemetry.reply_too_large, before anything is stored), a
+ * period that is not a whole number of windows
  * INVALID_FIELD (meter.period), and a table of more than 128 entries INVALID_FIELD (meter.records,
  * at its 129th entry), so a batch never needs more than its 256 records. Each
  * meter queues eight windows; a window that reaches no batch (dropped while the host did not call

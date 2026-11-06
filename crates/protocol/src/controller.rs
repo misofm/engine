@@ -815,6 +815,10 @@ pub struct MockProvider {
     telemetry_configuration: TelemetryConfiguration,
     /// How many times `response_get` ran: a replayed read never runs again.
     response_calls: usize,
+    /// A `TELEMETRY_CONFIGURE` echo the fixture answers in place of the configuration it
+    /// stored: a provider that breaks persist-and-echo, whose echo the controller cannot size
+    /// in advance (#2254).
+    echo_override: Option<TelemetryConfiguration>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -841,6 +845,7 @@ impl Default for MockProvider {
                 minimum_diagnostic_severity: crate::DiagnosticSeverity::Info,
             },
             response_calls: 0,
+            echo_override: None,
         }
     }
 }
@@ -1075,7 +1080,7 @@ impl ControlProvider for MockProvider {
         self.telemetry_configuration.diagnostics_enabled = configuration.diagnostics_enabled;
         self.telemetry_configuration.minimum_diagnostic_severity =
             configuration.minimum_diagnostic_severity;
-        Ok(configuration)
+        Ok(self.echo_override.clone().unwrap_or(configuration))
     }
     /// The fixture's meter delivery has a one-block window (#1583 D4).
     fn meter_window_blocks(&self) -> Option<core::num::NonZeroU32> {

@@ -3698,6 +3698,22 @@ fn prepare_legacy(
     }
 }
 
+/// One request through the one-call path, into a caller output larger than the response bound.
+fn process_one_call(
+    endpoint: &mut ProtocolController<MockProvider>,
+    input: &[u8],
+) -> Result<Vec<u8>, CommandFrameProcessError> {
+    let mut fields = [0_u16; 1024];
+    let mut output = vec![0_u8; 4096];
+    let written = endpoint.process_command_frame_into(
+        input,
+        &mut DecodeScratch::new(&mut fields),
+        &mut output,
+    )?;
+    output.truncate(written);
+    Ok(output)
+}
+
 /// The complete success frame a conforming provider's echo of `configuration` encodes to.
 fn telemetry_echo_frame_len(configuration: &TelemetryConfiguration) -> usize {
     let mut echo = configuration.clone();
@@ -3780,6 +3796,121 @@ fn a_telemetry_echo_over_the_bound_is_refused_before_anything_changes() {
         panic!("the next new request is refused: the cache was left wedged");
     };
     assert_eq!(header.request_id, id(2));
+}
+
+/// #2254: the catch-all for a provider that breaks persist-and-echo. Its echo is larger than the
+/// request the controller sized, so the reply overflows only after the command ran: the endpoint
+/// answers and records `INTERNAL` `protocol.encode` at the committed revision, a replay executes
+/// nothing a second time, and the next new request runs. Both legacy entry points: the prepared
+/// path, whose buffer is the bound, and the one-call path, whose caller output is larger.
+#[test]
+fn a_nonconforming_echo_over_the_bound_is_recorded_as_internal_and_executes_once() {
+    nonconforming_echo_is_recorded_as_internal(prepare_legacy);
+    nonconforming_echo_is_recorded_as_internal(process_one_call);
+}
+
+/// A legacy entry point: one request in, its reply frame out.
+type LegacyEntry =
+    fn(&mut ProtocolController<MockProvider>, &[u8]) -> Result<Vec<u8>, CommandFrameProcessError>;
+
+fn nonconforming_echo_is_recorded_as_internal(send: LegacyEntry) {
+    let mut endpoint = bounded_endpoint(256);
+    let configuration = TelemetryConfiguration {
+        meters: Vec::new(),
+        meter_period_blocks: 4,
+        meter_window_blocks: None,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 8,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: crate::DiagnosticSeverity::Warning,
+    };
+    assert!(
+        telemetry_echo_frame_len(&configuration) <= 256,
+        "the request's echo fits"
+    );
+    endpoint.provider.echo_override = Some(oversized_telemetry_configuration());
+    let configure = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::TelemetryConfigure(&configuration),
+    );
+
+    let first = send(&mut endpoint, &configure).expect("the executed command is answered");
+    assert_eq!(endpoint.telemetry_generation, 1, "the configuration ran");
+    assert!(first.len() <= 256, "the reply is within the response bound");
+    match ProtocolCodec::default()
+        .decode_typed_response(&first, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("bounded reply")
+    {
+        crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            assert_eq!(header.status, StatusCode::Internal);
+            assert_eq!(header.request_id, id(1));
+            assert_eq!(header.revision, SessionRevision(7));
+            assert_eq!(payload.diagnostics[0].code, "protocol.encode");
+        }
+        crate::DecodedTypedResponseFrame::Success { .. } => {
+            panic!("an echo larger than the bound was answered")
+        }
+    }
+    let replayed = send(&mut endpoint, &configure).expect("the replay is answered");
+    assert_eq!(replayed, first, "the replay returns the recorded reply");
+    assert_eq!(
+        endpoint.telemetry_generation, 1,
+        "the replay executes nothing a second time"
+    );
+    let next = prepare_legacy(
+        &mut endpoint,
+        &full_command(
+            2,
+            ExpectedRevision::Any,
+            crate::CommandPayload::TransportGet,
+        ),
+    )
+    .unwrap_or_else(|error| panic!("the next new request is refused ({error:?}): wedged"));
+    let mut fields = [0_u16; 64];
+    let crate::DecodedTypedResponseFrame::Success { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&next, &mut DecodeScratch::new(&mut fields))
+        .expect("transport reply")
+    else {
+        panic!("the next new request is refused: the cache was left wedged");
+    };
+    assert_eq!(header.request_id, id(2));
+}
+
+/// #2254: an endpoint whose response bound cannot hold even the `INTERNAL` fallback could record
+/// no reply, so it executes nothing, even a command whose own reply would fit. Through the
+/// prepared path the uncached replay `BACKPRESSURE` does not fit that bound either, so the call
+/// fails `OutputTooSmall`; the request stays unaccepted and its retry is refused the same way.
+#[test]
+fn a_bound_below_the_fallback_reply_refuses_before_dispatch() {
+    let mut endpoint = bounded_endpoint(100);
+    let play = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::TransportSet(TransportSetRequest {
+            state: TransportState::Playing,
+        }),
+    );
+    for attempt in 0..2 {
+        assert!(
+            matches!(
+                prepare_legacy(&mut endpoint, &play),
+                Err(CommandFrameProcessError::Encode(
+                    EncodeError::OutputTooSmall { .. }
+                ))
+            ),
+            "attempt {attempt} is refused"
+        );
+        assert_eq!(
+            endpoint.provider.transport_state,
+            TransportState::Stopped,
+            "nothing executed"
+        );
+        assert!(
+            endpoint.queues_mut().try_dequeue_event().is_err(),
+            "no transport event"
+        );
+    }
 }
 
 /// #2254: the echo bound is the whole reply frame, header included: an echo exactly at the

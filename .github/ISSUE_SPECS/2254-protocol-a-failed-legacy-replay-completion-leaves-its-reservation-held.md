@@ -34,7 +34,7 @@ The degenerate endpoint whose `max_response_bytes` cannot hold even that fallbac
 
 ## Non-goals
 - No wire, codec or corpus change. No change to the planned path's replies, ordering or replay entries.
-- Docs change only as Attempt 2 states: two registry rows and one semantics clause.
+- Docs change only to state the new refusal: two registry rows, one semantics clause, and the configure refusal lists in `crates/capi/include/miso_engine_v1.h` and `docs/C_ABI_V1_QUALIFICATION.md`.
 
 ## Hazards
 - `docs/CONTROL_PROTOCOL_SEMANTICS.md` l.11 ("an unretainable response is rejected before state changes") now holds on the legacy path for conforming providers (attempt 2). A non-conforming provider whose echo differs from its request can still reach the recorded `INTERNAL` `protocol.encode` with its effect applied.
@@ -72,3 +72,15 @@ Base: attempt-1 HEAD `475db20c3`.
 **Tests (red on `475db20c3` with the attempt-2 tests applied):**
 - `a_telemetry_echo_over_the_bound_is_refused_before_anything_changes` replaces `an_executed_command_whose_reply_overflows_the_bound_is_recorded_and_wedges_nothing`. Red at base: `left: Internal, right: LimitExceeded`. It asserts the refusal at revision 7, `telemetry_generation == 0`, the provider's stored table unchanged, a byte-equal replay that still applies nothing, and the next request served. It turns red if the bound check moves after the provider call (the table is stored) or is dropped (`INTERNAL`), or if the refusal is not recorded.
 - `a_telemetry_echo_exactly_at_the_bound_executes`: the 392-byte echo at bound 392 is `OK`, generation 1; at 391 it is `LIMIT_EXCEEDED`, generation 0. Red at base (the 391 case answers `INTERNAL`). Mutation: comparing the payload against the whole bound (forgetting the header) turns it red; the over-bound test stays green under that mutation, so this test is the only one defending the header term.
+
+**Verdict (attempt 2): FAIL.** The code is correct: the size check is exact, it runs on every path before any state changes, and the order matches the docs. The fail is test value. Attempt 2 deleted the only test that drove an executed legacy reply over the bound, so two mutations of the still-contracted `INTERNAL` catch-all survived the suite: the `OutputTooSmall` arm returning `Err(Internal)` unrecorded (M1), and dropping `.min(max_response_bytes)` from the reply slice (M5). The pre-existing degenerate-bound pre-dispatch check was untested too (M3). Minor: the C ABI header and qualification doc did not list the new refusal. Minor, accepted: restoring the request's meter window before the provider call has no test; the effect is invisible because the controller writes the echo's window after the provider returns.
+
+## Evidence (attempt 3)
+Base: attempt-2 HEAD `718467eb0`.
+
+**Change:** test-only `MockProvider::echo_override` (a provider that breaks persist-and-echo by answering a different echo than it stored). The configure refusal lists in `crates/capi/include/miso_engine_v1.h` and `docs/C_ABI_V1_QUALIFICATION.md` gain `telemetry.reply_too_large`. No production code change.
+
+**New tests, each checked against the reviewer's mutations (run, then restored):**
+- `a_nonconforming_echo_over_the_bound_is_recorded_as_internal_and_executes_once` runs through both legacy entry points, the prepared path and the one-call path with a 4096-byte output. A small configure whose echo fits passes the guard; the provider answers the oversized echo. The test asserts the recorded `INTERNAL` `protocol.encode` at revision 7 within the bound, `telemetry_generation == 1` after a byte-equal replay, and that the next request is served. Red under M1 (`the executed command is answered: Internal`) and under M5 (one-call path, same message). It turns red if an over-bound reply after execution goes unrecorded, so a retry would re-execute.
+  - A first draft padded the echo with duplicate meter entries. The codec refused that echo with a non-`OutputTooSmall` error, which takes the other fallback inside `encode_outcome_or_internal_into`, so M1 survived. The substitute echo is now a valid configuration.
+- `a_bound_below_the_fallback_reply_refuses_before_dispatch`: bound 100, below the 120-byte fallback. A `TRANSPORT_SET`, whose own reply would fit, fails `OutputTooSmall` twice; the transport stays `Stopped` and no event is queued. Red under M3 (`attempt 0 is refused`). It turns red if the endpoint executes a command it could not record a reply for. The first draft used the oversized configure, which the new echo guard refused anyway, masking M3.
