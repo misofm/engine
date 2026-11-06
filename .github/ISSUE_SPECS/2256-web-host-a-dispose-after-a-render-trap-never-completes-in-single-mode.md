@@ -47,7 +47,7 @@ Fields folded away: `handleDisposed` (equal to `handle === 0` at every site), `i
 **Green** at `4bf57a9ea`:
 - `bash scripts/test-web-audioworklet.sh`: exit 0 (hermetic suite, the safe-integer host variants, source/clock/timer/capability policies and their mutations, call-graph self-test, parameter-metadata and session-map gates, UTF-8 mutation).
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
-- SDK evals without an artifact (`cd sdk && node --test 'test/*-evals.mjs'`): 710 tests, 340 pass, 22 fail, the identical failing set on base and on this change, every failure `MISO_ENGINE_SDK_ARTIFACTS_HEX must encode a directory built by scripts/build-web-audioworklet.sh`. `the prelude over the real engine worklet class` passes.
+- SDK evals without an artifact (`cd sdk && node --test 'test/*-evals.mjs'`): 710 tests, 340 pass, 22 fail, the identical failing set on base and on this change, every failure the missing artifact (`MISO_ENGINE_SDK_ARTIFACTS_HEX must encode a directory built by scripts/build-web-audioworklet.sh`, and one `compileCount` TypeError in `boot-evals.mjs`'s after-hook, downstream of its failed before-hook). `the prelude over the real engine worklet class` passes.
 - Not run here: the artifact-backed SDK evals and the Playwright browser legs (the pinned browser nightly is not installed, so no artifact can be built). No Rust changed, so `cargo test -p host-web`, clippy and fmt were not needed.
 
 **Test value.**
