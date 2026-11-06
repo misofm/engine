@@ -23,6 +23,19 @@ const BUFFER_DIAGNOSTIC = 4;
 const BUFFER_OUTPUT_PCM = 5;
 const BUFFER_METER_FRAME = 7;
 const STATE_READY = 2;
+// Issue #2256: the instance's lifecycle, one explicit phase. `booting` until `initialize` posts
+// ready; `live` while it renders (and, in `single` mode, runs control work); `failed` once a
+// failure is sticky, with the failure record (`failureCode`, `failurePosted`, `failureTrapped`):
+// it renders silence and still holds its handle; `released` (`worker` mode) once it holds no
+// render half -- released to the Worker or the registry, lost to a trap, or never adopted -- and
+// answers the Worker's release; `disposed` (`single` mode) once it holds nothing -- its host freed,
+// its construction failed, or a trap left nothing that can be freed. `released` and `disposed`
+// are final.
+const PHASE_BOOTING = "booting";
+const PHASE_LIVE = "live";
+const PHASE_FAILED = "failed";
+const PHASE_RELEASED = "released";
+const PHASE_DISPOSED = "disposed";
 // Issue #1294a: the 96-byte watermark record `miso_engine_web_v1_watermark_ptr` names.
 const WATERMARK_BYTES = 96;
 // The outcome flag each of the record's three counts (exact, transition fallback, superseded) names.
@@ -206,13 +219,20 @@ function writeBoundedUtf8(value, memoryBuffer, pointer, capacity) {
 class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
-    this.ready = false;
-    this.disposed = false;
-    this.stickyResult = RESULT_OK;
+    // Issue #2256: the failure record. Set when the phase becomes `failed` and kept after it: the
+    // sticky result; whether the page already holds it; whether a trap killed the instance, whose
+    // memory is then whatever the trap left (in the shipped module, `LIVE_HOST` mutably borrowed
+    // and the render lock set), so no export runs on it again.
+    this.failureCode = RESULT_OK;
+    this.failurePosted = false;
+    this.failureTrapped = false;
+    // The phase (`PHASE_*`), and its published view for the SDK's PCM feed prelude, which
+    // subclasses this processor and reads `ready`, `disposed` and `stickyResult` in its own
+    // `process()` and seek handling. `enter` is their one writer; nothing in this file reads the
+    // view.
+    this.enter(PHASE_BOOTING);
     this.lastRequestId = 0;
     this.handle = 0;
-    this.handleDisposed = false;
-    this.initializationErrorPosted = false;
     // Issue #137: both leases start released, so a session that never asks for live controls pays
     // a single `false` test per block and nothing else.
     this.meterLease = false;
@@ -246,11 +266,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.workerMode = false;
     this.controlPort = undefined;
     // #1332 S8: the token of a half this instance released because its construction failed after
-    // the adoption (`0n`: none), answered on the Worker's release; whether that release was
-    // answered; and whether the page already holds this instance's sticky error.
+    // the adoption (`0n`: none), answered on the Worker's release; and whether that release was
+    // answered.
     this.releasedToken = 0n;
     this.releaseAnswered = false;
-    this.stickyPosted = false;
     this.memoryWords = null;
     this.meterFramesSkipped = 0;
     // Issue #1294a: the watermark `(revision, first_sample)` pair last posted (or read at boot).
@@ -435,7 +454,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       controlFrameBytes,
       instanceMode: "single",
     });
-    this.ready = true;
+    this.enter(PHASE_LIVE);
     return RESULT_OK;
   }
 
@@ -497,7 +516,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       backend: this.backend,
       instanceMode: "worker",
     });
-    this.ready = true;
+    this.enter(PHASE_LIVE);
     return RESULT_OK;
   }
 
@@ -515,8 +534,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
 
   /// D4.1: stop rendering and release the render half into a token for the control Worker, which
   /// adopts it back and disposes the host. Nothing is freed here.
-  /// A release that throws (an instance a render trap killed) still answers, with no token (`0n`):
-  /// the Worker then disposes without the half, and the page's dispose never waits forever.
+  /// A trapped instance (#2256) runs no export, and a release that throws still answers: both
+  /// with no token (`0n`), the half lost to the trap. The Worker then disposes without the half,
+  /// and the page's dispose never waits forever.
   /// #1332 S8: answered once; after a construction that failed past the adoption, the answer is
   /// the token that failure released.
   releaseRenderHalf() {
@@ -524,15 +544,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.releaseAnswered = true;
     let token = this.releasedToken;
     try {
-      if (token === 0n && this.handle !== 0) {
+      if (token === 0n && this.handle !== 0 && !this.failureTrapped) {
         token = BigInt.asUintN(64, this.exports.miso_engine_web_v1_host_release(this.handle));
       }
     } catch (_) {
       token = 0n;
     }
-    this.disposed = true;
-    this.ready = false;
     this.handle = 0;
+    this.enter(PHASE_RELEASED);
     this.controlPort.postMessage({ tag: "miso.released.v1", token });
   }
 
@@ -546,7 +565,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.controlPort.onmessage = (event) => this.receiveControlPlane(event.data);
         // Issue #1387 (S11): the address of this render half's status record; the Worker's PCM
         // feed drain reads its rendered quanta there as its render clock (shared memory, no call).
-        if (this.ready && this.statusView !== undefined) {
+        if (this.phase === PHASE_LIVE && this.statusView !== undefined) {
           this.controlPort.postMessage({ tag: "miso.render-clock.v1", status: this.statusView.byteOffset });
         }
         return;
@@ -577,7 +596,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   receiveControlPlane(message) {
     if (message?.tag === "miso.meter-view.v1" && exactFields(message, ["tag", "header", "memoryBytes"])
         && u32(message.header) && Number.isSafeInteger(message.memoryBytes)) {
-      if (this.disposed) return;
+      if (this.ended()) return;
       this.rebindMemoryViews();
       // A set's identity is its four-part key (header, frame, track and submix counts): a freed
       // header address may be reused by a later plan, so a pointer alone names nothing. The cut
@@ -599,7 +618,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.controlPort.postMessage({
         tag: "miso.render-status.v1",
         requestId: message.requestId,
-        status: this.disposed ? null : {
+        status: this.ended() ? null : {
           ...this.readStatus(),
           singleModeControlAllocations: this.exports.miso_engine_web_v1_control_allocation_count(),
           staleViewQuanta: this.staleViewQuanta,
@@ -619,9 +638,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// Worker's render check, a failure the page has not heard of yet is posted to it once, as the
   /// typed `miso.error.v1` with request ID 0; the page fails sticky with it.
   reportRenderFailure() {
-    if (this.disposed || this.stickyPosted || this.stickyResult === RESULT_OK) return;
-    this.stickyPosted = true;
-    this.port.postMessage({ tag: "miso.error.v1", requestId: 0, result: this.stickyResult });
+    if (this.phase !== PHASE_FAILED || this.failurePosted) return;
+    this.failurePosted = true;
+    this.port.postMessage({ tag: "miso.error.v1", requestId: 0, result: this.failureCode });
   }
 
   /// R-S7-meters, in a message handler: when render reports a header other than the active set's,
@@ -629,8 +648,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// The key is compared on the four words, so a reused header address is a new set. A newer
   /// pending set is kept: only the set made active here leaves the pending slot.
   syncWorkerMeterViews() {
-    if (!this.metersAttached || this.disposed || !this.ready || this.stickyResult !== RESULT_OK
-        || this.handle === 0 || this.meterSet === null) return;
+    if (!this.metersAttached || this.phase !== PHASE_LIVE || this.meterSet === null) return;
     const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0;
     if (this.meterSetMatches(this.meterSet, current)) return;
     if (this.pendingMeterSet !== null && this.meterSetMatches(this.pendingMeterSet, current)) {
@@ -808,8 +826,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// whose views are cut now so the quantum that adopts it only switches to them. A header or
   /// frame the module's memory cannot hold is a protocol fault, sticky.
   syncMeterViews() {
-    if (!this.metersAttached || this.disposed || !this.ready || this.stickyResult !== RESULT_OK
-        || this.handle === 0) return;
+    if (!this.metersAttached || this.phase !== PHASE_LIVE) return;
     this.rebindMemoryViews();
     const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0;
     let active = this.meterSet;
@@ -898,19 +915,22 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     };
   }
 
+  /// A refused construction ends the instance (to `released` or `disposed`), once.
   failInitialization(result, requestId) {
-    // `worker` mode never disposes here: only the control Worker frees the host (D4). A half this
-    // instance adopted before a later check refused leaves it now (#1332 S8): it is released into
-    // the registry, and the token answers the Worker's release, which the page asks for.
-    if (this.workerMode && this.handle !== 0) {
-      try {
-        this.releasedToken = BigInt.asUintN(64, this.exports.miso_engine_web_v1_host_release(this.handle));
-      } catch (_) {
-        this.releasedToken = 0n;
+    if (this.ended()) return;
+    if (this.workerMode) {
+      // `worker` mode never disposes here: only the control Worker frees the host (D4). A half
+      // this instance adopted before a later check refused leaves it now (#1332 S8): it is
+      // released into the registry, and the token answers the Worker's release, which the page
+      // asks for.
+      if (this.handle !== 0) {
+        try {
+          this.releasedToken = BigInt.asUintN(64, this.exports.miso_engine_web_v1_host_release(this.handle));
+        } catch (_) {
+          this.releasedToken = 0n;
+        }
       }
-    }
-    if (this.handle !== 0 && !this.handleDisposed && !this.workerMode) {
-      this.handleDisposed = true;
+    } else if (this.handle !== 0) {
       try {
         this.exports.miso_engine_web_v1_dispose(this.handle);
       } catch (_) {
@@ -918,17 +938,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       }
     }
     this.handle = 0;
-    this.ready = false;
-    this.disposed = true;
-    this.stickyResult = result;
-    this.stickyPosted = true;
-    if (!this.initializationErrorPosted) {
-      this.initializationErrorPosted = true;
-      try {
-        this.port.postMessage({ tag: "miso.error.v1", requestId, result });
-      } catch (_) {
-        // A failed MessagePort cannot receive the one address-free construction error.
-      }
+    this.failureCode = result;
+    this.enter(this.workerMode ? PHASE_RELEASED : PHASE_DISPOSED);
+    try {
+      this.port.postMessage({ tag: "miso.error.v1", requestId, result });
+    } catch (_) {
+      // A failed MessagePort cannot receive the one address-free construction error.
     }
   }
 
@@ -996,7 +1011,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     return Object.freeze({
       state: view.getUint32(8, true),
-      lastResult: this.stickyResult || view.getUint32(12, true),
+      lastResult: this.failureCode || view.getUint32(12, true),
       backend: view.getUint32(16, true),
       sampleRateHz: view.getUint32(20, true),
       quantumFrames: view.getUint32(24, true),
@@ -1028,9 +1043,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   sticky(result, requestId, planes) {
-    this.ready = false;
-    this.stickyResult = result;
-    this.stickyPosted = true;
+    this.fail(result, false);
+    this.failurePosted = true;
     const message = { tag: "miso.error.v1", requestId, result };
     if (planes !== undefined) message.planes = planes;
     this.port.postMessage(message, this.transferList(planes));
@@ -1040,7 +1054,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// success posts nothing; an epoch failure is sticky. Its allocations and frees are the
   /// instance's control allocations, which the status reports.
   serviceControl(requestId = this.lastRequestId) {
-    if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
+    if (this.phase !== PHASE_LIVE) return;
     const result = this.exports.miso_engine_web_v1_service(this.handle);
     if (result !== RESULT_OK) this.sticky(result, requestId);
   }
@@ -1054,7 +1068,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// bounded seqlock retry) skips this tick and the next message reads again; any other refusal
   /// is sticky, as the service step's is.
   pushWatermark(requestId = this.lastRequestId) {
-    if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
+    if (this.phase !== PHASE_LIVE) return;
     const result = this.exports.miso_engine_web_v1_watermark_read(this.handle);
     if (result === RESULT_BACKPRESSURE) return;
     if (result !== RESULT_OK) {
@@ -1099,7 +1113,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// decodes a frame, and a commit's reliable events are what keeps the next commit from
   /// backpressure, so this drain is what lets a page send unlimited transactions.
   drainControlEvents(requestId = this.lastRequestId) {
-    if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
+    if (this.phase !== PHASE_LIVE) return;
     for (const lane of CONTROL_EVENT_LANES) {
       for (let calls = 0; calls < MAXIMUM_CONTROL_EVENTS_PER_LANE; calls += 1) {
         const result = this.exports.miso_engine_web_v1_control_event(this.handle, lane);
@@ -1123,7 +1137,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   receive(message) {
-    if (this.disposed) return;
+    if (this.ended()) return;
     // The main realm's service tick carries no request ID: it is not a request, so it takes no
     // place in the request sequence and gets no reply. The step itself runs after this handler.
     if (message?.tag === "miso.service.v1" && exactFields(message, ["tag"])) return;
@@ -1134,18 +1148,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     this.lastRequestId = message.requestId;
     if (message.tag === "miso.dispose.v1" && exactFields(message, ["tag", "requestId"])) {
-      const result = this.exports.miso_engine_web_v1_dispose(this.handle);
-      if (result === RESULT_OK) {
-        this.disposed = true;
-        this.handleDisposed = true;
-        this.handle = 0;
-        this.lastSessionSeekGeneration = undefined;
-      }
-      this.acknowledge(message.requestId, result);
+      this.receiveDispose(message.requestId);
       return;
     }
-    if (this.stickyResult !== RESULT_OK) {
-      this.sticky(this.stickyResult, message.requestId, returnedPlanes);
+    if (this.phase === PHASE_FAILED) {
+      this.sticky(this.failureCode, message.requestId, returnedPlanes);
       return;
     }
     this.rebindMemoryViews();
@@ -1227,6 +1234,29 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
     }
+  }
+
+  /// The `single`-mode dispose, in the message handler (`live` or `failed` to `disposed`). Issue
+  /// #2256: a trapped instance runs no export -- its dispose can never succeed, and nothing it
+  /// holds can be freed; the memory goes with the node -- and a dispose export that traps is a
+  /// trap too. Either way the dispose is answered `RESULT_INTERNAL` and the instance ends: the
+  /// host tears down on that answer, as it does on the control Worker's in `worker` mode. Any other
+  /// refusal leaves the phase as it was, and the host may retry.
+  receiveDispose(requestId) {
+    let result = RESULT_INTERNAL;
+    if (!this.failureTrapped) {
+      try {
+        result = this.exports.miso_engine_web_v1_dispose(this.handle);
+      } catch (_) {
+        this.fail(RESULT_INTERNAL, true);
+      }
+    }
+    if (result === RESULT_OK || this.failureTrapped) {
+      this.handle = 0;
+      this.lastSessionSeekGeneration = undefined;
+      this.enter(PHASE_DISPOSED);
+    }
+    this.acknowledge(requestId, result);
   }
 
   receiveSource(message) {
@@ -1552,6 +1582,31 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
   }
 
+  /// Issue #2256: the one writer of the phase and of its published view. `process()` calls it,
+  /// so it only assigns.
+  enter(phase) {
+    this.phase = phase;
+    this.ready = phase === PHASE_LIVE;
+    this.disposed = phase === PHASE_RELEASED || phase === PHASE_DISPOSED;
+    this.stickyResult = this.failureCode;
+  }
+
+  /// Whether the phase is final (`released` or `disposed`): the instance holds nothing, renders
+  /// nothing and answers no request.
+  ended() {
+    return this.phase === PHASE_RELEASED || this.phase === PHASE_DISPOSED;
+  }
+
+  /// Fail sticky with `code` (`booting`, `live` or `failed` to `failed`); a final phase stays.
+  /// The latest code is the record's; a trap is permanent. `process()` calls it, so it only
+  /// assigns.
+  fail(code, trapped) {
+    if (this.ended()) return;
+    this.failureCode = code;
+    if (trapped) this.failureTrapped = true;
+    this.enter(PHASE_FAILED);
+  }
+
   /// Fold one finished meter window and post it (issue #137 D2).
   ///
   /// Allocation-free on this side: `meter_poll` moves `Copy` snapshots into a Wasm buffer sized at
@@ -1591,8 +1646,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       const next = this.pendingMeterSet;
       if (next === null
           || next.headerPointer !== set.header.getUint32(METER_HEADER_SUCCESSOR_POINTER, true)) {
-        this.stickyResult = RESULT_INTERNAL;
-        this.ready = false;
+        this.fail(RESULT_INTERNAL, false);
         return;
       }
       this.meterSet = next;
@@ -1659,15 +1713,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   process(_inputs, outputs) {
-    if (this.disposed) {
+    if (this.phase !== PHASE_LIVE) {
       this.silence(outputs);
-      return false;
+      // A final phase ends the node; `booting` and `failed` keep it, silent and disposable.
+      return !this.ended();
     }
     const output = outputs[0];
-    if (!this.ready || this.stickyResult !== RESULT_OK) {
-      this.silence(outputs);
-      return true;
-    }
     const actualFrames = output !== undefined && output.length === 2
         && output[0].length === this.quantumFrames && output[1].length === this.quantumFrames
       ? this.quantumFrames
@@ -1676,23 +1727,24 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // here as a throw. There is no `catch_unwind` inside Rust to convert it, so the containment is
     // this: sticky RESULT_INTERNAL and positive-zero output, never a torn or stale block. The user
     // agent may also fire `processorerror`; both paths end with the node silent and disposable.
+    // Issue #2256: the trap is recorded, so the dispose runs no export on the dead instance.
     // Issue #137 D3: no clock is read while the lease is released.
     const started = this.telemetryLease ? this.clock.read() : 0;
     let result;
+    let trapped = false;
     try {
       result = this.exports.miso_engine_web_v1_render(this.handle, actualFrames);
     } catch (_) {
       result = RESULT_INTERNAL;
+      trapped = true;
     }
     if (result !== RESULT_OK) {
-      this.stickyResult = result;
-      this.ready = false;
+      this.fail(result, trapped);
       this.silence(outputs);
       return true;
     }
     if (actualFrames === 0) {
-      this.stickyResult = RESULT_REPREPARE_REQUIRED;
-      this.ready = false;
+      this.fail(RESULT_REPREPARE_REQUIRED, false);
       this.silence(outputs);
       return true;
     }

@@ -1382,7 +1382,10 @@ class MisoAudioWorkletHost {
   /// typed error otherwise, and either way the page terminates the Worker and disconnects the node,
   /// exactly once. A failed worker-mode host is unusable, so there is no retry. In `single` mode a
   /// failed dispose may be retried: the promise is dropped and the service tick it stopped runs
-  /// again, unless it ended in a teardown.
+  /// again, unless it ended in a teardown. Issue #2256: a single-mode dispose that fails with 255
+  /// ends in teardown too -- the worklet answers 255 when its instance trapped (in render or in
+  /// the dispose) and ends it, so nothing is left to answer a retry -- as worker mode does on
+  /// the control Worker's 255.
   ///
   /// #1332 S8: a dispose ends in teardown even when nobody answers. With no reply within
   /// `DISPOSE_TIMEOUT_MS` the page tears down directly and rejects with `miso.teardown.v1`
@@ -1421,7 +1424,7 @@ class MisoAudioWorkletHost {
     try {
       await this.#awaitDispose();
     } catch (error) {
-      if (isTeardown(error)) this.#teardown();
+      if (isTeardown(error) || error?.result === 255) this.#teardown();
       throw error;
     }
     this.#teardown();
