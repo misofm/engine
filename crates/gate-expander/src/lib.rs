@@ -1348,7 +1348,15 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         }
         let hold_samples = rounded_samples(timing.hold_ms, self.sample_rate)
             .ok_or(state_error("effect.state.parameter"))?;
-        if !integral_within(hold, hold_samples as f32) {
+        // Issue #2310: the countdown is checked with the phase. A closed lane's is `+0.0`:
+        // `channel_step` closes a lane only once its countdown has run out, a closed lane keeps
+        // the word, and only an opening reloads it (`retime_hold` keeps `min(0, H1) = 0`). No
+        // writer leaves `-0.0` (a reload is a count, a decrement from `1` is `+0.0`).
+        let closed = open.to_bits() == 0;
+        if is_negative_zero(hold)
+            || (closed && hold.to_bits() != 0)
+            || !integral_within(hold, hold_samples as f32)
+        {
             return Err(state_error("effect.state.hold"));
         }
         let mut ramps = [[0.0_f32; 4]; RAMP_COUNT];
@@ -1363,9 +1371,11 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             // so the step is held only to be finite. The target and the `current`, moving or
             // resting, are held to the strict domain: the clamped law keeps every word between the
             // ramp's start and its target (issue #1409 D2), so a word past the domain is one the
-            // engine never holds (issue #1411 D1).
+            // engine never holds (issue #1411 D1). A settled ramp is at its target (issue #2310):
+            // `set_target` and the last `advance_ramp` step both land `current` on it.
             let spec = &GATE_SPECS[index];
             let path = integral_within(remaining, RAMP_SAMPLES as f32)
+                && (remaining != 0.0 || current.to_bits() == target.to_bits())
                 && payload::ramp_path_inside(
                     LinearRamp {
                         current,
@@ -1420,8 +1430,10 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         }
         // Issue #1370 D6: each weight lies in `[0, 1]` on its whole path, the engine never holds
         // `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`,
-        // `c` a word of an earlier glide and `n <= 2^24`, never `0`), and the two targets are
-        // exactly one supported mode's rest weights.
+        // `c` a word of an earlier glide and `n <= 2^24`, never `0`), a weight at rest is at its
+        // target (issue #2310: `rest_link`, a zero-length `retarget_link` and a glide's last
+        // frame all land it there; a stale resting weight would start the next glide off the law
+        // in force), and the two targets are exactly one supported mode's rest weights.
         let mut links = [[0.0_f32; 4]; LINK_COUNT];
         for (index, link) in links.iter_mut().enumerate() {
             let word = STATE_LINK_WORD + index * 4;
@@ -1433,6 +1445,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             let valid = integral_within(remaining, maximum as f32)
                 && !is_negative_zero(current)
                 && (remaining == 0.0 || step != 0.0)
+                && (remaining != 0.0 || current.to_bits() == target.to_bits())
                 && payload::ramp_path_inside(
                     LinearRamp {
                         current,

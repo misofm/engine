@@ -1635,7 +1635,9 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
 /// session afterwards; first the instance's reserved stack canary is checked
 /// ([`miso_engine_web_v1_instance_bind`]), and an overwritten canary fails the session
 /// (`web.instance.stack_canary`, sticky [`RESULT_INTERNAL`]) before the half goes, so the Worker
-/// that adopts it back sees the failure. Nothing is freed: the half is deposited in the handoff
+/// that adopts it back sees the failure. On a session that had already failed or been disposed
+/// (#2298), the canary failure is refused ([`RESULT_WRONG_STATE`]) and records no diagnostic, so
+/// the first failure's stands. Nothing is freed: the half is deposited in the handoff
 /// registry, and the token is the only way back to it. `0` for a wrong handle, a host whose half
 /// is already away or that has no session, or a full registry (the half stays where it was).
 ///

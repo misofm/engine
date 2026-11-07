@@ -1827,6 +1827,65 @@ fn a_host_found_failure_silences_the_released_render_half_and_overwrites_nothing
     assert_eq!(host.status().state, STATE_DISPOSED);
 }
 
+/// Issue #2298: a failure of the render half after the control half failed or disposed the
+/// session leaves the lifecycle where the first ended it. The worklet's render export checks the
+/// half's own status, which learns of the control half's failure or dispose only at the half's
+/// next block, so a shape mismatch or a bad stack canary found before that block reaches the
+/// half's `reject_output_quantum` or `fail` on a session that has already ended.
+///
+/// Test value: red if a render-side failure writes the lifecycle word with a plain store (so a
+/// dispose is undone), or records a second failure (its result code, and its diagnostic, which
+/// the adoption back would put in place of the first failure's); and red if the status shell a
+/// release leaves records a shape failure that the lifecycle word does not have. The #2267 test
+/// covers only the control half's own refusal; no test fails the render half after the session
+/// ended. The race itself is `lifecycle_loom`'s.
+#[test]
+fn a_later_failure_or_a_dispose_never_moves_the_lifecycle_back() {
+    let mut host = prepared_host(128);
+    let mut render = host.release_render().expect("the render half");
+    assert_eq!(
+        host.reject_output_quantum(64),
+        RESULT_WRONG_STATE,
+        "the released status shell renders nothing, so it rejects no shape"
+    );
+    assert_eq!(host.status().state, STATE_READY);
+    assert_eq!(host.fail_session(RESULT_INVALID_ARGUMENT), RESULT_OK);
+    assert_eq!(render.status().state, STATE_READY);
+    assert_eq!(
+        render.reject_output_quantum(64),
+        RESULT_WRONG_STATE,
+        "a shape mismatch on a failed session is refused, not a second failure"
+    );
+    assert_eq!(
+        render.fail(RESULT_INTERNAL, b"web.instance.stack_canary\t$\n"),
+        RESULT_WRONG_STATE,
+        "a render failure on a failed session is refused, not a second failure"
+    );
+    assert_eq!(render.status().state, STATE_FAILED);
+    assert!(host.adopt_render(render).is_ok());
+    assert_eq!(
+        host.diagnostic(),
+        b"web.host.failed\t$\n",
+        "the first failure's diagnostic stands across the adoption"
+    );
+
+    let mut host = prepared_host(128);
+    let mut render = host.release_render().expect("the render half");
+    let word = Arc::clone(&render.half.ready.as_ref().expect("ready").lifecycle);
+    assert_eq!(host.dispose(), RESULT_OK);
+    assert_eq!(render.reject_output_quantum(64), RESULT_WRONG_STATE);
+    assert_eq!(
+        render.fail(RESULT_INTERNAL, b"web.instance.stack_canary\t$\n"),
+        RESULT_WRONG_STATE
+    );
+    assert_eq!(
+        word.state(),
+        STATE_DISPOSED,
+        "a failure after a dispose leaves the session disposed"
+    );
+    assert!(render.diagnostic().is_empty());
+}
+
 /// #106 F2. A render failure is sticky, silent, and keeps every allocation alive.
 ///
 /// `PreparedRenderPlan::render` has exactly one failure mode reachable with valid buffers: the
