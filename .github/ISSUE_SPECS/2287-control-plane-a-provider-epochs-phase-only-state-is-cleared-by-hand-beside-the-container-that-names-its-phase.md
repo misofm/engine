@@ -163,13 +163,22 @@ during the mutation runs, because it fails under load on base too (see below).
 | M7 | `parked_resources` answers `None` | 5 (resource_lifecycle, plan_swap_race, capi) |
 | M8 | promotion moves the displaced epoch's base onto the new running epoch | 0 before the new test; red with it |
 
-M2 survives because the case it changes is unreachable. A mark is still waiting when its epoch is
-parked only if render claimed the successor's plan without running the waiting epoch's swap block.
-Render runs that block, which writes the carry record, before any later claim. Every promotion
-settles the pending pairings first, so by the time the next promotion parks an epoch, its mark is
-cleared. On base the mark simply stayed in the field. `park` keeps that behaviour, as defence in
-depth for `settle_observation_pairings`'s parked-successor arm, rather than drop a mark that no
-test can reach.
+M2 survives because nothing reachable can observe it. A mark (on an epoch B, waiting to pair B
+with the epoch P0 it displaced) can still be waiting when B is parked, as C is promoted, in two
+ways:
+- Render claimed C without running B's swap block. This cannot happen: render runs that block,
+  which writes B's carry record, before any later claim. Every promotion settles the pending
+  pairings first, so B's mark is already cleared when C's promotion parks B.
+- P0's plan has no host attachment. The swap block then never calls `adopt_predecessor`
+  (`crates/engine/src/realtime/plan.rs` 1508, at `5b5450d9a`), so B's record is never written. B's
+  mark waits until P0's plan is reclaimed, which settles it as nothing carried, and C's promotion
+  can park B before that. Dropping the mark at `park` is equivalent here: nothing carried into
+  B, so B's readers are its own whether B settles before C pairs with it or not. Pairing C with
+  B early or late reaches the same state.
+
+On base the mark stayed in the field. `park` keeps it, as defence in depth for
+`settle_observation_pairings`'s parked-successor arm, rather than drop a mark whose loss no
+reachable path can observe.
 
 **Load-dependent failure, pre-existing.** `spectrum_monitor::alternating_configures_against_a_
 rendering_thread_allocate_nothing_on_render` fails its `ready > 0` assert ("some reads analyzed a
@@ -199,12 +208,38 @@ this change; it is listed as a follow-up.
 - No render-path change, so no no-bit-moved comparison is needed. `ProviderEpoch` never reaches
   render.
 
+**Attempt-1 verdict: PASS** (adversarial review). The reviewer found every transition equivalent
+to base. The branch merges cleanly with `main`, and the merged tree passed 1,229 tests. The new
+test was accepted as a legitimate guard. Three minors are folded after merging `origin/main`
+(`5b5450d9a`):
+1. The M2 reasoning above now covers the second way a mark can still be waiting at `park`: a
+   predecessor plan with no host attachment.
+2. `promote_pending_provider` no longer drops a `None` row silently
+   (`parked.into_iter().take(index + 1).flatten()`). Its pre-pass refuses `Internal` unless
+   there is a row slot for every epoch it parks. The loop takes each row with
+   `let Some(row) = row else { debug_assert!(false, ..); return Err(CommandError::Internal) }`,
+   which that pre-pass makes unreachable.
+3. The follow-ups below record what the `Option` refactor would encode, and how PR-7's
+   non-promotion clears attach.
+
+Re-run on the merged tree, with the folds:
+- `cargo test --locked -p control-plane --all-targets --features test-support`: 10 binaries, 102 passed, 0 failed.
+- clippy `-D warnings` (control-plane with test-support, and the lib alone): clean.
+- `cargo fmt --check`: clean.
+- rustdoc `-D warnings`, with `--document-private-items`: clean.
+
 **Follow-ups (not in this issue).**
 - PR-7: put the `Primed` record in `EpochPhase::Pending`, as described under Decision / model.
 - `pending_providers` never holds more than one epoch (see the proof). It could become an
   `Option`, which would remove `kept_holder`'s and `restore_prime_flags`'s dead two-pending arms.
-  With pending exclusive, the kept base could then move onto the pending successor, and the
-  cross-container invariant above would be encoded too.
+  With pending exclusive, the kept base could then move onto the pending successor. That would
+  encode by type the invariant `a_kept_base_drops_when_render_adopts_its_successor` guards: a
+  base exists only while its successor is pending, and drops with it.
+- PR-7's record also has clears that are not promotions: the deadline step's `Stale` clear
+  (`check_prime_deadline`) and `withdraw_pending_candidate`'s clear of a record whose epoch is
+  not the `Withdrawn` candidate's. They need a `Pending`-phase accessor (for example
+  `prime_mut()` on the pending epoch), not `promote()`, which handles only the render-adopted
+  and `Taken`/`Nothing` clears. #2258 tracks this and the item above.
 - `alternating_configures_against_a_rendering_thread_allocate_nothing_on_render` should not hang
   when it fails (store `done` on unwind, for example with a drop guard). Its `ready > 0` claim
   also depends on render keeping pace under load.
