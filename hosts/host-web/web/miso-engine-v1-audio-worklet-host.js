@@ -450,8 +450,9 @@ function isUnsupportedBrowser(value) {
 ///
 /// - `live` (`HOST_LIVE`): requests are accepted; in `single` mode the service tick runs, and only
 ///   in this phase.
-/// - `{ kind: "failed", error, workerGone }`: sticky. `error` is the first failure, and it stands;
-///   `workerGone` is set once the control Worker raised `error` and was terminated. Only
+/// - `{ kind: "failed", error, workerGone, workletKnows }`: sticky. `error` is the first failure,
+///   and it stands; `workerGone` is set once the control Worker raised `error` and was terminated;
+///   `workletKnows` once the worklet needs no `miso.fail.v1` (issue #2317, see `#fail`). Only
 ///   `dispose()` is accepted.
 /// - `{ kind: "disposing", promise, failure }`: `dispose()` was called; `failure` is `null` or the
 ///   `failed` record. Every other request is refused with result 3 and `dispose()` returns
@@ -463,6 +464,11 @@ const HOST_LIVE = Object.freeze({ kind: "live" });
 /// (`FAIL_WORKER_GONE`). Either way the dispose's reply cannot be counted on.
 const FAIL_CHANNEL = Symbol("channel");
 const FAIL_WORKER_GONE = Symbol("worker-gone");
+/// Issue #2317: the host's two peers, as the sender of a message (`#receive`) and as the peer that
+/// needs no `miso.fail.v1` for a failure (`#fail`'s `aware`): the control Worker (`worker` mode)
+/// and the worklet (the only peer in `single` mode).
+const PEER_WORKER = "worker";
+const PEER_WORKLET = "worklet";
 
 /// Issue #2279: the slot a request's bound counts it in, or `null` for an unbounded kind: a status
 /// read is shared (see `status()`), a dispose is terminal and a fence follows a control reply.
@@ -565,7 +571,8 @@ class MisoAudioWorkletHost {
     this.#worker = worker;
     this.#port = worker ?? node.port;
     for (const port of worker === undefined ? [node.port] : [node.port, worker]) {
-      port.onmessage = (event) => this.#receive(event.data);
+      const peer = port === worker ? PEER_WORKER : PEER_WORKLET;
+      port.onmessage = (event) => this.#receive(event.data, peer);
       port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()), FAIL_CHANNEL);
     }
     if (worker !== undefined) {
@@ -575,11 +582,15 @@ class MisoAudioWorkletHost {
       };
     }
     // A user-agent/processor crash cannot return storage already transferred out of this realm.
-    this.node.onprocessorerror = () => this.#fail(webError(255, this.#oldestRequestId()), FAIL_CHANNEL);
+    // Issue #2317: the processor threw out of its constructor or `process()` and renders no more,
+    // so it needs no `miso.fail.v1`.
+    this.node.onprocessorerror = () => {
+      this.#fail(webError(255, this.#oldestRequestId()), FAIL_CHANNEL, PEER_WORKLET);
+    };
     // In `worker` mode the control Worker runs its own service tick (#1332 S7).
     if (worker === undefined) this.#startServiceTick();
     // What the Worker posted, or how it failed, before this host took it over (#1332 S7).
-    for (const message of early?.messages ?? []) this.#receive(message);
+    for (const message of early?.messages ?? []) this.#receive(message, PEER_WORKER);
     if (early?.failed === "error") this.#failWorker();
     else if (early?.failed === "messageerror") {
       this.#fail(webError(255, this.#oldestRequestId()), FAIL_CHANNEL);
@@ -660,7 +671,9 @@ class MisoAudioWorkletHost {
     }
   }
 
-  #receive(message) {
+  /// `peer` sent the message (`PEER_WORKER` or `PEER_WORKLET`). A well-formed typed error it posts
+  /// is a failure it recorded itself, so it needs no `miso.fail.v1` for it (issue #2317).
+  #receive(message, peer) {
     // Issue #137 D2/D3: meter and telemetry frames are unsolicited -- they answer a lease, not a
     // request -- so they are dispatched before the correlation lookup and never reach it. A frame
     // whose shape is wrong is a hard failure exactly like a malformed acknowledgement: a console
@@ -800,7 +813,7 @@ class MisoAudioWorkletHost {
     if (message?.tag === "miso.error.v1" && this.#worker !== undefined && message.requestId === 0
         && hasExactFields(message, ["tag", "requestId", "result"])
         && validResult(message.result) && message.result !== RESULT_OK) {
-      this.#fail(Object.freeze(message));
+      this.#fail(Object.freeze(message), null, peer);
       return;
     }
     if (message?.tag === "miso.error.v1" && hasExactFields(message, errorFields)) {
@@ -809,7 +822,7 @@ class MisoAudioWorkletHost {
         : message.planes === undefined;
       if (validRequestId(message.requestId) && validResult(message.result)
           && pending !== null && validPlanes) {
-        this.#fail(Object.freeze(message), pending);
+        this.#fail(Object.freeze(message), pending, peer);
       } else {
         this.#fail(webError(255, pending?.requestId ?? this.#oldestRequestId()), pending);
       }
@@ -985,18 +998,35 @@ class MisoAudioWorkletHost {
   /// frame). Only a message failure leaves the peer answering in arrival order, so a dispose
   /// already sent survives it, unless that message was the dispose's own reply; the dispose is
   /// then settled by its reply, or by its `DISPOSE_TIMEOUT_MS` bound.
-  #fail(error, source = null) {
+  ///
+  /// Issue #2317: the failure also reaches each peer that is still alive and does not know of it,
+  /// as `miso.fail.v1 { result }` (the sticky code; no request ID, no reply). `aware` is the peer
+  /// that needs none: it posted this failure itself, typed, or its processor is gone
+  /// (`processorerror`). The control Worker owns the session's lifecycle word while it lives
+  /// (#2267), so it is the one peer told while it lives, on the first entry into `failed`. After
+  /// that it knows: it was told, it reported the failure, or it is gone. The worklet is told once
+  /// no live Worker will tell it: in `single` mode on the first entry, in `worker` mode when the
+  /// Worker is first found gone (its death may come before it handled the page's post).
+  #fail(error, source = null, aware = null) {
     const phase = this.#phase;
     if (phase.kind === "disposed") return;
     const prior = this.#failure();
     // `prior === null` is the host's one entry into `failed`; no other site makes it.
+    const workerGone = prior?.workerGone === true || source === FAIL_WORKER_GONE;
+    const tellWorker = prior === null && this.#worker !== undefined && !workerGone
+      && aware !== PEER_WORKER;
+    const tellWorklet = prior?.workletKnows !== true && aware !== PEER_WORKLET
+      && (this.#worker === undefined || workerGone);
     const failure = Object.freeze({
       kind: "failed",
       error: prior?.error ?? error,
-      workerGone: prior?.workerGone === true || source === FAIL_WORKER_GONE,
+      workerGone,
+      workletKnows: prior?.workletKnows === true || aware === PEER_WORKLET || tellWorklet,
     });
     this.#phase = phase.kind === "disposing" ? Object.freeze({ ...phase, failure }) : failure;
     this.#stopServiceTick();
+    if (tellWorker) this.#tell(this.#worker, failure.error.result);
+    if (tellWorklet) this.#tell(this.#renderPort, failure.error.result);
     const replyDue = source !== FAIL_CHANNEL && source !== FAIL_WORKER_GONE
       && source?.response !== "dispose";
     const unsettled = [...this.#pending.values()];
@@ -1010,6 +1040,16 @@ class MisoAudioWorkletHost {
       else pending.reject(error);
     }
     follow?.reject(error);
+  }
+
+  /// Issue #2317: post a peer the host's failure. A channel that cannot carry it is a peer that
+  /// cannot be told; the host's failure stands either way.
+  #tell(port, result) {
+    try {
+      port.postMessage({ tag: "miso.fail.v1", result });
+    } catch (_) {
+      // Nothing more can reach that peer.
+    }
   }
 
   // The per-kind bound. `true` means the request has nowhere to go and is refused locally, before

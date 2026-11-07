@@ -15,8 +15,8 @@ use std::alloc::System;
 use std::sync::{Barrier, Mutex};
 
 use host_web::{
-    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_WRONG_STATE, RenderLockedAllocator, Reservation,
-    STATE_READY, native_staging,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_LIFECYCLE, RESULT_WRONG_STATE,
+    RenderLockedAllocator, Reservation, STATE_READY, native_staging,
 };
 use protocol::{
     CommandPayload, DecodeScratch, DecodedEventPayload, DecodedSuccessResponsePayload,
@@ -27,8 +27,8 @@ use protocol::{
 mod handoff;
 
 use handoff::{
-    AbortOnPanic, FED_BLOCKS, QUANTUM_FRAMES, SOURCE_ID, TLS_ALIGN, TLS_SIZE, boot, options,
-    render_blocks,
+    AbortOnPanic, FED_BLOCKS, FIXTURE, QUANTUM_FRAMES, SOURCE_ID, TLS_ALIGN, TLS_SIZE, boot,
+    options, render_blocks,
 };
 
 #[global_allocator]
@@ -37,7 +37,7 @@ static ALLOCATOR: RenderLockedAllocator<System> = RenderLockedAllocator(System);
 /// The tests share the handoff registry's four entries, so they take turns.
 static TURN: Mutex<()> = Mutex::new(());
 // A process holds at most four instance reservations (`handoff::RESERVATIONS`, never freed): this
-// binary's tests reserve two; a test that reserves goes in a binary with room
+// binary's tests reserve three; a test that reserves goes in a binary with room
 // (`worker_handoff_canary.rs` holds two more).
 
 fn frame(request: u64, payload: CommandPayload<'_>) -> Vec<u8> {
@@ -341,16 +341,6 @@ fn a_render_half_renders_on_another_instance_without_allocating_and_comes_back()
             *token.lock().expect("token") = released;
             step.wait(); // A
             step.wait(); // B
-            let record = reservation
-                .lock()
-                .expect("reservation")
-                .expect("reserved")
-                .record;
-            assert_eq!(
-                native_staging::instance_bind(record),
-                RESULT_INVALID_ARGUMENT,
-                "a second instance cannot bind a stack another instance runs on"
-            );
             assert_eq!(host_web::miso_engine_web_v1_service(handle), RESULT_OK);
             spectrum_arm(handle, 2);
             step.wait(); // C
@@ -743,6 +733,74 @@ fn a_release_into_a_full_registry_keeps_the_half() {
         );
         done.wait();
         assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+    });
+}
+
+/// #2332: an instance is the control instance or a render-only one, never both. An instance that
+/// holds a session refuses to bind a reservation, and a bound instance refuses to boot a host.
+/// A refused bind binds nothing, so the reservation is still free for the instance that binds it,
+/// and no third instance can bind it after that (#1332 S6, the check moved here from the
+/// round-trip test, whose Worker holds a host and so is now refused before it).
+///
+/// Test value: red if an instance holding a booted host binds (that host's dispose would then
+/// free on a bound, render-only instance, and an orphan adopted there could never be freed), or if
+/// a bound instance boots a host (it compiles and allocates on the render thread's instance, and
+/// its dispose frees there). No existing test binds an instance that holds a session or boots
+/// one that is bound.
+#[test]
+fn an_instance_is_the_control_instance_or_a_render_only_one_never_both() {
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reservation = native_staging::instance_reserve(TLS_SIZE, TLS_ALIGN).expect("a reservation");
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _guard = AbortOnPanic;
+                let handle = boot();
+                assert_eq!(
+                    native_staging::instance_bind(reservation.record),
+                    RESULT_WRONG_STATE,
+                    "an instance that holds a host stays the control instance"
+                );
+                assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+            })
+            .join()
+            .expect("the control instance");
+        scope
+            .spawn(|| {
+                let _guard = AbortOnPanic;
+                assert_eq!(
+                    native_staging::instance_bind(reservation.record),
+                    RESULT_OK,
+                    "the refused bind left the reservation unbound"
+                );
+                let length = native_staging::boot(options(), FIXTURE.as_bytes())
+                    .expect("the fixture stages");
+                assert_eq!(
+                    host_web::miso_engine_web_v1_boot(length),
+                    0,
+                    "a bound instance boots no host"
+                );
+                assert_eq!(
+                    host_web::miso_engine_web_v1_boot_result(),
+                    RESULT_REFUSED_LIFECYCLE,
+                    "the boot is refused as a lifecycle refusal"
+                );
+            })
+            .join()
+            .expect("the render-only instance");
+        scope
+            .spawn(|| {
+                let _guard = AbortOnPanic;
+                assert_eq!(
+                    native_staging::instance_bind(reservation.record),
+                    RESULT_INVALID_ARGUMENT,
+                    "a second instance cannot bind a stack another instance runs on"
+                );
+            })
+            .join()
+            .expect("a third instance");
     });
 }
 

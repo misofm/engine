@@ -89,7 +89,7 @@ fn bank<L: Lane, const W: usize>(
         automation_capacity: metadata.automation_capacity,
         state_sizes: metadata.state_sizes,
         instance: Instance::new(left, right, metadata).expect("prepares"),
-        silent_fixed_point: false,
+        silent: SilentClaim::new(),
     }
 }
 
@@ -218,7 +218,7 @@ impl<L: Lane, const W: usize> rest_probe::Probe for Probe<L, W> {
                 automation_capacity: self.bank.automation_capacity,
                 state_sizes: self.bank.state_sizes,
                 instance: self.bank.instance.clone(),
-                silent_fixed_point: false,
+                silent: SilentClaim::new(),
             },
             first_sample: self.first_sample,
             automation: None,
@@ -268,7 +268,7 @@ fn a_lane_reported_at_rest_stays_at_rest_through_silence() {
 /// included) and the silent-fixed-point flag.
 fn bank_words<L: Lane, const W: usize>(bank: &PreparedMultibandCompressorBank<L, W>) -> Vec<u8> {
     let sizes = bank.state_sizes;
-    let mut out = vec![u8::from(bank.silent_fixed_point)];
+    let mut out = vec![u8::from(bank.silent.proved())];
     for track in 0..W {
         let mut common = vec![0; sizes.common_bytes as usize];
         let mut left = vec![0; sizes.left_bytes as usize];
@@ -294,7 +294,7 @@ fn copy<L: Lane, const W: usize>(
         automation_capacity: bank.automation_capacity,
         state_sizes: bank.state_sizes,
         instance: bank.instance.clone(),
-        silent_fixed_point: bank.silent_fixed_point,
+        silent: bank.silent,
     }
 }
 
@@ -316,7 +316,7 @@ fn zero_blocks_match<L: Lane, const W: usize>(
         let frames = draw.pick(&[1, 17, 32, 48, 100, 128]);
         left.fill(0.0);
         right.fill(0.0);
-        kernel.silent_fixed_point = false;
+        kernel.silent.withdraw();
         process(kernel, &mut left, &mut right, frames, 0, &[], &offsets);
         left.fill(0.0);
         right.fill(0.0);
@@ -372,7 +372,7 @@ fn clocks_advance_as_a_zero_block<L: Lane, const W: usize>() {
                     side.silence = set_lane_value(side.silence, track, run);
                 }
             }
-            bank.silent_fixed_point = false;
+            bank.silent.withdraw();
         }
         zero_blocks_match(&mut draw, &mut banks, 24, &format!("{label}, differing"));
     }
@@ -403,4 +403,218 @@ fn tail_bound(rate: u32) -> effect_contract::RegisteredTailBound {
             EffectQuality::Normal,
         )
     })
+}
+
+/// Whether `bank`'s silent claim stands.
+#[cfg(debug_assertions)]
+fn claim_stands<L: Lane, const W: usize>(bank: &PreparedMultibandCompressorBank<L, W>) -> bool {
+    bank.silent.proved()
+}
+
+/// A bank of random tracks, prepared at rest, whose first `+0.0` block earns its silent claim.
+#[cfg(debug_assertions)]
+fn resting_bank<L: Lane, const W: usize>() -> PreparedMultibandCompressorBank<L, W> {
+    let mut draw = Draw::new(0x2320_0003 ^ W as u64);
+    let mut bank = bank::<L, W>(&mut draw, 48_000, LinkMode::Maximum, false);
+    let frames = QUANTUM as usize;
+    let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
+    process(
+        &mut bank,
+        &mut left,
+        &mut right,
+        frames,
+        0,
+        &[],
+        &vec![0; W + 1],
+    );
+    assert!(claim_stands(&bank), "W{W}: the claim stands");
+    bank
+}
+
+/// Renders one `+0.0` block through the dual (`mono == false`) or the collapsed body and requires
+/// it to panic with the claim-implies-scan assertion.
+#[cfg(debug_assertions)]
+fn refuses_stale_claim<L: Lane, const W: usize>(
+    arm: &str,
+    mut bank: PreparedMultibandCompressorBank<L, W>,
+    mono: bool,
+) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let frames = QUANTUM as usize;
+    let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
+    let offsets = vec![0_u32; W + 1];
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        if mono {
+            let width = bank.width;
+            let block = EffectBankProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                QUANTUM,
+                width,
+                0,
+                &[],
+                &offsets,
+                QUANTUM,
+            )
+            .expect("a bank block");
+            bank.process_bank_mono(block);
+        } else {
+            process(&mut bank, &mut left, &mut right, frames, 0, &[], &offsets);
+        }
+    }));
+    let Err(payload) = outcome else {
+        panic!("W{W} {arm}: a stale claim was believed");
+    };
+    let message = payload
+        .downcast::<String>()
+        .map(|message| *message)
+        .unwrap_or_default();
+    assert!(
+        message.contains("a standing silent claim the rest scan refutes"),
+        "W{W} {arm}: {message}"
+    );
+}
+
+/// **A claim the rest scan refutes is caught where it is trusted** (issue #2320).
+///
+/// Each arm brings a bank to rest with its silent claim standing, then moves one crossover
+/// integrator of track 0 off rest *without* withdrawing the claim, as a future between-block
+/// writer that forgot to withdraw it would, and renders a `+0.0` block: the dual body with the
+/// word on the right side, the collapsed body with it on the left. The quiet test reads no
+/// integrator, so the fast path would cut the track's tail and move bits; in debug builds each
+/// body must refuse with the claim-implies-scan assertion instead.
+///
+/// Test value: deleting or weakening the assertion on either body (for instance scanning only the
+/// left side on the dual one) turns this red; every other test that plants an off-rest word
+/// withdraws the claim by hand, so none exercises a stale claim.
+#[cfg(debug_assertions)]
+#[test]
+fn a_stale_silent_claim_is_refused_where_it_is_trusted() {
+    lane::each_vector_lane!(|L, W| {
+        let mut bank = resting_bank::<L, W>();
+        let side = &mut bank.instance.sides[1].filter.a;
+        side.ic1 = set_lane_value(side.ic1, 0, 0.5);
+        refuses_stale_claim("dual fast path", bank, false);
+
+        let mut bank = resting_bank::<L, W>();
+        let side = &mut bank.instance.sides[0].filter.a;
+        side.ic1 = set_lane_value(side.ic1, 0, 0.5);
+        refuses_stale_claim("collapsed fast path", bank, true);
+    });
+}
+
+/// Restores lane 0 of `into` from `from`'s lane 0 payload through the contract's payload calls.
+#[cfg(debug_assertions)]
+fn restore_lane_zero(
+    into: &mut dyn PreparedNativeEffectBank,
+    from: &dyn PreparedNativeEffectBank,
+    sizes: StatePayloadSizes,
+    version: u32,
+) {
+    let total = sizes.total().expect("sizes") as usize;
+    let mut payload = vec![0_u8; total];
+    let (common, rest) = payload.split_at_mut(sizes.common_bytes as usize);
+    let (left, right) = rest.split_at_mut(sizes.left_bytes as usize);
+    from.snapshot_track_state_payload(
+        0,
+        StatePayloadOutput::new(common, left, right, sizes).expect("output"),
+    )
+    .expect("snapshot");
+    let (common, rest) = payload.split_at(sizes.common_bytes as usize);
+    let (left, right) = rest.split_at(sizes.left_bytes as usize);
+    into.restore_track_state_payload(
+        0,
+        version,
+        StatePayloadInput::new(common, left, right, sizes).expect("input"),
+    )
+    .expect("restore");
+}
+
+/// **Every between-block writer that brings an off-rest lane into a resting bank withdraws its
+/// claim** (issue #2320). Each row takes a fresh resting bank whose claim stands and a donor whose
+/// track 0 holds one crossover integrator at `0.5`, and offers the donor's track to the bank's
+/// track 0 through one writer: a payload restore, the direct `copy_lane_from`, and a cross-bank
+/// `swap_bank_lanes` with the bank first and with the bank as the peer. The multiband implements
+/// no direct copy and declares no lane defaults, so those three refuse; a row that refuses must
+/// leave the bank at rest with its claim, a row that writes must leave the track off rest and the
+/// claim withdrawn. Either way a `+0.0` block then renders (in debug builds a stale claim would
+/// trip the fast path's claim-implies-scan assertion).
+///
+/// Test value: deleting the withdrawal from `restore_track_state_payload` turns this red (#2320
+/// mutation M12), which no other test catches, and so does a future copy or swap that writes the
+/// track without withdrawing; a stale claim there would cut the moved track's tail.
+#[cfg(debug_assertions)]
+#[test]
+fn every_writer_that_moves_a_lane_off_rest_withdraws_the_claim() {
+    type Bank<L, const W: usize> = PreparedMultibandCompressorBank<L, W>;
+    type Writer<L, const W: usize> = fn(&mut Bank<L, W>, &mut Bank<L, W>) -> bool;
+    fn rows<L: Lane, const W: usize>() -> [(&'static str, Writer<L, W>); 4] {
+        fn swap<L: Lane, const W: usize>(first: &mut Bank<L, W>, second: &mut Bank<L, W>) -> bool {
+            let sizes = first.state_sizes;
+            let mut scratch = vec![0_u8; sizes.total().expect("sizes") as usize * 2];
+            let second: &mut dyn PreparedNativeEffectBank = second;
+            effect_contract::swap_bank_lanes(
+                first,
+                0,
+                Some(second),
+                0,
+                MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version,
+                sizes,
+                &mut scratch,
+            )
+            .is_ok()
+        }
+        [
+            ("restore", |bank, donor| {
+                let sizes = bank.state_sizes;
+                let version = MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version;
+                restore_lane_zero(bank, &*donor, sizes, version);
+                true
+            }),
+            ("copy_lane_from", |bank, donor| {
+                bank.copy_lane_from(0, &*donor, 0).is_some()
+            }),
+            ("swap_bank_lanes", |bank, donor| swap(bank, donor)),
+            ("swap_bank_lanes as the peer", |bank, donor| {
+                swap(donor, bank)
+            }),
+        ]
+    }
+    lane::each_vector_lane!(|L, W| {
+        for (row, write) in rows::<L, W>() {
+            let mut donor = resting_bank::<L, W>();
+            for side in &mut donor.instance.sides {
+                side.filter.a.ic1 = set_lane_value(side.filter.a.ic1, 0, 0.5);
+            }
+            let mut bank = resting_bank::<L, W>();
+            let wrote = write(&mut bank, &mut donor);
+            assert_eq!(
+                wrote,
+                row == "restore",
+                "W{W} {row}: which writers the multiband has"
+            );
+            let at_rest = PreparedNativeEffectBank::lanes_at_rest(&bank) & 1 != 0;
+            assert_eq!(
+                at_rest, !wrote,
+                "W{W} {row}: the track is off rest iff it was written"
+            );
+            assert_eq!(
+                claim_stands(&bank),
+                !wrote,
+                "W{W} {row}: a write withdrew the claim, a refusal kept it"
+            );
+            let frames = QUANTUM as usize;
+            let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
+            process(
+                &mut bank,
+                &mut left,
+                &mut right,
+                frames,
+                0,
+                &[],
+                &[0; W + 1],
+            );
+        }
+    });
 }

@@ -343,6 +343,21 @@ impl PreparedNativeEffectBank for StripBank {
         Ok(())
     }
 
+    /// The restore above, which refuses only a lane out of range.
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        _state_layout_version: u32,
+        _input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.lanes
+            .get(track_index as usize)
+            .map(|_| ())
+            .ok_or(StatePayloadError {
+                code: "effect.state.lane",
+            })
+    }
+
     fn lane_default_bytes(&self) -> Option<usize> {
         Some(8)
     }

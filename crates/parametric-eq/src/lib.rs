@@ -56,6 +56,7 @@ use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
 use effect_runtime::ramp::LinearRamp;
+use effect_runtime::silent::SilentClaim;
 use effect_runtime::state_payload as payload;
 use effect_runtime::svf::{NORM_TOLERANCE, RAMP_PATH_NORM_TOLERANCE, transition_norm};
 use engine::{SampleRateHz, is_launch_sample_rate};
@@ -3424,7 +3425,9 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// lane, the two writes that could move it off `+0.0` at rest.
     active: [bool; W],
     /// Issue #163 phase 4 item 1: every lane of this bank, padded lanes included, is at its exact
-    /// rest ([`lanes_at_rest`](PreparedNativeEffectBank::lanes_at_rest), issue #1745 D2).
+    /// rest ([`lanes_at_rest`](PreparedNativeEffectBank::lanes_at_rest), issue #1745 D2): the
+    /// [`SilentClaim`] (#2320), trusted by both fast paths and checked against the scan there in
+    /// debug builds.
     ///
     /// Set only by [`render`](Self::render) and [`render_mono`](Self::render_mono), at the end of
     /// a block whose input was exactly `+0.0` with no ramp in flight (`quiet`), and only when the
@@ -3438,7 +3441,7 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// ([`Channel::rest_lanes`] states the proof), and the state is then at rest again. So on the
     /// next `quiet` block writing nothing and advancing the clocks is bit-identical to running the
     /// kernel.
-    silent_fixed_point: bool,
+    silent: SilentClaim,
     /// Whether a collapsed block ([`render_mono`](Self::render_mono)) has rendered since the last
     /// disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894). While
     /// it is set the right channel is frozen and stale, so the rest mask reads the left channel
@@ -3531,7 +3534,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             return Err(EffectTargetError::Capacity);
         }
         let (section, channel, band, words) = control::decode_prepared_target(target)?;
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         match channel {
             ParameterChannel::Left => self.left.apply_prepared_target(lane, section, band, words),
             ParameterChannel::Right => self.right.apply_prepared_target(lane, section, band, words),
@@ -3586,7 +3589,9 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         let quiet = stationary
             && block_is_positive_zero(&left[..words])
             && block_is_positive_zero(&right[..words]);
-        if quiet && self.silent_fixed_point {
+        // #2320: the claim is trusted here, so a stale one is caught here.
+        let every = all_lanes::<W>();
+        if quiet && self.silent.trusted(|| self.lanes_at_rest(), every) {
             // The buffers already hold exactly `+0.0`, which is exactly what the six sections
             // would have written; every lane is at rest (`Channel::rest_lanes`), so the kernel
             // would leave every state word but the clocks where it is. Writing nothing is
@@ -3663,7 +3668,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         }
         // Earn (or lose) the claim (issue #1745 D2): a `quiet` block, after which every lane of
         // both channels, padded lanes included, is at rest.
-        self.silent_fixed_point = quiet && self.lanes_at_rest() == all_lanes::<W>();
+        self.silent = SilentClaim::settled(quiet, || self.lanes_at_rest(), every);
         failures
     }
 
@@ -3682,7 +3687,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         let words = frames * W;
         let stationary = self.left.no_ramp_in_flight();
         let quiet = stationary && block_is_positive_zero(&left[..words]);
-        if quiet && self.silent_fixed_point {
+        let every = all_lanes::<W>();
+        if quiet && self.silent.trusted(|| self.lanes_at_rest(), every) {
             silence_advance(&mut self.left.silence, frames);
             return failures;
         }
@@ -3707,7 +3713,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         }
         // The collapsed body's claim reads the left channel alone: the right one is frozen at the
         // collapse, and the counterfactual right channel is the left one.
-        self.silent_fixed_point = quiet && self.lanes_at_rest() == all_lanes::<W>();
+        self.silent = SilentClaim::settled(quiet, || self.lanes_at_rest(), every);
         failures
     }
 
@@ -3754,7 +3760,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     fn reset_state(&mut self, kind: ResetKind) {
         // #163 phase 4 item 1: a reset moves state, and `FullToDefaults` moves coefficients too.
         // The flag is a claim about a block that has now been overwritten, so it is withdrawn.
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         match kind {
             ResetKind::FullToDefaults => {
                 self.reset_to_defaults();
@@ -3776,7 +3782,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         if lane >= W {
             return;
         }
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         match kind {
             ResetKind::FullToDefaults => {
                 let [left, right] = self.initial[lane];
@@ -3923,7 +3929,7 @@ fn prepare_width<L: Lane, const W: usize>(
         ),
         active: core::array::from_fn(|lane| active_mask.get(lane).copied().unwrap_or(false)),
         // Nothing has been observed yet, so nothing is claimed.
-        silent_fixed_point: false,
+        silent: SilentClaim::new(),
         collapsed: false,
         rest: [
             vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
@@ -4106,6 +4112,9 @@ fn runtime_state_error(error: payload::StatePayloadError) -> StatePayloadError {
     StatePayloadError { code: error.code }
 }
 
+/// One channel of a decoded payload: every band as it commits, and the silence run.
+type ParsedChannel = ([RestoredBand; EQ_SECTION_COUNT], f32);
+
 /// Reads a whole payload — header, then both lane sections — rejecting before anything is decoded.
 fn read_payload(
     input: StatePayloadInput<'_>,
@@ -4165,19 +4174,25 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         write_payload(output, &left, &right)
     }
 
-    /// Restores one track, all or none across both channels.
-    fn restore_track(
-        &mut self,
+    /// Both channels of a payload for lane `track`, decoded and validated, writing nothing: the
+    /// whole verdict of [`restore_track`](Self::restore_track), as `[(bands, silence); 2]`. Reads
+    /// only the payload, the lane's prepared targets and the rate (issue #2324).
+    fn parse_track(
+        &self,
         track: usize,
         version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
+        input: &StatePayloadInput<'_>,
+    ) -> Result<[ParsedChannel; 2], StatePayloadError> {
         if version != STATE_LAYOUT_VERSION {
             return Err(StatePayloadError {
                 code: payload::STATE_VERSION_CODE,
             });
         }
-        let (left, right) = read_payload(input)?;
+        let (left, right) = read_payload(StatePayloadInput {
+            common: input.common,
+            left: input.left,
+            right: input.right,
+        })?;
         let left_configuration =
             Channel::<L, W>::decode_configuration(&left, &self.initial[track][0])?;
         let right_configuration =
@@ -4190,6 +4205,18 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             Channel::<L, W>::decode_track(&right, &right_configuration, sample_rate)?;
         let left_silence = Channel::<L, W>::decode_silence(&left)?;
         let right_silence = Channel::<L, W>::decode_silence(&right)?;
+        Ok([(decoded_left, left_silence), (decoded_right, right_silence)])
+    }
+
+    /// Restores one track, all or none across both channels.
+    fn restore_track(
+        &mut self,
+        track: usize,
+        version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let [(decoded_left, left_silence), (decoded_right, right_silence)] =
+            self.parse_track(track, version, &input)?;
         self.left.commit_track(track, &decoded_left, left_silence);
         self.right
             .commit_track(track, &decoded_right, right_silence);
@@ -4300,7 +4327,7 @@ const LANE_DEFAULT_BYTES: usize = 2 * EQ_SECTION_COUNT * DEFAULT_WORDS_PER_BAND 
 /// * `targets[l][s]` (`BandTarget`) -- the control-plane band description. The kernel never reads
 ///   it, and it is the design *input*, not the designed word: two different band descriptions
 ///   that design to the same six words are symmetric, and the words are what decides that.
-/// * `silent_fixed_point`, `bypass` -- whole-instance, so they cannot be asymmetric.
+/// * `silent`, `bypass` -- whole-instance, so they cannot be asymmetric.
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     fn designed_channel_symmetry(&self, lane: usize) -> bool {
         channels_symmetric(&self.left, &self.right, lane)
@@ -4371,7 +4398,7 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
         if !block.automation.is_empty() {
-            self.silent_fixed_point = false;
+            self.silent.withdraw();
         }
         // EQ semantic spans are control-plane input. A production owner must lower them to
         // prepared targets before this entry point; never design coefficients on the render
@@ -4412,7 +4439,7 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         // A refusal is a state-preserving no-op, including the fixed-point witness.
         let result = self.restore_track(0, version, input);
         if result.is_ok() {
-            self.silent_fixed_point = false;
+            self.silent.withdraw();
         }
         result
     }
@@ -4476,7 +4503,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
     ///
     /// A prepared bypass renders nothing and advances nothing, so it advances nothing here. A
     /// rendered block after which every lane, padded lanes included, is at rest sets
-    /// `silent_fixed_point`, so a mask that covers the whole bank sets it too. The contract's
+    /// the silent claim, so a mask that covers the whole bank sets it too. The contract's
     /// caller skips a bank whole and always passes that mask; a partial mask, which it never
     /// passes, still advances exactly its own lanes and leaves the flag to the render of the
     /// other lanes. A collapsed bank's render advances only the left counter, and so does this
@@ -4502,9 +4529,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
             silence_advance(&mut advanced, frames as usize);
             channel.silence = L::select(mask, advanced, channel.silence);
         }
-        if bits == bank {
-            self.silent_fixed_point = true;
-        }
+        self.silent.settle_skipped(bits == bank);
     }
 
     fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
@@ -4548,9 +4573,25 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         // A refusal is a state-preserving no-op, including the fixed-point witness.
         let result = self.restore_track(track, version, input);
         if result.is_ok() {
-            self.silent_fixed_point = false;
+            self.silent.withdraw();
         }
         result
+    }
+
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = bank_track_index(track_index, W)?;
+        if !self.active[track] {
+            return Err(StatePayloadError {
+                code: "effect.bank.track",
+            });
+        }
+        self.parse_track(track, version, input)?;
+        Ok(())
     }
 
     fn as_any(&self) -> Option<&dyn core::any::Any> {
@@ -4581,7 +4622,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
             .copy_lane_from(lane, &from.left, from_lane, prepared_left);
         self.right
             .copy_lane_from(lane, &from.right, from_lane, prepared_right);
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         self.debug_assert_designed(lane);
         Some(left == right)
     }
@@ -4642,11 +4683,11 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
                     peer_lane,
                     [own_right, peer_right],
                 );
-                peer.silent_fixed_point = false;
+                peer.silent.withdraw();
                 peer.debug_assert_designed(peer_lane);
             }
         }
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         self.debug_assert_designed(lane);
         if !across {
             self.debug_assert_designed(peer_lane);
@@ -4763,7 +4804,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             return report;
         }
         if !block.automation.is_empty() {
-            self.silent_fixed_point = false;
+            self.silent.withdraw();
         }
         // Issue #1089: a padded lane carries no track, so nothing is charged to it and its entry
         // stays empty, here and after the render (the padding contract's D7 clause).
@@ -7482,7 +7523,7 @@ mod ramping_elision {
                 }
             }
         }
-        out.push(u32::from(eq.silent_fixed_point));
+        out.push(u32::from(eq.silent.proved()));
         out
     }
 

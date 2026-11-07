@@ -732,7 +732,7 @@ fn a_silent_bank_never_skips_a_glide() {
             automation_capacity: metadata.automation_capacity,
             state_sizes: metadata.state_sizes,
             instance,
-            silent_fixed_point: false,
+            silent: SilentClaim::new(),
         };
         let all = all_lanes::<W>();
         let offsets = vec![0_u32; W + 1];
@@ -755,10 +755,7 @@ fn a_silent_bank_never_skips_a_glide() {
         };
         render(&mut bank, 0);
         assert_eq!(bank.lanes_at_rest(), all, "W{W}: every lane at rest");
-        assert!(
-            bank.silent_fixed_point,
-            "W{W}: the quiet blocks are skipped"
-        );
+        assert!(bank.silent.proved(), "W{W}: the quiet blocks are skipped");
         assert!(bank.retarget_link(0, LinkMode::Average, GLIDE), "a glide");
         let words = |bank: &PreparedMultibandCompressorBank<L, W>| {
             let payload = bank_payload(bank, 0, sizes()).expect("snapshot");

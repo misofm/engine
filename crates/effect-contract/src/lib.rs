@@ -2633,6 +2633,34 @@ pub trait PreparedNativeEffectBank: Send {
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError>;
 
+    /// What [`restore_track_state_payload`](Self::restore_track_state_payload) would answer for
+    /// the same arguments, decided without writing anything (issue #2324).
+    ///
+    /// `Ok` exactly when that restore would commit, and otherwise the refusal it would return.
+    /// The verdict reads only `input`, the lane's prepared per-lane defaults and the bank's
+    /// prepared configuration, never its running state, so it stands across every render, reset
+    /// and restore of any lane until the lane's defaults are exchanged
+    /// ([`exchange_lane_defaults`](Self::exchange_lane_defaults)). [`swap_bank_lanes`] relies on
+    /// that: it proves both lanes' own payloads restore before its first write, so the undo it
+    /// may need is known to take.
+    ///
+    /// The default declines with `effect.state.unchecked`, so a bank that has not stated its
+    /// restore's verdict cannot swap lanes. A bank that declares its lane defaults
+    /// ([`lane_default_bytes`](Self::lane_default_bytes)) must implement it, and every launch
+    /// effect's bank does. Render-safe, like the restore it answers for: allocation-free,
+    /// lock-free and bounded by the prepared state size.
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let _ = (track_index, state_layout_version, input);
+        Err(StatePayloadError {
+            code: "effect.state.unchecked",
+        })
+    }
+
     /// This bank as [`core::any::Any`], so that [`copy_lane_from`](Self::copy_lane_from) can find
     /// a predecessor of its own type (issue #2229). The default is `None`: a bank that does not
     /// name its type has no direct copy, and the carry takes the payload path.
@@ -3009,7 +3037,10 @@ pub trait PreparedNativeEffectBank: Send {
     ///
     /// The default `None` declines: `swap_bank_lanes` refuses a bank that has not declared its
     /// defaults, because a swap that left them behind would re-seed a moved strip from another
-    /// strip's values. Off the render thread, or at a block boundary; constant time.
+    /// strip's values. A bank that declares them also implements
+    /// [`validate_track_state_payload`](Self::validate_track_state_payload), which the swap reads
+    /// before its first write (issue #2324). Off the render thread, or at a block boundary;
+    /// constant time.
     fn lane_default_bytes(&self) -> Option<usize> {
         None
     }

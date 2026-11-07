@@ -1591,12 +1591,14 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         })
     }
 
-    fn restore_lane(
-        &mut self,
-        lane: usize,
+    /// Both channel sections of a payload, parsed and validated, writing nothing: the whole
+    /// verdict of [`restore_lane`](Self::restore_lane), which reads only the payload and the rate
+    /// (issue #2324).
+    fn parse_payload(
+        &self,
         state_layout_version: u32,
         input: &StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
+    ) -> Result<[LaneRestore; 2], StatePayloadError> {
         if state_layout_version != STATE_LAYOUT_VERSION {
             return Err(state_error("effect.state.version"));
         }
@@ -1608,6 +1610,16 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         if parsed[0].mode != parsed[1].mode {
             return Err(state_error("effect.state.link"));
         }
+        Ok(parsed)
+    }
+
+    fn restore_lane(
+        &mut self,
+        lane: usize,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let parsed = self.parse_payload(state_layout_version, input)?;
         // Issue #1969 (#1370 D6): the weights land only under the mode they glide to. A payload
         // taken under another mode (the plan-swap carry into a successor prepared with a new
         // mode) leaves the lane's own mode at rest, as before the glide existed.
@@ -1875,6 +1887,17 @@ macro_rules! bank_impl {
             ) -> Result<(), StatePayloadError> {
                 let track = checked_track(track_index, <$lane as Lane>::WIDTH)?;
                 self.restore_lane(track, state_layout_version, &input)
+            }
+
+            fn validate_track_state_payload(
+                &self,
+                track_index: u32,
+                state_layout_version: u32,
+                input: &StatePayloadInput<'_>,
+            ) -> Result<(), StatePayloadError> {
+                checked_track(track_index, <$lane as Lane>::WIDTH)?;
+                self.parse_payload(state_layout_version, input)?;
+                Ok(())
             }
             // REALTIME_POLICY_END
 

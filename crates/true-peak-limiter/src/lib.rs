@@ -3991,23 +3991,19 @@ mod silent {
     /// that the windows rest **uniform**, so a read from any phase returns the value a slow path
     /// would have read. The fixed point is a property of this limiter's state, including its
     /// phase.
+    ///
+    /// The bypass is fixed at preparation (`LimiterCoef::bypass` has no writer), so a claim never
+    /// spans two arms of the output `select`, and the claim records no bypass (#2320).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) struct SilentClaim {
         /// The last settled block proved the fixed point.
         proved: bool,
-        /// The bypass flag in force when the claim was last settled, earned or refused. Bypass
-        /// selects a different arm of the output `select`, so a claim earned on one side of it
-        /// says nothing about the other.
-        bypass: bool,
     }
 
     impl SilentClaim {
-        /// No claim, at the prepared bypass: a claim is earned by observation, never assumed.
-        pub(super) const fn new(bypass: bool) -> Self {
-            Self {
-                proved: false,
-                bypass,
-            }
+        /// No claim: a claim is earned by observation, never assumed.
+        pub(super) const fn new() -> Self {
+            Self { proved: false }
         }
 
         /// Withdraws the claim. Always sound: the claim only ever buys speed.
@@ -4015,41 +4011,21 @@ mod silent {
             self.proved = false;
         }
 
-        /// Whether the claim was last settled under `bypass`: the admission test's bypass leg.
-        pub(super) const fn bypass_held(self, bypass: bool) -> bool {
-            self.bypass == bypass
-        }
-
-        /// Whether the claim stands under `bypass`: proved, and settled under that bypass.
-        pub(super) const fn proved_under(self, bypass: bool) -> bool {
-            self.proved && self.bypass_held(bypass)
-        }
-
-        /// Settles the claim at the end of a rendered block of `bypass`: earned iff the block was
-        /// quiet and the rest scan answered every lane (`rest == every`).
-        pub(super) const fn settle(&mut self, quiet: bool, rest: u32, every: u32, bypass: bool) {
-            self.proved = quiet && rest == every;
-            self.bypass = bypass;
-        }
-
-        /// Settles the claim at a skipped block of `bypass` (issue #1747): earned iff the skip was
-        /// whole-bank and the claim was last settled under the same bypass, as the rendered block
-        /// would earn it. A partial skip withdraws it.
-        pub(super) const fn settle_skipped(&mut self, whole: bool, bypass: bool) {
-            self.proved = whole && self.bypass_held(bypass);
-            self.bypass = bypass;
-        }
-
-        /// Whether the claim was last proved, whatever the bypass, for the gates.
-        #[cfg(test)]
+        /// Whether the claim stands.
         pub(super) const fn proved(self) -> bool {
             self.proved
         }
 
-        /// The bypass the claim was last settled under, for the gates.
-        #[cfg(test)]
-        pub(super) const fn bypass(self) -> bool {
-            self.bypass
+        /// Settles the claim at the end of a rendered block: earned iff the block was quiet and the
+        /// rest scan answered every lane (`rest == every`).
+        pub(super) const fn settle(&mut self, quiet: bool, rest: u32, every: u32) {
+            self.proved = quiet && rest == every;
+        }
+
+        /// Settles the claim at a skipped block (issue #1747): earned iff the skip was whole-bank,
+        /// as the rendered block would earn it. A partial skip withdraws it.
+        pub(super) const fn settle_skipped(&mut self, whole: bool) {
+            self.proved = whole;
         }
     }
 }
@@ -4294,8 +4270,8 @@ struct LimiterCore<L: Lane> {
     /// automation to a padded lane and refuses a padded lane's state payload, so nothing is charged
     /// to one. The kernel never reads it: a padded lane is rendered exactly as a member is.
     active: u32,
-    /// Issue #182 S2: whether the previous block proved this instance is at a silent fixed point,
-    /// and under which bypass ([`SilentClaim`], #2264).
+    /// Issue #182 S2: whether the previous block proved this instance is at a silent fixed point
+    /// ([`SilentClaim`], #2264).
     silent: SilentClaim,
     /// Whether a collapsed block ([`process_block_mono`](Self::process_block_mono)) has run since
     /// the last disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it
@@ -4338,7 +4314,7 @@ impl<L: Lane> LimiterCore<L> {
                 cursors: Cursors::default(),
                 report: NonFiniteReport::new(),
                 active: every_lane(width),
-                silent: SilentClaim::new(metadata.bypass),
+                silent: SilentClaim::new(),
                 collapsed: false,
                 link,
                 #[cfg(test)]
@@ -4590,7 +4566,7 @@ impl<L: Lane> LimiterCore<L> {
         let glide = self.glide_frames(frames, false);
         // Issue #182 S2, the phase-4 admission test ([`block_is_quiet`](Self::block_is_quiet)).
         let quiet = self.block_is_quiet(glide, &left_io[..words], Some(&right_io[..words]));
-        if quiet && self.silent.proved_under(self.coefficients.bypass) {
+        if quiet && self.silent.proved() {
             // #2264: the claim is trusted here, so a stale one is caught here.
             debug_assert_eq!(
                 self.left.lanes_at_silent_rest::<L>() & self.right.lanes_at_silent_rest::<L>(),
@@ -4683,12 +4659,8 @@ impl<L: Lane> LimiterCore<L> {
         // asymptotically, which is the difference between this kernel and the compressor's
         // `gain_reduction_db`. Without both, the claim would be refused forever and the fast path
         // would be dead code.
-        self.silent.settle(
-            quiet,
-            self.scan_lanes_at_rest(),
-            every_lane(L::WIDTH),
-            self.coefficients.bypass,
-        );
+        self.silent
+            .settle(quiet, self.scan_lanes_at_rest(), every_lane(L::WIDTH));
         // The §4.4 boundary check: one vector scan per channel, exactly `effect-runtime`'s
         // `finish_block` test. The two channels fail together per lane, as they do there, because
         // a lane's pair shares its reset.
@@ -4824,7 +4796,7 @@ impl<L: Lane> LimiterCore<L> {
         let words = frames * L::WIDTH;
         let glide = self.glide_frames(frames, true);
         let quiet = self.block_is_quiet(glide, &left_io[..words], None);
-        if quiet && self.silent.proved_under(self.coefficients.bypass) {
+        if quiet && self.silent.proved() {
             // #2264: as on the dual body, over the one channel that advances.
             debug_assert_eq!(
                 self.left.lanes_at_silent_rest::<L>(),
@@ -4869,7 +4841,6 @@ impl<L: Lane> LimiterCore<L> {
             quiet,
             self.left.lanes_at_silent_rest::<L>(),
             every_lane(L::WIDTH),
-            self.coefficients.bypass,
         );
         if check_block::<L>(left_io) {
             return [0, 0];
@@ -4930,11 +4901,11 @@ impl<L: Lane> LimiterCore<L> {
     ///
     /// # The standing claim (issue #1107)
     ///
-    /// When the #182 S2 claim stands -- [`SilentClaim`], earned under the bypass now in force,
-    /// with every ramp of both channels stationary and no link glide in flight (the left
-    /// channel's alone while collapsed) -- every lane is at rest, and the scan is not run. The
-    /// scan reads every ring word of every lane (about 3 us per bank per call on the 64-track
-    /// console at 48 kHz), which a whole-bank skip would otherwise pay on every silent block.
+    /// When the #182 S2 claim stands -- [`SilentClaim`], with every ramp of both channels
+    /// stationary and no link glide in flight (the left channel's alone while collapsed) -- every
+    /// lane is at rest, and the scan is not run. The scan reads every ring word of every lane
+    /// (about 3 us per bank per call on the 64-track console at 48 kHz), which a whole-bank skip
+    /// would otherwise pay on every silent block.
     ///
     /// The claim is the scan's own answer, taken after the last rendered or skipped block
     /// ([`process_block`](Self::process_block), [`advance_clocks`](Self::advance_clocks)), and
@@ -4958,11 +4929,11 @@ impl<L: Lane> LimiterCore<L> {
         self.scan_lanes_at_rest()
     }
 
-    /// The #182 S2 claim, with the fast path's own state legs (the input leg excluded): earned
-    /// under the bypass in force and every ramp stationary, the left channel's alone while
-    /// [`collapsed`](Self::collapsed), as the collapsed fast path reads them.
+    /// The #182 S2 claim, with the fast path's own state legs (the input leg excluded): every ramp
+    /// stationary, the left channel's alone while [`collapsed`](Self::collapsed), as the
+    /// collapsed fast path reads them.
     fn silent_claim_stands(&self) -> bool {
-        self.silent.proved_under(self.coefficients.bypass)
+        self.silent.proved()
             && self.ramps_settled(self.collapsed)
             && self.left.glide_frames() == 0
             && (self.collapsed || self.right.glide_frames() == 0)
@@ -4986,9 +4957,7 @@ impl<L: Lane> LimiterCore<L> {
     ///
     /// * no link glide is in flight, and no ramp of a rendered channel has a window open and each
     ///   holds exactly its target, so the coefficient words in force are the ones the observed
-    ///   block used;
-    /// * the bypass flag is the one the claim was last settled under, since bypass selects the
-    ///   other arm of this kernel's output `select`;
+    ///   block used (the bypass is fixed at preparation, so it is never a leg, #2320);
     /// * every input plane is exactly `+0.0`, which short-circuits on the first thirty-two words
     ///   for a block carrying signal.
     ///
@@ -5001,7 +4970,6 @@ impl<L: Lane> LimiterCore<L> {
     /// phase 4, adversarial pass) at a kernel that also has a delay line to carry it.
     fn block_is_quiet(&self, glide: usize, left: &[f32], right: Option<&[f32]>) -> bool {
         glide == 0
-            && self.silent.bypass_held(self.coefficients.bypass)
             && self.ramps_settled(right.is_none())
             && block_is_positive_zero(left)
             && right.is_none_or(block_is_positive_zero)
@@ -5029,12 +4997,11 @@ impl<L: Lane> LimiterCore<L> {
     /// The three bank flags follow [`process_block`](Self::process_block) on that block, so the
     /// skipped block leaves them as the rendered one would, not merely sound:
     ///
-    /// * with the silent claim standing and the bypass it was earned on still in force, the
-    ///   rendered block takes the fast path, which touches no flag;
+    /// * with the silent claim standing, the rendered block takes the fast path, which touches no
+    ///   flag;
     /// * otherwise it renders the body: the #990 record becomes the block's linked decision, and
     ///   the claim is earned, because the block is quiet (input `+0.0`, ramps stationary at rest)
-    ///   and every lane is at rest, when the bypass in force is the one the claim records and the
-    ///   whole bank is skipped. Then the bypass in force is recorded.
+    ///   and every lane is at rest, when the whole bank is skipped.
     ///
     /// A mask that leaves a lane out is not a whole-bank skip, so it withdraws the claim rather
     /// than keep or earn it: the claim only ever buys speed, and withdrawing it is always sound.
@@ -5053,13 +5020,13 @@ impl<L: Lane> LimiterCore<L> {
         }
         self.cursors.advance(frames, &self.shape);
         let whole = lanes == every_lane(L::WIDTH);
-        if !self.silent.proved_under(self.coefficients.bypass) {
+        if !self.silent.proved() {
             let link_all = self.coefficients.link_all;
             let (left, right) = (&self.left, &self.right);
             self.link
                 .decide(|| link_all && designed_gain_agree(left, right));
         }
-        self.silent.settle_skipped(whole, self.coefficients.bypass);
+        self.silent.settle_skipped(whole);
         // Issue #1370 D5: a skipped block's frames count, after its linked decision, as a
         // rendered block's do.
         self.tick_relink(frames);
@@ -5277,6 +5244,27 @@ fn snapshot_lane(
 }
 
 /// Validates one channel section in place, without touching any live state or the heap.
+///
+/// The rule is soft-clip's (#1071, #1300): accept every word the kernel itself can hold, refuse
+/// the rest, so that a lane's own payload always restores and the restored lane continues bit
+/// for bit (#1279 D6).
+///
+/// The `history` taps and the `main_ring` admit every word, NaN and the infinities included
+/// (issue #2324). Both hold input samples verbatim, and the kernel classifies no input word: the
+/// §4.4 check scans the output only. A non-finite input word therefore sits in the main ring for
+/// `B = N + 6` frames (and in the history, for its last 12 of them) with every output finite,
+/// since the detector's `select(P > limit, limit / P, 1)` answers a NaN peak with `1` and an
+/// infinite one with `0`, and the gain words stay finite and in range. At its `B`-th frame it
+/// reaches the output, the §4.4 check fails and the lane is recovered. A lane restored from such
+/// a payload reaches that frame at the same sample and recovers there too. Refusing the word
+/// instead made a live lane's own snapshot unrestorable for those `B` frames, which the
+/// plan-swap carry and `effect_contract::swap_bank_lanes` cannot honour.
+///
+/// The kernel writes a non-finite history word only beside the same sample in the main ring
+/// (`12 < B`). A payload holding one without the other is not the kernel's, and admitting it is
+/// bounded: the detector then answers `r = 1` for at most 12 frames, no gain word leaves its
+/// range, and every output stays the ring word times a gain in `[0, 1]`, so nothing leaves the
+/// §4.4 bound that the check would not catch.
 fn read_lane(
     bytes: &[u8],
     shape: &Shape,
@@ -5348,11 +5336,8 @@ fn read_lane(
         *ramp = read;
     }
 
-    for tap in 0..HISTORY_WORDS {
-        if !read_f32(bytes, words::HISTORY + tap).is_finite() {
-            return Err(state_error("effect.state.history"));
-        }
-    }
+    // Issue #2324: the history taps and the main ring (below) admit every word. See the note
+    // on [`read_lane`].
 
     // Issue #1370 D6: the weight lies in `[0, 1]` on its whole path, the engine never holds
     // `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`, `c` a
@@ -5383,11 +5368,6 @@ fn read_lane(
     let required_base = main_base + shape.main;
     let box_base = required_base + shape.ring;
     debug_assert_eq!(box_base + shape.ring, shape.lane_words());
-    for slot in 0..shape.main {
-        if !read_f32(bytes, main_base + slot).is_finite() {
-            return Err(state_error("effect.state.ring"));
-        }
-    }
     for slot in 0..shape.ring {
         if !(0.0..=1.0).contains(&read_f32(bytes, required_base + slot)) {
             return Err(state_error("effect.state.gain"));
@@ -5492,13 +5472,14 @@ impl<L: Lane> LimiterCore<L> {
         Ok(())
     }
 
-    /// Parses both channel sections of one track, then commits them together or not at all.
-    fn restore_track(
-        &mut self,
-        track: usize,
+    /// Parses and validates both channel sections of one track, writing nothing: the whole
+    /// verdict of [`restore_track`](Self::restore_track), which reads only the payload, the shape
+    /// and the rate (issue #2324).
+    fn parse_track(
+        &self,
         state_layout_version: u32,
         input: &StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
+    ) -> Result<[LaneRestore; 2], StatePayloadError> {
         if state_layout_version != STATE_LAYOUT_VERSION {
             return Err(state_error("effect.state.version"));
         }
@@ -5515,6 +5496,17 @@ impl<L: Lane> LimiterCore<L> {
         if left.mode != right.mode {
             return Err(state_error("effect.state.link"));
         }
+        Ok([left, right])
+    }
+
+    /// Parses both channel sections of one track, then commits them together or not at all.
+    fn restore_track(
+        &mut self,
+        track: usize,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let [left, right] = self.parse_track(state_layout_version, input)?;
         commit_lane(
             &mut self.left,
             track,
@@ -6055,6 +6047,17 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     ) -> Result<(), StatePayloadError> {
         let track = self.checked_member(track_index)?;
         self.core.restore_track(track, state_layout_version, &input)
+    }
+
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.checked_member(track_index)?;
+        self.core.parse_track(state_layout_version, input)?;
+        Ok(())
     }
 
     fn lane_default_bytes(&self) -> Option<usize> {
@@ -11452,8 +11455,8 @@ mod tests {
                         }
                         restored &= pair.restore(track, &payload);
                     }
-                    // A payload whose main ring holds a non-finite word the §4.4 check has not
-                    // reached yet is refused, by both arms alike (`restore` compares verdicts).
+                    // `restore` compares the two arms' verdicts. A payload whose main ring holds
+                    // a non-finite word the §4.4 check has not reached yet restores (#2324).
                     if restored && last {
                         totals.phase_last += 1;
                     } else if restored {

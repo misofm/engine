@@ -189,6 +189,7 @@ async function testMainRealm() {
     onmessage = null;
     onmessageerror = null;
     closeCount = 0;
+    failPosts = [];
 
     close() {
       this.closeCount += 1;
@@ -204,6 +205,11 @@ async function testMainRealm() {
       if (received.tag === "miso.service.v1") {
         // The service tick is no request: it carries no request ID and gets no reply.
         events.push(["service"]);
+        return;
+      }
+      if (received.tag === "miso.fail.v1") {
+        // Issue #2317: the host's failure, posted to the worklet; no request, no reply.
+        this.failPosts.push(received);
         return;
       }
       events.push(["request", received.tag, received.requestId, transfer.length]);
@@ -3077,6 +3083,147 @@ async function testMainRealm() {
             assert.equal(worker.terminated, true);
             assert.equal(node.disconnectCount, 1);
           }
+
+          // Issue #2317: the host's failure reaches each peer that is alive and does not know of it,
+          // as `miso.fail.v1 { result }` with the sticky code, at most once each: the Worker (which
+          // owns the session's lifecycle word while it lives) on the first failure unless it posted
+          // the failure itself or is gone; the worklet once no live Worker will tell it, unless it
+          // posted the failure itself or its processor is gone. A second failure posts nothing more.
+          // Test value, per case: a failure the page found (or the worklet posted, in worker mode)
+          // that no peer hears of, so the session keeps playing (or the Worker keeps ticking); a
+          // peer told twice, or told of a failure it posted itself; a Worker posted after it is
+          // gone; a worklet left playing when the Worker dies before it could fail the word; and a
+          // later post carrying another code than the sticky error's.
+          const failPosts = ({ node, worker }) => ({
+            worker: worker?.posts.filter((message) => message.tag === "miso.fail.v1").map((message) => message.result) ?? [],
+            worklet: node.port.failPosts.map((message) => message.result),
+          });
+          const fenceThatCannotPost = async ({ host, node }) => {
+            const post = node.port.postMessage.bind(node.port);
+            node.port.postMessage = (message, transfer) => {
+              if (message.tag === "miso.fence.v1") throw new Error("port closed");
+              return post(message, transfer);
+            };
+            await errorResult(host.control(new Uint8Array([1])), 255);
+          };
+          const workerTyped = async ({ host, worker }) => {
+            workerBehaviour = "controlSilent";
+            const call = host.control(new Uint8Array([1]));
+            workerBehaviour = "ready";
+            inject(worker, { tag: "miso.error.v1", requestId: worker.posts.at(-1).requestId, result: 9 });
+            await errorResult(call, 9);
+          };
+          const workletTypedLease = async ({ host }) => {
+            renderAllocationsMutation = (reply) => ({ tag: "miso.error.v1", requestId: reply.requestId, result: 1 });
+            await errorResult(host.renderAllocationCount(), 1);
+            renderAllocationsMutation = null;
+          };
+          const workerError = ({ worker }) => worker.onerror({ preventDefault() {} });
+          const routes = [
+            ["single", "a malformed meter frame", ({ node }) => inject(node.port, { tag: "miso.meter.v1" }), [], [255]],
+            ["single", "a reply that matches no request",
+              ({ node }) => inject(node.port, { tag: "miso.ack.v1", requestId: 999, result: 0 }), [], [255]],
+            ["single", "a malformed reply", async ({ host }) => {
+              controlMutation = (reply) => ({ ...reply, extra: 1 });
+              await errorResult(host.control(new Uint8Array([1])), 255);
+              controlMutation = null;
+            }, [], [255]],
+            ["single", "a malformed typed error", async ({ host }) => {
+              controlMutation = (reply) => ({ tag: "miso.error.v1", requestId: reply.requestId, result: 4242 });
+              await errorResult(host.control(new Uint8Array([1])), 255);
+              controlMutation = null;
+            }, [], [255]],
+            ["single", "a messageerror", ({ node }) => node.port.onmessageerror(), [], [255]],
+            ["single", "the worklet's typed error", async ({ host }) => {
+              controlMutation = (reply) => ({ tag: "miso.error.v1", requestId: reply.requestId, result: 9 });
+              await errorResult(host.control(new Uint8Array([1])), 9);
+              controlMutation = null;
+            }, [], []],
+            ["single", "a processorerror", ({ node }) => node.onprocessorerror(), [], []],
+            // A peer whose port throws on the post: the host's failure stands, and the request in
+            // flight still rejects with the sticky code (a throw out of `#tell` would leave `#fail`
+            // after the phase was set and before any request was rejected).
+            ["single", "a failure whose post throws", async ({ host, node }) => {
+              const post = node.port.postMessage.bind(node.port);
+              node.port.postMessage = (message, transfer) => {
+                if (message.tag === "miso.fail.v1") throw new Error("port closed");
+                return post(message, transfer);
+              };
+              holdAll = true;
+              const call = host.control(new Uint8Array([1]));
+              holdAll = false;
+              // A browser's port dispatch drops a throw out of the handler; so does this one.
+              try { inject(node.port, { tag: "miso.meter.v1" }); } catch (_) { /* reported, not raised */ }
+              assert.equal(await settledState(call), "rejected", "the request in flight still settles");
+              await errorResult(call, 255);
+              heldAll.length = 0;
+            }, [], []],
+            ["worker", "a malformed meter frame", ({ node }) => inject(node.port, { tag: "miso.meter.v1" }), [255], []],
+            ["worker", "a reply that matches no request",
+              ({ worker }) => inject(worker, { tag: "miso.ack.v1", requestId: 999, result: 0 }), [255], []],
+            ["worker", "a Worker messageerror", ({ worker }) => worker.onmessageerror(), [255], []],
+            ["worker", "a worklet-port messageerror", ({ node }) => node.port.onmessageerror(), [255], []],
+            ["worker", "a fence it cannot post", fenceThatCannotPost, [255], []],
+            ["worker", "the Worker's typed error, ID 0",
+              ({ worker }) => inject(worker, { tag: "miso.error.v1", requestId: 0, result: 9 }), [], []],
+            ["worker", "the Worker's typed error to a request", workerTyped, [], []],
+            ["worker", "the worklet's typed error, ID 0",
+              ({ node }) => inject(node.port, { tag: "miso.error.v1", requestId: 0, result: 9 }), [9], []],
+            ["worker", "the worklet's typed error to a lease", workletTypedLease, [1], []],
+            ["worker", "a processorerror", ({ node }) => node.onprocessorerror(), [255], []],
+            ["worker", "the Worker's error", workerError, [], [255]],
+            ["worker", "a malformed frame, then the Worker's error", (peers) => {
+              inject(peers.node.port, { tag: "miso.meter.v1" });
+              workerError(peers);
+            }, [255], [255]],
+            ["worker", "the Worker's typed error, then its error", async (peers) => {
+              await workerTyped(peers);
+              workerError(peers);
+            }, [], [9]],
+            ["worker", "the worklet's typed error, then the Worker's error", async (peers) => {
+              await workletTypedLease(peers);
+              workerError(peers);
+            }, [1], []],
+            ["worker", "a processorerror, then the Worker's error", (peers) => {
+              peers.node.onprocessorerror();
+              workerError(peers);
+            }, [255], []],
+          ];
+          for (const [mode, label, act, toWorker, toWorklet] of routes) {
+            const what = `${mode}: ${label}`;
+            const host = await boot(mode);
+            const peers = { host, node: FakeNode.latest, worker: mode === "worker" ? workers.at(-1) : undefined };
+            assert.deepEqual(failPosts(peers), { worker: [], worklet: [] }, `${what}: a live host posts no failure`);
+            await act(peers);
+            assert.deepEqual(failPosts(peers), { worker: toWorker, worklet: toWorklet }, `${what}: who is told`);
+            inject(peers.node.port, { tag: "miso.meter.v1" });
+            assert.deepEqual(failPosts(peers), { worker: toWorker, worklet: toWorklet },
+              `${what}: a second failure tells nobody again`);
+            assert.deepEqual([...(peers.worker?.posts ?? []), ...peers.node.port.failPosts]
+              .filter((message) => message.tag === "miso.fail.v1")
+              .map((message) => Object.keys(message)), [...toWorker, ...toWorklet].map(() => ["tag", "result"]),
+            `${what}: the post is the tag and the code alone`);
+            await host.dispose().catch(() => undefined);
+          }
+          // Issue #2317's generator reached `#fail`'s clear of the shared status read: a failure
+          // while a read is in flight, with a later request sent after it, leaves no read behind, so
+          // a status call on the failed host rejects with the sticky error. Test value: the clear
+          // dropped, so the call joins a follow-up of a read that already failed and never settles.
+          {
+            const host = await boot("single");
+            holdAll = true;
+            const read = host.status();
+            const later = host.control(new Uint8Array([1]));
+            holdAll = false;
+            inject(FakeNode.latest.port, { tag: "miso.meter.v1" });
+            await errorResult(read, 255);
+            await errorResult(later, 255);
+            const after = host.status();
+            assert.equal(await settledState(after), "rejected", "a status call on the failed host settles");
+            await errorResult(after, 255);
+            heldAll.length = 0;
+            await host.dispose().catch(() => undefined);
+          }
         }
 
         // #1332 S8: a worklet whose construction failed (perhaps after it adopted the half): the
@@ -3154,6 +3301,33 @@ async function testMainRealm() {
           await disposal.catch(() => undefined);
           if (!gone) assert.equal(worker.posts.filter((message) => message.tag === "miso.dispose.v1").length, 1,
             `${what}: the dispose is sent to the live Worker`);
+          // Issue #2317: an early failure reaches the peer still alive: the worklet when the Worker
+          // is gone, the Worker otherwise.
+          assert.deepEqual(
+            [worker.posts.filter((message) => message.tag === "miso.fail.v1").length,
+              FakeNode.latest.port.failPosts.length],
+            gone ? [0, 1] : [1, 0], `${what}: who is told`);
+        }
+        // Issue #2317: the Worker's typed error posted before the host took the Worker over is the
+        // Worker's own: the host fails with it, typed, and tells the Worker nothing. Test value: the
+        // early messages replayed as if the worklet had sent them (the Worker is then posted a
+        // failure it reported itself), or not replayed at all (the host starts live).
+        {
+          const gate = snapshotGate();
+          readyGate = gate;
+          const pending = createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          await gate.started;
+          const worker = workers.at(-1);
+          worker.onmessage({ data: { tag: "miso.error.v1", requestId: 0, result: 9 } });
+          gate.release();
+          const failedHost = await pending;
+          await errorResult(failedHost.control(new Uint8Array([1])), 9);
+          assert.equal(worker.posts.filter((message) => message.tag === "miso.fail.v1").length, 0,
+            "an early typed error from the Worker tells the Worker nothing");
+          await failedHost.dispose().catch(() => undefined);
         }
         // D6: a Worker `error` or `messageerror` before the boot reply rejects with `worker-failed`,
         // no worklet starts and nothing falls back to `single` mode. A refused boot rejects with
@@ -5601,6 +5775,72 @@ async function testProcessor() {
       fromWorker({ tag: "miso.render-check.v1" });
       assert.equal(processor.port.posts.length, posts + 1, "once");
     }
+    // Issue #2317: the page host's `miso.fail.v1 { result }` (sent when no live control Worker will
+    // tell this instance) fails a live phase sticky with that code, in both modes. It is no request
+    // and posts nothing back, not even on a render check, because the page holds the error. A
+    // failure already recorded keeps its code, and a final phase stays final. A malformed one takes
+    // the unknown-message path, sticky 1. Test value: a failed page whose worklet keeps rendering
+    // the session; the post read as a request and answered (or refused) on the page's port, or
+    // reported again on the Worker's render check; a later post replacing the first code; a
+    // released or disposed instance revived into `failed`; and a malformed post accepted.
+    {
+      const silent = (processor) => {
+        const left = new Float32Array(64).fill(1);
+        const right = new Float32Array(64).fill(1);
+        const kept = processor.process([], [[left, right]]);
+        return [kept, left[0], right[63]];
+      };
+      // A single-mode processor makes its own memory.
+      workerModeMemory = null;
+      const { processor } = makeProcessor();
+      const posts = processor.port.posts.length;
+      processor.port.onmessage({ data: { tag: "miso.fail.v1", result: 9 } });
+      assert.equal(processor.port.posts.length, posts, "single: nothing is posted back");
+      assert.deepEqual(silent(processor), [true, 0, 0], "single: the node stays, silent");
+      assert.deepEqual([processor.ready, processor.stickyResult], [false, 9],
+        "single: the published view says failed, with the code");
+      processor.port.onmessage({ data: { tag: "miso.fail.v1", result: 4 } });
+      processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
+      assert.deepEqual(processor.port.posts.at(-1).message, { tag: "miso.error.v1", requestId: 1, result: 9 },
+        "single: a later request is refused with the first code");
+      processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 2 } });
+      assert.deepEqual(processor.port.posts.at(-1).message, { tag: "miso.ack.v1", requestId: 2, result: 0 },
+        "single: the failed instance still disposes");
+      processor.port.onmessage({ data: { tag: "miso.fail.v1", result: 9 } });
+      assert.equal(silent(processor)[0], false, "single: a disposed instance stays disposed");
+
+      const fake = createFakeExports(64);
+      const { processor: worklet, controlPosts, fromWorker } = constructWorkerMode(fake);
+      const workletPosts = worklet.port.posts.length;
+      worklet.port.onmessage({ data: { tag: "miso.fail.v1", result: 255 } });
+      assert.equal(worklet.port.posts.length, workletPosts, "worker: nothing is posted back");
+      assert.deepEqual(silent(worklet), [true, 0, 0], "worker: the node stays, silent");
+      fromWorker({ tag: "miso.render-check.v1" });
+      assert.equal(worklet.port.posts.length, workletPosts, "worker: a render check reports nothing");
+      fromWorker({ tag: "miso.release.v1" });
+      assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: (1n << 32n) | 1n },
+        "worker: the failed half is still released");
+      worklet.port.onmessage({ data: { tag: "miso.fail.v1", result: 255 } });
+      assert.equal(silent(worklet)[0], false, "worker: a released instance stays released");
+
+      for (const [label, message] of [
+        ["a zero code", { tag: "miso.fail.v1", result: 0 }],
+        ["a code that is no u32", { tag: "miso.fail.v1", result: -1 }],
+        ["an extra field", { tag: "miso.fail.v1", result: 9, requestId: 1 }],
+      ]) {
+        // The handler runs before the mode's dispatch, so one mode carries the shapes.
+        workerModeMemory = null;
+        const { processor: single } = makeProcessor();
+        single.port.onmessage({ data: message });
+        assert.deepEqual(single.port.posts.at(-1).message,
+          { tag: "miso.error.v1", requestId: message.requestId ?? 0, result: 1 }, `single: ${label} is sticky 1`);
+      }
+      // One shape in `worker` mode, where the unknown-message path is `receiveWorkerMode`'s.
+      const { processor: render } = constructWorkerMode(createFakeExports(64));
+      render.port.onmessage({ data: { tag: "miso.fail.v1", result: 0 } });
+      assert.deepEqual(render.port.posts.at(-1).message, { tag: "miso.error.v1", requestId: 0, result: 1 },
+        "worker: a malformed post is sticky 1");
+    }
     // #1332 S8: a construction that fails after the adoption releases the half at once (no half
     // stays in a worklet that never renders) and answers the Worker's release with its token,
     // once; a construction that failed before the adoption answers with no token.
@@ -5885,6 +6125,76 @@ async function testControlWorker() {
         `${name}: the page gets the sticky error`);
       assert.deepEqual(fake.calls.sessionFail, [[1, result]],
         `${name}: the session's lifecycle word is failed with the same code`);
+    }
+    // Issue #2317: the page host's `miso.fail.v1 { result }` (a failure this Worker did not find)
+    // fails the session as this Worker's own first sticky error does: `session_fail` once with that
+    // code, so the render half silences, the tick stops, and later requests are refused with it.
+    // It is no request and posts nothing. A session already failed keeps its first code, and a
+    // dispose already begun is left to finish. Test value: a failed page whose Worker leaves the
+    // lifecycle word ready (the worklet keeps rendering) or keeps ticking; the post read as a
+    // request, so it is refused on the page's port or moves the request sequence; a second post,
+    // or one after the Worker's own failure, calling `session_fail` again; one during a dispose
+    // failing the session the release is taking back.
+    {
+      const { send } = await boot();
+      const tick = intervals.at(-1);
+      send({ tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([5]) });
+      const before = posts.length;
+      send({ tag: "miso.fail.v1", result: 9 });
+      assert.deepEqual(fake.calls.sessionFail, [[1, 9]], "the lifecycle word is failed with the page's code");
+      assert.equal(posts.length, before, "nothing is posted back");
+      const services = fake.calls.service.length;
+      tick.callback();
+      assert.equal(tick.cleared, true, "the tick stops at its next run");
+      assert.equal(fake.calls.service.length, services, "and runs no service step");
+      send({ tag: "miso.fail.v1", result: 4 });
+      assert.deepEqual(fake.calls.sessionFail, [[1, 9]], "a second post fails nothing more");
+      // A source request, so the refusal also hands its planes back (a sticky refusal's planes
+      // were otherwise unpinned on this side).
+      send({
+        tag: "miso.source.v1", requestId: 2, sourceId: "drums", generation: 1n, startFrame: 0n,
+        sampleRateHz: 48000, planes: [new Float32Array([0.5]), new Float32Array([0.25])], frames: 1,
+        endOfRegion: false,
+      });
+      const refusal = posts.at(-1);
+      assert.deepEqual([refusal.tag, refusal.requestId, refusal.result, refusal.planes?.map((plane) => plane[0])],
+        ["miso.error.v1", 2, 9, [0.5, 0.25]],
+        "the next request (its ID next in sequence) is refused with the first code, its planes returned");
+    }
+    {
+      const { send } = await boot();
+      send({ tag: "miso.unknown.v1", requestId: 1 });
+      send({ tag: "miso.fail.v1", result: 255 });
+      assert.deepEqual(fake.calls.sessionFail, [[1, 1]], "after the Worker's own failure a post fails nothing");
+      send({ tag: "miso.status.v1", requestId: 2 });
+      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: 2, result: 1 }, "and its code stands");
+    }
+    // A post in the dispose window fails nothing and leaves the release deadline running: the tick
+    // still times an unanswered release out. Test value: a guard that lets the post fail the
+    // session the release is taking back, or stop the tick that keeps the dispose bounded.
+    {
+      const { send } = await boot();
+      const tick = intervals.at(-1);
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      send({ tag: "miso.fail.v1", result: 255 });
+      assert.deepEqual(fake.calls.sessionFail, [], "a post during a dispose fails nothing");
+      assert.equal(tick.cleared, false, "and keeps the release deadline's tick");
+      now += RELEASE_TIMEOUT_MS;
+      tick.callback();
+      assert.deepEqual(posts.at(-1),
+        { tag: "miso.teardown.v1", requestId: 1, result: 255, reason: "release-timeout" },
+        "which still ends an unanswered release");
+    }
+    for (const [label, message] of [
+      ["a zero code", { tag: "miso.fail.v1", result: 0 }],
+      ["a code that is no u32", { tag: "miso.fail.v1", result: 2 ** 32 }],
+      ["an extra field", { tag: "miso.fail.v1", result: 9, requestId: 1 }],
+    ]) {
+      const { send } = await boot();
+      send(message);
+      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: message.requestId ?? 0, result: 1 },
+        `${label} is the unknown-message refusal`);
+      assert.deepEqual(fake.calls.sessionFail, [[1, 1]], `${label}: with its own code`);
     }
     // Issue #1387 (S11): the MSB1 feed drain of `worker` mode runs here, on the service tick and
     // after every message. Red if the tick does not drain, if the block accounting counts ticks
