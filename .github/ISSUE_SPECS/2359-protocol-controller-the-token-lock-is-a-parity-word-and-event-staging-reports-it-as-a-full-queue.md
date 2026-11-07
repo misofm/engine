@@ -129,6 +129,32 @@ checked current under `&mut self`).
 - `cargo clippy --locked -p protocol -p control-plane -p audit --all-targets --all-features -- -D warnings`: clean. (Without `--all-features`, `control-plane`'s lib test reports the existing unused `compile_children_warm`, `compile.rs:2729`, untouched here; CI runs with `--all-features`.)
 - `cargo fmt --all --check`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps -p protocol -p control-plane -p audit`, `bash scripts/check-workspace-policy.sh`: clean.
 
+**Verdict on attempt 1 (Sol): PASS**, with four MINOR findings. The memory ordering, the control-plane retry, the error mapping and the CI step were all judged correct. The findings were folded in below, after a merge of `origin/main` at `5c71b3e8d`.
+
+### Attempt 1 folds
+1. **Lease order on drop.** `lease` was the first field of each token, so a dropped structural token released the lock before its `session_committed` and `observation_ended.room` reservations were returned. Since tokens are `Send`, a drop on another thread could let `idle()` succeed while a reservation was still counted, which contradicted the `IdleController::queues_mut` doc. `lease` is now the last field in all three tokens, with a comment saying the order is load-bearing: fields drop in declaration order.
+2. **The loom model now guards data.** The holder thread writes a `Relaxed` word, the stand-in for the reservation counts, before it drops its lease. The next acquirer reads that word before any other load of the lock word. Loom lets a `Relaxed` load return any value the happens-before order allows, so only the lease's orderings make the write visible. The crate denies `unsafe`, so there is no `UnsafeCell`.
+
+   | Mutation of the lease's orderings | Model |
+   |---|---|
+   | drop CAS weakened to `Relaxed` | red (`lease.rs:171`, read 0 not 1) |
+   | `acquire`'s load and CAS weakened to `Relaxed` | red (same row) |
+   | every ordering in `lease.rs` set to `Relaxed` | red |
+
+   Under the attempt-1 model, all three of these stayed green.
+3. **The `is_current` row.** In `a_session_command_completes_once_and_replays_its_exact_bytes`, completing controller A's session token on controller B now asserts:
+   - B refuses with `Internal`, and B's replay cache stays empty.
+   - A is locked while the token is outstanding, and the refused completion releases it, as a drop does.
+
+   Mutation: with `complete_planned`'s `is_current` check replaced by `if false`, this test goes red. 191 others stay green, as all 192 did before this row.
+4. **Restored assertion.** `assert!(!endpoint.response_ready_pending())` is back after the refused response-ready call in the staging test.
+
+**Gates re-run after the folds:**
+- `cargo test --locked -p protocol` and `-p control-plane --features test-support`: pass.
+- The loom leg with CI's flags: pass.
+- Clippy `--all-targets --all-features -D warnings` on protocol, control-plane and audit: clean.
+- `cargo fmt --all --check`, rustdoc `-D warnings` and `check-workspace-policy.sh`: clean.
+
 **Follow-ups (not in this issue).**
 - Route the remaining controller entry points (`process`, `process_command_frame_into`, the
   `prepare_command_frame*` family, the four staging calls) through `IdleController`, so that their

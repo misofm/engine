@@ -1345,13 +1345,15 @@ fn request_digest(bytes: &[u8]) -> u64 {
 /// and bound to one controller generation as [`PreparedSessionCommand`] is, and holding nothing
 /// on the heap. The completion takes the request bytes again, which must be the prepared ones.
 pub struct PreparedObservationRead {
-    /// The controller's token lock, held until the read completes or the token is dropped.
-    lease: TokenLease,
     request_id: RequestId,
     request_len: usize,
     /// [`request_digest`] of the prepared request's bytes.
     request_digest: u64,
     replay_plan: ReplayAdmission,
+    /// The controller's token lock. Declared last on purpose: fields drop in declaration order,
+    /// so every reservation the token holds is returned before the lock reads idle, even when the
+    /// token is dropped on another thread (#2359).
+    lease: TokenLease,
 }
 
 impl PreparedObservationRead {
@@ -1408,13 +1410,15 @@ pub enum SessionCommandReply<'a> {
 /// plan stays valid, and a token dropped without completion leaves the cache as it was (the
 /// request then has no reply and no replay entry).
 pub struct PreparedSessionCommand {
-    /// The controller's token lock, held until the command completes or the token is dropped.
-    lease: TokenLease,
     message_id: MessageId,
     request_id: RequestId,
     replay_plan: ReplayAdmission,
     request: Box<[u8]>,
     command: SessionCommand,
+    /// The controller's token lock. Declared last on purpose: fields drop in declaration order,
+    /// so every reservation the token holds is returned before the lock reads idle, even when the
+    /// token is dropped on another thread (#2359).
+    lease: TokenLease,
 }
 
 impl PreparedSessionCommand {
@@ -1472,8 +1476,6 @@ enum StructuralCommandDisposition {
 /// Opaque affine structural preparation bound to one exact controller identity and generation.
 /// It is deliberately neither `Clone` nor publicly constructible.
 pub struct PreparedStructuralCommand {
-    /// The controller's token lock, held until the commit's last write or the token is dropped.
-    lease: TokenLease,
     /// `SESSION_TRANSACTION_APPLY` or `SESSION_REPLACE`: the reply's message ID.
     message_id: MessageId,
     request_id: RequestId,
@@ -1497,6 +1499,10 @@ pub struct PreparedStructuralCommand {
     /// The one `OBSERVATION_ENDED` event this commit emits after its `SESSION_COMMITTED` (#1584
     /// D6a fold), with the room and the cell it takes. `None` unless the host attached keys.
     observation_ended: Option<EndedAttachment>,
+    /// The controller's token lock. Declared last on purpose: fields drop in declaration order,
+    /// so every reservation the token holds is returned before the lock reads idle, even when the
+    /// token is dropped on another thread (#2359).
+    lease: TokenLease,
 }
 
 /// An `OBSERVATION_ENDED` event attached to a token, with everything its commit needs, proven

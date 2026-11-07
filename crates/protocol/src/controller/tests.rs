@@ -5444,6 +5444,7 @@ fn a_held_token_refuses_event_staging_as_outstanding_not_as_a_full_queue() {
         .expect_err("a token is outstanding");
     assert_eq!(refused.reason, EventEgressError::PreparedCommandOutstanding);
     assert_eq!(refused.event, response_ready_event(1));
+    assert!(!endpoint.response_ready_pending());
 
     drop(token);
     endpoint
@@ -5748,6 +5749,35 @@ fn a_session_command_completes_once_and_replays_its_exact_bytes() {
         &crate::SessionCommand::SpectrumConfigure(request.clone())
     );
     drop(dropped);
+
+    // #2359: a token completed on another controller is refused `Internal`, and that controller's
+    // replay cache stays as it was. Its own controller stays locked while it is outstanding, and
+    // the refused completion releases it, as a drop does. Red if the completion's lock check
+    // passes a foreign token, which would record the reply in the wrong cache.
+    let PreparedCommandFrame::Session(foreign) = prepare(&mut endpoint, &input) else {
+        panic!("a dropped token left the request new");
+    };
+    let mut other = controller(8);
+    assert!(endpoint.idle().is_none());
+    let foreign_reply = crate::SpectrumConfigured {
+        revision: other.session().revision().0,
+        configured_epoch: 1,
+        adopted_epoch: 0,
+        rebuild: true,
+        plan_epoch: Some(1),
+    };
+    assert_eq!(
+        other.complete_session_command(
+            *foreign,
+            crate::SessionCommandReply::SpectrumConfigured(foreign_reply),
+            &mut [0_u8; 2048],
+        ),
+        Err(CommandFrameProcessError::Internal)
+    );
+    assert!(other.replay().is_empty());
+    assert!(other.idle().is_some());
+    assert!(endpoint.replay().is_empty());
+    assert!(endpoint.idle().is_some());
 
     let PreparedCommandFrame::Session(prepared) = prepare(&mut endpoint, &input) else {
         panic!("a dropped token left the request new");

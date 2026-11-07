@@ -128,51 +128,60 @@ mod tests {
     }
 
     /// Issue #2359: the lease handoff under `loom`. The controller thread acquires a lease and
-    /// hands it to a host thread, which drops it, while the controller thread tries again; a
-    /// stale lease from another lock is dropped beside them.
+    /// hands it to a host thread, which writes the guarded data (the stand-in for the reservation
+    /// counts a token returns before its lease) and drops the lease, while the controller thread
+    /// tries again and, holding the lock, reads that data. A stale lease from another lock is
+    /// dropped beside them.
     ///
-    /// Red if two leases are ever held at once (an acquire that does not see the outstanding
-    /// lease), if a drop on another thread fails to release (the lock stays held after both
-    /// threads finish), or if a foreign lease's drop releases this lock.
+    /// The guarded data is a `Relaxed` word, so only the lease's own orderings make the holder's
+    /// write visible: loom lets a `Relaxed` load return any value the happens-before order allows,
+    /// so without them it returns the stale 0 (the crate denies `unsafe`, so no `UnsafeCell`).
+    ///
+    /// Red if two leases are ever held at once or the release does not order the holder's writes
+    /// before the next holder's reads (a drop CAS or the acquire weakened to `Relaxed`, or an
+    /// acquire that does not see the outstanding lease), if a drop on another
+    /// thread fails to release (the lock stays held after both threads finish), or if a foreign
+    /// lease's drop releases this lock.
     #[cfg(loom)]
     mod token_lease_loom {
         use super::*;
-        use loom::sync::atomic::AtomicUsize;
 
         #[test]
         fn a_lease_dropped_on_another_thread_releases_exactly_once() {
             loom::model(|| {
                 let lock = Arc::new(TokenLock::new());
                 let other = TokenLock::new();
-                let holders = Arc::new(AtomicUsize::new(1));
+                let guarded = Arc::new(AtomicU64::new(0));
                 let first = lock.acquire().expect("an idle lock");
                 let foreign = other.acquire().expect("another idle lock");
                 assert!(!lock.issued(&foreign));
 
-                let host_holders = Arc::clone(&holders);
+                let host_guarded = Arc::clone(&guarded);
                 let host = loom::thread::spawn(move || {
                     drop(foreign);
-                    host_holders.fetch_sub(1, Ordering::AcqRel);
+                    host_guarded.store(1, Ordering::Relaxed);
                     drop(first);
                 });
 
-                let second = lock.acquire();
-                if let Ok(second) = &second {
-                    assert!(lock.is_current(second));
-                    // The first lease was released before this one was taken.
-                    assert_eq!(holders.fetch_add(1, Ordering::AcqRel), 0);
-                }
-                host.join().expect("host thread");
-                if let Ok(second) = second {
-                    holders.fetch_sub(1, Ordering::AcqRel);
+                if let Ok(second) = lock.acquire() {
+                    // The first holder's write happened before its release, which this acquire
+                    // observed. Read before any other load of the word, so the acquire's own
+                    // ordering is the one that makes it visible.
+                    let seen = guarded.load(Ordering::Relaxed);
+                    assert_eq!(seen, 1, "the first holder's write precedes this lease");
+                    assert!(lock.is_current(&second));
                     drop(second);
+                    host.join().expect("host thread");
                 } else {
+                    host.join().expect("host thread");
                     assert!(lock.is_idle(), "the host's drop released the lock");
                 }
                 assert!(lock.is_idle());
                 assert!(other.is_idle());
                 let third = lock.acquire().expect("the lock is idle again");
                 assert!(lock.is_current(&third));
+                // The host's write is ordered before `third` by its release.
+                assert_eq!(guarded.load(Ordering::Relaxed), 1);
             });
         }
     }
