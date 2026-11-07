@@ -549,7 +549,7 @@ fn a_lane_leaving_settled_bypass_is_reset_alone_keeping_parameters() {
 ///   drain that skips its walk (no new publication) reports none;
 /// * a drained stage that takes a lane from a chain that has not drained, by a lane swap, records
 ///   the moved lane's own settled state, so the next drain reports no edge for a lane that did not
-///   change.
+///   change, whichever of the two chains calls the swap.
 ///
 /// Test value: red if the first drain reports the session's bypass as an edge, if a skipped walk
 /// reports one, or if a drained stage takes an undrained peer's lane as unsettled (base
@@ -614,4 +614,27 @@ fn settle_edges_follow_live_switches_and_lane_moves_not_the_sessions_own_bypass(
         "the moved lane did not change"
     );
     assert_eq!(world.chain.slot_settled_bypassed_lanes(0), 0b1001);
+
+    // The mirrored arm: the undrained chain calls the swap, and its wet lane 2 goes back into the
+    // drained chain's lane 3.
+    peer.chain
+        .swap_lanes(2, ChainLanePeer::Other(&mut world.chain, 3), &mut scratch)
+        .expect("a cross-chain swap");
+    assert_eq!(
+        world.chain.slot_settled_bypassed_lanes(0),
+        0b0001,
+        "the lane moved in from the undrained caller is wet"
+    );
+    assert_eq!(
+        peer.chain.slot_settled_bypassed_lanes(0),
+        0b0100,
+        "and the caller holds the bypass"
+    );
+    let _ = world.step();
+    assert_eq!(
+        world.chain.settle_edges(),
+        0,
+        "the lane moved back did not change"
+    );
+    assert_eq!(world.chain.slot_settled_bypassed_lanes(0), 0b0001);
 }
