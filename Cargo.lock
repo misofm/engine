@@ -383,6 +383,7 @@ dependencies = [
  "engine",
  "host-core",
  "lane",
+ "loom",
  "loudness",
  "math",
  "protocol",

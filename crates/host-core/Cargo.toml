@@ -57,5 +57,12 @@ compressor.workspace = true
 parametric-eq.workspace = true
 source.workspace = true
 
+# Issue #2265: `control-plane`'s loudness arming model builds this crate as a *dependency* under
+# `--cfg loom`, where the spectrum words' `ModelledWord` names `loom`. A dev-dependency does not
+# reach a dependency's build, so the same pinned crate is a dependency under that cfg alone (as
+# `engine` does for #1609). Nothing reaches it in a build without `--cfg loom`.
+[target.'cfg(loom)'.dependencies]
+loom = "=0.7.2"
+
 [lints]
 workspace = true
