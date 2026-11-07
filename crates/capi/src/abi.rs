@@ -33,8 +33,10 @@ pub const RESULT_BACKPRESSURE: u32 = 6;
 pub const RESULT_UNSUPPORTED: u32 = 7;
 /// Render validation rejected the call without advancing state.
 pub const RESULT_RENDER_REJECTED: u32 = 8;
-/// Another call holds the session handle (#2276): the call touched nothing, wrote no diagnostic
-/// and left every out pointer as it was. Only a host that breaks the session thread rule sees it.
+/// Another call holds the handle: the session (#2276), the plan's render state (#2293) or the
+/// engine (#2321). The call touched no handle state, wrote no diagnostic and left every out
+/// pointer as it was, except that a refused `compile_session` clears its two handle outputs as
+/// every compile rejection does. Only a host that breaks the handle's thread rule sees it.
 pub const RESULT_BUSY: u32 = 9;
 /// A panic or other internal failure was contained at the ABI boundary.
 pub const RESULT_INTERNAL: u32 = 255;
@@ -480,18 +482,28 @@ impl HandleHeader {
 }
 
 /// Opaque engine handle. C consumers only observe pointers to this type.
+///
+/// `header` is immutable after construction and `busy` is the engine's claim word (#2321);
+/// `last_error` and `last_error_len` belong to the one engine call that holds `busy`.
 #[repr(C)]
 pub struct Engine {
     header: HandleHeader,
+    /// `1` while an engine call (`compile_session`, or `last_error` on the engine) holds the
+    /// engine's diagnostic, else `0` (#2321). A call claims it with one compare-exchange on entry
+    /// and releases it with one store on every exit; a call that finds it held is refused with
+    /// [`RESULT_BUSY`], never waits, and touches no state. A destroy claims it and never releases
+    /// it.
+    pub(crate) busy: ClaimWord,
     pub(crate) last_error: RefCell<[u8; 256]>,
     pub(crate) last_error_len: core::cell::Cell<usize>,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
 impl Engine {
-    pub(crate) const fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             header: HandleHeader::new(HANDLE_KIND_ENGINE),
+            busy: ClaimWord::new(0),
             last_error: RefCell::new([0; 256]),
             last_error_len: core::cell::Cell::new(0),
             not_sync: PhantomData,
@@ -548,6 +560,8 @@ pub struct Plan {
     /// render state, else `0` (#2213). A call claims it with one compare-exchange on entry and
     /// releases it with one store on every exit; a call that finds it held is refused with
     /// [`RESULT_BUSY`] (#2293), never waits, and touches no state, `last_error` included.
+    /// `plan_destroy` claims it too and never releases it (#2321): a destroy that finds it held
+    /// frees nothing.
     pub(crate) render_busy: ClaimWord,
     pub(crate) state: PlanState,
     not_sync: PhantomData<core::cell::Cell<()>>,
