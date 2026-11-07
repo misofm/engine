@@ -45,9 +45,22 @@ Verified on base, by reading and by the tests below:
   - single mode: a dispose racing a control request's typed failure resolves with its own reply, disconnects the node and restarts no tick;
   - single mode: after a typed failure, a `processorerror` leaves the typed error standing;
   - worker mode: a dispose racing a worklet render failure resolves cleanly once the Worker answers.
-- A guard row for the survival rule's boundary (single mode): a dispose whose own reply is a `miso.error.v1` rejects at once with it, and a retryable refusal of a now-failed host restarts no tick (red on base at the tick); a `processorerror` while the dispose is in flight rejects it at once with 255 and tears down (green on base).
+- A failure-source table (attempt 2; it absorbs attempt 1's guard row). Each of these settles a dispose in flight at once:
+  - its own reply in every shape: a typed error (rejects with it, retryable, no tick; red on base at the tick), a malformed `miso.error.v1`, a malformed ack, and a worker-mode teardown with another reason (each 255, torn down);
+  - `messageerror` in both modes, and `processorerror`;
+  - a fence that cannot be posted;
+  - a `processorerror` after the dispose survived a typed failure (rejects with 255, not 9, and disconnects).
+
+  A failed host whose Worker is gone disposes at once with the first error and sends no dispose, whichever of the two failures came first. `openFeedPort` is `null` while failed and while disposing.
+- A bounds table (attempt 2) covering every bounded kind: source, seek, seek-at, seek report, session seek, render allocations, plan latency, control, meters, telemetry and session map. For each kind:
+  - the request past the bound is refused with `RESULT_BACKPRESSURE`, posts nothing and burns no ID;
+  - another key of the kind, and every kind with a slot of its own, is accepted (seek-at shares seek's slot and is refused);
+  - settling one request frees exactly one place.
+
+  The scattered single-kind refusals it supersedes are deleted.
+- Three rows for guards that no row pinned (attempt 2): an early `messageerror` fails the host the factory returns; a status read that failed to post is not kept as the shared read; a reply that matches no request fails a live host.
 - Every existing row of `bash scripts/test-web-audioworklet.sh` stays green, including the safe-integer allocator mutation it runs.
-- Mutations of the fix, each red at its row: make `#fail` reject a dispose whose reply is still due; let a later `#fail` replace the first error; keep the dispose on its own reply's failure, on a channel failure, or on the Worker's `error`; restart the tick on a retry into `failed`.
+- Mutations of the fix, each red at its row: make `#fail` reject a dispose whose reply is still due; let a later `#fail` replace the first error; keep the dispose on its own reply's failure, on a channel failure, or on the Worker's `error`; restart the tick on a retry into `failed`. Every guard of the lifecycle and bound code is either red when deleted or named as equivalent in the guard table under attempt 2.
 - `bash scripts/check-workspace-policy.sh` passes.
 - No Rust or render path is touched, so cargo, clippy, fmt, doc, the realtime-policy tool and a no-bit-moved comparison do not apply.
 
@@ -85,3 +98,107 @@ Base `76ff20b54`.
 - sticky stands: red if a later failure (`processorerror`) replaces the typed sticky error a request already rejected with; the S9 row checks only failures that arrive before the first.
 - worker-mode race: red if a worker-mode dispose is rejected, and the Worker terminated, by a render failure the worklet posted while the Worker was disposing; the S8 rows fail the host before `dispose()`, never during it.
 - own-reply and `processorerror` guard row: red if the survival rule keeps a dispose whose own reply was the failure, or one whose channel broke, waiting out its 5 s bound; and red if a retryable refusal of a failed host restarts the service tick.
+
+### Attempt 1 verdict: FAIL, two MAJORs and two MINORs (2026-11-07)
+The reviewer confirmed:
+- the survival rule is correct in both modes;
+- a dispose never hangs past its bound and never resolves without an OK ack;
+- the slot map preserves every bound exactly, by reading;
+- the scope is right.
+
+The code was found correct. The failures are missing tests. The reviewer ran 63 mutations; these stayed green:
+1. **MAJOR: the `#fail` source sites and the `workerGone` merge were untested.**
+   - `messageerror` with `FAIL_CHANNEL` changed to `null`.
+   - The dispose's own reply as a worker-mode teardown with the wrong reason, as a malformed `miso.error.v1`, and as a malformed ack, each with `pending` changed to `null`.
+   - The fence post failure with `FAIL_CHANNEL` changed to `null`.
+   - `workerGone` not kept from an earlier failure, or not added by a later one.
+   - Rejecting with `failure.error` instead of `error`.
+2. **MAJOR: the rewritten bounds were unpinned.**
+   - The control, plan-latency and render-allocations slots set to `null`.
+   - The control bound set to 65.
+   - The three leases sharing one slot.
+   - A seek report sharing the seek slot.
+   - `#release` deleting the whole count instead of decrementing it.
+3. **MINOR:** name the guards that need no test, with reasons.
+4. **MINOR:** sync the issue body with the spec, including the `FAIL_CHANNEL`/`FAIL_WORKER_GONE` names.
+
+### Attempt 2 (Terra, 2026-11-07)
+The branch merged `origin/main` (`83a83e262`). The host module is unchanged from attempt 1; attempt 2 is tests and the spec.
+
+**MAJOR 1: the failure-source table** (`scripts/test-web-audioworklet.mjs`, worker block, "what settles a dispose in flight at once"). The cases are listed under Gates. It replaces attempt 1's own-reply/`processorerror` guard row, which it covers.
+
+**MAJOR 2: the bounds table** (single-mode block, "every bounded request kind, one table"). The plan-latency fake now answers a valid refusal, so a read can be settled. The table makes these older checks redundant, and they are deleted:
+- the pipeline row's seek and session-seek overflows;
+- the seek row's seek-at and seek-report overflows;
+- `assertBoundedNoBurn` and its three lease/session-map calls.
+
+The pipeline source overflow stays, because it also pins plane ownership on a local refusal.
+
+**Mutations.** All 63 of the reviewer's mutants were re-run against the attempt-2 suite, plus their two follow-ups (`later_no_workergone`, `reject_with_sticky`):
+- Every mutant in both MAJOR lists is now RED. The bounds table catches `slot_control_null`, `slot_planlatency_null`, `slot_renderalloc_null`, `bound_control_plus1`, `slot_lease_shared`, `slot_seekreport_shared_seek` and `release_delete_all`. The failure-source table catches the six source mutants and both `workerGone` mutants. `feedport_live` is RED at `no feed port while a dispose is in flight`.
+- 11 stay GREEN. Each is named in the guard table below.
+
+**Guard table.** It covers every guard in the lifecycle, failure, dispose, status-sharing and bound code of `MisoAudioWorkletHost`, and the early-failure handoff in `bootControlWorker`. Line numbers are in `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` at this attempt's head. Message-schema checks in `#receive` and the factory's argument validation are outside it: they are earlier schema gates, with their own rows. "Red" means that deleting the guard (or the reviewer's narrowing of it) turns the named row red.
+
+| Line | Guard | Deleted or narrowed | Evidence |
+|---|---|---|---|
+| 472-478 | `inFlightSlot` arms | any arm `null`, merged or shared | Red: bounds table |
+| 580 | tick only in `single` mode | always start | Red: S7 "worker mode holds no main-realm service tick" |
+| 583 | early Worker `error` replayed | dropped | Red: S7 MINOR 1 |
+| 584 | early `messageerror` replayed | dropped | Red: S7 MINOR 1, the new `messageerror` case |
+| 585 | early `messageerror` source | `FAIL_CHANNEL` to `null` | Equivalent: no dispose exists during construction, and the source only decides whether a dispose survives |
+| 592 | `#failWorker` once | guard deleted | Unreachable: `#failWorker` nulls `worker.onerror` before `#fail`, and the constructor's early-`error` replay runs once |
+| 603-604 | `#failure()` in `failed`/`disposing` | `disposing` arm `null` | Red: S8 "the dispose tears down at once" |
+| 619 | `#postServiceTick` only when `live` | narrowed to `disposed` | Equivalent: every exit from `live` (`dispose()`, `#fail`, `#teardown`) clears the timer synchronously, and a cleared interval never fires. Deleted outright: red, "a tick after dispose posts nothing" |
+| 631 | `#stopServiceTick` with no timer | deleted | Equivalent: `clearInterval(null)` is a no-op |
+| 651 | slot arm before the status arm | always the slot arm | Red: the suite never settles (a status follow-up is never sent) |
+| 653 | decrement, not delete | delete the slot / no-op | Red: bounds table "and only one"; the pipeline row |
+| 656 | status pending is the shared read | always | Equivalent: a status request is pending only while it is `#statusRead`. A read is kept only once posted, a follow-up is sent only after the read settles, and `#fail`/`#teardown` clear both together |
+| 782 | late reply on a failed host ignored | narrowed to `failed`; deleted | Equivalent since this issue: the reply falls through to `#fail(255, null)`, where the first error stands, nothing but a surviving dispose is pending, and a `null` source keeps that dispose |
+| 785 | teardown tag only in `worker` mode | either mode | Unreachable: the single-mode worklet never posts `miso.teardown.v1`, and both arms tear down |
+| 791, 812, 814, 924 | the dispose's own reply as `source` | `pending` to `null` | Red: failure-source table (teardown with another reason, own typed error, malformed error, malformed ack) |
+| 818 | unmatched reply fails a live host | deleted | Red: the new stray-reply row |
+| 929, 944 | fence answer; hold for the fence | deleted | Red: the S9 rows |
+| 932 | the control is still pending at its fence | deleted | Unreachable: a fence and its control leave `#pending` together (`#fail` and `#teardown` clear both, and only this branch releases the control) |
+| 961 | fence ID exhausted | deleted | Unreachable in any session: it needs 2^53-1 request IDs. The shared allocator boundary is pinned at `#request` (1050) by the script's MAX_SAFE run. That run ends before the worker-mode block, so this site has no row |
+| 962 | fence-exhaustion `source` | `control` to `null` | Equivalent: both sources keep the dispose |
+| 973 | fence post failure `source` | `FAIL_CHANNEL` to `null` | Red: failure-source table "a fence it cannot post" |
+| 989 | `#fail` once `disposed` | deleted | Unreachable: `#teardown` nulls every handler that calls `#fail` (ports, `onprocessorerror`, `worker.onerror`) |
+| 994-995 | first error stands; `workerGone` merge | replace; not kept; not added | Red: sticky row; the Worker-gone table, both orders |
+| 997 | failure kept inside `disposing` | phase set to `failed` | Red: single-mode race |
+| 999-1000 | `replyDue` | any term dropped | Red: failure-source table; S8 `disposeTrap` |
+| 1003 | `#inFlight.clear()` in `#fail` | deleted | Equivalent: once failed, no bounded request is sent again, so the counts are never read |
+| 1008 | keep only a due dispose | keep all; keep the dispose always | Red: the suite never settles; own typed error case |
+| 1009 | reject with this failure's error | `failure.error` | Red: failure-source table "a processorerror after it survived a typed failure" |
+| 1019 | `#saturated` for a `null` slot | deleted | Equivalent: a `null` slot is never reserved, so its count is 0, under every bound |
+| 1027 | `#reserve` skips a `null` slot | deleted | Equivalent: a count under the `null` key is never read (`#saturated` returns first, and `null`-slot requests release through the status arm) |
+| 1041 | `disposed`, or the dispose/`disposing` XOR | `disposed` dropped; XOR narrowed | `disposed` dropped: red, because the suite never settles. XOR narrowed: equivalent, because only `#awaitDispose` sends a dispose, from `disposing` |
+| 1044 | `failed` refuses with the sticky error | deleted | Red: sticky rows |
+| 1046 | bound | deleted | Red: bounds table |
+| 1050 | request ID exhausted | deleted | Red: the MAX_SAFE run of `test-web-audioworklet.sh` |
+| 1205, 1234 | `#disposeBegan` | narrowed to `disposed`; to `disposing` | To `disposed`: red, because the suite never settles. To `disposing`: equivalent, because in `disposed` `#request` refuses with 3 too, and `#teardown` clears the follow-up |
+| 1207, 1208, 1232 | shared-read join; follow-up | deleted | Red: Gate 3 rows |
+| 1224 | read kept only when posted | always kept | Red: the new failed-post status row |
+| 1254 | feed port only when `live` | narrowed to `disposed` | Red: failure-source table; the Worker-gone table |
+| 1409, 1412, 1420-1422 | dispose promise; failure carried; retry arms | each mutated | Red: S7 "a second dispose is the first one's promise" (and the suite never settles); S8 "the dispose tears down at once"; S8 "and not restarted"; own typed error "no service tick runs" |
+| 1434 | Worker gone disposes at once | deleted | Red: S8 broken-Worker row; Worker-gone table |
+| 1446, 1463 | single-mode teardown; timeout | deleted | Red: S8 single-mode rows |
+| 1474 | `#teardown` once | deleted | Unreachable: only the dispose runners call it, once per dispose (worker mode: `finally`; single mode: `catch` or success), always from `disposing` |
+| 1484 | `#inFlight.clear()` in `#teardown` | deleted | Equivalent: nothing bounded is sent once `disposed` |
+| 1486 | a fence is not rejected | deleted | Equivalent: a fence's `reject` is a no-op |
+| 1487, 1505 | held replies after a clean dispose; terminate | deleted | Red: S9 clean dispose; S7 "the Worker ends after its dispose reply" |
+| 1533 | boot `finish` once | deleted | Unreachable: the first `finish` replaces (on resolve) or nulls (on reject) every boot handler, and the post-failure `finish` runs before any handler can |
+| 1535 | boot reject arm | deleted | Red: the boot rows |
+
+**Gates run (attempt 2):**
+- `node scripts/test-web-audioworklet.mjs`: passed.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+
+**Test value (attempt 2).**
+- failure-source table: red if a `#fail` call site names the wrong source, so a dispose waits out its 5 s bound for a reply that already came or that a broken channel cannot bring; or if a dispose that survived a typed failure rejects with that failure, not the one that ended it, and stays retryable.
+- Worker-gone table: red if `workerGone` is lost by a later failure, or never recorded when the Worker's error comes second; the dispose then posts to a terminated Worker. Also red if a failed host opens a feed port.
+- bounds table: red if a kind is unbounded, a bound is off by one, two kinds or two keys share a slot, a refusal posts or burns an ID, or settling a request frees more than one place. The deleted single-kind checks each tested one cell of it.
+- early `messageerror` case: red if a `messageerror` between the boot reply and the host's construction is dropped, so the host starts live; MINOR 1 covered only `error`.
+- failed-post status row: red if a status read that failed to post is kept as the shared read, so the next call returns its rejection and posts nothing.
+- stray-reply row: red if a reply that matches no request is ignored on a live host, or crashes the handler.
