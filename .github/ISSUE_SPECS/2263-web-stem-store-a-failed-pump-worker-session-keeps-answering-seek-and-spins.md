@@ -19,7 +19,7 @@ The PCM pump Worker (`hosts/host-web/web/stem-store/pcm-pump-worker.js`) kept it
 
 ## Non-goals
 - `session-gate.js` and `opfs-store.js` (WEB-4 owns those).
-- Whether an argument error in a `seek` message should fail the session at all (today every Worker error is a session error; unchanged).
+- Whether a malformed argument in a `seek` message should fail the whole session. Today every Worker error is a session error, and this issue keeps that. It is a candidate follow-up: refuse a malformed `seek` with a `session-error` answering its `requestId` and leave the session running. `messagePathFailureStopsTheCadence` uses exactly this path (`frame: -1`) as its message-path trigger, so that follow-up must swap the trigger for another message-path failure.
 
 ## Gates
 - A Worker test, red on today's code: after a pump failure under `selfDriving`, `seek` and `pump` are answered `session-error` (`stem.pump.session_failed`) with their `requestId`, the ring's seek epoch does not move, and no idle timer is left; after a message-path failure the cadence's timer is cancelled.
@@ -54,4 +54,15 @@ Base `de0878e23`.
 **Test value.**
 - `stoppedPumpRefusesSeekAndPump`: red if a stopped `CanonicalPcmPump` accepts a seek (re-tagging a released ring) or answers a pass with a zero-chunk success; no existing test calls the pump after `stop`.
 - `failedSessionRefusesSeekAndPump`: red if a Worker session that failed on the cadence keeps answering `seek`/`pump` with success, re-arms the loop, or refuses only through a pump it should no longer hold; the #278 tests never fail a session.
-- `messagePathFailureStopsTheCadence`: red if a failure that arrives on a message leaves the self-driving loop and its idle timer alive, or leaves the ring writer engaged; the drive-path test cannot see this because a cadence-pass failure ends its own loop.
+- `messagePathFailureStopsTheCadence` (trigger: a `seek` with `frame: -1`): red if a failure that arrives on a message leaves the self-driving loop and its idle timer alive, or leaves the ring writer engaged; the drive-path test cannot see this because a cadence-pass failure ends its own loop.
+- `refusedSelfDrivingEngagesNoRing` (added in the fold): red if `initialize` builds the pump, which engages its rings, before it refuses a bad `selfDriving`. Such a ring stays engaged with no session to release it. No other test sends a refused option.
+- `cadenceFailureIsRecordedBeforeTheNextMessage` (added in the fold): red if a cadence pass's failure is recorded outside the message tail. A message queued behind the failing pass would then run first, and a late report would fail the session that message started. The other tests send nothing while a pass is failing.
+
+### Attempt 1 verdict: PASS, with four MINORs folded (2026-11-07)
+The reviewer accepted the public behaviour change (`pumpUntilFull` and `seek` on a stopped pump now reject). There is no SDK copy drift: `sdk/src/browser/stems/pcm-pump.js` re-exports the engine's file in the source tree, and `stage-package.mjs` copies it verbatim. The four MINORs, folded on the same branch:
+1. **`selfDriving` ordering was untested.** Moving `requestedIdleMs(...)` after `new CanonicalPcmPump` survived the suite. New test `refusedSelfDrivingEngagesNoRing`: `initialize` with `selfDriving: { idleMs: -1 }` answers `session-error` and leaves `WRITER_STATE == 0`. New ledger mutation `check selfDriving after the pump engages its rings`, RED at `a refused selfDriving option left a ring engaged`.
+2. **A cadence-pass failure reported outside the tail survived.** The reviewer's mutation reported it after a 5 ms delay. New test `cadenceFailureIsRecordedBeforeTheNextMessage`: the cadence's first window read calls `worker.send(initialize…)` synchronously before it rejects. The replies must be exactly `initialized`, `session-error`, `initialized`, and a `pump` to the second session answers `pumped`. New ledger mutation `record a cadence failure outside the message tail` (the reviewer's delayed report), RED at `the failed pass was recorded before the next message ran, and only once`.
+3. **`details.failure` was never asserted.** `failedSessionRefusesSeekAndPump` now asserts that the `seek` and `pump` refusals both carry `details.failure.message` matching `/PCM window is truncated/`. Checked by hand: replacing `{ failure: session.error }` with `{}` turns it red.
+4. **The non-goal and the trigger were not recorded.** They are now, under Non-goals and in the test-value line above. `sdk/README.md`'s pump section also says that a stopped pump rejects.
+
+Gates after the fold: `node scripts/check-stem-store-v1.mjs` PASS. `--self-test` PASS, with all six #2263 mutations RED at their targets. `bash scripts/check-workspace-policy.sh` ok.

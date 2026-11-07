@@ -930,6 +930,11 @@ async function failedSessionRefusesSeekAndPump() {
       "stem.pump.session_failed",
       "the refusal must come from the failed session, not from a pump it still held"
     )
+    assert.match(
+      String(reply.error.details?.failure?.message),
+      /PCM window is truncated/,
+      `the \`${requestId}\` refusal names the failure that ended the session`
+    )
   }
   worker.send({ type: "seek", requestId: "seek", frame: 0 })
   await worker.until(() => answer(worker, "seek") !== undefined, "the seek answer")
@@ -977,6 +982,136 @@ async function messagePathFailureStopsTheCadence() {
   await lease.close()
 }
 
+async function refusedSelfDrivingEngagesNoRing() {
+  // `selfDriving` is checked before the pump is built. Checked after, the pump would already have
+  // engaged its rings when the option is refused, and a session that never began owns nothing that
+  // would release them: the reader would see a live writer that never writes.
+  const fixture = cadenceFixture()
+  const { identity: stemIdentity, lease } = await stagedStore(fixture.bytes, "refused-option")
+  const shared = createFixtureMsb1Ring(fixture.ring)
+  const control = new Int32Array(shared, 0, 128 / 4)
+  const worker = await mountWorker("refused-option")
+  worker.send(
+    initializeMessage({
+      identity: stemIdentity,
+      shared,
+      fixture,
+      folderName: "refused-option",
+      selfDriving: { idleMs: -1 },
+    })
+  )
+  await worker.until(() => answer(worker, "init") !== undefined, "the initialize answer")
+  assert.equal(answer(worker, "init").type, "session-error")
+  assert.match(answer(worker, "init").error.message, /selfDriving\.idleMs/)
+  assert.equal(
+    Atomics.load(control, WRITER_STATE),
+    0,
+    "a refused selfDriving option left a ring engaged"
+  )
+  await lease.close()
+}
+
+/**
+ * Wrap `navigator.storage` so the first window read of `fileName` calls `beforeReject` and then
+ * rejects. Only that stem's file is wrapped; the store's index and directories are the fake's own.
+ */
+function failFirstWindowRead(fileName, beforeReject) {
+  const storage = globalThis.navigator.storage
+  let fired = false
+  const forward = (target, wrap) =>
+    new Proxy(target, {
+      get(handle, property) {
+        const wrapped = wrap(handle, property)
+        if (wrapped !== undefined) return wrapped
+        const value = Reflect.get(handle, property)
+        return typeof value === "function" ? value.bind(handle) : value
+      },
+    })
+  const file = (handle) =>
+    forward(handle, (target, property) => {
+      if (property !== "getFile") return undefined
+      return async () => {
+        const blob = await target.getFile()
+        return {
+          slice(start, end) {
+            if (fired) return blob.slice(start, end)
+            fired = true
+            return {
+              arrayBuffer() {
+                beforeReject()
+                return Promise.reject(new Error("synthetic window read failure"))
+              },
+            }
+          },
+        }
+      }
+    })
+  const directory = (handle) =>
+    forward(handle, (target, property) => {
+      if (property === "getDirectoryHandle") {
+        return async (...args) => directory(await target.getDirectoryHandle(...args))
+      }
+      if (property === "getFileHandle") {
+        return async (name, ...rest) => {
+          const opened = await target.getFileHandle(name, ...rest)
+          return name === fileName ? file(opened) : opened
+        }
+      }
+      return undefined
+    })
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      ...globalThis.navigator,
+      storage: { ...storage, getDirectory: async () => directory(await storage.getDirectory()) },
+    },
+  })
+}
+
+async function cadenceFailureIsRecordedBeforeTheNextMessage() {
+  // The cadence's first window read fails, and the host's next `initialize` arrives while that
+  // read is still in flight. The failed pass must be recorded inside the message tail, before that
+  // `initialize` runs. Recorded later, it would land on the session `initialize` just started and
+  // fail it.
+  const fixture = cadenceFixture()
+  const { identity: stemIdentity, lease } = await stagedStore(fixture.bytes, "tail-failure")
+  const first = createFixtureMsb1Ring(fixture.ring)
+  const second = createFixtureMsb1Ring(fixture.ring)
+  const worker = await mountWorker("tail-failure")
+  const reinitialize = {
+    ...initializeMessage({ identity: stemIdentity, shared: second, fixture, folderName: "tail-failure" }),
+    requestId: "second-init",
+  }
+  failFirstWindowRead(`blake3-${stemIdentity.slice("blake3:".length)}`, () => worker.send(reinitialize))
+  worker.send(
+    initializeMessage({
+      identity: stemIdentity,
+      shared: first,
+      fixture,
+      folderName: "tail-failure",
+      selfDriving: { idleMs: 1 },
+    })
+  )
+  await worker.until(() => answer(worker, "second-init") !== undefined, "the second initialize answer")
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.deepEqual(
+    worker.posted.map((message) => message.type),
+    ["initialized", "session-error", "initialized"],
+    "the failed pass was recorded before the next message ran, and only once"
+  )
+  worker.send({ type: "pump", requestId: "second-pump" })
+  await worker.until(() => answer(worker, "second-pump") !== undefined, "the second pump answer")
+  assert.equal(
+    answer(worker, "second-pump").type,
+    "pumped",
+    "the first session's failure failed the session after it"
+  )
+
+  worker.send({ type: "stop", requestId: "stop" })
+  await worker.until(() => worker.reply("stopped") !== undefined, "the stop reply")
+  await lease.close()
+}
+
 await transformContract()
 await workerPumpContract()
 await unalignedSeekKeepsChunksQuantumShaped()
@@ -995,4 +1130,6 @@ await stopInterruptsTheIdleLoop()
 await seekReArmsAFinishedLoop()
 await failedSessionRefusesSeekAndPump()
 await messagePathFailureStopsTheCadence()
+await refusedSelfDrivingEngagesNoRing()
+await cadenceFailureIsRecordedBeforeTheNextMessage()
 process.stdout.write("stem-pump-v1: PASS\n")

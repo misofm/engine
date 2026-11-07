@@ -583,7 +583,9 @@ Call `pump.pumpUntilFull()` before `context.resume()` and again as the ring drai
 pump to `engine.seek(frame, { producers: [pump] })`: it repositions every ring it writes after
 the engine accepted the seek. The pump holds at most two windows per source, the resident one and
 the next one read ahead (`windowFrames`, 4096 by default), never the whole stem; it reads the
-sources' windows concurrently, at most eight at a time. `readWavHeader` refuses with a `WavFormatError`, whose
+sources' windows concurrently, at most eight at a time. Once stopped (`pump.stop()`, or a read
+failure), the pump rejects `seek` and `pumpUntilFull` with `CanonicalPcmPumpError`
+`stem.pump.stopped`, so a seek through a dead pump fails as a `SessionSeekProducerError`. `readWavHeader` refuses with a `WavFormatError`, whose
 `code` names the cause: a float WAV (`wav.float_unsupported`: export 16- or 24-bit PCM), more than
 two channels (`wav.channels`), and a rate other than 44.1, 48, 88.2 or 96 kHz (`wav.sample_rate`).
 A `data` size larger than the file is read to the file's end. The pump and the hash are the
