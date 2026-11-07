@@ -15,8 +15,8 @@ use std::alloc::System;
 use std::sync::{Barrier, Mutex};
 
 use host_web::{
-    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_WRONG_STATE, RenderLockedAllocator, Reservation,
-    STATE_READY, native_staging,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_LIFECYCLE, RESULT_WRONG_STATE,
+    RenderLockedAllocator, Reservation, STATE_READY, native_staging,
 };
 use protocol::{
     CommandPayload, DecodeScratch, DecodedEventPayload, DecodedSuccessResponsePayload,
@@ -784,7 +784,7 @@ fn an_instance_is_the_control_instance_or_a_render_only_one_never_both() {
                 );
                 assert_eq!(
                     host_web::miso_engine_web_v1_boot_result(),
-                    RESULT_WRONG_STATE,
+                    RESULT_REFUSED_LIFECYCLE,
                     "the boot is refused as a lifecycle refusal"
                 );
             })

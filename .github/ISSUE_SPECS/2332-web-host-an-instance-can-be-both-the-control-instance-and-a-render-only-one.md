@@ -158,6 +158,21 @@ One gate went red on the way. The first build placed `impl RenderSlot` above `im
 **Test value.** `an_instance_is_the_control_instance_or_a_render_only_one_never_both` is red if an instance that holds a booted host can bind a reservation. That host's dispose would then free on a bound, render-only instance, and an orphan adopted there could never be freed. It is also red if a bound instance can boot a host: the preparation would allocate on the render thread's instance, and the dispose would free there. No existing test binds an instance that holds a session, or boots one that is bound.
 
 **Follow-ups (not filed):**
-1. The control Worker's `readStatus` reads the released half's status through a pointer cached before the release, not the shell (`miso-engine-v1-control-worker.js` 368-374, 439). That is JS, which #2317 owns.
+1. **To be filed as its own issue (root).** The control Worker caches `status_ptr` before `host_release` (`miso-engine-v1-control-worker.js` 368-374, 439). So its `readStatus` reads the released half's render-thread status, without atomics, and not the shell. The 64-bit clock words can tear. The defect predates this PR, and the attempt-1 review confirmed it. It is not folded into #2317 or this PR.
 2. No test reads the released host's shell `state` after a control failure (the green mutation row). Take it with item 1, which decides whether the shell's mirror of the lifecycle word has a reader at all.
 3. `RenderHalf::ready: Option` still encodes "disposed while here". A `Disposed` variant would remove the last `ready: None` branches.
+4. The call-graph gate pins `call_indirect` sites by mangled name, and those names include the impl-block index (`Ms2`/`Ms3`, `scripts/check-web-audioworklet-callgraph.py` `INDIRECT_SITES`). That couples source order to the gate: reordering or inserting an impl renames the pins and turns the gate red, even when the sites and counts are unchanged. This is why `impl RenderSlot` sits below `impl RenderReady` and `impl RenderHalf`. A pin keyed on something order-independent would remove the coupling.
+
+**Verdict on attempt 1 (Sol): PASS with MINORs**, folded after a merge of `origin/main`:
+1. The new test checks `boot_result` against `RESULT_REFUSED_LIFECYCLE`, the contract it pins, rather than `RESULT_WRONG_STATE`. The two constants have the same value.
+2. Follow-up 4 (the mangled impl-index pins) is recorded.
+3. Follow-up 1 is marked to be filed as its own issue by root.
+
+The fold changes no render code. It was re-gated with:
+- `cargo test --locked -p host-web --all-features --test worker_handoff`;
+- clippy `-D warnings` on `host-web`;
+- `cargo fmt --check`;
+- `RUSTDOCFLAGS="-D warnings" cargo doc` on `host-web`;
+- `bash scripts/check-workspace-policy.sh`.
+
+The wasm artifact was not rebuilt.
