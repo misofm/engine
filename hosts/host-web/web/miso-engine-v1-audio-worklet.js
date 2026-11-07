@@ -859,34 +859,36 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// header the active one names as its successor: the replacement plan a command just committed,
   /// whose views are cut now so the quantum that adopts it only switches to them. A header or
   /// frame the module's memory cannot hold is a protocol fault, sticky, reported to `requestId`:
-  /// the steps' request ID, so a fault found on a service tick belongs to no request (#2291).
+  /// the steps' request ID, so a fault found on a service tick belongs to no request (#2291). Both
+  /// faults (the active header's and the successor's) leave through this one report.
   syncMeterViews(requestId = this.lastRequestId) {
     if (!this.metersAttached || this.phase !== PHASE_LIVE) return;
+    if (!this.cutLiveMeterSets()) this.sticky(RESULT_INTERNAL, requestId);
+  }
+
+  /// `syncMeterViews`' cut: whether the active and pending sets now follow the host's headers
+  /// (`false`: a header or frame the module's memory cannot hold).
+  cutLiveMeterSets() {
     this.rebindMemoryViews();
     const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0;
     let active = this.meterSet;
     if (active === null || active.headerPointer !== current) {
       active = this.cutMeterSet(current);
-      if (active === null) {
-        this.sticky(RESULT_INTERNAL, requestId);
-        return;
-      }
+      if (active === null) return false;
       this.meterSet = active;
       this.pendingMeterSet = null;
     }
     const successor = active.header.getUint32(METER_HEADER_SUCCESSOR_POINTER, true);
     if (successor === 0) {
       this.pendingMeterSet = null;
-      return;
+      return true;
     }
     if (this.pendingMeterSet === null || this.pendingMeterSet.headerPointer !== successor) {
       const pending = this.cutMeterSet(successor);
-      if (pending === null) {
-        this.sticky(RESULT_INTERNAL, requestId);
-        return;
-      }
+      if (pending === null) return false;
       this.pendingMeterSet = pending;
     }
+    return true;
   }
 
   /// Bind every live-control view and preallocate every frame the render callback posts.

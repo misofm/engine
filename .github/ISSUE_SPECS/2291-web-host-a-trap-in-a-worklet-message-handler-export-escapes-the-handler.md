@@ -147,12 +147,15 @@ Export callers that are not message handlers: the constructor (`initialize`, con
 | M16 after-answer branch passes planes | after-answer: no planes | RED: `a service after a source trap stays inside the handler` (`DataCloneError`) |
 | M17 `receive`'s refusals drop planes | (refactor of an existing line) | survives: the planes a malformed or failed-phase request gets back were untested on base too, and the refactor moved the expression unchanged; the trap path's planes are M6's. A follow-up, not this issue's claim |
 | M18 `syncMeterViews()` without the steps' ID | meter-view fault on a tick -> 0 | RED: `a meter-view fault on a tick is request 0's` |
+| R6 (the reviewer's, folded after attempt 2) `syncMeterViews`' fault exit reports `lastRequestId` | both meter-view faults -> the steps' ID | RED: `a meter-view fault on a tick is request 0's`. Attempt 2 had a separate `sticky` for the successor-cut fault, and the tick row covered only the active-header fault. Reverting the successor's alone stayed green. Both faults now leave through one report (`syncMeterViews` -> `cutLiveMeterSets()`), so the one row covers both |
 | P1 prelude catch rethrows | prelude catch | RED: `Got unwanted exception` |
 | P2 prelude records no trap | prelude's `trap` call | RED: `the page hears of the trap` |
 | P3 prelude `trap(lastRequestId)` | prelude -> 0 | RED: `the page hears of the trap` |
 | P4 prelude refusal not 255 | prelude refusal | RED: the `seek-prepared` reply |
 
 **Green at attempt 2:**
+Note, R5 (the reviewer's): `syncMeterViews(0)` on every message, ticks and requests alike, survives. On base, too, a meter-view fault after a request was reported to that request, which the page has already seen answered; the host fails on either ID. It is pre-existing and is recorded here, not tested.
+
 - `bash scripts/test-web-audioworklet.sh`: exit 0.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `cd sdk && node --test test/browser-pcm-evals.mjs`: 51 tests, 48 pass, 3 fail. The 3 are the "actual Wasm" rows, which fail on base too, each on the missing artifact.
@@ -165,3 +168,5 @@ Export callers that are not message handlers: the constructor (`initialize`, con
 - The worker rows "after the answer" and "Worker port": red if the worker `answered` branch or the control port's request 0 is lost; the reviewer's M7, M9 and M12 survived attempt 1.
 - The prelude row: red if `prepare-seek` lets an export's throw escape, records no trap on the real engine class (the dispose then calls the export the trap left refusing), reports it to a page request, or refuses with anything but 255.
 - Deleted: the `session_seek` row. It defended the same unanswered branch as the control command row, so it caught nothing that row does not.
+
+**Verdict on attempt 2 (Sol): PASS, with one minor folded.** The reviewer re-ran these mutations plus 27 of their own, ruled M15 equivalent, accepted M17 as a follow-up, and found the merge with current main clean and green. The minor was R6: half of the `syncMeterViews` request-ID change had no test. It is folded by routing both refusals through one report, and R6 is red (guard table above). After the fold, `bash scripts/test-web-audioworklet.sh` exits 0, and `bash scripts/check-workspace-policy.sh` is ok. The coordinator files two follow-ups in #2258: the trap in `process()` outside the render call, and M17.
