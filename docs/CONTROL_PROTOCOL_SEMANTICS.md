@@ -87,7 +87,7 @@ Changing revision cancels nothing, and the transport has no position to locate (
 
 ## Queues and telemetry
 
-Control commands, responses, and reliable events reject before related state changes when full and preserve the original item. Telemetry may replace only the latest same `(revision, handle/component)` value, incrementing `telemetry_coalesced`; a new key rejected at capacity increments `telemetry_dropped`. Counters are non-resetting and saturate at `u64::MAX`.
+Control commands, responses, and reliable events reject before related state changes when full and preserve the original item. A reliable-event slot held by a reservation (a commit's own, or a render diagnostic the control plane has staged) is full: every reliable-event admission counts it, so a transaction refused for it is `BACKPRESSURE` like any other, and the refusal's pre-attempt occupancy includes it. Telemetry may replace only the latest same `(revision, handle/component)` value, incrementing `telemetry_coalesced`; a new key rejected at capacity increments `telemetry_dropped`. Counters are non-resetting and saturate at `u64::MAX`.
 
 Render-side consumption has a fixed work bound and does no BTLV decode, allocation/free, lock, logging, I/O, syscall, or structural mutation. Queue configuration and formulas are in the [sizing guide](CONTROL_PROTOCOL_SIZING.md). Typed `BACKPRESSURE` identifies queue kind, capacity, pre-attempt occupancy, requested slots, generation, and applicable byte/retry values.
 

@@ -85,17 +85,18 @@ impl PrimedCandidate {
 /// [`PlanAdoption::Primed`] (#1403 D3, amended by the scope note's R1: the publication goes
 /// through the rebuild's own reservation, which the caller then commits).
 ///
-/// Call it after the transaction's last fallible step and **before** W's set takes any producer
-/// ([`SourceControlSet::adopt_persisting`]) or donated ring: at that point an entry W holds vacant
-/// is exactly a ring W carries from the plan it displaces, and each ring's producer is still in
-/// the set of the plan that holds it.
+/// Call it after the transaction's last fallible step. Every ring reads `true` exactly when W
+/// carries it ([`SourceControlSet::carries`], fixed when W was prepared), wherever its producer is,
+/// so the flags are the same whether W's set has taken its producers
+/// ([`SourceControlSet::adopt_persisting`]) or a donated ring yet or not (#2273). Each ring's
+/// producer is in one of the three sets:
 ///
-/// 1. Every ring whose producer `running_sources` holds (the plan W displaces, which render runs)
-///    reads `true` if W carries it (W holds the source vacant) and `false` otherwise.
-/// 2. Every ring whose producer `withdrawn_sources` holds (a candidate W supersedes, #1310) reads
-///    the same rule: a ring it carried from the running plan and W carries on reads `true`; one W
-///    removes, and every ring it created, reads `false`, so no `true` written for it outlives it.
-/// 3. Every ring W created reads `false`.
+/// 1. `running_sources`, the plan W displaces, which render runs: `true` if W carries the ring.
+/// 2. `withdrawn_sources`, a candidate W supersedes (#1310): a ring it carried from the running
+///    plan and W carries on reads `true`; one W removes, and every ring it created, reads `false`,
+///    so no `true` written for it outlives it.
+/// 3. `candidate_sources`, W's own: a ring W carries, once its producer has moved in, reads
+///    `true`; every ring W created reads `false`.
 ///
 /// It then reads `not_before` from the render clock and sets the reservation's adoption to
 /// `Primed { not_before, lead_blocks }`. The caller publishes only into an `Empty` cell (#1343 D3),
@@ -109,12 +110,12 @@ pub fn publish_primed(
     withdrawn_sources: Option<&SourceControlSet>,
     lead_blocks: u32,
 ) -> PrimedCandidate {
-    let carried = |id: &[u8]| candidate_sources.holds_vacant(id);
+    let carried = |id: &[u8]| candidate_sources.carries(id);
     running_sources.set_prime_flags(carried);
     if let Some(withdrawn) = withdrawn_sources {
         withdrawn.set_prime_flags(carried);
     }
-    candidate_sources.set_prime_flags(|_| false);
+    candidate_sources.set_prime_flags(carried);
     let not_before = reservation.render_clock();
     reservation.set_adoption(PlanAdoption::Primed {
         not_before,

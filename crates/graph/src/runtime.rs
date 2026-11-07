@@ -3097,11 +3097,11 @@ impl LiveControlEffect {
         let staged = self.control.stage(&mut self.spans, first_sample, snapshot);
         // #2129 D2, D3 (as amended): leaving settled bypass resumes from rest, as a bank lane
         // does, so the instance's bits after the switch do not depend on where it renders.
-        if self.control.take_rest() {
+        if let Some(rest) = self.control.take_rest() {
             self.effect
                 .processor
                 .reset(effect_contract::ResetKind::DiscontinuityKeepParameters);
-            self.control.begin_hold(self.warmup);
+            self.control.begin_hold(rest, self.warmup);
         }
         // #1371 D2: the lane's link switch reaches the processor before the block renders.
         if let Some(link) = staged.link {

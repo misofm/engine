@@ -3589,6 +3589,91 @@ fn session_commit_reserves_reliable_event_before_replacing_store() {
     assert_eq!(controller.session().canonical_snapshot(), before_snapshot);
 }
 
+/// A reliable-event slot a reservation holds is not room (#2283). With the one slot held, as the
+/// control plane holds one for each render diagnostic it stages, a structural transaction is
+/// refused as typed `BACKPRESSURE` on both frame entry points, reporting the held slot as
+/// occupied, with the model, the revision and the queue unchanged and the refusal recorded for
+/// replay; once the hold is released the same edit commits.
+///
+/// Test value: red if the structural plan's room check counts queued events only, so a held slot
+/// passes it: the prepared path's reservation then fails as `INTERNAL`, and the one-call path's
+/// reservation `expect` panics.
+#[test]
+fn a_held_reliable_event_slot_refuses_a_structural_transaction_as_backpressure() {
+    let mut controller = controller(4);
+    let before = controller.session().canonical_snapshot().to_owned();
+    let held = controller
+        .queues_mut()
+        .reserve_reliable_event()
+        .expect("the one slot");
+    let edits = [SessionEdit::SetSessionId {
+        session_id: session::StableId::parse("held-slot").expect("ID"),
+    }];
+    let frame = |request| {
+        full_command(
+            request,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::SessionTransactionApply(&edits),
+        )
+    };
+    let prepared = controller
+        .prepare_command_frame(
+            &frame(1),
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
+        .expect("a typed reply");
+    let PreparedCommandFrame::Immediate(prepared) = prepared else {
+        panic!("a held slot leaves no room for a structural token");
+    };
+    let mut output = [0_u8; 2048];
+    let length = prepared.write_into(&mut output).expect("reply bytes");
+    let replies = [
+        output[..length].to_vec(),
+        process_full_command(&mut controller, &frame(2)),
+    ];
+    for reply in &replies {
+        let crate::DecodedTypedResponseFrame::NonOk { header, payload } = decode_response(reply)
+        else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(header.status, StatusCode::Backpressure);
+        assert_eq!(
+            payload.backpressure,
+            Some(Backpressure {
+                queue_kind: BackpressureQueueKind::ReliableEvent,
+                capacity: 1,
+                occupancy: 1,
+                requested_items: 1,
+                generation: Some(4),
+                retry_boundary: None,
+                requested_bytes: None,
+                available_bytes: None,
+            }),
+            "the held slot is reported as occupied"
+        );
+    }
+    assert_eq!(controller.session().revision(), SessionRevision(7));
+    assert_eq!(controller.session().canonical_snapshot(), before);
+    assert_eq!(controller.replay().len(), 2, "both refusals are recorded");
+    assert_eq!(
+        controller
+            .queues()
+            .report(crate::QueueKind::ReliableEvent)
+            .occupancy,
+        0,
+        "nothing was queued"
+    );
+
+    controller.queues_mut().release_reliable_event(held);
+    assert!(matches!(
+        decode_response(&process_full_command(&mut controller, &frame(3))),
+        crate::DecodedTypedResponseFrame::Success { .. }
+    ));
+    assert_eq!(controller.session().revision(), SessionRevision(8));
+}
+
 /// An executed `BACKPRESSURE` outcome is cached like any other: a retry under the same request ID
 /// replays the identical response and executes nothing, even after the queue that refused the
 /// first attempt has room. Red if the cache stops storing `BACKPRESSURE` outcomes: the retry then
@@ -4375,6 +4460,70 @@ fn counter_egress_splits_nonascending_staged_snapshots_without_stalling() {
         assert_eq!(actual, expected_bytes[..expected_len]);
     }
     assert_eq!(controller.dequeue_lossy_event_frame_into(&mut []), Ok(None));
+}
+
+/// #2268: the reliable backlog counts the queued events and the one a failed dequeue keeps
+/// pending, and the delivered count rises by one for each frame that reaches caller output and
+/// for nothing else, a short buffer or any other egress error included.
+///
+/// Red if the backlog drops its queued or its pending term, or if the delivered count misses a
+/// delivery or counts a failed dequeue: a host that places its own events by these counts (the
+/// control plane's render diagnostics) would reorder them against the controller's.
+#[test]
+fn the_reliable_backlog_and_delivered_count_follow_each_dequeue_outcome() {
+    let mut controller = egress_controller(4, 1);
+    let revision = controller.session().revision();
+    let counts = |controller: &ProtocolController<MockProvider>| {
+        (
+            controller.reliable_backlog(),
+            controller.reliable_events_delivered(),
+        )
+    };
+    for slot in [
+        ReliableSlot::session_committed(revision, 1, id(1), SessionRevision(6), 1),
+        ReliableSlot::transport_state(revision, 2, TransportState::Stopped, SampleTime(0), None),
+    ] {
+        controller
+            .queues_mut()
+            .try_enqueue_event(slot)
+            .expect("room for the event");
+    }
+    assert_eq!(counts(&controller), (2, 0), "two queued");
+    assert!(matches!(
+        controller.dequeue_reliable_event_frame_into(&mut [0_u8; 1]),
+        Err(EventEgressError::Encode(EncodeError::OutputTooSmall { .. }))
+    ));
+    assert_eq!(counts(&controller), (2, 0), "one pending, one queued");
+    let mut output = [0_u8; 256];
+    assert!(matches!(
+        controller.dequeue_reliable_event_frame_into(&mut output),
+        Ok(Some(_))
+    ));
+    assert_eq!(counts(&controller), (1, 1), "the pending one delivered");
+    // A slot no frame encodes: it fails, and stays pending, at every dequeue.
+    controller
+        .queues_mut()
+        .try_enqueue_event(ReliableSlot {
+            header: crate::ReliableHeader::Event,
+            revision,
+            message_id: MessageId::SessionCommitted,
+            payload: crate::ReliablePayload::EmptyResponse,
+        })
+        .expect("room for the undeliverable event");
+    assert!(matches!(
+        controller.dequeue_reliable_event_frame_into(&mut output),
+        Ok(Some(_))
+    ));
+    assert_eq!(counts(&controller), (1, 2), "the queued one delivered");
+    assert!(matches!(
+        controller.dequeue_reliable_event_frame_into(&mut output),
+        Err(EventEgressError::Encode(EncodeError::MessageKindMismatch))
+    ));
+    assert_eq!(
+        counts(&controller),
+        (1, 2),
+        "the failed one pending, uncounted"
+    );
 }
 
 #[test]

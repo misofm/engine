@@ -1650,7 +1650,9 @@ pub enum EventEgressError {
     /// The endpoint's one `RESPONSE_READY` cell holds an event whose frame has not reached caller
     /// output yet (#1578 D4).
     ResponseReadyOccupied,
-    /// A reliable queue rejected the original event without dropping or coalescing it.
+    /// A reliable queue rejected the original event without dropping or coalescing it. The report
+    /// is [`ProtocolQueues::reliable_event_admission_report`]: its occupancy counts held slots,
+    /// an outstanding structural token's own included.
     ReliableQueueFull(QueueReport),
     /// The typed caller-buffer encoder rejected the requested event/output.
     Encode(EncodeError),
@@ -1771,6 +1773,10 @@ pub struct ProtocolController<P: ControlProvider> {
     /// refused with `BACKPRESSURE` `response.capture.pending`.
     response_ready: Option<ResponseReady>,
     pending_reliable_event: Option<ReliableSlot>,
+    /// How many reliable event frames reached caller output (#2268): monotone, never reset. It
+    /// saturates rather than wraps, which is unreachable: `u64::MAX` frames at 10^9 a second take
+    /// about 584 years.
+    reliable_events_delivered: u64,
     pending_meter_record: Option<TelemetryRecord>,
     pending_counter_record: Option<CounterTelemetryRecord>,
     pending_telemetry_event: PendingTelemetryEvent,
@@ -1816,6 +1822,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             observation_ended_cells: observation_ended_cells.into_boxed_slice(),
             response_ready: None,
             pending_reliable_event: None,
+            reliable_events_delivered: 0,
             pending_meter_record: None,
             pending_counter_record: None,
             pending_telemetry_event: PendingTelemetryEvent::None,
@@ -2854,6 +2861,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             .try_reserve_exact(input.len())
             .map_err(|_| CommandFrameProcessError::Internal)?;
         request.extend_from_slice(input);
+        // The plan checked this room with the queue's own check under this `&mut self`, and only
+        // a release can change it since, so this cannot fail; it stays a defect report, never a
+        // refusal.
         let event_reservations = match self.queues.reserve_reliable_events(plan.required_events) {
             Ok(reservations) => reservations,
             Err(_) => return Err(CommandFrameProcessError::Internal),
@@ -2994,13 +3004,11 @@ impl<P: ControlProvider> ProtocolController<P> {
         // A replace never writes a monitor row (a document carries no solo).
         let monitor_only =
             replacement.is_none() && monitor && crate::model::is_monitor_transaction(&edits);
+        // The room is the queue's own check, which counts a slot another holder reserved (a
+        // staged render diagnostic's) as taken, so the reservation in preparation or in the
+        // one-call commit cannot fail where this passed (#2283).
         let required_events = usize::from(!monitor_only);
-        let event_report = self.queues.report(crate::QueueKind::ReliableEvent);
-        if required_events
-            > event_report
-                .capacity
-                .saturating_sub(usize::try_from(event_report.occupancy).unwrap_or(usize::MAX))
-        {
+        if let Err(event_report) = self.queues.check_reliable_event_room(required_events) {
             return Ok(StructuralCommandDisposition::Immediate {
                 replay_plan,
                 outcome: self.queue_backpressure_outcome(event_report),
@@ -3131,12 +3139,13 @@ impl<P: ControlProvider> ProtocolController<P> {
             .map_err(CommandFrameProcessError::Encode)?;
 
         // Every fallible semantic, output, replay-capacity, and event-capacity decision completed
-        // above. Exclusive `&mut self` ownership makes these exact reservations invariant from
-        // this point through the session/event/replay commit.
+        // above; the plan checked the event room with the queue's own check, held slots counted.
+        // Exclusive `&mut self` ownership makes these exact reservations invariant from this
+        // point through the session/event/replay commit.
         let mut event_reservations = self
             .queues
             .reserve_reliable_events(plan.required_events)
-            .expect("read-only structural plan reserved exact reliable-event capacity");
+            .expect("the plan's room check admits exactly this reservation");
         self.replay
             .complete(plan.replay_plan, input, &output[..written])
             .expect("planned replay reservation accepts the measured direct response");
@@ -3914,7 +3923,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
             return Err(EventEgressError::ReliableQueueFull(
-                self.queues.report(crate::QueueKind::ReliableEvent),
+                self.queues.reliable_event_admission_report(),
             ));
         }
         if !self.config.provider_features.meters
@@ -3964,7 +3973,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
             return Err(EventEgressError::ReliableQueueFull(
-                self.queues.report(crate::QueueKind::ReliableEvent),
+                self.queues.reliable_event_admission_report(),
             ));
         }
         if !self.config.provider_features.counters
@@ -4008,7 +4017,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
             return Err(EventEgressError::ReliableQueueFull(
-                self.queues.report(crate::QueueKind::ReliableEvent),
+                self.queues.reliable_event_admission_report(),
             ));
         }
         if !self.config.provider_features.diagnostics
@@ -4069,7 +4078,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<(), ResponseReadyEnqueueError> {
         let refuse = |reason, event| Err(ResponseReadyEnqueueError { reason, event });
         if self.structural_outstanding() {
-            let report = self.queues.report(crate::QueueKind::ReliableEvent);
+            let report = self.queues.reliable_event_admission_report();
             return refuse(EventEgressError::ReliableQueueFull(report), event);
         }
         if !self.config.provider_features.response {
@@ -4117,9 +4126,30 @@ impl<P: ControlProvider> ProtocolController<P> {
         self.response_ready.is_some()
     }
 
-    /// Dequeue and encode one complete reliable event frame. A short caller output buffer leaves
-    /// the exact queued event pending, so retrying with the required size neither loses nor
-    /// reorders reliable events.
+    /// The reliable events this endpoint holds whose frames have not reached caller output: the
+    /// queued ones, plus the one [`Self::dequeue_reliable_event_frame_into`] popped and keeps
+    /// pending after any error (#2268). A host that interleaves events of its own with these
+    /// places one behind every older event by waiting until
+    /// [`Self::reliable_events_delivered`] reaches its value then plus this backlog.
+    #[must_use]
+    pub fn reliable_backlog(&self) -> u64 {
+        self.queues
+            .report(crate::QueueKind::ReliableEvent)
+            .occupancy
+            .saturating_add(u64::from(self.pending_reliable_event.is_some()))
+    }
+
+    /// How many reliable event frames [`Self::dequeue_reliable_event_frame_into`] has delivered to
+    /// caller output since boot (#2268). Monotone; an error delivers nothing and counts nothing.
+    /// It saturates at `u64::MAX`, which is unreachable (about 584 years at 10^9 frames a second).
+    #[must_use]
+    pub const fn reliable_events_delivered(&self) -> u64 {
+        self.reliable_events_delivered
+    }
+
+    /// Dequeue and encode one complete reliable event frame. Any error, a short caller output
+    /// buffer included, leaves the exact event pending, so a retry neither loses nor reorders
+    /// reliable events.
     pub fn dequeue_reliable_event_frame_into(
         &mut self,
         output: &mut [u8],
@@ -4148,6 +4178,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 self.response_ready = None;
             }
             self.pending_reliable_event = None;
+            self.reliable_events_delivered = self.reliable_events_delivered.saturating_add(1);
         }
         result.map(Some)
     }

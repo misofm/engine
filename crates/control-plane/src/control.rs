@@ -1533,7 +1533,6 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) render_diagnostics: Box<[RenderDiagnosticSlot]>,
     pub(crate) render_diagnostic_head: usize,
     pub(crate) render_diagnostic_len: usize,
-    pub(crate) protocol_reliable_pending: bool,
     /// The monitor overlay (decision 17, C8, #1559 D1): the soloed strips. Host-local, never saved
     /// and never in a snapshot; empty at boot. The newest plan's cells hold it (D10), the control
     /// catalog shows it (D11), and it is written only after every fallible step of the
@@ -2790,12 +2789,33 @@ impl Drop for ObservedController {
     }
 }
 
+/// One prepared render-diagnostic slot of the reliable egress ring: its eagerly allocated
+/// diagnostic, and whether it holds a staged one.
 pub(crate) struct RenderDiagnosticSlot {
+    /// The diagnostic's text, allocated at boot. Its `sample_time` and `provider_sequence` stay
+    /// `None` here: the staged block's values live in [`DiagnosticSlotState::Staged`] and are
+    /// written in only for the encode.
     pub(crate) diagnostic: protocol::Diagnostic,
-    pub(crate) reservation: Option<protocol::ReliableEventReservation>,
-    pub(crate) protocol_events_before: u64,
-    pub(crate) revision: protocol::SessionRevision,
-    pub(crate) occupied: bool,
+    pub(crate) state: DiagnosticSlotState,
+}
+
+/// Whether a render-diagnostic slot holds a diagnostic waiting for egress (#2268).
+pub(crate) enum DiagnosticSlotState {
+    Free,
+    Staged {
+        /// The reliable-event capacity the diagnostic holds until its frame is delivered: a
+        /// hold, released when the slot returns to `Free` and drops it.
+        _reservation: protocol::ReliableEventReservation,
+        /// The controller's delivered-event count at which every protocol event older than the
+        /// diagnostic has reached caller output: the count when it was staged plus the backlog
+        /// then. An absolute target, so it needs no update as events are delivered.
+        deliver_after: u64,
+        revision: protocol::SessionRevision,
+        /// The observed block's end sample.
+        sample: u64,
+        /// The observed block's render sequence.
+        sequence: u64,
+    },
 }
 
 impl RenderDiagnosticSlot {
@@ -2814,10 +2834,7 @@ impl RenderDiagnosticSlot {
                 sample_time: None,
                 provider_sequence: None,
             },
-            reservation: None,
-            protocol_events_before: 0,
-            revision: protocol::SessionRevision(0),
-            occupied: false,
+            state: DiagnosticSlotState::Free,
         })
     }
 }
@@ -3390,14 +3407,13 @@ where
         }
 
         // A reliable-event reservation is the capacity credit for this CAPI-owned event. The
-        // barrier records already-published protocol events, preserving their FIFO order while
-        // the diagnostic itself remains in fixed, eagerly allocated CAPI storage.
-        let protocol_events_before = self
+        // diagnostic is due once every protocol event the controller holds now, the one it keeps
+        // pending after an egress error included, has been delivered (#2268), preserving their
+        // FIFO order while the diagnostic itself remains in fixed, eagerly allocated CAPI storage.
+        let deliver_after = self
             .controller
-            .queues()
-            .report(protocol::QueueKind::ReliableEvent)
-            .occupancy
-            .saturating_add(u64::from(self.protocol_reliable_pending));
+            .reliable_events_delivered()
+            .saturating_add(self.controller.reliable_backlog());
         let Ok(reservation) = self.controller.queues_mut().reserve_reliable_event() else {
             return;
         };
@@ -3406,14 +3422,14 @@ where
         let tail = (self.render_diagnostic_head + self.render_diagnostic_len)
             % self.render_diagnostics.len();
         let slot = &mut self.render_diagnostics[tail];
-        debug_assert!(!slot.occupied);
-        debug_assert!(slot.reservation.is_none());
-        slot.diagnostic.sample_time = Some(sample);
-        slot.diagnostic.provider_sequence = Some(sequence);
-        slot.revision = revision;
-        slot.protocol_events_before = protocol_events_before;
-        slot.reservation = Some(reservation);
-        slot.occupied = true;
+        debug_assert!(matches!(slot.state, DiagnosticSlotState::Free));
+        slot.state = DiagnosticSlotState::Staged {
+            _reservation: reservation,
+            deliver_after,
+            revision,
+            sample,
+            sequence,
+        };
         self.controller
             .provider_mut()
             .set_render_diagnostic(tail, sample, sequence, true);
@@ -5677,11 +5693,10 @@ where
     /// Sets the prime flags of the newest pending candidate's carry again, as its own
     /// `publish_primed` set them (#1403 D3, #2044), before it is republished.
     ///
-    /// Its publication moved every producer it held vacant in from the epoch it succeeds, which
-    /// then holds those entries vacant. So the candidate carries exactly the rings whose
-    /// producers it holds and whose IDs that epoch holds vacant (a redeclared source's entry
-    /// there keeps its own producer); every producer that epoch still holds is of a ring the
-    /// candidate does not carry. No allocation.
+    /// The same rule as `publish_primed`: a ring reads `true` exactly when the candidate carries
+    /// it ([`host_core::SourceControlSet::carries`], fixed at its preparation), wherever its
+    /// producer now is (#2273). Its publication moved every producer it carries in from the epoch
+    /// it succeeds, so that epoch's own producers are of rings it does not carry. No allocation.
     fn restore_prime_flags(&self, epoch: u64) {
         let len = self.pending_providers.len();
         let Some(candidate) = self.pending_providers.last() else {
@@ -5695,12 +5710,9 @@ where
             0 | 1 => &self.providers,
             _ => &self.pending_providers[len - 2],
         };
-        holder
-            .sources
-            .set_prime_flags(|id| candidate.sources.holds_vacant(id));
-        candidate
-            .sources
-            .set_prime_flags(|id| holder.sources.holds_vacant(id));
+        let carried = |id: &[u8]| candidate.sources.carries(id);
+        holder.sources.set_prime_flags(carried);
+        candidate.sources.set_prime_flags(carried);
     }
 
     /// The transition fallback across the pending `Primed` candidate W, the donor (#1397 D2): the
@@ -6573,16 +6585,14 @@ where
             }
             None => None,
         };
-        // #1403 D3: a warm candidate's flags and `Primed` schedule, before its set takes any
-        // producer or donated ring: each entry it holds vacant is then a ring it carries from the
-        // plan it displaces, whose producer is still in that plan's set, or, across a withdrawn
-        // candidate, in the withdrawn candidate's. It sets the prime flags of rings render reads,
-        // so it runs after the last refusal: the commit below cannot refuse once its predicate
-        // passed above, with no controller write between. #2044: it runs before the protocol
-        // commit, so a panic here or in the commit (no lock is held) leaves the controller as it
-        // was and republishes the withdrawn candidate (#2010). Its flags are then the
-        // successor's: `rebuild_withdrawn` sets a `Primed` candidate's again before it republishes
-        // it (`restore_prime_flags`).
+        // #1403 D3: a warm candidate's flags and `Primed` schedule. A ring's flag is whether the
+        // candidate carries it, fixed at its preparation, so the producer moves below do not
+        // change it (#2273). It sets the prime flags of rings render reads, so it runs after the
+        // last refusal: the commit below cannot refuse once its predicate passed above, with no
+        // controller write between. #2044: it runs before the protocol commit, so a panic here
+        // or in the commit (no lock is held) leaves the controller as it was and republishes the
+        // withdrawn candidate (#2010). Its flags are then the successor's: `rebuild_withdrawn`
+        // sets a `Primed` candidate's again before it republishes it (`restore_prime_flags`).
         let mut primed = warm_lead_blocks.map(|lead_blocks| {
             let (running, withdrawn_sources) = if superseding {
                 let len = self.pending_providers.len();
@@ -7703,71 +7713,84 @@ where
         result.map_err(map_event_egress_error)
     }
 
+    /// Whether no staged render diagnostic waits for more protocol events than the controller
+    /// holds (#2268): each waits only for events older than it, and those are all still held.
+    fn render_diagnostics_within_backlog(&self) -> bool {
+        let delivered = self.controller.reliable_events_delivered();
+        let backlog = self.controller.reliable_backlog();
+        self.render_diagnostics.iter().all(|slot| match slot.state {
+            DiagnosticSlotState::Staged { deliver_after, .. } => {
+                deliver_after.saturating_sub(delivered) <= backlog
+            }
+            DiagnosticSlotState::Free => true,
+        })
+    }
+
     pub(crate) fn dequeue_reliable_event(
         &mut self,
         output_capacity: usize,
     ) -> Result<Option<usize>, EventEgressError> {
-        if self.render_diagnostic_len == 0 {
-            let result = self
-                .controller
-                .dequeue_reliable_event_frame_into(&mut self.response_scratch[..output_capacity]);
-            self.protocol_reliable_pending = matches!(
-                result,
-                Err(EventEgressError::Encode(EncodeError::OutputTooSmall { .. }))
-            );
-            return result;
-        }
-
+        debug_assert!(
+            self.render_diagnostics_within_backlog(),
+            "a render diagnostic waits for protocol events the controller does not hold"
+        );
         let head = self.render_diagnostic_head;
-        if self.render_diagnostics[head].protocol_events_before != 0 {
-            let result = self
+        let (deliver_after, revision, sample, sequence) = match &self.render_diagnostics[head].state
+        {
+            DiagnosticSlotState::Staged {
+                deliver_after,
+                revision,
+                sample,
+                sequence,
+                ..
+            } if self.render_diagnostic_len != 0 => (*deliver_after, *revision, *sample, *sequence),
+            _ => {
+                debug_assert_eq!(self.render_diagnostic_len, 0, "the ring's head is staged");
+                return self.controller.dequeue_reliable_event_frame_into(
+                    &mut self.response_scratch[..output_capacity],
+                );
+            }
+        };
+
+        // An older protocol event goes first, and an error leaves it pending and first.
+        if self.controller.reliable_events_delivered() < deliver_after {
+            match self
                 .controller
-                .dequeue_reliable_event_frame_into(&mut self.response_scratch[..output_capacity]);
-            match result {
-                Ok(Some(bytes)) => {
-                    self.render_diagnostics[head].protocol_events_before -= 1;
-                    self.protocol_reliable_pending = false;
-                    return Ok(Some(bytes));
-                }
-                Ok(None) => {
-                    self.protocol_reliable_pending = false;
-                    return Ok(None);
-                }
-                Err(error) => {
-                    self.protocol_reliable_pending = matches!(
-                        error,
-                        EventEgressError::Encode(EncodeError::OutputTooSmall { .. })
-                    );
-                    return Err(error);
-                }
+                .dequeue_reliable_event_frame_into(&mut self.response_scratch[..output_capacity])
+            {
+                // The controller holds every event the diagnostic waits for, so it has one. An
+                // empty controller breaks that invariant; in a release build the diagnostic
+                // follows, since nothing older remains to deliver.
+                Ok(None) => debug_assert!(
+                    self.controller.reliable_events_delivered() >= deliver_after,
+                    "a render diagnostic waits for protocol events the controller does not hold"
+                ),
+                result => return result,
             }
         }
 
         let slot = &mut self.render_diagnostics[head];
+        slot.diagnostic.sample_time = Some(sample);
+        slot.diagnostic.provider_sequence = Some(sequence);
         let result = ProtocolCodec::default().encode_event_frame_into(
             &protocol::TypedEventFrame {
-                revision: slot.revision,
+                revision,
                 payload: protocol::EventPayload::Diagnostic(&slot.diagnostic),
             },
             &mut self.response_scratch[..output_capacity],
         );
-        match result {
-            Ok(bytes) => {
-                drop(slot.reservation.take());
-                slot.diagnostic.sample_time = None;
-                slot.diagnostic.provider_sequence = None;
-                slot.protocol_events_before = 0;
-                slot.occupied = false;
-                self.controller
-                    .provider_mut()
-                    .set_render_diagnostic(head, 0, 0, false);
-                self.render_diagnostic_head =
-                    (self.render_diagnostic_head + 1) % self.render_diagnostics.len();
-                self.render_diagnostic_len -= 1;
-                Ok(Some(bytes))
-            }
-            Err(error) => Err(EventEgressError::Encode(error)),
-        }
+        slot.diagnostic.sample_time = None;
+        slot.diagnostic.provider_sequence = None;
+        let bytes = result.map_err(EventEgressError::Encode)?;
+        // Freeing the slot drops its reservation.
+        slot.state = DiagnosticSlotState::Free;
+        self.controller
+            .provider_mut()
+            .set_render_diagnostic(head, 0, 0, false);
+        self.render_diagnostic_head =
+            (self.render_diagnostic_head + 1) % self.render_diagnostics.len();
+        self.render_diagnostic_len -= 1;
+        Ok(Some(bytes))
     }
 
     /// The bytes of the last dequeued event.
@@ -8752,7 +8775,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     mod rendered_meters {
         use crate::{
-            CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources,
+            CompiledChildren, ControlAdapter, ControlLimits, EventError, EventLane, PlanResources,
             RuntimePreparer, compile_children,
         };
         use engine::realtime::PlanarBufferMut;
@@ -9267,6 +9290,155 @@ mod tests {
                 1,
                 "the third block's diagnostic was replaced"
             );
+        }
+
+        /// #2268: each staged render diagnostic goes after exactly the protocol events older than
+        /// it, the one the controller holds pending (popped, its frame not yet delivered)
+        /// included, whichever error left it pending: a short caller buffer, or any other egress
+        /// failure. The second case has no path through the public API today (every enqueue
+        /// checks that its frame encodes), so the test puts an event that cannot encode at the
+        /// head of the queue.
+        ///
+        /// Test value: red if a diagnostic's barrier misses the pending event (counting only the
+        /// queued ones, or learning of the pending one only from a short-buffer error, the mirror
+        /// #2268 deleted), or if a second staged diagnostic waits for events that went before the
+        /// first (attempt 1's per-slot count, lowered only at the head), or if a failed dequeue
+        /// counts as a delivery: a diagnostic would overtake an older protocol event, or a newer
+        /// one overtake it.
+        #[test]
+        fn each_render_diagnostic_goes_after_exactly_the_protocol_events_older_than_it() {
+            let mut children = boot(None, Vec::new());
+            command(
+                &mut children,
+                2,
+                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters: Vec::new(),
+                    meter_period_blocks: 0,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: true,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            );
+            let kind = |children: &mut CompiledChildren<Adapter>| {
+                let length = children
+                    .session
+                    .dequeue_event(EventLane::Reliable, 4_096)
+                    .expect("an event")?;
+                let bytes = children.session.event_response(length).to_vec();
+                let mut fields = [0_u16; 64];
+                let decoded = ProtocolCodec::default()
+                    .decode_typed_event(&bytes, &mut protocol::DecodeScratch::new(&mut fields))
+                    .expect("a typed event");
+                Some(match decoded.payload {
+                    protocol::DecodedEventPayload::SessionCommitted(_) => "committed",
+                    protocol::DecodedEventPayload::Diagnostic(_) => "diagnostic",
+                    protocol::DecodedEventPayload::TransportState(_) => "transport",
+                    _ => "other",
+                })
+            };
+            assert_eq!(kind(&mut children), None, "the lane starts empty");
+
+            // A short buffer leaves `SESSION_COMMITTED` pending in the controller. The two
+            // diagnostics staged next go after it, and before the newer `TRANSPORT_STATE`; a
+            // short buffer after staging delivers, and counts, nothing.
+            let rename = SessionEdit::SetSessionId {
+                session_id: StableId::parse("renamed").expect("session ID"),
+            };
+            command(
+                &mut children,
+                3,
+                CommandPayload::SessionTransactionApply(core::slice::from_ref(&rename)),
+            );
+            assert!(matches!(
+                children.session.dequeue_event(EventLane::Reliable, 8),
+                Err(EventError::BufferTooSmall { .. })
+            ));
+            render(&mut children, 0);
+            assert!(matches!(
+                children.session.dequeue_event(EventLane::Reliable, 8),
+                Err(EventError::BufferTooSmall { .. })
+            ));
+            render(&mut children, 1);
+            assert_eq!(kind(&mut children), Some("committed"));
+            assert_eq!(kind(&mut children), Some("diagnostic"));
+            command(
+                &mut children,
+                4,
+                CommandPayload::TransportSet(protocol::TransportSetRequest {
+                    state: protocol::TransportState::Playing,
+                }),
+            );
+            assert_eq!(kind(&mut children), Some("diagnostic"));
+            assert_eq!(kind(&mut children), Some("transport"));
+            assert_eq!(kind(&mut children), None);
+
+            // Any other egress error leaves the event pending too.
+            let revision = children.session.test_controller().session().revision();
+            children
+                .session
+                .controller
+                .queues_mut()
+                .try_enqueue_event(protocol::ReliableSlot {
+                    header: protocol::ReliableHeader::Event,
+                    revision,
+                    message_id: protocol::MessageId::SessionCommitted,
+                    payload: protocol::ReliablePayload::EmptyResponse,
+                })
+                .expect("room for the undeliverable event");
+            assert!(matches!(
+                children.session.dequeue_event(EventLane::Reliable, 4_096),
+                Err(EventError::Internal)
+            ));
+            render(&mut children, 2);
+            let next = children.session.dequeue_event(EventLane::Reliable, 4_096);
+            assert!(
+                matches!(next, Err(EventError::Internal)),
+                "the pending event still heads the lane, so the diagnostic waits: {next:?}"
+            );
+        }
+
+        /// #2268: a staged render diagnostic waits only for events the controller still holds.
+        /// An event that leaves the controller without being delivered (here popped from its
+        /// queue directly, which no product path does) breaks that, and a debug build stops at
+        /// the next reliable dequeue instead of following or stalling.
+        ///
+        /// Test value: red if the egress stops checking that no staged diagnostic waits for more
+        /// events than the controller holds; a lost or uncounted delivery would then go unseen.
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic(expected = "waits for protocol events the controller does not hold")]
+        fn a_diagnostic_waiting_for_events_the_controller_lost_stops_a_debug_build() {
+            let mut children = boot(None, Vec::new());
+            command(
+                &mut children,
+                2,
+                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters: Vec::new(),
+                    meter_period_blocks: 0,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: true,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            );
+            command(
+                &mut children,
+                3,
+                CommandPayload::TransportSet(protocol::TransportSetRequest {
+                    state: protocol::TransportState::Playing,
+                }),
+            );
+            render(&mut children, 0);
+            children
+                .session
+                .controller
+                .queues_mut()
+                .try_dequeue_event()
+                .expect("the transport event");
+            let _ = children.session.dequeue_event(EventLane::Reliable, 4_096);
         }
     }
 

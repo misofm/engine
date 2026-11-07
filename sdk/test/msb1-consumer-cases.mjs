@@ -62,6 +62,22 @@ function ring(sourceId, channels = 1, capacity = 8) {
 async function drain(consumer, passes = 6) {
   for (let pass = 0; pass < passes; pass += 1) await consumer.pass();
 }
+/** Run `publish` once, right after the next `Atomics.load` of the ring's SEEK_EPOCH word, and
+ *  return the function that restores `Atomics.load` (#2282: a writer between the seqlock's loads). */
+function publishAfterEpochLoad(fed, publish) {
+  const original = Atomics.load;
+  let armed = true;
+  Atomics.load = function (view, index) {
+    const value = original.call(Atomics, view, index);
+    if (armed && view.buffer.byteLength === fed.shared.byteLength && view instanceof Int32Array && view.byteOffset === 0
+        && index === MSB1_CONTROL.SEEK_EPOCH) {
+      armed = false;
+      publish();
+    }
+    return value;
+  };
+  return () => { Atomics.load = original; };
+}
 const starts = (consumer) => consumer.submissions.map(({ generation, start }) => [generation, start]);
 
 export const MSB1_CONSUMER_CASES = [
@@ -166,6 +182,33 @@ export const MSB1_CONSUMER_CASES = [
     },
   },
   {
+    // #2282: red when a consumer counts the engine running dry while a publication is in flight
+    // as this ring's underruns once it completes (the torn arm of the wait).
+    name: "a ring whose seek publication is in flight counts no drain block and no underrun, though the engine runs dry meanwhile",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      await consumer.pass();
+      const counts = () => [count(fed.shared, "UNDERRUNS"), count(fed.shared, "DRAIN_BLOCKS")];
+      assert.deepEqual(counts(), [0, 1]);
+      const c = controls(fed.shared);
+      const wide = new BigInt64Array(fed.shared, MSB1_CONTROL_I64_OFFSET, 3);
+      Atomics.add(c, MSB1_CONTROL.SEEK_EPOCH, 1);
+      Atomics.store(wide, 0, 2n);
+      Atomics.store(wide, 1, 40n);
+      Atomics.store(wide, 2, -1n);
+      Atomics.store(c, MSB1_CONTROL.GENERATION_TAG, 2);
+      for (let pass = 0; pass < 3; pass += 1) await consumer.pass();
+      assert.deepEqual(counts(), [0, 1], "the wait counts nothing");
+      Atomics.add(c, MSB1_CONTROL.SEEK_EPOCH, 1);
+      fed.write(2n, 40n);
+      await consumer.pass();
+      assert.deepEqual(starts(consumer), [[1n, 0n], [2n, 40n]]);
+      assert.deepEqual(counts(), [0, 2], "nor once it ends: the blocks the engine ran dry in were the wait's");
+    },
+  },
+  {
     // #2185 attempt 2: red on a pass that reads the write index or classifies slots outside its
     // seek snapshot: it frees the newer seek's first chunk as stale, and the engine then refuses
     // that generation's later chunks as non-contiguous.
@@ -191,6 +234,62 @@ export const MSB1_CONSUMER_CASES = [
       assert.deepEqual(consumer.seeks, [[2n, 40n], [3n, 80n]]);
       assert.deepEqual(after(2n), [[2n, 40n], [3n, 80n], [3n, 84n]], "the newer seek's first chunk survives the drain");
       assert.equal(count(fed.shared, "REFUSED"), 0);
+    },
+  },
+  {
+    // #2282 (attempt 2 review): the first seek's twin of the #2185 case. Red on a pass that reads
+    // the write index outside its snapshot: before any seek the engaged tag decides a slot's
+    // age, so the first seek's first chunk is freed as stale.
+    name: "a ring's first seek published after a pass's snapshot keeps its first chunk",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      consumer.onSnapshot = () => { consumer.onSnapshot = null; fed.writer.seek(3n, 80n); fed.write(3n, 80n); };
+      await consumer.pass();
+      fed.write(3n, 84n);
+      await drain(consumer);
+      assert.deepEqual(consumer.seeks, [[3n, 80n]]);
+      assert.deepEqual(starts(consumer).filter(([g]) => g === 3n), [[3n, 80n], [3n, 84n]], "the first seek's first chunk survives");
+      assert.equal(count(fed.shared, "REFUSED"), 0);
+    },
+  },
+  {
+    // #2282 (attempt 2 review): the seqlock's recheck on the cached-epoch path. The writer
+    // publishes right after the consumer's first SEEK_EPOCH load (both harnesses share this realm's
+    // `Atomics`). Red when the recheck is dropped: the pass reads the new tag and write index
+    // under the old epoch and submits the new generation's chunk before its seek.
+    name: "a seek published between the epoch load and its recheck (cached path) is not read as the old one",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      const restore = publishAfterEpochLoad(fed, () => { fed.writer.seek(3n, 80n); fed.write(3n, 80n); });
+      let before = null;
+      consumer.onSeek = () => { before ??= consumer.submissions.length; };
+      try { await consumer.pass(); } finally { restore(); }
+      await drain(consumer);
+      assert.deepEqual(consumer.seeks, [[3n, 80n]]);
+      assert.equal(before, 0, "the g3 chunk is not submitted before its seek");
+    },
+  },
+  {
+    // #2282 (attempt 2 review): the same race on the full path, a new epoch's tuple. Red when the
+    // recheck is dropped: the pass applies the tuple it read under the old epoch, then the newer
+    // seek as well.
+    name: "a seek published between the epoch load and its recheck (full path) is applied once",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      await consumer.pass();
+      fed.writer.seek(2n, 40n);
+      fed.write(2n, 40n);
+      const restore = publishAfterEpochLoad(fed, () => { fed.writer.seek(3n, 80n); fed.write(3n, 80n); });
+      try { await consumer.pass(); } finally { restore(); }
+      await drain(consumer);
+      assert.deepEqual(consumer.seeks, [[3n, 80n]], "the newer seek, applied once");
+      assert.equal(count(fed.shared, "SEEKS_APPLIED"), 1);
     },
   },
   {
@@ -233,7 +332,10 @@ export const MSB1_CONSUMER_CASES = [
       fed.write(2n, 0n);
       await consumer.pass();
       assert.equal(count(fed.shared, "FINISHED"), 0, "a seek starts the region again");
+      assert.equal(count(fed.shared, "UNDERRUNS"), 0, "none while the region had ended");
       await drain(consumer);
+      // #2282: red when a seek clears the shared word but not the consumer's own finished mark.
+      assert.equal(count(fed.shared, "UNDERRUNS"), 6, "the region runs dry again after its one chunk");
       // Bad frame counts: 0 and a quantum plus one, both skipped and counted.
       const headers = new Int32Array(fed.shared, MSB1_HEADER_OFFSET, (8 * MSB1_SLOT_HEADER_BYTES) / 4);
       for (const frames of [0, Q + 1]) {
@@ -346,10 +448,13 @@ export const MSB1_CONSUMER_CASES = [
       fed.write(9n, 40n);
       await consumer.pass();
       assert.deepEqual([consumer.submissions.length, count(fed.shared, "SEEKS_APPLIED")], [0, 0], "nothing before the handler");
-      // A tuple that does not match the ring's (another frame) leaves it waiting.
-      await consumer.seekAt({ sourceId: "añadido", generation: 9n, sourceFrame: 44n, anchorSample: 2_048n });
-      await consumer.pass();
-      assert.equal(consumer.submissions.length, 0, "a mismatched tuple is not this ring's seek");
+      // A tuple that does not match the ring's (another frame, generation or anchor sample) leaves
+      // it waiting.
+      for (const mismatched of [{ sourceFrame: 44n }, { generation: 8n }, { anchorSample: 2_052n }]) {
+        await consumer.seekAt({ sourceId: "añadido", generation: 9n, sourceFrame: 40n, anchorSample: 2_048n, ...mismatched });
+        await consumer.pass();
+        assert.equal(consumer.submissions.length, 0, `a mismatched tuple is not this ring's seek: ${Object.keys(mismatched)}`);
+      }
       // A refused seek-at leaves the epoch unseen.
       consumer.seekAtResult = 1;
       await consumer.seekAt({ sourceId: "añadido", generation: 9n, sourceFrame: 40n, anchorSample: 2_048n });
@@ -360,6 +465,33 @@ export const MSB1_CONSUMER_CASES = [
       await consumer.pass();
       assert.deepEqual(starts(consumer), [[9n, 40n]]);
       assert.deepEqual([count(fed.shared, "SEEKS_APPLIED"), consumer.seeks.length], [1, 0], "consumed with no plain seek");
+      // #2282: the OK is spent on the seek it applied: the same tuple published again waits for
+      // its own seek-at.
+      fed.writer.seek(9n, 40n, 2_048n);
+      fed.write(9n, 40n);
+      await consumer.pass();
+      assert.deepEqual([consumer.submissions.length, count(fed.shared, "SEEKS_APPLIED")], [1, 1], "a spent OK applies nothing");
+    },
+  },
+  {
+    // #2282: red when a consumer counts the engine running dry during the wait as this ring's
+    // underruns once the wait ends (the control Worker on base counted all three blocks late).
+    name: "a ring waiting for its seek counts no drain block and no underrun, though the engine runs dry meanwhile",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      await consumer.pass();
+      assert.deepEqual([count(fed.shared, "UNDERRUNS"), count(fed.shared, "DRAIN_BLOCKS")], [0, 1]);
+      fed.writer.seek(9n, 40n, 2_048n);
+      fed.write(9n, 40n);
+      for (let pass = 0; pass < 3; pass += 1) await consumer.pass();
+      assert.deepEqual([count(fed.shared, "UNDERRUNS"), count(fed.shared, "DRAIN_BLOCKS")], [0, 1], "the wait counts nothing");
+      await consumer.seekAt({ sourceId: "fed", generation: 9n, sourceFrame: 40n, anchorSample: 2_048n });
+      await consumer.pass();
+      assert.deepEqual(starts(consumer), [[1n, 0n], [9n, 40n]]);
+      assert.deepEqual([count(fed.shared, "UNDERRUNS"), count(fed.shared, "DRAIN_BLOCKS")], [0, 2],
+        "nor once it ends: the blocks the engine ran dry in were the wait's");
     },
   },
   {
@@ -367,6 +499,9 @@ export const MSB1_CONSUMER_CASES = [
     async run(consumer) {
       const fed = ring("fed");
       await consumer.attach([fed.shared]);
+      // #2282: epoch 0 is no seek: the ring's state before its first publication is never prepared.
+      const unpublished = await consumer.prepareSeek([{ epoch: 0, generation: 0n, frame: 0n }]);
+      assert.equal(unpublished.kind, "superseded");
       consumer.submitResult = 6; // the engine holds what it has: nothing is drained meanwhile
       for (let chunk = 0; chunk < 3; chunk += 1) fed.write(1n, BigInt(chunk * Q));
       fed.writer.seek(2n, 12n);
@@ -397,14 +532,29 @@ export const MSB1_CONSUMER_CASES = [
       reply = await consumer.prepareSeek([{ epoch: epochOf(fed.shared), generation: 5n, frame: 24n }]);
       assert.equal(reply.kind, "confirmed");
       assert.equal(fed.writer.occupancy, 1, "the superseding generation's chunk survives both");
-      // A stale snapshot (an epoch the ring has moved past) is superseded before any seek.
-      const asked = consumer.seeks.length;
-      reply = await consumer.prepareSeek([{ epoch: passed, generation: 4n, frame: 20n }]);
-      assert.equal(reply.kind, "superseded");
-      assert.equal(consumer.seeks.length, asked);
+      // A stale snapshot (an epoch the ring has moved past), or one whose tuple is not the
+      // epoch's, is superseded before any seek.
+      const asked = consumer.prepared.length;
+      fed.writer.seek(5n, 24n); // the same tuple again: only the epoch tells the snapshots apart
+      for (const snapshot of [
+        { epoch: passed + 2, generation: 5n, frame: 24n },
+        { epoch: passed, generation: 4n, frame: 20n },
+        { epoch: epochOf(fed.shared), generation: 4n, frame: 24n },
+        { epoch: epochOf(fed.shared), generation: 5n, frame: 20n },
+      ]) {
+        reply = await consumer.prepareSeek([snapshot]);
+        assert.equal(reply.kind, "superseded", `${snapshot.epoch}, ${snapshot.generation}, ${snapshot.frame}`);
+      }
+      assert.equal(consumer.prepared.length, asked, "no superseded snapshot is prepared");
       consumer.submitResult = 0;
       await drain(consumer);
       assert.deepEqual(starts(consumer).at(-1), [5n, 24n]);
+      // #2282: an anchored publication is the handler's to apply, never a preparation's: without
+      // its seek-at OK the preparation is refused as backpressure and asks no seek.
+      fed.writer.seek(6n, 28n, 4_096n);
+      const before = consumer.seeks.length;
+      reply = await consumer.prepareSeek([{ epoch: epochOf(fed.shared), generation: 6n, frame: 28n }]);
+      assert.deepEqual([reply.kind, reply.result, consumer.seeks.length], ["refused", 6, before]);
     },
   },
   {

@@ -1214,6 +1214,51 @@ fn adoption_follows_the_metadata_status() {
     );
 }
 
+/// #2272. Turns red if an analysis that runs no stream holds a stream's facts: a window at hand
+/// that a ready read marked, or a smoothing that a restarting select wrote, while
+/// `stream_active` is false (the adoption case, an analysis made after its service's stream
+/// started). Such an analysis adopts the stream from the metadata alone.
+#[test]
+fn an_analysis_without_a_stream_holds_no_stream_facts() {
+    let (mut rig, mut service) = collection_service();
+    service.select(OUTPUT, SpectrumChannels::Stereo).unwrap();
+    service.start_stream(smoothing(100.0), None).unwrap();
+    let mut idle = Some(SpectrumAnalysis::new());
+    let facts = |a: &SpectrumAnalysis| (a.stream_cadence(), a.stream_smoothing());
+    rig.window();
+    let ready = read_stream(&mut service, &mut idle);
+    assert_eq!(ready.status, SpectrumStreamStatus::Ready);
+    let analysis = idle.as_ref().unwrap();
+    assert!(!analysis.stream_active());
+    assert!(!analysis.has_stream_window(), "a read marked a window");
+    assert_eq!(
+        service.select_stream(
+            OUTPUT,
+            SpectrumChannels::Stereo,
+            Some(smoothing(50.0)),
+            idle.as_mut()
+        ),
+        Ok(true)
+    );
+    let analysis = idle.as_ref().unwrap();
+    assert!(!analysis.stream_active());
+    assert_eq!(facts(analysis), (None, None), "a select wrote a smoothing");
+
+    rig.window();
+    let ready = read_stream(&mut service, &mut idle);
+    let analysis = idle.as_mut().unwrap();
+    assert_eq!(
+        SpectrumAnalysis::adoption_needed(Some(analysis), &ready),
+        Ok(true)
+    );
+    analysis.configure_imported(&ready).unwrap();
+    assert_eq!(
+        facts(analysis),
+        (service.stream_cadence(), Some(smoothing(50.0)))
+    );
+    assert!(analysis.has_stream_window());
+}
+
 fn entry(target: SpectrumTarget, channels: SpectrumChannels) -> SpectrumCaptureCollectionEntry {
     SpectrumCaptureCollectionEntry { target, channels }
 }
