@@ -184,4 +184,22 @@ mod tests {
             None
         );
     }
+
+    /// A restored idle crossfade whose pending tap differs from its active one starts that
+    /// crossfade at the next `begin`, as the live one it was taken from does.
+    ///
+    /// Red for: `from_words` not deriving the `queued` cache from the words, so a crossfade queued
+    /// when the snapshot was taken (a fade that ended on a block's last sample, with a change
+    /// queued behind it) never starts after the plan-swap carry.
+    #[test]
+    fn a_restored_queue_starts_its_crossfade() {
+        let mut taps = TapCrossfade::from_words(5_u32, 5, 9, 0).expect("idle, queued");
+        taps.begin();
+        assert_eq!(
+            (*taps.transition(), taps.remaining()),
+            (9, TRANSITION_SAMPLES)
+        );
+        taps.advance(TRANSITION_SAMPLES);
+        assert_eq!(taps, TapCrossfade::settled(9));
+    }
 }
