@@ -848,6 +848,11 @@ jobs:
       # engine leg's.
       - name: Realtime race model (spectrum handoff loom leg)
         run: unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/loom-host-core RUSTFLAGS='--cfg loom --check-cfg=cfg(loom) -C target-feature=+avx2,+fma' cargo test --locked --release -p host-core --lib spectrum_handoff_loom
+      # Issue #2265: the loudness meter's arming across a stop and a start, on the host-core leg's
+      # target dir and flags, so it reuses that leg's dependency builds. control-plane builds
+      # host-core as a dependency here, which is why host-core names loom under `cfg(loom)`.
+      - name: Realtime race model (loudness arming loom leg)
+        run: unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/loom-host-core RUSTFLAGS='--cfg loom --check-cfg=cfg(loom) -C target-feature=+avx2,+fma' cargo test --locked --release -p control-plane --lib loudness_arming_loom
       - name: Math M1 exhaustive sweep
         if: needs.route.outputs.math_closure == 'true'
         run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored

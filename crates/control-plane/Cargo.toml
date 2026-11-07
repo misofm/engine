@@ -36,6 +36,9 @@ source.workspace = true
 bench-support.workspace = true
 # Issue #2219: the dense gate shape's one builder, for `tests/session_replace.rs`.
 session = { workspace = true, features = ["test-support"] }
+# Issue #2265: the loudness arming model (`loudness_arming_loom`) runs under `--cfg loom`. Test
+# and model-checking only; it is not reachable from production, Wasm, or render.
+loom = "=0.7.2"
 
 [lints]
 workspace = true
