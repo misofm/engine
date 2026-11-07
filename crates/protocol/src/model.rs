@@ -2205,7 +2205,7 @@ mod tests {
 
     /// #1310 D3. A commit installed as a whole compilation returns the compiled session it
     /// displaced, the model the plan that renders was prepared from; a commit made in place
-    /// displaces none; a commit of solo writes only, in either form, changes nothing and displaces
+    /// displaces none; a commit of solo writes only, prepared whole, changes nothing and displaces
     /// none (#2286).
     ///
     /// Red if the displaced compilation is the committed one (a host would keep the successor's
@@ -2235,7 +2235,8 @@ mod tests {
         assert!(prepared.is_in_place());
         assert!(store.commit_prepared_displacing(prepared).1.is_none());
 
-        // #2286: solo writes alone commit nothing, whichever form the preparation took.
+        // #2286: solo writes alone, prepared whole, commit nothing. (The in-place form's commit is
+        // `a_transaction_of_values_is_prepared_in_place_and_commits_as_the_full_path_does`'s.)
         let committed = store.compiled().normalized_model().clone();
         let base = store.revision();
         let track = committed.tracks[0].id.clone();
@@ -2250,20 +2251,15 @@ mod tests {
             None,
         );
         let revision = ExpectedRevision::Exact(base);
-        let whole = store.prepare_transaction_with_monitor(revision, std::slice::from_ref(&solo));
-        let in_place = store.prepare_transaction_in_place(revision, std::slice::from_ref(&solo));
-        for (form, prepared) in [("whole", whole), ("in place", in_place)] {
-            let prepared = prepared.expect("prepares");
-            assert!(prepared.is_monitor_only(), "{form}");
-            let (commit, displaced) = store.commit_prepared_displacing(prepared);
-            assert_eq!(commit.revision, base, "{form}");
-            assert!(
-                displaced.is_none(),
-                "{form}: a solo displaces no compilation"
-            );
-            assert_eq!(store.revision(), base, "{form}");
-            assert_eq!(store.compiled().normalized_model(), &committed, "{form}");
-        }
+        let prepared = store
+            .prepare_transaction_with_monitor(revision, std::slice::from_ref(&solo))
+            .expect("prepares");
+        assert!(prepared.is_monitor_only() && !prepared.is_in_place());
+        let (commit, displaced) = store.commit_prepared_displacing(prepared);
+        assert_eq!(commit.revision, base);
+        assert!(displaced.is_none(), "a solo displaces no compilation");
+        assert_eq!(store.revision(), base);
+        assert_eq!(store.compiled().normalized_model(), &committed);
     }
 
     /// #1613. A transaction of values is prepared in place, holds the edited owners and no

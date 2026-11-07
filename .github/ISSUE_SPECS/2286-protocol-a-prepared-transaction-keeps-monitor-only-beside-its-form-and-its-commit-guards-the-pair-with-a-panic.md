@@ -86,15 +86,18 @@ Base: `main` @ `24ea03525`.
 
 **Test.** `model::tests::a_compiled_commit_returns_the_compilation_it_displaced` is extended, not
 duplicated: the claim is still "what a commit displaces".
-- It prepares one solo both ways (`prepare_transaction_with_monitor`, then
-  `prepare_transaction_in_place`) and commits each through `commit_prepared_displacing`.
-- Each must keep the revision and the model, and displace nothing.
+- It prepares one solo whole (`prepare_transaction_with_monitor`) and commits it through
+  `commit_prepared_displacing`. The commit must keep the revision and the model, and displace
+  nothing.
+- The in-place form is not repeated here (review fold, below). Its commit goes through
+  `apply_transaction_in_place` in
+  `a_transaction_of_values_is_prepared_in_place_and_commits_as_the_full_path_does`, which already
+  defends it.
 - On base `24ea03525` (test extension added, model unchanged):
   - debug: `panicked at crates/protocol/src/model.rs:1782:9: a monitor-only transaction commits no
-    model` (the `debug_assert`; the in-place form reaches the same assertion first).
-  - release: `panicked at crates/protocol/src/model.rs:2246:13: whole: a solo displaces no
-    compilation`. The whole form reinstalled its clone and reported it as displaced. The in-place
-    form would then hit `unreachable!`.
+    model` (the `debug_assert`).
+  - release: `panicked at crates/protocol/src/model.rs:2246:9: a solo displaces no compilation`.
+    The whole form reinstalled its clone and reported it as displaced.
 - At head: passes.
 - Test value: this is the only test that commits a whole-path solo token through the commit
   itself. A commit arm that reinstalls the clone, bumps the revision or panics turns it red. The
@@ -116,9 +119,13 @@ preparation state, and no rendered value reads the deleted bool.
 
 **Gates (head).**
 - `cargo test --locked --all-targets -p protocol -p control-plane -p host-core -p capi --features
-  protocol/test-support,control-plane/test-support,host-core/test-support`: 1,159 passed, 0 failed
-  (89 binaries). This includes `host-core/tests/in_place_commit.rs`, which applies solos through
-  both `apply_*` entry points, now via `commit_prepared`.
+  protocol/test-support,control-plane/test-support,host-core/test-support,host-core/control-provider`:
+  1,159 passed, 0 failed (89 binaries).
+  - This includes `host-core/tests/in_place_commit.rs` (6 tests). It is gated on
+    `control-provider` and `test-support`, and it applies solos through both `apply_*` entry
+    points, now via `commit_prepared`.
+  - In the first run, `control-provider` was not named; feature unification turned it on. The
+    recorded command now names it, and the reviewer ran the file 6/6.
 - Doctests for `protocol`, `control-plane` and `host-core`, with the same features: 9 passed.
 - `cargo clippy --locked` on the same packages and features, `--all-targets -- -D warnings`: clean.
 - `cargo fmt --check`: clean.
@@ -127,6 +134,28 @@ preparation state, and no rendered value reads the deleted bool.
 - `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (292 marked regions in 46 files)`.
 
 **Follow-ups (not in this issue).**
+- `commit_prepared_structural` (`controller.rs:3348`, `if !monitor_only`) is still a second place
+  that decides whether a token commits.
+  - It is acceptable as it stands. The commit is now total, so a missing or wrong guard there
+    could no longer panic or write the model: calling the commit for a solo is a no-op.
+  - The guard also decides the event reservation and the edit path, so it stays.
+  - Folding it into the commit's result is a follow-up for whoever owns `controller.rs`.
 - The whole path clones the committed compilation for a solo, only so that `compiled()` can lend
   it. A reader could take the committed compilation from the store instead. That would move the
   readers in `control.rs` and `controller.rs`, which other branches own.
+
+**Verdict (attempt 1): PASS, with four minors folded.**
+- The adversarial review found:
+  - every accessor equivalent for every token kind;
+  - that deleting `commit_or_keep` changes no caller;
+  - the three-way tree (`main` + #2286 + #2283) clean and green.
+- Folded:
+  1. The extended test keeps only the whole form. The in-place half repeated
+     `a_transaction_of_values_is_prepared_in_place_and_commits_as_the_full_path_does`. The
+     whole-only test was re-run on base and is red as recorded above. M1-M3 were re-run against
+     it and are red as recorded. After the fold, `cargo test --all-targets -p protocol` passed
+     215, clippy `-D warnings` on the four crates (with `control-provider`) was clean, and
+     `cargo fmt --check` was clean.
+  2. The controller's `if !monitor_only` is recorded as a second commit decision and a follow-up.
+  3. `host-core/control-provider` is added to the recorded gate command.
+  4. The clone-for-`compiled()` follow-up stays; the coordinator tracks it in #2258.
