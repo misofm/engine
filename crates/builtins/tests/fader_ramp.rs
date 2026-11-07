@@ -565,20 +565,42 @@ impl Subject {
         }
     }
 
-    /// Lane `0`'s `[is_muted, is_armed, gain_held]` on channel `channel`.
-    fn channel_state(&self, channel: usize) -> [bool; 3] {
+    /// Lane `0`'s queries on channel `channel`.
+    fn channel_state(&self, channel: usize) -> ChannelState {
         match self {
-            Self::Bank(bank) => [
-                bank.is_muted(0, channel).expect("member lane"),
-                bank.is_armed(0, channel).expect("member lane"),
-                bank.gain_held(0, channel).expect("member lane"),
-            ],
-            Self::Scalar(track) => [
-                track.is_muted(channel),
-                track.is_armed(channel).expect("a channel"),
-                track.gain_held(channel).expect("a channel"),
-            ],
+            Self::Bank(bank) => ChannelState {
+                flags: [
+                    bank.is_muted(0, channel).expect("member lane"),
+                    bank.is_armed(0, channel).expect("member lane"),
+                    bank.gain_held(0, channel).expect("member lane"),
+                ],
+                remaining: bank.ramp_remaining(0, channel).expect("member lane"),
+                target: bank.ramp_target(0, channel).expect("member lane").to_bits(),
+            },
+            Self::Scalar(track) => ChannelState {
+                flags: [
+                    track.is_muted(channel),
+                    track.is_armed(channel).expect("a channel"),
+                    track.gain_held(channel).expect("a channel"),
+                ],
+                remaining: track.ramp_remaining(channel).expect("a channel"),
+                target: track.target_gain(channel).to_bits(),
+            },
         }
+    }
+
+    /// [`Self::process`] of a block whose right input is its left plane, as a collapsed chain
+    /// renders a mono source (issue #975): the bank's `process_from_left`, and when it declines,
+    /// the copy and [`Self::process`] its caller then runs. The scalar track has no such path.
+    fn process_mono(&mut self, left: &mut [f32], right: &mut [f32], start: u64) {
+        if let Self::Bank(bank) = self {
+            let frames = (left.len() / bank.width().lanes() as usize) as u32;
+            if bank.process_from_left(left, right, frames) {
+                return;
+            }
+        }
+        right.copy_from_slice(left);
+        self.process(left, right, start);
     }
 
     fn held(&self, index: usize) -> bool {
@@ -1344,40 +1366,57 @@ fn an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute() {
     }
 }
 
-/// How lane `0`'s right plane renders once a row's window is over.
+/// One channel of lane `0`, as its queries answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChannelState {
+    /// `[is_muted, is_armed, gain_held]`.
+    flags: [bool; 3],
+    /// `ramp_remaining`.
+    remaining: u32,
+    /// The bits of the gain the ramp runs toward (`ramp_target`, the scalar's `target_gain`).
+    target: u32,
+}
+
+/// How lane `0`'s right channel aims and renders once a row's drive is over.
 #[derive(Clone, Copy, Debug)]
 enum RightRenders {
-    /// Exact `+0.0` on every frame: held muted.
+    /// Toward `+0.0`, and exact `+0.0` on every frame once the window is over: held muted.
     Zero,
-    /// The undriven twin's bits: open at its prepared gain.
+    /// Toward the undriven twin's target, and the twin's bits once the window is over: open at
+    /// its prepared gain.
     Twin,
 }
 
 /// A dual-mono strip's two channels are two faders (issue #2355): a transition driven on the
 /// right channel alone -- an unmute with a window, a mute with a window, an arm whose left channel
-/// the session mutes, a fire -- moves the right channel's `is_muted`, `is_armed` and `gain_held`
-/// and its rendered plane, and leaves the left channel's answers and bits those of an undriven
-/// twin, on every bank width and on the scalar track.
+/// the session mutes, a fire -- moves the right channel's `is_muted`, `is_armed`, `gain_held`,
+/// `ramp_remaining` and target gain and its rendered plane, and leaves the left channel's answers
+/// and bits, and every other lane's, those of an undriven twin, on every bank width and on the
+/// scalar track, for a dual input and for a mono one (the bank's `process_from_left`).
 ///
 /// Red if a per-channel query or transition reads or writes channel `0` for both channels: the
-/// scalar's or the bank's `is_armed` or `gain_held` answering with the left channel's state, or
-/// the end of a ramp window settling the unmute phase on the left channel only, so the right
-/// channel's unmute holds its gain for good.
+/// scalar's or the bank's `is_armed`, `gain_held`, `ramp_remaining` or target answering with the
+/// left channel's state; the end of a ramp window settling the unmute phase on the left channel
+/// only, so the right channel's unmute holds its gain for good; or `process_from_left` taking the
+/// left channel's countdown for the right's, so a right ramp beside a settled left one freezes.
 #[test]
 fn a_transition_on_the_right_channel_leaves_the_left_channel_alone() {
     /// `[left, right]`, each `[is_muted, is_armed, gain_held]`.
     type Channels = [[bool; 3]; 2];
     // Name, left channel prepared muted, the drive, the channels after the drive and once the
-    // window is over, and how the right plane then renders.
+    // window is over, the right channel's countdown after the drive, and how the right channel
+    // aims and renders.
     type Row = (
         &'static str,
         bool,
         fn(&mut Subject),
         Channels,
         Channels,
+        u32,
         RightRenders,
     );
     const WINDOW: u32 = 200;
+    const FRAMES: usize = 128;
     const OPEN: [bool; 3] = [false, false, false];
     const MUTED: [bool; 3] = [true, false, true];
     const UNMUTING: [bool; 3] = [false, false, true];
@@ -1392,6 +1431,7 @@ fn a_transition_on_the_right_channel_leaves_the_left_channel_alone() {
             },
             [OPEN, UNMUTING],
             [OPEN, OPEN],
+            WINDOW,
             RightRenders::Twin,
         ),
         (
@@ -1400,6 +1440,7 @@ fn a_transition_on_the_right_channel_leaves_the_left_channel_alone() {
             |subject| subject.channel_mute(1, true, WINDOW),
             [OPEN, MUTED],
             [OPEN, MUTED],
+            WINDOW,
             RightRenders::Zero,
         ),
         (
@@ -1408,6 +1449,7 @@ fn a_transition_on_the_right_channel_leaves_the_left_channel_alone() {
             |subject| assert!(subject.arm()),
             [MUTED, ARMED_TO_OPEN],
             [MUTED, ARMED_TO_OPEN],
+            0,
             RightRenders::Zero,
         ),
         (
@@ -1419,50 +1461,86 @@ fn a_transition_on_the_right_channel_leaves_the_left_channel_alone() {
             },
             [MUTED, UNMUTING],
             [MUTED, OPEN],
+            WINDOW,
             RightRenders::Twin,
         ),
     ];
-    for (row, left_muted, drive, driven, settled, renders) in rows {
-        for (name, build) in Subject::subjects_with(left_muted) {
-            let (mut subject, mut twin) = (build(), build());
-            let undriven_left = twin.channel_state(0);
-            drive(&mut subject);
-            let context = format!("{name} {row}");
-            assert_eq!(
-                [subject.channel_state(0), subject.channel_state(1)],
-                driven,
-                "after the drive: {context}"
-            );
-            assert_eq!(subject.channel_state(0), undriven_left, "left: {context}");
-            let width = subject.width();
-            // Two blocks run the window out; the third renders settled.
-            for block in 0..3 {
-                let start = (block * 128) as u64;
-                let (mut left, mut right) = signal(128, width, block);
-                let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
-                subject.process(&mut left, &mut right, start);
-                twin.process(&mut twin_left, &mut twin_right, start);
-                let context = format!("{context} block={block}");
-                assert_eq!(bits(&left), bits(&twin_left), "left plane: {context}");
-                if block < 2 {
-                    continue;
-                }
+    for mono in [false, true] {
+        for (row, left_muted, drive, driven, settled, remaining, renders) in rows {
+            for (name, build) in Subject::subjects_with(left_muted) {
+                let (mut subject, mut twin) = (build(), build());
+                let undriven = [twin.channel_state(0), twin.channel_state(1)];
+                drive(&mut subject);
+                let context = format!("{name} {row} mono={mono}");
+                let state = [subject.channel_state(0), subject.channel_state(1)];
                 assert_eq!(
-                    [subject.channel_state(0), subject.channel_state(1)],
-                    settled,
-                    "after the window: {context}"
+                    [state[0].flags, state[1].flags],
+                    driven,
+                    "after the drive: {context}"
                 );
-                for frame in 0..128 {
-                    let at = frame * width;
-                    let expected = match renders {
-                        RightRenders::Zero => 0,
-                        RightRenders::Twin => twin_right[at].to_bits(),
-                    };
+                assert_eq!(state[0], undriven[0], "left: {context}");
+                assert_eq!(state[1].remaining, remaining, "right countdown: {context}");
+                let target = match renders {
+                    RightRenders::Zero => 0.0_f32.to_bits(),
+                    RightRenders::Twin => undriven[1].target,
+                };
+                assert_eq!(state[1].target, target, "right target: {context}");
+                let width = subject.width();
+                // Two blocks run the window out; the third renders settled.
+                for block in 0..3 {
+                    let start = (block * FRAMES) as u64;
+                    let (mut left, mut right) = signal(FRAMES, width, block);
+                    if mono {
+                        right.clone_from(&left);
+                    }
+                    let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
+                    if mono {
+                        subject.process_mono(&mut left, &mut right, start);
+                        twin.process_mono(&mut twin_left, &mut twin_right, start);
+                    } else {
+                        subject.process(&mut left, &mut right, start);
+                        twin.process(&mut twin_left, &mut twin_right, start);
+                    }
+                    let context = format!("{context} block={block}");
+                    assert_eq!(bits(&left), bits(&twin_left), "left plane: {context}");
+                    for (at, (value, twin_value)) in right.iter().zip(&twin_right).enumerate() {
+                        if at % width != 0 {
+                            assert_eq!(
+                                value.to_bits(),
+                                twin_value.to_bits(),
+                                "right plane, lane {}: {context}",
+                                at % width
+                            );
+                        }
+                    }
+                    let state = [subject.channel_state(0), subject.channel_state(1)];
+                    assert_eq!(state[0], twin.channel_state(0), "left: {context}");
+                    let elapsed = (FRAMES * (block + 1)) as u32;
                     assert_eq!(
-                        right[at].to_bits(),
-                        expected,
-                        "right plane frame {frame}: {context}"
+                        state[1].remaining,
+                        remaining.saturating_sub(elapsed),
+                        "right countdown: {context}"
                     );
+                    if block < 2 {
+                        continue;
+                    }
+                    assert_eq!(
+                        [state[0].flags, state[1].flags],
+                        settled,
+                        "after the window: {context}"
+                    );
+                    for frame in 0..FRAMES {
+                        let at = frame * width;
+                        let expected = match renders {
+                            RightRenders::Zero => 0,
+                            RightRenders::Twin => twin_right[at].to_bits(),
+                        };
+                        assert_eq!(
+                            right[at].to_bits(),
+                            expected,
+                            "right plane frame {frame}: {context}"
+                        );
+                    }
                 }
             }
         }
