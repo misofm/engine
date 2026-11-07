@@ -5890,8 +5890,8 @@ where
     /// on B (root ruling B15-Q4), then the protocol's commit predicate. A refusal returns with
     /// `withdrawn` untouched, and the caller republishes A. After the commit, infallibly and in
     /// order (D5): the donation and the producer moves, B's `superseded` word and revision, B's
-    /// publication, the return to P0's epoch of every producer A still holds that P0 holds
-    /// vacant, and A's drop.
+    /// publication, the return to P0's epoch of every producer P0 handed A that A still holds
+    /// ([`host_core::SourceControlSet::reclaim_from_withdrawn`]), and A's drop.
     ///
     /// **Acked-batch question (D8): can an ack ever precede a drop? No.** A's revisions stay
     /// committed: their edits are in the model B is compiled from, A's host-fed rings move into
@@ -6963,13 +6963,13 @@ where
             });
         }
         if let Some((donor_plan, mut donor)) = superseded {
-            // #1310 D5 step 5: P0 still renders until B is adopted, so every producer A still
-            // holds that P0 holds vacant (a source B removed or redeclared) goes back to P0's
-            // epoch before A drops. Infallible and allocation-free; keyed by source ID.
+            // #1310 D5 step 5: P0 still renders until B is adopted, so every producer P0 handed
+            // A that A still holds (a source B removed or redeclared) goes back to P0's epoch
+            // before A drops. Infallible and allocation-free; keyed by source ID.
             let holder = self
                 .kept_holder_mut()
                 .expect("B succeeds the epoch A succeeded");
-            holder.sources.adopt_persisting(&mut donor.sources);
+            holder.sources.reclaim_from_withdrawn(&mut donor.sources);
             // Step 6: A's plan, provider epoch (with its gate handle) and credit drop here, on the
             // control thread. The credit went back when the plan was taken out.
             drop(ObservedCandidatePlan::returned(donor_plan));
