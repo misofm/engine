@@ -364,7 +364,7 @@ kernel kept in the test module), "randomized" is
 `tests::randomized_scenarios_render_exactly_the_unmodified_kernel`, "gate 2" is
 `tests::the_linked_body_engages_exactly_where_the_record_allows` (the engagement witness, whose runs
 are also identity runs), "M4 gate" is `tests::a_collapsed_block_unlinks_the_pair_without_desymmetrize`
-and "gate 3" is `linked::the_linked_scenario_renders_the_pinned_base_words` (pinned on the unmodified
+(deleted by #2352; see below) and "gate 3" is `linked::the_linked_scenario_renders_the_pinned_base_words` (pinned on the unmodified
 kernel before the change).
 
 | # | mutation | file | tests that turned red |
@@ -402,6 +402,12 @@ block always finds it re-established over genuinely equal words. The clear in `p
 is defensive. M4 is red only on a sequence the contract forbids -- collapsed blocks and then a dual
 block with no `desymmetrize` -- which the M4 gate constructs at the core level, and which the
 randomized harness reaches by skipping `desymmetrize` after one collapse run in four.
+
+Issue #2352 closed that sequence off: a dual block entered collapsed now takes the disengage copy
+itself (`effect_runtime::collapse::MonoCollapse`), which re-establishes the record before the block
+reads it. M4 is therefore equivalent on every sequence, the clear in `process_block_mono` stays only
+as defence, and the M4 gate was deleted with the sequence it constructed. The rows above that name it
+are the record of their runs.
 
 The brief's original claim that the `console-workload` `chain_shape` transition tests turn red for
 M4 was withdrawn by the verification amendment and is not made here. The verification

@@ -11610,45 +11610,6 @@ mod tests {
         }
     }
 
-    /// Mutation M4's gate: a collapsed block unlinks the pair even when no `desymmetrize` follows.
-    ///
-    /// The contract desymmetrizes before any dual block (`effect-contract`), and `desymmetrize`
-    /// re-establishes the record, so clearing it on a collapsed block is defensive: under the
-    /// contract the clear is unobservable. This test leaves the contract on purpose to reach it.
-    /// The right channel keeps its pre-collapse words, so a pair still marked linked would render
-    /// its right channel from the left's gain path; the reference kernel renders it from its own.
-    /// Red mutation: drop the clear in `process_block_mono` (M4).
-    #[test]
-    fn a_collapsed_block_unlinks_the_pair_without_desymmetrize() {
-        fn run<L: Lane>(label: &str) {
-            let mut pair = LinkedPair::<L>::new(
-                &fixture_tracks(L::WIDTH),
-                LinkMode::Maximum,
-                false,
-                48_000,
-                label.to_owned(),
-            );
-            let mut draw = Draw(0x0990_0004);
-            let spans = no_spans(L::WIDTH);
-            for block in 0..4 {
-                let (left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
-                assert!(pair.dual(&left, &right, &spans, &format!("dual {block}")));
-            }
-            for block in 0..3 {
-                let (left, _) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
-                pair.mono(&left, &format!("collapsed {block}"));
-            }
-            for block in 0..4 {
-                let (left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
-                assert!(
-                    !pair.dual(&left, &right, &spans, &format!("after {block}")),
-                    "{label}: linked after a collapse with no desymmetrize"
-                );
-            }
-        }
-        lane::each_lane!(|L, W| run::<L>(&width_label(W)));
-    }
-
     /// **A linked record the gain words refute is caught where it is trusted** (issue #2285).
     ///
     /// A bank of the fixture's shape at `Maximum` renders hot blocks, linked. Then one word of

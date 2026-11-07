@@ -225,7 +225,7 @@ fn check(effect: &str) {
                 _ => (-12.0, 18.0),
             };
             let gains: Vec<f32> = (0..lanes)
-                .map(|_| 10_f32.powf((floor + span * rng.signed().abs()) / 20.0))
+                .map(|_| math::powf(10.0, (floor + span * rng.signed().abs()) / 20.0))
                 .collect();
             let mut plane = vec![0.0_f32; QUANTUM as usize * lanes];
             if block < COLLAPSED + LOUD {
@@ -233,7 +233,7 @@ fn check(effect: &str) {
                     let t = (sample + frame) as f32;
                     for (lane, word) in words.iter_mut().enumerate() {
                         let (period, noise) = shapes[lane];
-                        let tone = (core::f32::consts::TAU * t / period).sin();
+                        let tone = math::sin(f64::from(core::f32::consts::TAU * t / period)) as f32;
                         *word = gains[lane] * ((1.0 - noise) * tone + noise * rng.signed());
                     }
                 }
