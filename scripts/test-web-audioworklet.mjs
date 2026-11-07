@@ -5067,11 +5067,11 @@ async function testControlWorker() {
       const control = new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4);
       const writer = new Msb1RingWriter(ring);
       writer.engage(1n);
-      const write = (generation, startFrame, value) => {
+      const write = (generation, startFrame, value, endOfRegion = false) => {
         const planes = writer.reserve(64);
         planes[0].fill(value);
         planes[1].fill(-value);
-        writer.commit({ generation, startFrame, frames: 64, endOfRegion: false });
+        writer.commit({ generation, startFrame, frames: 64, endOfRegion });
       };
       let renderedSoFar = 0n;
       const rendered = (quanta) => {
@@ -5114,6 +5114,15 @@ async function testControlWorker() {
       fake.calls.sourceResult = 0;
       tick.callback();
       assert.deepEqual(fake.calls.source.at(-1), [1, 5, 1n, 192n, 2, 64, 0], "and is submitted next");
+      // #2282: once the region's last chunk is submitted, frames the engine reports missing are
+      // not underruns. Red if the drain drops its finished-region rule.
+      write(1n, 256n, 1, true);
+      tick.callback();
+      rendered(5n);
+      fake.calls.seekReportWords = [5n, 1024n, 48000n, 7n + 128n, 9n];
+      tick.callback();
+      assert.deepEqual([control[MSB1_CONTROL.DRAIN_BLOCKS], control[MSB1_CONTROL.UNDERRUNS]], [5, 1],
+        "a finished region's missing frames are no underrun");
       // A seek in `worker` mode: the drain seeks the source before it reads a slot, drops the
       // chunks of the old generation and resumes at the new one. Red if the drain submits a stale
       // chunk, or reads a slot before the seek.
@@ -5131,17 +5140,23 @@ async function testControlWorker() {
       assert.deepEqual([control[MSB1_CONTROL.STALE], control[MSB1_CONTROL.SEEKS_APPLIED]], [1, 1]);
       // An anchored seek waits for this Worker's own `source_seek_at`, and is then consumed with no
       // `source_seek` (#1297b). Red if the Worker does not record the applied tuple: the ring stalls.
+      // #2282: the quanta a refused report read carried are rendered before the wait, so they
+      // still count once it ends; only the wait's own quanta pass uncounted (the shared case table
+      // holds that rule). Red if the wait drops the carried quanta too.
+      const drained = control[MSB1_CONTROL.DRAIN_BLOCKS];
+      fake.calls.seekReportResult = 6;
+      rendered(7n);
+      tick.callback();
+      fake.calls.seekReportResult = 0;
       writer.seek(3n, 0n, 6400n);
       write(3n, 0n, 0.5);
       const seeks = fake.calls.seek.length;
-      // As in the prelude, a ring waiting for its seek-at counts no drain block (#1387 MINOR 1).
-      const drained = control[MSB1_CONTROL.DRAIN_BLOCKS];
-      rendered(6n);
+      rendered(10n);
       tick.callback();
-      assert.equal(control[MSB1_CONTROL.DRAIN_BLOCKS], drained, "the quanta of the wait pass uncounted");
       assert.equal(fake.calls.source.length, submitted + 4, "nothing of the anchored ring is read before the handler");
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: 6400n });
       assert.deepEqual(fake.calls.source.at(-1), [1, 5, 3n, 0n, 2, 64, 0], "the drain after the message resumes it");
+      assert.equal(control[MSB1_CONTROL.DRAIN_BLOCKS], drained + 2, "the two carried quanta count, the wait's three do not");
       assert.equal(fake.calls.seek.length, seeks, "with no second seek of the source");
       // `detach` (the feed's close) withdraws the ring and closes the port from this end.
       port.onmessage({ data: { op: "detach" } });
@@ -5262,6 +5277,27 @@ async function testControlWorker() {
       fill();
       tick.callback();
       assert.equal(engine.queued.filter((value) => value === 3n).length, 38, "the next seek is admitted");
+    }
+    {
+      // #2282: a landing settles when render reports a later generation than its seek's, not only
+      // the same one. A per-source seek at g3 (`miso.seek.v1`, another path) moves the source past
+      // the ring's landing g2 before render ever reports g2. Red on a settle that asks for the
+      // exact generation: the landing keeps admitting into the headroom for good.
+      const { send, tick, engine, room, render, fill, seek } = await headroomRig(64);
+      fill(4);
+      tick.callback();
+      seek(2n, 4800n);
+      fill();
+      tick.callback();
+      assert.equal(engine.queued.length, 68, "the ring seek lands, admitted into the headroom");
+      send({ tag: "miso.seek.v1", requestId: 1, sourceId: "drums", generation: 3n, sourceFrame: 0n });
+      render(1);
+      tick.callback();
+      assert.equal(engine.generation, 3n, "render reports g3, past the landing g2");
+      assert.equal(globalThis.__controlWorker.rings[0].seek.phase, "settled", "the landing settled");
+      fill();
+      tick.callback();
+      assert.equal(room(), 38, "admit is cleared: the headroom is kept again");
     }
     // Issue #2205: the Worker's runway is a parallel formula; it equals the engine's
     // `source::seek_runway_blocks` at every launch rate, whose values the ABI layout's
