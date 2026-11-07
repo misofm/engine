@@ -35,7 +35,8 @@ would publish a transition fallback whose duck set is the ordinary successor's.
 
 ## Decision / model
 A local `enum SuccessorShape { Ordinary, Warm { primed_lead_blocks: Option<u32> }, Transition }`,
-set by the same arms. `replanned` is `!matches!(shape, Ordinary)`; the outcome is a `match` with
+the immutable value of the one `if`/`else` decision (so no later reassignment can desync its
+readers). `replanned` is `!matches!(shape, Ordinary)`; the outcome is a `match` with
 `Transition => TransitionFallback`; the primed lead is projected once, from `Warm` only, into the
 `warm_lead_blocks` the four later readers already use. Two locals and every combination no shape
 has are gone. No behaviour changes.
@@ -82,3 +83,22 @@ only difference in the sorted logs is the suite's wall time.
 **Gates.** `cargo test --locked -p control-plane --features test-support`: all pass (33 lib + 69
 integration). `cargo test --locked -p capi --test strip_transitions --test latency_growth`: 3 + 12
 pass. clippy (`--all-features`), fmt, doc and the workspace policy: clean.
+
+## Verdict (attempt 1)
+Sol: **PASS**, with minors only. They are folded in the same branch:
+- `shape` is no longer `let mut`. It is the value of the decision expression, so a later
+  reassignment does not compile.
+- A ninth mutant changes the replan condition to `if true`. On a declared discontinuity it would
+  plan a transition, where the declared path deliberately plans none (`transition` is `None`, the
+  shape is `Ordinary`). This gap predates the issue. I ran the mutant against all of
+  `cargo test -p control-plane --features test-support` (lib and every integration suite) and
+  `cargo test -p capi --test strip_transitions --test latency_growth`. **Nothing kills it.**
+
+## Follow-ups (not in this issue)
+- No test pins that a declared discontinuity plans no transition. The `if true` replan mutant
+  above survives every control-plane and capi transition suite.
+- With `--all-targets` and without `--features test-support`, `cargo clippy -p control-plane`
+  fails on base with "function `compile_children_warm` is never used"
+  (`crates/control-plane/src/compile.rs` 2729). Only `test-support` tests use it, and CI runs
+  clippy with `--all-features`, so CI stays green. A `#[cfg(feature = "test-support")]` would fix
+  it.

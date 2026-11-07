@@ -6181,7 +6181,6 @@ where
             /// (`Rebuild::Transition`).
             Transition,
         }
-        let mut shape = SuccessorShape::Ordinary;
         let fall_back = |ordinary: PreparedRuntime| {
             host_core::fall_back_to_transition(
                 base,
@@ -6191,9 +6190,10 @@ where
                 prepare,
             )
         };
-        if fallback {
+        // The shape is the value of this one decision and is never reassigned.
+        let shape = if fallback {
             prepared_runtime = fall_back(prepared_runtime)?;
-            shape = SuccessorShape::Transition;
+            SuccessorShape::Transition
         } else if let Some(config) = self.warm
             && transition.is_some()
         {
@@ -6225,18 +6225,20 @@ where
                         warm: Some(&lead),
                         ..base
                     })?;
-                    shape = SuccessorShape::Warm {
+                    SuccessorShape::Warm {
                         primed_lead_blocks: (lead.lead_samples > 0).then_some(lead_blocks),
-                    };
+                    }
                 }
                 // #1397 D2 at submit, with no donor: a failure refuses the edit before its commit.
                 host_core::WarmDecision::Warm(_) | host_core::WarmDecision::Unavailable(_) => {
                     prepared_runtime = fall_back(prepared_runtime)?;
-                    shape = SuccessorShape::Transition;
+                    SuccessorShape::Transition
                 }
-                host_core::WarmDecision::Ordinary => {}
+                host_core::WarmDecision::Ordinary => SuccessorShape::Ordinary,
             }
-        }
+        } else {
+            SuccessorShape::Ordinary
+        };
         // A primed warm candidate's lead, read by its admission, schedule and record below.
         let warm_lead_blocks = match shape {
             SuccessorShape::Warm { primed_lead_blocks } => primed_lead_blocks,
