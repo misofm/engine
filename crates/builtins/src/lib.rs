@@ -3306,6 +3306,9 @@ impl<L: Lane> FaderRampStage<L> {
     fn arm_fade_in(&mut self, lane: usize) -> bool {
         for channel in 0..2 {
             let phase = self.phase[channel][lane];
+            // Defensive, and unreachable from a plan: `graph::install_fade_arms` arms each lane
+            // once per plan and refuses a repeated target, so no lane is armed twice. Were one,
+            // its arm (and the fire target its records set) would stand.
             if matches!(phase, FaderPhase::Armed { .. }) {
                 continue;
             }
@@ -7576,12 +7579,15 @@ mod lane_state {
     }
 
     /// Issue #2280: an unmute holds the lane's gain only while its countdown runs. An unmute with
-    /// no window, a reset in the middle of an unmute ramp, and a lane record whose unmute ramp has
-    /// no frames left (imported, as a plan swap's carry imports it) each leave the lane open, so a
-    /// timed fader move retargets it. Red if any of the three keeps the unmute ramp's hold with no
-    /// countdown left (for the import: if it copies the phase verbatim, as it copied four flags
-    /// before #2280): the gain is then held for good, every timed fader move only remembers its
-    /// gain, and the rest claim declines the lane forever.
+    /// no window, a reset in the middle of an unmute ramp, a live fader move with no window in the
+    /// middle of one (which takes the lane over and ends its countdown), and a lane record whose
+    /// unmute ramp has no frames left (imported, as a plan swap's carry imports it) each leave the
+    /// lane open, so a timed fader move retargets it; a lane imported in the middle of an unmute
+    /// ramp keeps holding its gain until the ramp ends. Red if any of the four keeps the unmute
+    /// ramp's hold with no countdown left (for the import: if it copies the phase verbatim, as it
+    /// copied four flags before #2280): the gain is then held for good, every timed fader move
+    /// only remembers its gain, and the rest claim declines the lane forever. Red, too, if an
+    /// import settles an unmute ramp that still runs, so a timed move fights the unmute.
     #[test]
     fn an_unmute_holds_the_gain_only_while_its_countdown_runs() {
         let ended = FaderChannelState {
@@ -7594,7 +7600,7 @@ mod lane_state {
         };
         for (backend, width) in banks() {
             let mut bank =
-                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], true); 3])
+                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], true); 4])
                     .expect("bank");
             bank.set_mute(1, BuiltinLaneSelector::Both, false, 64)
                 .expect("lane");
@@ -7603,9 +7609,37 @@ mod lane_state {
                 Some(true),
                 "{backend:?}: an unmute ramp holds"
             );
+            // A plan swap carries the running unmute ramp: the gain stays held.
+            let mut carried =
+                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false)])
+                    .expect("bank");
+            carried
+                .import_lane(0, &bank.export_lane(1).expect("a member lane"))
+                .expect("a member lane");
+            assert_eq!(
+                carried.gain_held(0, 0),
+                Some(true),
+                "{backend:?}: an imported unmute ramp holds"
+            );
+            carried
+                .apply_fader_operation(
+                    0,
+                    BuiltinLaneSelector::Both,
+                    FaderOperation::SetGain { gain: 0.5 },
+                )
+                .expect("lane");
+            assert_eq!(
+                carried.ramp_target(0, 1),
+                Some(1.0),
+                "{backend:?}: an imported unmute ramp only remembers a timed move"
+            );
             bank.reset();
             // After the reset, so that the reset cannot settle it.
             bank.set_mute(0, BuiltinLaneSelector::Both, false, 0)
+                .expect("lane");
+            bank.set_mute(3, BuiltinLaneSelector::Both, false, 64)
+                .expect("lane");
+            bank.set_fader_db(3, BuiltinLaneSelector::Both, -6.0, 0)
                 .expect("lane");
             bank.import_lane(
                 2,
@@ -7614,7 +7648,12 @@ mod lane_state {
                 },
             )
             .expect("a member lane");
-            for (lane, how) in [(0, "an instant unmute"), (1, "a reset"), (2, "an import")] {
+            for (lane, how) in [
+                (0, "an instant unmute"),
+                (1, "a reset"),
+                (2, "an import"),
+                (3, "a live fader move"),
+            ] {
                 assert_eq!(bank.gain_held(lane, 0), Some(false), "{backend:?}: {how}");
                 bank.apply_fader_operation(
                     lane,
