@@ -129,7 +129,86 @@ test is the settle record's swap rule, through the public surface.
 
 ## Evidence
 
-(Filled in below as attempt 1 records it.)
+Base is `d11fed9b4`.
+
+**Red on base.** `settle_edges_follow_live_switches_and_lane_moves_not_the_sessions_own_bypass`
+(`crates/rack/tests/bypass_skip.rs`, new), run against base's `rack`:
+```
+assertion `left == right` failed: the moved lane is settled at bypass
+  left: 1
+ right: 9
+```
+- Test value: red if the first drain reports the session's own bypass as an edge, if a skipped
+  walk reports one, or if a drained stage takes an undrained peer's lane as unsettled. No other
+  test reads a stage's settle record.
+- The test's `Recorder` bank now declares `Some(0)` lane defaults and exchanges them, so that a
+  lane swap can move its lanes (issue #1747). Its other two tests do not swap.
+
+**Mutations (head).** Each was run over `cargo test -p rack`; the last two also over `-p graph -p
+host-core`.
+
+| Mutation | Red test |
+|---|---|
+| `ControlLanes::lanes_mut` keeps the mark | `a_quiet_live_slot_renders_what_one_read_every_block_does`. In debug the drain's `quiet_walk_holds` assertion fires first; in release the test's own output assertion fires (`lane_swap.rs:947`). |
+| `quiet_under` lets `LiveSnapshot::ALL` skip | `a_quiet_live_slot_renders_what_one_read_every_block_does`, `a_swapped_strip_renders_and_publishes_what_its_twin_does` |
+| The walk's verdict ignores `LaneWalk::quiet` (marks quiet on an empty partition alone) | `a_bank_whose_every_lane_is_settled_bypassed_skips_unless_a_lane_has_work`, `the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly`. In debug the `quiet_walk_holds` assertion fires; in release the tests' own assertions fire. |
+| The first drain reports the settled bits as edges | the new test (`the session's bypass is no settle`). Green in every other `rack`, `graph` and `host-core` test. |
+| A drained stage keeps its own bit when it takes an undrained peer's lane | the new test (`the moved lane is settled at bypass`). Green in every other `rack`, `graph` and `host-core` test. |
+
+On base, dropping each hand clear in turn: `carry_lane_from` (1952), `swap_lanes` self (2428) and
+`swap_lanes` peer (2494) are each red in `a_quiet_live_slot_renders_what_one_read_every_block_does`.
+`carry_lane_from_instance` (2076) and `install_carry_slots` (2176) are green in all `rack` tests,
+which is the defensive pair the reachability section explains.
+
+`Drained` has no mutation: a stage body called without the token does not compile.
+
+**No bit moved.** A scratch probe, never committed, was applied identically to base and to head
+`4907ffad2`. At the end of every `BankChain::run_with_input` block, rendered or skipped, it folded
+an FNV-1a hash of these into a per-thread chain:
+- every resident output word;
+- each slot's `settled_bypassed_lanes`, `settle_edges`, `lanes_at_rest` and `bypass_skips`;
+- the chain's `settle_edges`, `lanes_at_rest`, silent skips, collapses, seam copies and
+  `collapse_transitions`.
+
+It wrote one line per test thread. Release builds on AVX2, `MISO_ENGINE_RANDOMIZED_SCALE=4`, over
+`cargo test -p rack -p graph -p host-core -p builtins-compiler`:
+- *With `graph/test-support,host-core/test-support,builtins-compiler/test-support`*: 272 thread
+  lines and 230,276 chain blocks.
+  - This includes `host-core/tests/successor_swap.rs` and `randomized.rs`: 108 lines, 54,727
+    blocks. It also includes `rack`'s `lane_swap`, `mono_reengage`, `bypass_skip`, `lane_rest`
+    and `live_control_bank`: 21 lines, 3,324 blocks.
+  - Every line is identical at base and head, except three.
+  - The new test's line exists at head only.
+  - `rt9_resident_prepared_plan_render_allocates_and_frees_nothing` is an allocation-count test
+    that the probe's own allocation trips at a varying block. Both of its hashes (6 and 96 blocks)
+    also appear in base reruns.
+  - `session_seek`'s two unnamed render threads render for wall-clock time. Three base runs gave
+    three different pairs, as did three head runs.
+- *Default features*: 148 lines, every one identical at base and head except the new test's.
+  `rt9_resident_bank_input_alloc` aborted under the probe in that base run; rerun three times per
+  tree, its three lines match for equal block counts.
+
+`builtins`' `mono_collapse` suite drives the input bank directly, not a `BankChain`, so the probe
+does not see it. `builtins` is untouched.
+
+**Gates (head).**
+- `cargo test --locked -p rack -p graph -p builtins-compiler -p host-core`: 82 result lines,
+  all ok. The same with `graph/test-support,host-core/test-support,builtins-compiler/test-support`:
+  82, all ok. The drain's new `debug_assert!` holds on every skipped walk in them.
+- `cargo clippy --locked -p rack -p graph -p builtins-compiler -p host-core --all-targets -- -D
+  warnings`, with and without those features: clean.
+- `cargo fmt --check`: clean. `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p rack`:
+  clean.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- `./target/release/realtime_policy`: `realtime policy: ok (297 marked regions in 47 files)`.
 
 ## Attempt record
-- **Attempt 1**: in progress.
+- **Attempt 1** (Terra): the model above, the settle test and the evidence above. Awaiting Sol's
+  verdict.
+
+## Follow-ups (not this issue)
+- A `Drained` proof in the `BankStage` trait itself, if the drain-then-process order should be
+  compiler-checked for direct drivers too. It needs a non-overridable drain entry, so that only
+  `rack` can mint the proof, and that touches all 41 implementations.
+- `builtins-compiler`'s quiet-walk caches (`quiet_walk_skips`, `quiet_at` on the fader, matrix and
+  input banks) follow the same hand-cleared pattern and could take the same owner.
