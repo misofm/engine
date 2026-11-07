@@ -1479,7 +1479,6 @@ struct StructuralCommandPlan {
     prospective_session: PreparedSessionTransaction,
     replay_plan: ReplayAdmission,
     event_sequence: u64,
-    required_events: usize,
     applied_operations: u32,
     /// The reply's fields, with the edit path the host has not chosen yet ([`EditPath::ModelOnly`])
     /// and the arm tags measured at preparation (#1585 D5).
@@ -1515,19 +1514,33 @@ pub struct PreparedStructuralCommand {
     replay_plan: ReplayAdmission,
     request: Box<[u8]>,
     response: Option<ControllerResponse>,
-    event_reservations: Option<crate::ReliableEventReservations>,
+    /// The queue slot the commit's `SESSION_COMMITTED` takes: held exactly when the prospective
+    /// session's form is a session mutation, decided from that form when the token is made
+    /// (#2330), so the commit never meets a mutation without its slot.
+    session_committed: Option<crate::ReliableEventReservation>,
     event_sequence: u64,
     applied_operations: u32,
     /// The reply's fields as prepared (#1585 D5): the commit sets the edit path, and the arm tags
     /// fixed the frame's length.
     applied: TransactionApplied,
-    /// The one `OBSERVATION_ENDED` event this commit emits after its `SESSION_COMMITTED`, carrying
-    /// every ended key, with its sequence (#1584 D6a fold). `None` unless the host attached keys.
-    observation_ended: Option<ObservationEnded>,
-    /// The reliable-event room held for `observation_ended`, checked and reserved before the
-    /// host commits anything.
-    ended_reservations: Option<crate::ReliableEventReservations>,
+    /// The one `OBSERVATION_ENDED` event this commit emits after its `SESSION_COMMITTED` (#1584
+    /// D6a fold), with the room and the cell it takes. `None` unless the host attached keys.
+    observation_ended: Option<EndedAttachment>,
     armed: bool,
+}
+
+/// An `OBSERVATION_ENDED` event attached to a token, with everything its commit needs, proven
+/// when it was attached rather than when it is committed (#2330): the commit queues the event
+/// after its first write, where nothing may fail.
+struct EndedAttachment {
+    /// The event, carrying every ended key, with its sequence.
+    event: ObservationEnded,
+    /// The reliable-event slot held for it, checked together with the token's own.
+    room: crate::ReliableEventReservation,
+    /// The free prepared cell the event fills. Only a structural commit fills a cell, and no
+    /// other commit runs while the token is outstanding (the odd generation), while a delivery
+    /// only empties one, so the cell is still free when the token commits.
+    cell: u32,
 }
 
 impl PreparedStructuralCommand {
@@ -1621,6 +1634,10 @@ pub enum AttachObservationEndedError {
     Unencodable,
     /// A token of monitor writes only commits no revision and so emits no event.
     MonitorOnly,
+    /// Every prepared `OBSERVATION_ENDED` cell holds an event. A defect, never backpressure: the
+    /// cells outnumber the queue's slots and only a delivered event frame empties one, so an event
+    /// left the controller some other way. Nothing changed (#2330).
+    NoFreeCell,
 }
 
 impl fmt::Display for AttachObservationEndedError {
@@ -2864,10 +2881,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         // The plan checked this room with the queue's own check under this `&mut self`, and only
         // a release can change it since, so this cannot fail; it stays a defect report, never a
         // refusal.
-        let event_reservations = match self.queues.reserve_reliable_events(plan.required_events) {
-            Ok(reservations) => reservations,
-            Err(_) => return Err(CommandFrameProcessError::Internal),
-        };
+        let session_committed = self
+            .reserve_session_committed(&plan.prospective_session)
+            .map_err(|_| CommandFrameProcessError::Internal)?;
 
         let current = self.structural_generation.load(Ordering::Acquire);
         let generation = current
@@ -2887,12 +2903,11 @@ impl<P: ControlProvider> ProtocolController<P> {
             replay_plan: plan.replay_plan,
             request: request.into_boxed_slice(),
             response: Some(response),
-            event_reservations: Some(event_reservations),
+            session_committed,
             event_sequence: plan.event_sequence,
             applied_operations: plan.applied_operations,
             applied,
             observation_ended: None,
-            ended_reservations: None,
             armed: true,
         })
     }
@@ -3006,7 +3021,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             replacement.is_none() && monitor && crate::model::is_monitor_transaction(&edits);
         // The room is the queue's own check, which counts a slot another holder reserved (a
         // staged render diagnostic's) as taken, so the reservation in preparation or in the
-        // one-call commit cannot fail where this passed (#2283).
+        // one-call commit cannot fail where this passed (#2283). It runs before the preparation,
+        // so the count is predicted from the edits as the store decides the form; the reservation
+        // itself reads the prepared form (`reserve_session_committed`, #2330).
         let required_events = usize::from(!monitor_only);
         if let Err(event_report) = self.queues.check_reliable_event_room(required_events) {
             return Ok(StructuralCommandDisposition::Immediate {
@@ -3108,7 +3125,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 prospective_session,
                 replay_plan,
                 event_sequence,
-                required_events,
                 applied_operations,
                 applied: applied_of(response_frame.payload),
                 response_measure,
@@ -3141,29 +3157,50 @@ impl<P: ControlProvider> ProtocolController<P> {
         // Every fallible semantic, output, replay-capacity, and event-capacity decision completed
         // above; the plan checked the event room with the queue's own check, held slots counted.
         // Exclusive `&mut self` ownership makes these exact reservations invariant from this
-        // point through the session/event/replay commit.
-        let mut event_reservations = self
-            .queues
-            .reserve_reliable_events(plan.required_events)
+        // point through the session/event/replay commit. Each of the two steps below either
+        // changes nothing or completes, and a panic in the replay step returns the slot as it
+        // unwinds, so neither panic leaves anything written (#2330).
+        debug_assert_eq!(
+            plan.prospective_session.applied_operations(),
+            plan.applied_operations as usize
+        );
+        let session_committed = self
+            .reserve_session_committed(&plan.prospective_session)
             .expect("the plan's room check admits exactly this reservation");
         self.replay
             .complete(plan.replay_plan, input, &output[..written])
             .expect("planned replay reservation accepts the measured direct response");
 
+        // From here on nothing fails.
         let commit = self.session.commit_prepared(plan.prospective_session);
-        debug_assert_eq!(commit.applied_operations, plan.applied_operations as usize);
-        self.queues.commit_reserved_reliable_event(
-            &mut event_reservations,
-            ReliableSlot::session_committed(
-                commit.revision,
-                plan.event_sequence,
-                plan.request_id,
-                plan.previous_revision,
-                plan.applied_operations,
-            ),
-        );
-        self.next_reliable_event_sequence = plan.event_sequence.saturating_add(1);
+        if let Some(reservation) = session_committed {
+            self.queues.commit_reliable_event(
+                reservation,
+                ReliableSlot::session_committed(
+                    commit.revision,
+                    plan.event_sequence,
+                    plan.request_id,
+                    plan.previous_revision,
+                    plan.applied_operations,
+                ),
+            );
+            self.next_reliable_event_sequence = plan.event_sequence.saturating_add(1);
+        }
         Ok(written)
+    }
+
+    /// The queue slot a commit of `session` takes for its `SESSION_COMMITTED`: one for a session
+    /// mutation, none for a transaction of monitor writes only, which emits no event (#1559 D4).
+    /// The form decides (#2286), so the commit that reads the same form always finds the slot
+    /// its mutation needs (#2330).
+    fn reserve_session_committed(
+        &mut self,
+        session: &PreparedSessionTransaction,
+    ) -> Result<Option<crate::ReliableEventReservation>, QueueReport> {
+        if session.is_monitor_only() {
+            return Ok(None);
+        }
+        self.queues.reserve_reliable_event().map(Some)
     }
 
     fn process_planned_immediate_into(
@@ -3258,15 +3295,16 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// [`AttachObservationEndedError::Unencodable`]. The room is checked together with the
     /// `SESSION_COMMITTED` the token already holds, one slot for the event whatever the number of
     /// keys: a queue holding unread events that leave less room refuses here, with nothing
-    /// changed, and the host refuses the transaction as backpressure. After an `Ok` the commit
-    /// cannot fail for room and allocates nothing. A second call replaces the first. An empty list
-    /// attaches nothing and returns 0.
+    /// changed, and the host refuses the transaction as backpressure. The prepared cell that keeps
+    /// the event's keys until its frame is delivered is taken here too (#2330). After an `Ok`
+    /// the commit cannot fail for room or a cell and allocates nothing. A second call replaces the
+    /// first. An empty list attaches nothing and returns 0.
     ///
     /// # Errors
     ///
     /// [`AttachObservationEndedError`]: the token is another controller's or stale, it is a token of
-    /// monitor writes (which emits no event), the queue has no room, or the event cannot be
-    /// encoded.
+    /// monitor writes (which emits no event), the queue has no room, no cell is free (a defect), or
+    /// the event cannot be encoded.
     pub fn attach_observation_ended(
         &mut self,
         prepared: &mut PreparedStructuralCommand,
@@ -3276,7 +3314,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             .map_err(AttachObservationEndedError::Token)?;
         // Drop an earlier attachment first, so its room counts as free for this one.
         prepared.observation_ended = None;
-        prepared.ended_reservations = None;
         if ended.is_empty() {
             return Ok(0);
         }
@@ -3300,12 +3337,18 @@ impl<P: ControlProvider> ProtocolController<P> {
             Err(EncodeError::OutputTooSmall { required }) => required,
             Err(_) | Ok(_) => return Err(AttachObservationEndedError::Unencodable),
         };
-        let reservations = self
+        // The cell is found before the room is held, so either refusal holds nothing.
+        let cell = self
+            .observation_ended_cells
+            .iter()
+            .position(Option::is_none)
+            .and_then(|cell| u32::try_from(cell).ok())
+            .ok_or(AttachObservationEndedError::NoFreeCell)?;
+        let room = self
             .queues
-            .reserve_reliable_events(1)
+            .reserve_reliable_event()
             .map_err(AttachObservationEndedError::NoRoom)?;
-        prepared.observation_ended = Some(event);
-        prepared.ended_reservations = Some(reservations);
+        prepared.observation_ended = Some(EndedAttachment { event, room, cell });
         Ok(required)
     }
 
@@ -3318,20 +3361,24 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// the token's own buffer, then applies the token's replay plan to the committed cache and
     /// completes the entry with that frame (#1615). The field is fixed width, so the length is
     /// unchanged; the plan was made against the committed cache, which no entry point writes while
-    /// the token is outstanding, so neither write can fail. A caller whose token is refused returns
-    /// before either write, and a token dropped instead of committed leaves the cache as it was.
-    /// The reply exists only after the replay entry is written, in this one call. A token of monitor writes only commits no model and no revision
-    /// (#1559 D4): its response takes [`EditPath::Monitor`] whatever `path` says.
+    /// the token is outstanding, so neither step can fail. A caller whose token is refused returns
+    /// before either, and a token dropped instead of committed leaves the cache as it was. The
+    /// reply exists only after the replay entry is written, in this one call. A token of monitor
+    /// writes only commits no model and no revision (#1559 D4): its response takes
+    /// [`EditPath::Monitor`] whatever `path` says.
+    ///
+    /// Every check runs before the first write, and the first write, the replay entry's, is
+    /// itself all checks then writes (#2330). What follows it -- the session, the
+    /// `SESSION_COMMITTED` and an attached `OBSERVATION_ENDED` -- took its room and its cell at
+    /// preparation and attachment, and cannot fail. So in a build that unwinds, a panic here
+    /// leaves the controller exactly as it was, and a host that catches it (the C ABI does) knows
+    /// that nothing was committed.
     pub fn commit_prepared_structural(
         &mut self,
         mut prepared: PreparedStructuralCommand,
         path: EditPath,
     ) -> Result<CommittedCommandFrame, PreparedCommandCommitError> {
         self.check_prepared_structural(&prepared)?;
-        let mut event_reservations = prepared
-            .event_reservations
-            .take()
-            .expect("affine token owns exact event reservations");
         let session = prepared
             .prospective_session
             .take()
@@ -3351,48 +3398,24 @@ impl<P: ControlProvider> ProtocolController<P> {
             monitor_only || path != EditPath::Monitor,
             "only a transaction of monitor writes has the monitor path"
         );
-        let mut displaced = None;
-        if !monitor_only {
-            let (commit, previous) = self.session.commit_prepared_displacing(session);
-            displaced = previous;
-            debug_assert_eq!(
-                commit.applied_operations,
-                prepared.applied_operations as usize
-            );
-            self.queues.commit_reserved_reliable_event(
-                &mut event_reservations,
-                ReliableSlot::session_committed(
-                    commit.revision,
-                    prepared.event_sequence,
-                    prepared.request_id,
-                    prepared.previous_revision,
-                    prepared.applied_operations,
-                ),
-            );
-            self.next_reliable_event_sequence = prepared.event_sequence.saturating_add(1);
-            // #1584 D6a fold: the one event of the subscriptions this commit ended follows it. Its
-            // room was reserved before the host committed, and the event was built and sized
-            // then, so this moves it and allocates nothing.
-            if let Some(event) = prepared.observation_ended.take() {
-                let mut reservations = prepared
-                    .ended_reservations
-                    .take()
-                    .expect("an attached observation-ended event holds its reserved room");
-                let cell = self
-                    .observation_ended_cells
-                    .iter()
-                    .position(Option::is_none)
-                    .expect("a reserved reliable slot has a free observation-ended cell");
-                self.next_reliable_event_sequence = event.event_sequence.saturating_add(1);
-                self.observation_ended_cells[cell] = Some(event);
-                self.queues.commit_reserved_reliable_event(
-                    &mut reservations,
-                    ReliableSlot::observation_ended(
-                        commit.revision,
-                        u32::try_from(cell).expect("cell count is a queue length"),
-                    ),
-                );
+        debug_assert_eq!(
+            session.applied_operations(),
+            prepared.applied_operations as usize
+        );
+        // The token's slot was reserved from this same form (`reserve_session_committed`), and a
+        // monitor token holds no attachment (`attach_observation_ended` refuses one).
+        let events = match (monitor_only, prepared.session_committed.take()) {
+            (true, None) => None,
+            (false, Some(committed)) => Some((committed, prepared.observation_ended.take())),
+            (true, Some(_)) | (false, None) => {
+                unreachable!("a token holds a SESSION_COMMITTED slot exactly for a mutation")
             }
+        };
+        if let Some((_, Some(ended))) = &events {
+            debug_assert!(
+                self.observation_ended_cells[ended.cell as usize].is_none(),
+                "the cell attached to the token is free: only a commit fills one"
+            );
         }
         let response = prepared
             .response
@@ -3424,14 +3447,43 @@ impl<P: ControlProvider> ProtocolController<P> {
             bytes.len(),
             "the final frame has the prepared frame's length"
         );
-        // The replay entry is written here, in the same call that returns the reply: the reply
-        // exists only after the entry does (the acked-batch rule). The cache is the one the plan was
-        // made against: no entry point wrote it while the token was outstanding.
+        // The first write. The replay entry is written in the same call that returns the reply:
+        // the reply exists only after the entry does (the acked-batch rule). The cache is the one
+        // the plan was made against: no entry point wrote it while the token was outstanding. An
+        // error leaves the cache as it was, so even this panic leaves nothing written.
         self.replay
             .complete(prepared.replay_plan, &prepared.request, &bytes)
             .expect(
                 "the plan reserved room for the response, whose length the prepared frame fixed",
             );
+        // From here on nothing fails.
+        let mut displaced = None;
+        if let Some((committed, ended)) = events {
+            let (commit, previous) = self.session.commit_prepared_displacing(session);
+            displaced = previous;
+            self.queues.commit_reliable_event(
+                committed,
+                ReliableSlot::session_committed(
+                    commit.revision,
+                    prepared.event_sequence,
+                    prepared.request_id,
+                    prepared.previous_revision,
+                    prepared.applied_operations,
+                ),
+            );
+            self.next_reliable_event_sequence = prepared.event_sequence.saturating_add(1);
+            // #1584 D6a fold: the one event of the subscriptions this commit ended follows it. Its
+            // room and its cell were taken when it was attached, before the host committed, and
+            // the event was built and sized then, so this moves it and allocates nothing.
+            if let Some(EndedAttachment { event, room, cell }) = ended {
+                self.next_reliable_event_sequence = event.event_sequence.saturating_add(1);
+                self.observation_ended_cells[cell as usize] = Some(event);
+                self.queues.commit_reliable_event(
+                    room,
+                    ReliableSlot::observation_ended(commit.revision, cell),
+                );
+            }
+        }
         self.structural_generation
             .store(prepared.generation.saturating_add(1), Ordering::Release);
         prepared.armed = false;
