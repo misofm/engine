@@ -68,12 +68,18 @@ rendered bit moves; the meter only observes.
 ## Evidence (attempt 1)
 
 **Strictly required beyond the loudness files.** `crates/control-plane/Cargo.toml` names
-`loom = "=0.7.2"` as a dev-dependency (one `Cargo.lock` line). `crates/host-core/Cargo.toml`
-names the same pin under `[target.'cfg(loom)'.dependencies]`: the model builds host-core as a
-*dependency* under `--cfg loom`, where its spectrum `ModelledWord` names `loom`, and a
-dev-dependency does not reach a dependency's build (the reason `engine` has the same section
-for #1609). Nothing reaches it without `--cfg loom`. `.github/workflows/qualification.yml` gains
-the loom leg, on the host-core leg's target dir and flags.
+`loom = "=0.7.2"` as a dev-dependency (one `Cargo.lock` line) for the model, and the same pin
+under `[target.'cfg(loom)'.dependencies]`, because its library's `ModelledWord` names `loom` and a
+dependent built under `--cfg loom` (capi, host-web) would otherwise fail with E0433 in
+control-plane (reproduced with `cargo check -p capi` under the leg's flags; it builds after the
+fix). `crates/host-core/Cargo.toml` names the same pin under `[target.'cfg(loom)'.dependencies]`:
+the model builds host-core as a *dependency* under `--cfg loom`, where its spectrum
+`ModelledWord` names `loom`, and a dev-dependency does not reach a dependency's build (the reason
+`engine` has the same section for #1609). Nothing reaches either without `--cfg loom`.
+`.github/workflows/qualification.yml` gains the loom leg, on the host-core leg's target dir and
+flags, and the `test-release` job's timeout is re-derived for it (23 to 28 minutes: about 44 s
+warm on 32 cores, estimated at 3 min cold on a 4-core runner; to be re-derived from the first
+`main` run that includes the leg).
 
 **Red on base.** `loudness::tests::a_record_of_an_earlier_arming_is_discarded` is rewritten, not
 added: it now re-arms at the same sample (960, stop, 960) and tags the queued hops with the gate
@@ -126,3 +132,13 @@ move: the tap only observes the master planes.
   46 files)`.
 - The host-core spectrum loom leg still passes with host-core's new `cfg(loom)` dependency
   (3 passed).
+
+## Verdict (attempt 1)
+**PASS**, with two minor findings folded on the branch. The reviewer confirmed the argument for
+removing `first_sample < gate`, the no-bit-moved comparison (12 of 12 replies identical), and
+that the loom model catches the gate-before-drain mutation, which the unit test misses.
+- *loom reached control-plane only as a dev-dependency*, so `cargo check -p capi` under
+  `--cfg loom` failed with E0433 in control-plane. Folded: the `cfg(loom)` dependency above;
+  that check now builds.
+- *The `test-release` timeout was not re-derived* for the new leg. Folded: 23 to 28 minutes,
+  derived in the comment, to be re-derived from the first `main` run.

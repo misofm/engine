@@ -40,5 +40,12 @@ session = { workspace = true, features = ["test-support"] }
 # and model-checking only; it is not reachable from production, Wasm, or render.
 loom = "=0.7.2"
 
+# Issue #2265: the loudness meter's `ModelledWord` names `loom` under `--cfg loom`, so a dependent
+# (capi, host-web) built under that cfg needs it too; a dev-dependency does not reach a dependent's
+# build. The same pinned crate, as `engine` and `host-core` do. Nothing reaches it without
+# `--cfg loom`.
+[target.'cfg(loom)'.dependencies]
+loom = "=0.7.2"
+
 [lints]
 workspace = true
