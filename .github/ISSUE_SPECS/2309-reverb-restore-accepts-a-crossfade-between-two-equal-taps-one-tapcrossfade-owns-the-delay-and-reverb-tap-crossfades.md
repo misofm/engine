@@ -54,9 +54,10 @@ the validator admits a state the model cannot reach.
 - **The users.** The delay's two lanes are `TapCrossfade<u32>`. The reverb's pre-delay is
   `TapCrossfade<u32>`, and its lines are one `TapCrossfade<[u32; 32]>`: the lines share one fade.
 - **The `queued` cache.** It replaces the reverb's `line_queued`, so a per-sample `begin` on 32
-  taps compares no taps. It is `false` while fading and set again when the fade ends. So it is a
-  function of the four words, and the derived `PartialEq` (the delay's `lanes_symmetric`) compares
-  the same thing as before.
+  taps compares no taps. It is `false` while fading and set again when the fade ends, and
+  `from_words` derives it from the words.
+- **Equality compares the four words alone**, not the cache. So the delay's `lanes_symmetric`
+  compares exactly the words it compared before.
 - **No phase enum.** `remaining` is the phase word (`0` idle, `k` fading with `k` updates left).
   The kernels read it per chunk (the delay) or per sample (the reverb). An enum would be matched at
   the same points to re-derive the same word, and the payload holds the words. So privacy plus the
@@ -84,6 +85,7 @@ the validator admits a state the model cannot reach.
   refused for the pre-delay and for the lines. A restore that is refused writes nothing. A real
   crossfade on both is accepted.
 - The validator's own claim: `effect_runtime::tap_crossfade::tests::from_words_accepts_exactly_the_reachable_phases`.
+- A restored queue resumes: `effect_runtime::tap_crossfade::tests::a_restored_queue_starts_its_crossfade`.
 - A one-time no-bit-moved comparison against base, recorded below and not committed.
 - `cargo test --locked -p effect-runtime -p delay -p reverb`.
 - `cargo clippy --locked -p effect-runtime -p delay -p reverb --all-targets -- -D warnings`.
@@ -129,3 +131,47 @@ block.
 |---|---|---|---|---|---|---|
 | delay | 13224 | 1459 | 242 | 239 | `8efe8f354db23308` | `8efe8f354db23308` |
 | reverb | 5979 | 753 | 115 | 121 | `3d701db95e402429` | `3d701db95e402429` |
+
+The final tree (after the `PartialEq` change below) gives the same two hashes.
+
+**Mutations of the fix.** Each mutant ran `cargo test --locked --no-fail-fast -p effect-runtime -p
+delay -p reverb`.
+
+| Mutation | Result |
+|---|---|
+| `from_words` drops the converse (`idle && transition != active`), which is the base reverb rule | Red: `from_words_accepts_exactly_the_reachable_phases` and `restore_refuses_a_crossfade_between_equal_taps` |
+| `from_words` drops the `remaining <= 128` bound | Red: `from_words_accepts_exactly_the_reachable_phases` |
+| `advance` does not re-queue when a fade ends | Red: the delay's E6 crossfade test, both conformance runs, the delay randomized differential, the reverb width and partition tests, the corpus checks |
+| `from_words` leaves `queued` false | **Green on the first pass.** No suite restores an idle crossfade with a queued tap. `a_restored_queue_starts_its_crossfade` was added, and the mutant is red on it. |
+| `queue` ignores an idle crossfade | Red: the same set as the re-queue mutant, plus `invalid_restore_is_atomic_and_both_resets_are_word_exact` and the reverb's `a_size_increase_never_replays_a_word_already_read` |
+| `queue` sets `queued` while fading too | **Green: equivalent.** `begin` ignores `queued` while fading, and the fade's end recomputes it. Under the first, derived `PartialEq` this mutant could still change `lanes_symmetric`'s answer. So equality now compares the four words alone, and the mutant changes nothing anyone reads. |
+
+**Test value.**
+- `restore_refuses_a_crossfade_between_equal_taps` (reverb): red when the reverb's restore does not
+  apply the full phase rule to either crossfade. It is the regression reproducer (red on base). It
+  also defends the wiring: the unit test cannot see whether the reverb calls the validator for both
+  crossfades.
+- `from_words_accepts_exactly_the_reachable_phases` (effect-runtime): red when the one validator
+  misses either direction of the phase rule, or the length bound. The delay's restore had no test
+  of these words before.
+- `a_restored_queue_starts_its_crossfade` (effect-runtime): red when `from_words` does not derive
+  the `queued` cache, so that a crossfade queued at the snapshot never starts after the carry.
+- No test was made useless. Three existing assertions in the delay's E6 test now read the
+  accessors.
+
+**Gates run (all green):**
+- `cargo test --locked -p effect-runtime -p delay -p reverb`: 116 tests;
+- `cargo clippy --locked -p effect-runtime -p delay -p reverb --all-targets -- -D warnings`;
+- `cargo fmt --check`;
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p effect-runtime -p delay -p reverb`;
+- `bash scripts/check-workspace-policy.sh`;
+- `./target/release/realtime_policy`: 292 marked regions in 46 files;
+- `bash scripts/build-web-audioworklet.sh --named-twin …` on the pinned nightly, then
+  `python3 -B scripts/check-browser-expected-resources.py --artifacts …`. The built module's
+  digests and exact rows agree with `expected.json`, and every row is within its budget;
+- `bash scripts/test-web-audioworklet.sh`.
+
+**Not run here:** `scripts/check-web-audioworklet.sh` on the built artifact, which holds the
+call-graph, trap-owner and kernel-shape gates. This machine has no `wasm-objdump`. The render
+closure gains no call: `begin`, `advance`, `queue` and the accessors are `#[inline(always)]`, and
+they do the same arithmetic as the field code they replace. CI's `qualification` runs the gate.

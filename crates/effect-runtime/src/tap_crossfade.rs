@@ -39,9 +39,9 @@ pub const TRANSITION_SAMPLES: u32 = 128;
 ///
 /// See the [module documentation](self) for the phases. `queued` caches `pending != active` while
 /// idle, so a per-sample [`TapCrossfade::begin`] on a large tap set compares no taps; it is
-/// `false` while fading and set again when the fade ends, so it is a function of the other four
-/// words and two values with the same words compare equal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `false` while fading and set again when the fade ends. Equality compares the four words alone,
+/// the ones a payload carries, so it never depends on the cache.
+#[derive(Clone, Copy, Debug)]
 pub struct TapCrossfade<T> {
     active: T,
     transition: T,
@@ -49,6 +49,17 @@ pub struct TapCrossfade<T> {
     remaining: u32,
     queued: bool,
 }
+
+impl<T: PartialEq> PartialEq for TapCrossfade<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.active == other.active
+            && self.transition == other.transition
+            && self.pending == other.pending
+            && self.remaining == other.remaining
+    }
+}
+
+impl<T: Eq> Eq for TapCrossfade<T> {}
 
 impl<T: Copy + PartialEq> TapCrossfade<T> {
     /// Idle at `tap`, with nothing queued: a prepared or reset instance.
