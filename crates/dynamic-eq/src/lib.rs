@@ -651,8 +651,6 @@ struct DynamicEq<L: Lane, const CONNECTED: bool> {
     values: [[[f32; PARAMETER_COUNT]; 2]; MAX_WIDTH],
     coef: [Coef<L>; 2],
     state: [Chan<L>; 2],
-    /// At least every lane's `remaining`: where a block's ramping segment ends.
-    ramp_frames_left: u32,
     /// Bit `l` set when lane `l` carries a member (issue #1092).
     active: u32,
     /// Whether a collapsed block (`run_block::<true>`) has rendered since the last disengage copy
@@ -845,7 +843,6 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
                 link_avg: word(metadata.link_mode == LinkMode::Average),
             }; 2],
             state: [Chan::default(); 2],
-            ramp_frames_left: 0,
             active: all_lanes(L::WIDTH),
             collapsed: false,
         };
@@ -887,7 +884,8 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
     ///
     /// The lane's link words become `mode`'s at once, so a glide that arrives lands on `mode`'s
     /// own law; the weights, retargeted from the words in force, carry the transition, and the
-    /// bank's ramp clock covers it. The mode is the one a full reset keeps and a lane swap moves.
+    /// block's ramping prefix ([`ramp_frames`](Self::ramp_frames)) covers it. The mode is the one
+    /// a full reset keeps and a lane swap moves.
     /// `false`, changing nothing, for a lane past the width or padded, a mode the descriptor does
     /// not support or a glide longer than `LINK_GLIDE_MAX_SAMPLES`.
     fn retarget_link(&mut self, lane: usize, mode: LinkMode, samples: u32) -> bool {
@@ -916,7 +914,6 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
                     lane,
                     [ramp.current, ramp.target, ramp.step, ramp.remaining as f32],
                 );
-                self.ramp_frames_left = self.ramp_frames_left.max(ramp.remaining);
             }
         }
         true
@@ -934,6 +931,31 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         })
     }
     // REALTIME_POLICY_END
+
+    /// The frames a block's ramping prefix must cover (issue #2316, #2258 FX-5): the largest
+    /// `remaining` of any ramp, the link weights' included, on any lane of the channels the block
+    /// renders (the left alone on a collapsed block, whose right state is frozen).
+    ///
+    /// It is read from the words in force at the block's start, after its automation, so no
+    /// writer has to announce a ramp it starts: a retarget, a link glide, a restore and a lane
+    /// swap are all covered by what they wrote. Every `remaining` word is a whole number in
+    /// `[0, LINK_GLIDE_MAX_SAMPLES]` (a restored `-0.0` counts as `0`, as the kernel's
+    /// `remaining > 0` does). Once per block, never per sample: one vector max per ramp per
+    /// channel, and the silent fast path does not reach it.
+    fn ramp_frames<const MONO: bool>(&self) -> usize {
+        let channels = if MONO { 1 } else { 2 };
+        let mut most = L::zero();
+        for state in &self.state[..channels] {
+            for ramp in state.ramps.iter().chain(&state.links) {
+                most = most.max(ramp.remaining);
+            }
+        }
+        let mut words = [0.0_f32; MAX_WIDTH];
+        most.store(&mut words[..L::WIDTH]);
+        words[..L::WIDTH]
+            .iter()
+            .fold(0, |frames, &word| frames.max(word as usize))
+    }
 
     fn set_lane_link(&mut self, lane: usize, link: LinkMode) {
         for coef in &mut self.coef {
@@ -1001,16 +1023,13 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         for lane in 0..L::WIDTH {
             self.reset_lane(lane, kind);
         }
-        self.ramp_frames_left = 0;
     }
 
     // REALTIME_POLICY_BEGIN
     /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
     /// [`reset`](Self::reset) on both channels, its silence clocks included, and nothing of any
-    /// other lane. The bank-level `ramp_frames_left` stays: it only chooses where a block's
-    /// ramping segment ends, and its invariant (`>=` every lane's `remaining`) still holds once
-    /// this lane's ramps rest. `collapsed` stays as the whole-bank reset leaves it. A lane past
-    /// the width changes nothing. Bounded by one lane's words.
+    /// other lane. `collapsed` stays as the whole-bank reset leaves it. A lane past the width
+    /// changes nothing. Bounded by one lane's words.
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
         if lane >= L::WIDTH {
             return;
@@ -1153,8 +1172,6 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             };
             ramp.set_target(design, RAMP_SAMPLES);
             chunk.copy_from_slice(&[ramp.current, ramp.target, ramp.step, ramp.remaining as f32]);
-            // Issue #1969: never below a link glide's remaining frames, which may be longer.
-            self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
         }
         set_lane_words(&mut self.state[channel], lane, &words);
     }
@@ -1191,8 +1208,6 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             // From here until the disengage copy the right channel is frozen and stale.
             self.collapsed = true;
         }
-        let smoothed = (self.ramp_frames_left as usize).min(frames);
-        self.ramp_frames_left -= smoothed as u32;
         if self.silent_block::<MONO>(left, right, sidechain) {
             // Every lane rests and every input word is `+0.0`: the kernel would write the `+0.0`
             // the planes hold and move only the clocks, which advance here as it would.
@@ -1200,6 +1215,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             self.advance_clocks_masked(all_lanes(L::WIDTH), frames, channels);
             return;
         }
+        let smoothed = self.ramp_frames::<MONO>().min(frames);
         let (split, total) = (smoothed * L::WIDTH, left.len());
         let armed_after = L::splat(lane::silence_frames(self.sample_rate) as f32);
         let channels = if MONO { 1 } else { 2 };
@@ -1340,8 +1356,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
     }
 
     /// The clocks a `+0.0` block of `frames` frames moves, on the lanes of `mask` and the first
-    /// `channels` channels: the silence clocks (the sidechain's only while connected) and the
-    /// bank's ramp countdown, which only says where a block splits.
+    /// `channels` channels: the silence clocks (the sidechain's only while connected).
     fn advance_clocks_masked(&mut self, mask: u32, frames: usize, channels: usize) {
         for s in &mut self.state[..channels] {
             for clock in [&mut s.run, &mut s.side_run]
@@ -1603,18 +1618,9 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         for (channel, restore) in parsed.iter().enumerate() {
             set_lane_words(&mut self.state[channel], lane, &restore.words);
             self.values[lane][channel] = restore.values;
-            if restore.words[SIGNAL_WORDS..]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .any(|chunk| chunk[3] != 0.0)
-            {
-                self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
-            }
             if adopt {
                 for (ramp, words) in self.state[channel].links.iter_mut().zip(restore.links) {
                     set_link_lane(ramp, lane, words);
-                    self.ramp_frames_left = self.ramp_frames_left.max(words[3] as u32);
                 }
             }
         }
@@ -1875,7 +1881,6 @@ macro_rules! bank_impl {
             // REALTIME_POLICY_BEGIN: #1747, the clock advance of a skipped block.
             fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
                 debug_assert_eq!(lanes_mask & !self.rest_lanes(), 0, "a lane not at rest");
-                self.ramp_frames_left = self.ramp_frames_left.saturating_sub(frames);
                 // A collapsed bank's right clocks are frozen, as the collapsed block leaves them.
                 let channels = if self.collapsed { 1 } else { 2 };
                 self.advance_clocks_masked(lanes_mask, frames as usize, channels);
@@ -2062,3 +2067,5 @@ fn bind_bank<const NATIVE_ONLY: bool>(
 
 #[cfg(test)]
 mod glide_tests;
+#[cfg(test)]
+mod ramp_tests;
