@@ -1205,6 +1205,12 @@ impl PreparedSessionTransaction {
         &self.edit_ramps
     }
 
+    /// The number of edits the commit reports as applied, as [`SessionCommit::applied_operations`]
+    /// will report it: a controller compares it with its own count before it commits anything.
+    pub(crate) const fn applied_operations(&self) -> usize {
+        self.applied_operations
+    }
+
     /// Revision the prospective compilation will own if committed.
     #[must_use]
     pub fn revision(&self) -> SessionRevision {

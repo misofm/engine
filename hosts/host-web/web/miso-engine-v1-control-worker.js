@@ -166,9 +166,19 @@ function wholeBytes(bytes) {
 class ControlWorker {
   constructor(scope) {
     this.scope = scope;
-    this.booted = false;
-    this.ready = false;
-    this.disposed = false;
+    // Issue #2306 (#2258 WEB-7): the Worker's lifecycle, one tagged union.
+    // - `unbooted`: before the first page message, which is the boot;
+    // - `refused`: the boot did not reach `live` (it was refused, or it threw: the page then
+    //   hears the Worker's `error` event and terminates it); nothing is held;
+    // - `live`: booted, with the render half released to the worklet;
+    // - `disposing`, `{ requestIds, deadline }`: the release was asked for; `requestIds` are the
+    //   page's dispose requests, answered together, and `deadline` the release's (#1332 S8);
+    // - `disposed`, `{ outcome, reason }`: the host is freed; `outcome` is the dispose's result
+    //   and `reason` its typed teardown reason (`release-timeout`), if any.
+    // Only `live` and `disposing` hold a host. A sticky error is the session's, not a phase: a
+    // failed session is still `live`. It keeps its host, which only a dispose frees, and every
+    // request but a dispose gets the sticky error.
+    this.phase = { kind: "unbooted" };
     this.stickyResult = RESULT_OK;
     this.lastRequestId = 0;
     this.handle = 0;
@@ -181,20 +191,10 @@ class ControlWorker {
     this.postedMemoryBytes = -1;
     // Status reads waiting for the worklet's render fields, in request order.
     this.statusReads = [];
-    // The page's dispose requests, answered together once the host is freed (a second dispose
-    // while one runs joins it; it posts no second release).
-    this.disposeRequestIds = [];
-    // The result of the finished dispose (undefined until then); a later dispose request gets it.
-    this.disposeOutcome = undefined;
-    // Set once a dispose began: every later control call is refused `WRONG_STATE`.
-    // #1332 S8: the reason a dispose ended without the half (`release-timeout`), the clock time
-    // it gives up on the release, the token the boot released (taken back when the worklet never
-    // adopted it) and the last render check.
-    this.disposeReason = undefined;
-    this.releaseDeadline = 0;
+    // #1332 S8: the token the boot released (taken back when the worklet never adopted it) and
+    // the last render check.
     this.bootToken = 0n;
     this.lastRenderCheck = 0;
-    this.disposing = false;
     // Issue #1387 (S11): the feed ports (one per SDK feed), the rings bound from them, the render
     // half's status address (the drain's render clock) and the last session seek's generation.
     this.feeds = [];
@@ -203,16 +203,38 @@ class ControlWorker {
     this.renderClockWords = null;
     this.lastSessionSeekGeneration = undefined;
     scope.onmessage = (event) => this.onPageMessage(event.data);
-    scope.onmessageerror = () => this.fatal(RESULT_INTERNAL, this.lastRequestId);
+    scope.onmessageerror = () => this.onMessageError();
+  }
+
+  /// A page message that could not be read. #2306: before the boot it is the boot, refused 255
+  /// (the page's boot then hears why); while a host is held it is a sticky error; with none (a
+  /// refused boot, a finished dispose) there is nothing left to fail, and it is dropped.
+  onMessageError() {
+    if (this.phase.kind === "unbooted") {
+      this.phase = { kind: "refused" };
+      this.failBoot(RESULT_INTERNAL);
+      return;
+    }
+    if (this.holdsHost()) this.sticky(RESULT_INTERNAL, this.lastRequestId);
   }
 
   /// One message from the main realm. The first is the boot; every later one is a request, run
   /// here and followed by the service step, the watermark, the protocol events and the meter view.
   onPageMessage(message) {
-    if (!this.booted) {
-      this.booted = true;
+    if (this.phase.kind === "unbooted") {
+      // #2306: a boot holds nothing until it reaches `live`, so a boot that is refused or throws
+      // stays `refused`; one that reports OK without reaching `live` is refused 255.
+      this.phase = { kind: "refused" };
       const result = this.boot(message);
-      if (result !== RESULT_OK) this.failBoot(result);
+      if (this.phase.kind !== "live") this.failBoot(result === RESULT_OK ? RESULT_INTERNAL : result);
+      return;
+    }
+    if (!this.holdsHost()) {
+      // Only a dispose is answered with no host: with the finished dispose's outcome. A feed
+      // port is not opened (#2306): no ring could be bound, and no dispose would close it.
+      if (message?.tag === "miso.dispose.v1" && Number.isSafeInteger(message.requestId)) {
+        this.answerDispose(message.requestId);
+      }
       return;
     }
     if (message?.tag === "miso.feed-port.v1" && exactFields(message, ["tag", "port"])
@@ -220,16 +242,21 @@ class ControlWorker {
       this.openFeed(message.port);
       return;
     }
-    if (this.disposed) {
-      // Only a dispose is answered once the host is gone: with the finished dispose's outcome.
-      if (message?.tag === "miso.dispose.v1" && Number.isSafeInteger(message.requestId)) {
-        this.answerDispose(message.requestId);
-      }
-      return;
-    }
     this.receive(message);
-    const requestId = message?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
-    this.afterControl(requestId);
+    this.afterControl(this.lastRequestId);
+  }
+
+  /// Whether this Worker holds a host: from the boot's success until the dispose frees it.
+  holdsHost() {
+    return this.phase.kind === "live" || this.phase.kind === "disposing";
+  }
+
+  /// #2306: the one guard of control work (the feed drain, the service step, the watermark, the
+  /// protocol events, the seek preparation and the tick's work): a live session with no sticky
+  /// error. Nothing runs once a dispose began, so a session that fails in the dispose window
+  /// cannot post a sticky error that rejects the dispose (`refuseDisposing`).
+  controlLive() {
+    return this.phase.kind === "live" && this.stickyResult === RESULT_OK;
   }
 
   afterControl(requestId) {
@@ -312,7 +339,7 @@ class ControlWorker {
     if (unsigned === 0n || Number(unsigned >> 32n) !== this.handle) {
       return this.disposeAfterFailedBoot(RESULT_INTERNAL);
     }
-    this.ready = true;
+    this.phase = { kind: "live" };
     this.bootToken = unsigned;
     this.lastRenderCheck = clock();
     this.postedMemoryBytes = this.buffer.byteLength;
@@ -488,7 +515,6 @@ class ControlWorker {
   /// D6: a refused boot answers with the result code the `single`-mode worklet answers, and the
   /// worklet is never started.
   failBoot(result) {
-    this.disposed = true;
     this.scope.postMessage({ tag: "miso.error.v1", requestId: 0, result });
   }
 
@@ -503,16 +529,12 @@ class ControlWorker {
   // SERVICE_TICK_END
 
   tick() {
-    if (this.disposed) {
-      this.stopServiceTick();
-      return;
-    }
     // #1332 S8: while a dispose waits for the worklet's release, the tick only keeps its deadline.
-    if (this.disposing) {
-      if (clock() >= this.releaseDeadline) this.finishDispose(0n, "release-timeout");
+    if (this.phase.kind === "disposing") {
+      if (clock() >= this.phase.deadline) this.finishDispose(0n, "release-timeout");
       return;
     }
-    if (!this.ready) {
+    if (!this.controlLive()) {
       this.stopServiceTick();
       return;
     }
@@ -552,12 +574,13 @@ class ControlWorker {
       .map((plane) => plane.buffer))];
   }
 
-  /// Every sticky error of this Worker goes through here (`fatal` too). Issue #2267: the first one
+  /// Every sticky error of this Worker goes through here. Issue #2267: the first one
   /// also fails the session in Rust (`session_fail`), so the lifecycle word the render half reads
   /// before every block says failed and the worklet stops rendering, as for a failure the engine
   /// records itself; a sticky error found only here (an out-of-order request ID, an unknown tag, a
   /// session map the engine cannot have written) would otherwise leave the worklet playing. Later
-  /// sticky replies only post their code.
+  /// sticky replies only post their code. #2306: a sticky error stops the service tick at its next
+  /// run (`tick`), but never the release deadline of a dispose that is running.
   sticky(result, requestId, planes) {
     if (this.stickyResult === RESULT_OK && this.handle !== 0) {
       try {
@@ -566,20 +589,15 @@ class ControlWorker {
         // A trapped instance: the page still gets the sticky error below.
       }
     }
-    this.ready = false;
     this.stickyResult = result;
     const message = { tag: "miso.error.v1", requestId, result };
     if (planes !== undefined) message.planes = planes;
     this.post(message, this.transferList(planes));
   }
 
-  fatal(result, requestId) {
-    this.stopServiceTick();
-    this.sticky(result, requestId);
-  }
-
+  /// A page request. #2306: in `worker` mode the page sends no `miso.service.v1` (this Worker runs
+  /// its own tick), so one is refused like any message with no request ID.
   receive(message) {
-    if (message?.tag === "miso.service.v1" && exactFields(message, ["tag"])) return;
     const returnedPlanes = Array.isArray(message?.planes) ? message.planes : undefined;
     if (!Number.isSafeInteger(message?.requestId) || message.requestId <= this.lastRequestId) {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
@@ -594,7 +612,7 @@ class ControlWorker {
       this.sticky(this.stickyResult, message.requestId, returnedPlanes);
       return;
     }
-    if (this.disposing) {
+    if (this.phase.kind === "disposing") {
       this.refuseDisposing(message);
       return;
     }
@@ -835,23 +853,23 @@ class ControlWorker {
   }
 
   serviceControl(requestId) {
-    if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK) return;
+    if (!this.controlLive()) return;
     const result = this.exports.miso_engine_web_v1_service(this.handle);
-    if (result !== RESULT_OK) this.fatal(result, requestId);
+    if (result !== RESULT_OK) this.sticky(result, requestId);
   }
 
   pushWatermark(requestId) {
-    if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK) return;
+    if (!this.controlLive()) return;
     const e = this.exports;
     const result = e.miso_engine_web_v1_watermark_read(this.handle);
     if (result === RESULT_BACKPRESSURE) return;
     if (result !== RESULT_OK) {
-      this.fatal(result, requestId);
+      this.sticky(result, requestId);
       return;
     }
     const view = this.view(DataView, e.miso_engine_web_v1_watermark_ptr(this.handle), WATERMARK_BYTES);
     if (view.getUint32(0, true) !== WATERMARK_BYTES || view.getUint32(4, true) !== 0) {
-      this.fatal(RESULT_INTERNAL, requestId);
+      this.sticky(RESULT_INTERNAL, requestId);
       return;
     }
     const revision = view.getBigUint64(8, true);
@@ -872,20 +890,20 @@ class ControlWorker {
   }
 
   drainControlEvents(requestId) {
-    if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK) return;
+    if (!this.controlLive()) return;
     const e = this.exports;
     for (const lane of CONTROL_EVENT_LANES) {
       for (let calls = 0; calls < MAXIMUM_CONTROL_EVENTS_PER_LANE; calls += 1) {
         const result = e.miso_engine_web_v1_control_event(this.handle, lane);
         if (result !== RESULT_OK) {
-          this.fatal(result, requestId);
+          this.sticky(result, requestId);
           return;
         }
         const bytes = e.miso_engine_web_v1_control_response_bytes(this.handle);
         if (bytes === 0) break;
         const pointer = e.miso_engine_web_v1_control_response_ptr(this.handle);
         if (pointer === 0) {
-          this.fatal(RESULT_INTERNAL, requestId);
+          this.sticky(RESULT_INTERNAL, requestId);
           return;
         }
         const frame = new Uint8Array(bytes);
@@ -923,7 +941,7 @@ class ControlWorker {
     if (data.op === "attach" && Array.isArray(data.rings)) {
       this.withdrawRings(feed.delivered);
       feed.delivered = data.rings;
-      if (this.disposed || this.disposing) return;
+      if (this.phase.kind !== "live") return;
       for (const shared of data.rings) {
         const ring = this.bindRing(shared);
         if (ring === null) continue;
@@ -1098,10 +1116,7 @@ class ControlWorker {
   }
 
   drainFeeds() {
-    if (this.rings.length === 0 || this.disposed || this.disposing || !this.ready
-        || this.stickyResult !== RESULT_OK) {
-      return;
-    }
+    if (this.rings.length === 0 || !this.controlLive()) return;
     const rendered = this.renderedQuanta();
     for (const ring of this.rings) {
       try {
@@ -1370,8 +1385,7 @@ class ControlWorker {
   /// The prelude's `prepare-seek`: apply each ring's published seek and free its stale slots,
   /// while the context is suspended (the SDK checks it); a newer seek supersedes the request.
   prepareSharedSeeks(delivered, seeks) {
-    if (!this.ready || this.disposed || this.disposing || this.stickyResult !== RESULT_OK
-        || !Array.isArray(seeks) || seeks.length !== delivered.length) {
+    if (!this.controlLive() || !Array.isArray(seeks) || seeks.length !== delivered.length) {
       return { kind: "refused", result: RESULT_WRONG_STATE };
     }
     const rings = delivered.map((shared) => this.rings.find((ring) => ring.shared === shared));
@@ -1421,7 +1435,7 @@ class ControlWorker {
   /// worklet, whose message handler cuts the views before render adopts that plan.
   postMeterView() {
     // Nothing is named once a dispose asked for the release: the worklet renders no more.
-    if (this.disposed || this.disposing || this.handle === 0 || this.workletPort === undefined) return;
+    if (this.phase.kind !== "live") return;
     // An `i32` result: normalised to its `u32` address (the memory is capped at 512 MiB, 8192
     // pages, so no address reaches 2 GiB; the normalisation is belt and braces).
     const header = this.exports.miso_engine_web_v1_successor_header_ptr(this.handle) >>> 0;
@@ -1435,23 +1449,26 @@ class ControlWorker {
   /// D4: the worklet releases the render half and posts its token; this Worker adopts it back,
   /// disposes the host (the only place that frees it) and answers the page's dispose.
   /// A dispose request that arrives once a dispose finished (the host freed, or the attempt
-  /// failed: `disposed` is set either way) is answered at once with that outcome in
+  /// failed: the phase is `disposed` either way) is answered at once with that outcome in
   /// `onPageMessage`: it never joins a dispose that will not complete.
   ///
   /// #1332 S8: the release is bounded: when no release arrives within `RELEASE_TIMEOUT_MS`, the
   /// host is disposed with no token and the page is answered `release-timeout`.
   beginDispose(requestId) {
-    this.disposeRequestIds.push(requestId);
-    if (this.disposing) return;
-    this.disposing = true;
-    this.releaseDeadline = clock() + RELEASE_TIMEOUT_MS;
+    // A second dispose while one runs joins it; it posts no second release.
+    if (this.phase.kind === "disposing") {
+      this.phase.requestIds.push(requestId);
+      return;
+    }
+    this.phase = { kind: "disposing", requestIds: [requestId], deadline: clock() + RELEASE_TIMEOUT_MS };
     this.workletPort.postMessage({ tag: "miso.release.v1" });
     // The deadline runs on the service tick (this Worker's one timer).
     if (this.serviceTick === null) this.startServiceTick();
   }
 
   finishDispose(token, reason = undefined) {
-    if (this.disposeRequestIds.length === 0 || this.disposeOutcome !== undefined) return;
+    const phase = this.phase;
+    if (phase.kind !== "disposing") return;
     this.stopServiceTick();
     const e = this.exports;
     let result;
@@ -1470,22 +1487,20 @@ class ControlWorker {
       // A trap in the adoption or the dispose: the instance is unusable; the outcome is final.
       result = RESULT_INTERNAL;
     }
-    this.disposed = true;
+    this.phase = { kind: "disposed", outcome: result, reason };
     this.handle = 0;
     this.closeFeeds();
-    this.disposeOutcome = result;
-    this.disposeReason = reason;
-    for (const requestId of this.disposeRequestIds) this.answerDispose(requestId);
-    this.disposeRequestIds = [];
+    for (const requestId of phase.requestIds) this.answerDispose(requestId);
   }
 
   /// The answer to a dispose once it finished: the typed teardown when the release timed out,
   /// the dispose's result otherwise (255 for a boot that never finished).
   answerDispose(requestId) {
-    if (this.disposeReason !== undefined) {
-      this.post({ tag: "miso.teardown.v1", requestId, result: RESULT_INTERNAL, reason: this.disposeReason });
+    const phase = this.phase;
+    if (phase.kind === "disposed" && phase.reason !== undefined) {
+      this.post({ tag: "miso.teardown.v1", requestId, result: RESULT_INTERNAL, reason: phase.reason });
     } else {
-      this.acknowledge(requestId, this.disposeOutcome ?? RESULT_INTERNAL);
+      this.acknowledge(requestId, phase.kind === "disposed" ? phase.outcome : RESULT_INTERNAL);
     }
   }
 
@@ -1507,10 +1522,13 @@ class ControlWorker {
     if (message?.tag === "miso.released.v1" && exactFields(message, ["tag", "token"])
         && typeof message.token === "bigint") {
       const token = BigInt.asUintN(64, message.token);
-      if (this.disposeOutcome !== undefined) this.reclaimOrphan(token);
+      if (this.phase.kind === "disposed") this.reclaimOrphan(token);
       else this.finishDispose(token);
       return;
     }
+    // #2306: with no host, nothing else the worklet says can be answered (a status reply that
+    // outlived a release-timeout dispose, say): it is dropped, never a sticky error.
+    if (!this.holdsHost()) return;
     if (message?.tag === "miso.render-clock.v1" && exactFields(message, ["tag", "status"])
         && u32(message.status) && message.status !== 0 && this.renderStatusPointer === 0) {
       this.renderStatusPointer = message.status;
@@ -1522,7 +1540,7 @@ class ControlWorker {
       this.answerStatus(message.requestId, message.status);
       return;
     }
-    this.fatal(RESULT_INTERNAL, this.lastRequestId);
+    this.sticky(RESULT_INTERNAL, this.lastRequestId);
   }
 
   /// The host status in `worker` mode: the render fields are the worklet's (its render half's
@@ -1537,11 +1555,11 @@ class ControlWorker {
     try {
       control = this.readStatus();
     } catch (_) {
-      this.fatal(RESULT_INTERNAL, requestId);
+      this.sticky(RESULT_INTERNAL, requestId);
       return;
     }
     if (rendered !== null && typeof rendered !== "object") {
-      this.fatal(RESULT_INTERNAL, requestId);
+      this.sticky(RESULT_INTERNAL, requestId);
       return;
     }
     const render = rendered ?? {

@@ -235,15 +235,8 @@ impl PreparedReverb {
 
         for frame in 0..io_left.len() {
             // Queued crossfades start on the first sample after the running one ends.
-            if self.pre_fade == 0 && self.pre_pending != self.pre_active {
-                self.pre_transition = self.pre_pending;
-                self.pre_fade = TRANSITION_SAMPLES;
-            }
-            if self.line_fade == 0 && self.line_queued {
-                self.line_transition = self.line_pending;
-                self.line_fade = TRANSITION_SAMPLES;
-                self.line_queued = false;
-            }
+            self.pre_tap.begin();
+            self.line_taps.begin();
 
             // R12: every ramped word steps once, then this sample uses it.
             let damping = L::splat(self.ramps[RAMP_DAMPING].next_value());
@@ -276,14 +269,15 @@ impl PreparedReverb {
                     (0.0, 0.0)
                 }
             };
-            let (old_left, old_right) = pre_read(&self.pre, self.pre_active);
-            let (pre_left, pre_right) = if self.pre_fade == 0 {
+            let pre_fade = self.pre_tap.remaining();
+            let (old_left, old_right) = pre_read(&self.pre, *self.pre_tap.active());
+            let (pre_left, pre_right) = if pre_fade == 0 {
                 (old_left, old_right)
             } else {
-                let (new_left, new_right) = pre_read(&self.pre, self.pre_transition);
+                let (new_left, new_right) = pre_read(&self.pre, *self.pre_tap.transition());
                 (
-                    blend(old_left, new_left, self.pre_fade),
-                    blend(old_right, new_right, self.pre_fade),
+                    blend(old_left, new_left, pre_fade),
+                    blend(old_right, new_right, pre_fade),
                 )
             };
 
@@ -327,11 +321,12 @@ impl PreparedReverb {
 
             // R3-R4: clear-on-read taps into slot order. The ring reads and clears are per line
             // (each line has its own length and index), so they stay scalar.
+            let line_fade = self.line_taps.remaining();
             for line in 0..LINES {
                 let len = geometry.line_len[line] as usize;
                 let base = geometry.line_offset[line];
                 let cursor = self.line_cursor[line] as usize;
-                let old_delay = self.line_active[line];
+                let old_delay = self.line_taps.active()[line];
                 let old_index = base + wrap(cursor + len - old_delay as usize, len);
                 let old = if FULL || old_delay <= history {
                     self.lines[old_index]
@@ -339,11 +334,11 @@ impl PreparedReverb {
                     0.0
                 };
                 let slot = slot_of_line(line);
-                if self.line_fade == 0 {
+                if line_fade == 0 {
                     self.lines[old_index] = 0.0;
                     slots[slot] = old;
                 } else {
-                    let new_delay = self.line_transition[line];
+                    let new_delay = self.line_taps.transition()[line];
                     let new_index = base + wrap(cursor + len - new_delay as usize, len);
                     let new = if FULL || new_delay <= history {
                         self.lines[new_index]
@@ -359,8 +354,8 @@ impl PreparedReverb {
             // The size crossfade's blend, one vector pass over all thirty-two slots: every line
             // shares one alpha. The last update (`line_fade == 1`) is the new word exactly,
             // which `slots` already holds.
-            if self.line_fade > 1 {
-                let alpha = L::splat(fade_alpha(self.line_fade));
+            if line_fade > 1 {
+                let alpha = L::splat(fade_alpha(line_fade));
                 for v in 0..vectors {
                     let old = L::load(&old_taps[v * w..]);
                     let new = L::load(&slots[v * w..]);
@@ -439,19 +434,8 @@ impl PreparedReverb {
             // Advance the clocks.
             let next = self.pre_cursor + 1;
             self.pre_cursor = if next == geometry.pre_len { 0 } else { next };
-            if self.pre_fade != 0 {
-                self.pre_fade -= 1;
-                if self.pre_fade == 0 {
-                    self.pre_active = self.pre_transition;
-                }
-            }
-            if self.line_fade != 0 {
-                self.line_fade -= 1;
-                if self.line_fade == 0 {
-                    self.line_active = self.line_transition;
-                    self.line_queued = self.line_pending != self.line_active;
-                }
-            }
+            self.pre_tap.advance(1);
+            self.line_taps.advance(1);
             if !FULL {
                 history = (history + 1).min(geometry.history_cap);
             }

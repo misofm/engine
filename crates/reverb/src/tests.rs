@@ -290,7 +290,12 @@ fn kernel_matches_the_f64_oracle() {
         let mut effect = prepare_at(&values, sample_rate);
         let mut oracle =
             ReferenceReverb::new(sample_rate, reference_parameters(&values)).expect("oracle");
-        let lengths: Vec<usize> = effect.line_active.iter().map(|d| *d as usize).collect();
+        let lengths: Vec<usize> = effect
+            .line_taps
+            .active()
+            .iter()
+            .map(|d| *d as usize)
+            .collect();
         assert_eq!(
             lengths,
             oracle.line_lengths().to_vec(),
@@ -471,4 +476,70 @@ fn line_lengths_are_pairwise_coprime_at_every_size_and_rate() {
         println!("{sample_rate} Hz: {breakpoints} breakpoints");
         assert!(breakpoints > 0);
     }
+}
+
+/// #2309: a restore refuses a crossfade in flight between two equal taps, for the pre-delay and
+/// for the lines, and still accepts a crossfade between two different taps.
+///
+/// Live rendering starts a crossfade only towards a tap that differs from the active one, so no
+/// snapshot holds a fade between equal taps. Restored, such a fade moves nothing, and it holds a
+/// queued tap change back for up to 128 samples, which no reachable state does. The accepted
+/// control shows that the refusal comes from the equal taps alone.
+///
+/// Red for: a restore validator that checks `fade == 0 => active == transition` but not its
+/// converse, for either of the two crossfades (the delay's validator checks both).
+#[test]
+fn restore_refuses_a_crossfade_between_equal_taps() {
+    use effect_runtime::state_payload::write_u32;
+    use state::{C_LINE_FADE, C_LINE_TRANSITION, C_PRE_FADE, C_PRE_TRANSITION};
+
+    let mut effect = prepare_at(&defaults(), 48_000);
+    let (mut left, mut right) = signal(QUANTUM as usize, 0x5eed);
+    effect.process_at::<lane::Native>(
+        EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], QUANTUM).expect("block"),
+    );
+    let sizes = effect.state_sizes;
+    let mut common = vec![0; sizes.common_bytes as usize];
+    let mut left = vec![0; sizes.left_bytes as usize];
+    let mut right = vec![0; sizes.right_bytes as usize];
+    effect
+        .snapshot_state_payload(
+            StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("output"),
+        )
+        .expect("snapshot");
+    // Both crossfades are idle: each tap equals the one it would fade towards.
+    assert_eq!(effect.pre_tap.remaining(), 0);
+    assert_eq!(effect.line_taps.remaining(), 0);
+    let at_rest = snapshot(&effect);
+    let restore = |effect: &mut PreparedReverb, common: &[u8]| {
+        effect.restore_state_payload(
+            1,
+            StatePayloadInput::new(common, &left, &right, sizes).expect("payload shape"),
+        )
+    };
+
+    for (name, fade) in [("pre-delay", C_PRE_FADE), ("lines", C_LINE_FADE)] {
+        let mut equal_taps = common.clone();
+        write_u32(&mut equal_taps, fade, 64);
+        assert_eq!(
+            restore(&mut effect, &equal_taps),
+            Err(StatePayloadError {
+                code: "effect.state.lane"
+            }),
+            "{name}: a crossfade between equal taps is refused"
+        );
+        assert!(
+            snapshot(&effect) == at_rest,
+            "{name}: a refused restore wrote state"
+        );
+    }
+
+    let mut fading = common.clone();
+    write_u32(&mut fading, C_PRE_FADE, 64);
+    write_u32(&mut fading, C_PRE_TRANSITION, effect.geometry.pre_max);
+    write_u32(&mut fading, C_LINE_FADE, 64);
+    write_u32(&mut fading, C_LINE_TRANSITION, effect.max_lengths[0]);
+    assert_ne!(*effect.pre_tap.active(), effect.geometry.pre_max);
+    assert_ne!(effect.line_taps.active()[0], effect.max_lengths[0]);
+    assert_eq!(restore(&mut effect, &fading), Ok(()));
 }

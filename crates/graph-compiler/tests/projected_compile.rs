@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use builtins_compiler::{BuiltinCompileCaps, PreparedBuiltinsSession, prepare_session_builtins};
 use effect_compiler::{
-    EffectCompileCaps, EffectProjectedSession, launch_native_effect_registry,
-    project_native_session_effects,
+    EffectCompileCaps, EffectProjectedEntry, EffectProjectedSession, launch_native_effect_registry,
+    plan_projected_effect_live_controls, project_native_session_effects,
 };
 use effect_contract::{
     EffectDescriptor, EffectPrepareError, NativeEffectFactory, NativeEffectRegistry,
@@ -21,7 +21,9 @@ use effect_contract::{
     QualityDescriptor,
 };
 use graph::GraphCompileCaps;
-use graph_compiler::{Backend, GainLiveness, GraphCompiler, GraphProjectionRequest};
+use graph_compiler::{
+    Backend, GainLiveness, GraphBuiltinsCompileRequest, GraphCompiler, GraphProjectionRequest,
+};
 use session::{
     CompileCaps, CompiledSession, Effect, EffectIdentity, EffectQuality, LinkMode,
     SidechainDeclaration, StableId, compile_session, parse_session_json,
@@ -456,4 +458,114 @@ fn a_projections_estimate_is_its_compiled_plans() {
     let artifact = GraphCompiler::compile_projected(projection, builtins)
         .unwrap_or_else(|failure| panic!("the console compiles: {:?}", failure.diagnostics));
     assert_eq!(artifact.graph_resource_estimate(), &projected);
+}
+
+/// Whether `diagnostics` carries `code`.
+fn carries(diagnostics: &graph::GraphDiagnosticSet, code: &str) -> bool {
+    diagnostics
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.code == code)
+}
+
+/// A projected compile refuses entries that are not, entry for entry, the ones its projection
+/// planned (issue #2303): the per-node delay removed, or two entries swapped, through
+/// `GraphProjection::effects_mut` is `graph.internal.invariant`, and the projected effects are
+/// handed back. A removed bank member is refused already, by the bank bind; a per-node one is not.
+///
+/// Test value: red when the back half lowers entries other than the front's, pairing each with
+/// the node, bank and placement of whatever entry sat at its index when the graph was projected:
+/// the removed delay then silently compiles a plan without it, and two swapped entries compile
+/// each under the other's node.
+#[test]
+fn a_projected_compile_refuses_entries_changed_since_its_projection() {
+    let session = console();
+    let registry = launch_native_effect_registry().expect("launch registry");
+    type Change = fn(&mut Vec<EffectProjectedEntry>);
+    fn removed(entries: &mut Vec<EffectProjectedEntry>) {
+        entries.retain(|entry| entry.effect_id != "delay");
+    }
+    #[allow(clippy::ptr_arg)] // One signature with `removed`, which needs the `Vec`.
+    fn swapped(entries: &mut Vec<EffectProjectedEntry>) {
+        let last = entries.len() - 1;
+        entries.swap(0, last);
+    }
+    let changes: [(&str, Change, usize); 2] = [("removed", removed, 1), ("swapped", swapped, 0)];
+    for (change, edit, lost) in changes {
+        let builtins = builtins(&session);
+        let mut projection =
+            GraphCompiler::project(request(projected(&session, registry), &builtins))
+                .unwrap_or_else(|failure| {
+                    panic!("the console projects: {:?}", failure.diagnostics)
+                });
+        let instances = projection.effects().entries.len();
+        edit(&mut projection.effects_mut().entries);
+        let Err(failure) = GraphCompiler::compile_projected(projection, builtins) else {
+            panic!("a projection whose entries were {change} compiled");
+        };
+        assert!(
+            carries(&failure.diagnostics, "graph.internal.invariant"),
+            "{change}: {:?}",
+            failure.diagnostics
+        );
+        assert_eq!(
+            failure.effects.entries.len(),
+            instances - lost,
+            "{change}: the projected effects are handed back"
+        );
+    }
+}
+
+/// A live-control lane attached after the graph was projected must have the layout the projection
+/// planned and charged (issue #2199), on both compile paths. Here none is attached, so every
+/// planned lane differs and the compile is refused with `graph.effect.control_layout`.
+///
+/// Test value: red when a back half lowers a plan whose estimate charged lanes the plan does not
+/// hold. On the prepared path that is a processor supply that ignores the back half's pending
+/// diagnostics (#2303): it prepares nothing that could fail, so that check is its only refusal.
+#[test]
+fn a_lane_other_than_the_planned_one_is_refused_on_both_compile_paths() {
+    let session = console();
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let planned = || {
+        let mut effects = projected(&session, registry);
+        plan_projected_effect_live_controls(&mut effects, 0)
+            .expect("the console's lanes are planned");
+        assert!(
+            effects
+                .entries
+                .iter()
+                .any(|entry| entry.planned_lane.is_some()),
+            "a lane is planned"
+        );
+        effects
+    };
+    let builtins_session = builtins(&session);
+    let projection = GraphCompiler::project(request(planned(), &builtins_session))
+        .unwrap_or_else(|failure| panic!("the console projects: {:?}", failure.diagnostics));
+    let Err(failure) = GraphCompiler::compile_projected(projection, builtins_session) else {
+        panic!("a projected compile without its planned lanes compiled");
+    };
+    assert!(
+        carries(&failure.diagnostics, "graph.effect.control_layout"),
+        "projected: {:?}",
+        failure.diagnostics
+    );
+    let effects = planned().prepare().expect("the console's effects prepare");
+    let Err(failure) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        plan_id: 2_303,
+        builtins: builtins(&effects.session),
+        effects,
+        caps: graph_caps(),
+        dispatch: Backend::current(),
+        input_floors: Default::default(),
+        gain_liveness: GainLiveness::FIXED,
+    }) else {
+        panic!("a prepared compile without its planned lanes compiled");
+    };
+    assert!(
+        carries(&failure.diagnostics, "graph.effect.control_layout"),
+        "prepared: {:?}",
+        failure.diagnostics
+    );
 }
