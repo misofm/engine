@@ -946,6 +946,72 @@ async function testMainRealm() {
     assert.deepEqual(events.slice(0, 2), [
       ["compile", "simd.wasm"], ["addModule", "processor.js"],
     ]);
+    if (process.env.MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST === "2") {
+      // Issue #2279 (this copy starts at MAX_SAFE_INTEGER - 2): a dispose sent after a control
+      // request and before its reply takes the last safe ID, so the held reply's fence gets none.
+      // The control fails the host with its own ID; the dispose was sent and the Worker still
+      // answers it, so it settles cleanly on its own reply. Test value: the fence-exhaustion
+      // failure naming the channel as its source, so it rejects a dispose the Worker answers.
+      await host.dispose().catch(() => undefined);
+      const originalWorker = globalThis.Worker;
+      const originalIsolated = Object.getOwnPropertyDescriptor(globalThis, "crossOriginIsolated");
+      const originalMemory = WebAssembly.Memory;
+      let worker;
+      class HeldWorker {
+        onmessage = null; onerror = null; onmessageerror = null; terminated = false; posts = [];
+        held = [];
+        constructor() { worker = this; }
+        deliver(data) { this.onmessage?.({ data }); }
+        postMessage(message) {
+          this.posts.push(message);
+          if (message.tag === "miso.worker-boot.v1") {
+            queueMicrotask(() => this.deliver({
+              tag: "miso.worker-ready.v1", requestId: 0, result: 0, handle: 5,
+              token: (5n << 32n) | 1n, reservation: 70000, metersAttached: true,
+              backend: "simd128", resources: resourceReport(1, 64), memoryBytes: 1310720,
+              sourceRingFrames: 40 * 64, controlFrameBytes: 16384,
+            }));
+          } else if (message.tag === "miso.control.v1") {
+            this.held.push({ tag: "miso.control.v1", requestId: message.requestId, result: 0,
+              response: new Uint8Array([1]), revision: 3n });
+          } else if (message.tag === "miso.dispose.v1") {
+            this.held.push({ tag: "miso.ack.v1", requestId: message.requestId, result: 0 });
+          }
+        }
+        terminate() { this.terminated = true; }
+      }
+      try {
+        globalThis.Worker = HeldWorker;
+        Object.defineProperty(globalThis, "crossOriginIsolated", { value: true, configurable: true });
+        WebAssembly.Memory = class {
+          constructor(descriptor) { this.descriptor = { ...descriptor }; this.buffer = new SharedArrayBuffer(65536); }
+        };
+        const workerHost = await createMisoAudioWorkletHost({
+          context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "https://example.test/w.js",
+        });
+        assert.equal(workerHost.instanceMode, "worker");
+        const control = workerHost.control(new Uint8Array([1]));
+        control.catch(() => undefined);
+        const disposal = workerHost.dispose();
+        disposal.catch(() => undefined);
+        assert.deepEqual(worker.posts.slice(1).map((m) => [m.tag, m.requestId]),
+          [["miso.control.v1", Number.MAX_SAFE_INTEGER - 1], ["miso.dispose.v1", Number.MAX_SAFE_INTEGER]]);
+        worker.deliver(worker.held.shift()); // the control reply: its fence has no ID
+        assert.equal(await settledState(control), "rejected");
+        assert.equal((await control.catch((e) => e)).result, 255);
+        assert.equal(await settledState(disposal), "pending", "the dispose waits for its own reply");
+        worker.deliver(worker.held.shift()); // the dispose's own ack
+        assert.equal(await settledState(disposal), "resolved", "and settles cleanly on it");
+        assert.equal(worker.terminated, true);
+      } finally {
+        globalThis.Worker = originalWorker;
+        WebAssembly.Memory = originalMemory;
+        if (originalIsolated === undefined) delete globalThis.crossOriginIsolated;
+        else Object.defineProperty(globalThis, "crossOriginIsolated", originalIsolated);
+      }
+      return;
+    }
     if (process.env.MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST === "1") {
       const last = await host.status();
       assert.equal(last.requestId, Number.MAX_SAFE_INTEGER);
@@ -2307,7 +2373,12 @@ async function testMainRealm() {
       await strayHost.dispose();
       // A stray message with no request ID, or one that is not a request ID, fails the host with
       // request ID 0. Test value: the sticky error echoing a missing ID as 1, or a non-ID as is.
-      for (const stray of [{ tag: "miso.nope.v1" }, { tag: "miso.ack.v1", requestId: "x", result: 0 }]) {
+      for (const stray of [
+        { tag: "miso.nope.v1" },
+        { tag: "miso.ack.v1", requestId: "x", result: 0 },
+        { tag: "miso.ack.v1", requestId: -1, result: 0 },
+        { tag: "miso.ack.v1", requestId: 1.5, result: 0 },
+      ]) {
         const idHost = await create();
         FakeNode.latest.port.onmessage({ data: stray });
         assert.equal((await errorResult(idHost.status(), 255)).requestId, 0, `${JSON.stringify(stray)} fails with ID 0`);
@@ -2863,7 +2934,9 @@ async function testMainRealm() {
             await calls[0];
             await new Promise((resolve) => setImmediate(resolve));
             const next = host.control(new Uint8Array([1]));
-            assert.equal(await settledState(host.control(new Uint8Array([1]))), "rejected", "the control bound counts one settled call once");
+            const over = host.control(new Uint8Array([1]));
+            assert.equal(await settledState(over), "rejected", "the control bound counts one settled call once");
+            await localErrorResult(over, 6);
             workerBehaviour = "ready";
             await host.dispose().catch(() => undefined);
             void next.catch(() => undefined);

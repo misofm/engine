@@ -467,8 +467,8 @@ The branch merged `origin/main` (`cbab8eb3f`).
 | 816 | `L816_noreturn` (delete 'return;') | It falls to the `pending === null` or shape-check `#fail`, a second call with the same source as the first (`null` or the same pending). The first error stands, and the second call finds the `#pending` the first one left. |
 | 820 | `L820_failsrc_pending` (#fail source null->pending) | It is inside `if (pending === null)`, so `pending` is `null`. |
 | 936 | `L936_noreturn` (delete 'return;') | It falls through with the fence record. Its second `#release` is a no-op (a `null` slot, not a status read) and its `resolve` is a no-op. |
-| 963 | `L963_failsrc_FAIL_CHANNEL` (#fail source control->FAIL_CHANNEL) | Unreachable with a dispose in flight; the reason is the same as for the `null` swap. |
-| 963 | `L963_failsrc_null` (#fail source control->null) | Unreachable with a dispose in flight. The fence finds no ID only after the control took the last one, and a dispose gets no ID after it (refused locally with result 1, as the MAX_SAFE row shows), while one sent before it refuses the control with result 3. |
+| 963 | `L963_failsrc_FAIL_CHANNEL` (#fail source control->FAIL_CHANNEL) | **Withdrawn after the attempt-4 review: not equivalent.** A dispose sent after the control and before its reply takes the last ID, so the fence finds none while the dispose is in flight. RED since the fold, in the `MAX_SAFE - 2` run ("the dispose waits for its own reply"). |
+| 963 | `L963_failsrc_null` (#fail source control->null) | Equivalent: `#fail` treats a `null` source and a non-dispose pending source alike, since both leave `replyDue` true. |
 | 990 | `L990_iffalse` (if condition -> false) | Unreachable: `#teardown` nulls every handler that calls `#fail` (ports, `onprocessorerror`, `worker.onerror`). |
 | 995 | `L995_qq_0` ('??'->'||' #0) | `prior.error` is a frozen error record and cannot be another falsy value, so `||` and `??` agree. |
 | 1004 | `L1004_dropstmtclear` (blank line 'this.#inFlight.clear();') | Once failed, no bounded request is sent again, so the counts are never read. |
@@ -533,3 +533,17 @@ The branch merged `origin/main` (`cbab8eb3f`).
 - refused fence: red if the fence's result check is dropped, so a refused fence releases the held reply.
 - malformed frame and listener: red if the frame reaches its listener after the host failed on it.
 - stray and oldest IDs: red if the sticky error echoes a non-ID or turns a missing ID into 1, or if the oldest-request lookup answers 0 with requests unsettled.
+
+### Attempt 4 verdict: PASS, with two MINORs and a nit folded (2026-11-07)
+The reviewer confirmed the generator counts exactly: 633 RED, 9 RED only in the MAX_SAFE run, 152 GREEN. They upheld 44 of the 45 equivalences and confirmed that all 107 deferred mutants are on lines that already exist on `main`. Folded on the same branch:
+1. **The `L963_failsrc_FAIL_CHANNEL` equivalence is refuted.** A dispose sent after a control request and before its reply takes the last safe ID, so the control reply's fence finds none while the dispose is in flight. The mutant then rejects the dispose with 255 instead of letting it settle on its own ack.
+   - The reviewer's row is added to the MAX_SAFE block, under `MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST=2`.
+   - `scripts/test-web-audioworklet.sh` runs it on a second safe-start copy that starts at `MAX_SAFE_INTEGER - 2`.
+   - Both 963 rows above are corrected. The `null` swap stays equivalent because a `null` source and a non-dispose pending source both leave `replyDue` true.
+   - Check: the reviewer's `L963fc` mutant is RED in that run, and head and the `null` mutant stay GREEN.
+2. **Line 820 was pinned only for a missing ID and a string ID.** The stray loop now also sends acks with `requestId: -1` and `requestId: 1.5`. The reviewer's six line-820 mutants, including the `Number.isSafeInteger` and `typeof === "number"` substitutions, are all RED.
+3. **Nit:** the duplicate-reply row now asserts result 6 (backpressure) for the 65th call, not just a rejection.
+
+Gates after the fold:
+- `bash scripts/test-web-audioworklet.sh`: exit 0, including both MAX_SAFE runs.
+- `bash scripts/check-workspace-policy.sh`: ok.
