@@ -6035,6 +6035,50 @@ async function testControlWorker() {
         "a dispose after the host is freed is answered at once with the outcome");
       assert.equal(intervals[0].cleared, true, "dispose stops the tick");
     }
+    // Issue #2346: the status address is the slot's, not the boot's. After the release,
+    // `status_ptr` names the status shell inside the host, while the address it named at the boot
+    // is the released half's own status, written by the render thread. After the adoption back it
+    // names the half's status again. Test value: red if the Worker caches the boot's address
+    // (then it reports the half's state and result, not the control half's failure), or caches
+    // the shell's at the release (then a status read after the adoption reads the shell).
+    {
+      const halfPointer = 16384;
+      const shellPointer = 67000;
+      let statusAt = halfPointer;
+      const { send, fromWorklet } = await boot({}, 64, (engine) => {
+        const { miso_engine_web_v1_host_release: release, miso_engine_web_v1_host_adopt: adopt } = engine.exports;
+        engine.exports.miso_engine_web_v1_status_ptr = () => statusAt;
+        engine.exports.miso_engine_web_v1_host_release = (handle) => {
+          const shell = new Uint8Array(engine.memory.buffer, shellPointer, 80);
+          shell.set(new Uint8Array(engine.memory.buffer, halfPointer, 80));
+          statusAt = shellPointer;
+          return release(handle);
+        };
+        engine.exports.miso_engine_web_v1_host_adopt = (token) => {
+          statusAt = halfPointer;
+          return adopt(token);
+        };
+      });
+      // A control failure the host records in the shell; the released half still says ready.
+      const shell = new DataView(fake.memory.buffer, shellPointer, 80);
+      shell.setUint32(8, 3, true);
+      shell.setUint32(12, 7, true);
+      new DataView(fake.memory.buffer, halfPointer, 80).setBigUint64(40, 11n, true);
+      send({ tag: "miso.status.v1", requestId: 1 });
+      fromWorklet({
+        tag: "miso.render-status.v1", requestId: 1,
+        status: { state: 2, lastResult: 0, renderedQuanta: 11n, blockingRebuilds: 0, meterFramesSkipped: 0 },
+      });
+      const failed = posts.at(-1);
+      assert.deepEqual([failed.tag, failed.state, failed.lastResult], ["miso.status.v1", 3, 7],
+        "the Worker reports the shell's lifecycle state and result");
+      send({ tag: "miso.status.v1", requestId: 2 });
+      send({ tag: "miso.dispose.v1", requestId: 3 });
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      const adopted = posts.find((message) => message.tag === "miso.status.v1" && message.requestId === 2);
+      assert.deepEqual([adopted?.result, adopted?.renderedQuanta], [0, 11n],
+        "after the adoption back, the status read is the half's own");
+    }
     // A trap in the Worker's dispose is a final outcome: the dispose is answered 255, and a later
     // dispose is answered at once with it (it never joins a dispose that will not complete).
     {
