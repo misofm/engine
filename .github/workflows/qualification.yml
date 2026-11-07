@@ -778,11 +778,13 @@ jobs:
     # cold 4-core runner (its control-plane test build is the cost; the model runs in under 0.1 s),
     # plus #2276's C ABI handle claim loom leg, a debug build: 22 s cold on 32 cores, estimated at
     # 2 min on a cold 4-core runner, plus #2298's web host lifecycle loom leg, a debug build: 39 s
-    # on 32 cores, estimated at 2:30 on a cold 4-core runner, so
-    # 1.5 x (15:05 + 3:00 + 2:00 + 2:30) = 33:53. Re-derive from the first `main` run that
-    # includes the three loom legs added since the 15:05 run (loudness arming, C ABI handle claim
-    # and web host lifecycle; the job runs six loom legs in all).
-    timeout-minutes: 34
+    # on 32 cores, estimated at 2:30 on a cold 4-core runner, plus #2359's protocol token lease
+    # loom leg, a debug build: 17 s cold on 32 cores (the dependency graph shared with the legs
+    # above), estimated at 1:30 on a cold 4-core runner, so
+    # 1.5 x (15:05 + 3:00 + 2:00 + 2:30 + 1:30) = 36:08. Re-derive from the first `main` run that
+    # includes the four loom legs added since the 15:05 run (loudness arming, C ABI handle claim,
+    # web host lifecycle and protocol token lease; the job runs seven loom legs in all).
+    timeout-minutes: 37
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -875,6 +877,12 @@ jobs:
       # dev-dependency), which a release build would rebuild in release.
       - name: Realtime race model (web host lifecycle loom leg)
         run: unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/loom-host-core RUSTFLAGS='--cfg loom --check-cfg=cfg(loom) -C target-feature=+avx2,+fma' cargo test --locked -p host-web --lib lifecycle_loom
+      # Issue #2359: the protocol controller's token lease (a lease dropped on a host thread while
+      # the controller thread acquires), on the host-core leg's target dir and flags, in the debug
+      # profile as the two legs above are. Only this crate's own test build models the word
+      # (`cfg(all(loom, test))`), so the legs above build `protocol` with `std`'s atomics.
+      - name: Realtime race model (protocol token lease loom leg)
+        run: unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/loom-host-core RUSTFLAGS='--cfg loom --check-cfg=cfg(loom) -C target-feature=+avx2,+fma' cargo test --locked -p protocol --lib token_lease_loom
       - name: Math M1 exhaustive sweep
         if: needs.route.outputs.math_closure == 'true'
         run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored

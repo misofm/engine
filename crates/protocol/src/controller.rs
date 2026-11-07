@@ -4,10 +4,11 @@
 //! calls a renderer, and this module has no plan-publication capability.
 
 use core::{alloc::Layout, fmt, num::NonZeroUsize, ops::Range};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+
+mod lease;
+
+use lease::{LeaseRefusal, TokenLease, TokenLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 std::thread_local! {
@@ -1344,14 +1345,15 @@ fn request_digest(bytes: &[u8]) -> u64 {
 /// and bound to one controller generation as [`PreparedSessionCommand`] is, and holding nothing
 /// on the heap. The completion takes the request bytes again, which must be the prepared ones.
 pub struct PreparedObservationRead {
-    owner: Arc<AtomicU64>,
-    generation: u64,
     request_id: RequestId,
     request_len: usize,
     /// [`request_digest`] of the prepared request's bytes.
     request_digest: u64,
     replay_plan: ReplayAdmission,
-    armed: bool,
+    /// The controller's token lock. Declared last on purpose: fields drop in declaration order,
+    /// so every reservation the token holds is returned before the lock reads idle, even when the
+    /// token is dropped on another thread (#2359).
+    lease: TokenLease,
 }
 
 impl PreparedObservationRead {
@@ -1359,20 +1361,6 @@ impl PreparedObservationRead {
     #[must_use]
     pub const fn request_id(&self) -> RequestId {
         self.request_id
-    }
-}
-
-impl Drop for PreparedObservationRead {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self.owner.compare_exchange(
-                self.generation,
-                self.generation.saturating_add(1),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-            self.armed = false;
-        }
     }
 }
 
@@ -1422,14 +1410,15 @@ pub enum SessionCommandReply<'a> {
 /// plan stays valid, and a token dropped without completion leaves the cache as it was (the
 /// request then has no reply and no replay entry).
 pub struct PreparedSessionCommand {
-    owner: Arc<AtomicU64>,
-    generation: u64,
     message_id: MessageId,
     request_id: RequestId,
     replay_plan: ReplayAdmission,
     request: Box<[u8]>,
     command: SessionCommand,
-    armed: bool,
+    /// The controller's token lock. Declared last on purpose: fields drop in declaration order,
+    /// so every reservation the token holds is returned before the lock reads idle, even when the
+    /// token is dropped on another thread (#2359).
+    lease: TokenLease,
 }
 
 impl PreparedSessionCommand {
@@ -1443,20 +1432,6 @@ impl PreparedSessionCommand {
     #[must_use]
     pub const fn command(&self) -> &SessionCommand {
         &self.command
-    }
-}
-
-impl Drop for PreparedSessionCommand {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self.owner.compare_exchange(
-                self.generation,
-                self.generation.saturating_add(1),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-            self.armed = false;
-        }
     }
 }
 
@@ -1501,8 +1476,6 @@ enum StructuralCommandDisposition {
 /// Opaque affine structural preparation bound to one exact controller identity and generation.
 /// It is deliberately neither `Clone` nor publicly constructible.
 pub struct PreparedStructuralCommand {
-    owner: Arc<AtomicU64>,
-    generation: u64,
     /// `SESSION_TRANSACTION_APPLY` or `SESSION_REPLACE`: the reply's message ID.
     message_id: MessageId,
     request_id: RequestId,
@@ -1513,7 +1486,7 @@ pub struct PreparedStructuralCommand {
     // cloned; nothing is written to it before the commit, so a dropped token has nothing to undo.
     replay_plan: ReplayAdmission,
     request: Box<[u8]>,
-    response: Option<ControllerResponse>,
+    response: ControllerResponse,
     /// The queue slot the commit's `SESSION_COMMITTED` takes: held exactly when the prospective
     /// session's form is a session mutation, decided from that form when the token is made
     /// (#2330), so the commit never meets a mutation without its slot.
@@ -1526,7 +1499,10 @@ pub struct PreparedStructuralCommand {
     /// The one `OBSERVATION_ENDED` event this commit emits after its `SESSION_COMMITTED` (#1584
     /// D6a fold), with the room and the cell it takes. `None` unless the host attached keys.
     observation_ended: Option<EndedAttachment>,
-    armed: bool,
+    /// The controller's token lock. Declared last on purpose: fields drop in declaration order,
+    /// so every reservation the token holds is returned before the lock reads idle, even when the
+    /// token is dropped on another thread (#2359).
+    lease: TokenLease,
 }
 
 /// An `OBSERVATION_ENDED` event attached to a token, with everything its commit needs, proven
@@ -1538,7 +1514,7 @@ struct EndedAttachment {
     /// The reliable-event slot held for it, checked together with the token's own.
     room: crate::ReliableEventReservation,
     /// The free prepared cell the event fills. Only a structural commit fills a cell, and no
-    /// other commit runs while the token is outstanding (the odd generation), while a delivery
+    /// other commit runs while the token is outstanding (it holds the token lock), while a delivery
     /// only empties one, so the cell is still free when the token commits.
     cell: u32,
 }
@@ -1569,23 +1545,7 @@ impl PreparedStructuralCommand {
     /// Exact canonical response byte count retained for post-publication caller output.
     #[must_use]
     pub fn response_len(&self) -> usize {
-        self.response
-            .as_ref()
-            .map_or(0, |response| response.frame.len())
-    }
-}
-
-impl Drop for PreparedStructuralCommand {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self.owner.compare_exchange(
-                self.generation,
-                self.generation.saturating_add(1),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-            self.armed = false;
-        }
+        self.response.frame.len()
     }
 }
 
@@ -1671,6 +1631,10 @@ pub enum EventEgressError {
     /// is [`ProtocolQueues::reliable_event_admission_report`]: its occupancy counts held slots,
     /// an outstanding structural token's own included.
     ReliableQueueFull(QueueReport),
+    /// A prepared command's token is outstanding (#2359): the endpoint stages no event until the
+    /// token is completed or dropped. The same phase
+    /// [`CommandFrameProcessError::PreparedCommandOutstanding`] reports on the command path.
+    PreparedCommandOutstanding,
     /// The typed caller-buffer encoder rejected the requested event/output.
     Encode(EncodeError),
 }
@@ -1797,7 +1761,27 @@ pub struct ProtocolController<P: ControlProvider> {
     pending_meter_record: Option<TelemetryRecord>,
     pending_counter_record: Option<CounterTelemetryRecord>,
     pending_telemetry_event: PendingTelemetryEvent,
-    structural_generation: Arc<AtomicU64>,
+    /// The one lock every prepared token holds while outstanding (#2359).
+    token_lock: TokenLock,
+}
+
+/// A [`ProtocolController`] with no prepared token outstanding (#2359), from
+/// [`ProtocolController::idle`]. It borrows the controller mutably, so no token can be prepared
+/// while it lives.
+pub struct IdleController<'a, P: ControlProvider> {
+    controller: &'a mut ProtocolController<P>,
+}
+
+impl<P: ControlProvider> IdleController<'_, P> {
+    /// Mutably borrow the preallocated protocol queues: no token holds a reservation in them.
+    pub fn queues_mut(&mut self) -> &mut ProtocolQueues {
+        &mut self.controller.queues
+    }
+
+    /// Replace only typed provider/event enablement for endpoint configuration tests/hosts.
+    pub fn set_provider_features(&mut self, features: ProviderFeatures) {
+        self.controller.config.provider_features = features;
+    }
 }
 
 impl<P: ControlProvider> ProtocolController<P> {
@@ -1843,7 +1827,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             pending_meter_record: None,
             pending_counter_record: None,
             pending_telemetry_event: PendingTelemetryEvent::None,
-            structural_generation: Arc::new(AtomicU64::new(0)),
+            token_lock: TokenLock::new(),
         })
     }
 
@@ -1915,7 +1899,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// Process one logical request with exact-byte replay and no renderer call.
     pub fn process(&mut self, request: ControllerRequest<'_>) -> ControllerResponse {
         let message_id = request.command.message_id();
-        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+        if !self.token_lock.is_idle() {
             return self.compatibility_response(
                 message_id,
                 request.request_id,
@@ -2092,7 +2076,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
-        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+        if !self.token_lock.is_idle() {
             return Err(CommandFrameProcessError::PreparedCommandOutstanding);
         }
         let header = self
@@ -2138,7 +2122,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
-        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+        if !self.token_lock.is_idle() {
             return Err(CommandFrameProcessError::PreparedCommandOutstanding);
         }
         let header = self
@@ -2173,7 +2157,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         output_capacity: usize,
         observe: crate::ObserveContext<'_>,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
-        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+        if !self.token_lock.is_idle() {
             return Err(CommandFrameProcessError::PreparedCommandOutstanding);
         }
         let header = self
@@ -2207,7 +2191,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
-        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+        if !self.token_lock.is_idle() {
             return Err(CommandFrameProcessError::PreparedCommandOutstanding);
         }
         let header = self
@@ -2240,7 +2224,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         output_capacity: usize,
         observe: crate::ObserveContext<'_>,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
-        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+        if !self.token_lock.is_idle() {
             return Err(CommandFrameProcessError::PreparedCommandOutstanding);
         }
         let header = self
@@ -2409,24 +2393,15 @@ impl<P: ControlProvider> ProtocolController<P> {
             .try_reserve_exact(input.len())
             .map_err(|_| CommandFrameProcessError::Internal)?;
         request.extend_from_slice(input);
-        let current = self.structural_generation.load(Ordering::Acquire);
-        let generation = current
-            .checked_add(1)
-            .filter(|generation| generation & 1 == 1)
-            .ok_or(CommandFrameProcessError::Internal)?;
-        self.structural_generation
-            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
+        let lease = self.acquire_token_lease()?;
         Ok(PreparedCommandFrame::Session(Box::new(
             PreparedSessionCommand {
-                owner: Arc::clone(&self.structural_generation),
-                generation,
+                lease,
                 message_id: header.message_id,
                 request_id: header.request_id,
                 replay_plan,
                 request: request.into_boxed_slice(),
                 command,
-                armed: true,
             },
         )))
     }
@@ -2478,23 +2453,14 @@ impl<P: ControlProvider> ProtocolController<P> {
                 output_capacity,
             );
         }
-        let current = self.structural_generation.load(Ordering::Acquire);
-        let generation = current
-            .checked_add(1)
-            .filter(|generation| generation & 1 == 1)
-            .ok_or(CommandFrameProcessError::Internal)?;
-        self.structural_generation
-            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
+        let lease = self.acquire_token_lease()?;
         Ok(PreparedCommandFrame::ObservationRead(
             PreparedObservationRead {
-                owner: Arc::clone(&self.structural_generation),
-                generation,
+                lease,
                 request_id: header.request_id,
                 request_len: input.len(),
                 request_digest: request_digest(input),
                 replay_plan,
-                armed: true,
             },
         ))
     }
@@ -2742,28 +2708,24 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// bytes (#1594 D9).
     fn complete_session_encoded(
         &mut self,
-        mut prepared: PreparedSessionCommand,
+        prepared: PreparedSessionCommand,
         output: &mut [u8],
         encode: impl FnOnce(&Self, &mut [u8]) -> Result<usize, EncodeError>,
     ) -> Result<usize, CommandFrameProcessError> {
-        let request = core::mem::take(&mut prepared.request);
-        let written = self.complete_planned(
-            &prepared.owner,
-            prepared.generation,
-            prepared.replay_plan,
-            &request,
-            output,
-            encode,
-        )?;
-        prepared.armed = false;
-        Ok(written)
+        let PreparedSessionCommand {
+            lease,
+            replay_plan,
+            request,
+            ..
+        } = prepared;
+        self.complete_planned(lease, replay_plan, &request, output, encode)
     }
 
     /// [`Self::complete_session_encoded`] for an `OBSERVATION_READ` (#1586 D6), whose request bytes
     /// the session passes again.
     fn complete_observation_read_encoded(
         &mut self,
-        mut prepared: PreparedObservationRead,
+        prepared: PreparedObservationRead,
         request: &[u8],
         output: &mut [u8],
         encode: impl FnOnce(&Self, &mut [u8]) -> Result<usize, EncodeError>,
@@ -2781,40 +2743,34 @@ impl<P: ControlProvider> ProtocolController<P> {
         {
             return Err(CommandFrameProcessError::Internal);
         }
-        let written = self.complete_planned(
-            &prepared.owner,
-            prepared.generation,
+        self.complete_planned(
+            prepared.lease,
             prepared.replay_plan,
             request,
             output,
             encode,
-        )?;
-        prepared.armed = false;
-        Ok(written)
+        )
     }
 
     /// Encode a session-executed command's reply with `encode`, then record its replay entry with
-    /// `request`'s bytes (#1594 D9); the token's generation ends here.
+    /// `request`'s bytes (#1594 D9); the token's lease is released here, after the last write,
+    /// or on any error.
     fn complete_planned(
         &mut self,
-        owner: &Arc<AtomicU64>,
-        generation: u64,
+        lease: TokenLease,
         replay_plan: ReplayAdmission,
         request: &[u8],
         output: &mut [u8],
         encode: impl FnOnce(&Self, &mut [u8]) -> Result<usize, EncodeError>,
     ) -> Result<usize, CommandFrameProcessError> {
-        if !Arc::ptr_eq(&self.structural_generation, owner)
-            || self.structural_generation.load(Ordering::Acquire) != generation
-        {
+        if !self.token_lock.is_current(&lease) {
             return Err(CommandFrameProcessError::Internal);
         }
         let written = encode(self, output).map_err(CommandFrameProcessError::Encode)?;
         self.replay
             .complete(replay_plan, request, &output[..written])
             .expect("the plan reserved room for a reply of the endpoint's response bound");
-        self.structural_generation
-            .store(generation.saturating_add(1), Ordering::Release);
+        drop(lease);
         Ok(written)
     }
 
@@ -2872,7 +2828,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         // What the commit will write into the committed cache: the request bytes, kept off the
         // cache until then. The plan came from the committed cache in `plan_structural_command`,
         // and nothing writes the cache while this token is outstanding (every entry point refuses
-        // on the odd generation set below), so the commit's eviction and completion cannot fail.
+        // while the lease taken below is held), so the commit's eviction and completion cannot
+        // fail.
         let mut request = Vec::new();
         request
             .try_reserve_exact(input.len())
@@ -2885,30 +2842,21 @@ impl<P: ControlProvider> ProtocolController<P> {
             .reserve_session_committed(&plan.prospective_session)
             .map_err(|_| CommandFrameProcessError::Internal)?;
 
-        let current = self.structural_generation.load(Ordering::Acquire);
-        let generation = current
-            .checked_add(1)
-            .filter(|generation| generation & 1 == 1)
-            .ok_or(CommandFrameProcessError::Internal)?;
-        self.structural_generation
-            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
+        let lease = self.acquire_token_lease()?;
         Ok(PreparedStructuralCommand {
-            owner: Arc::clone(&self.structural_generation),
-            generation,
+            lease,
             message_id: plan.message_id,
             request_id: plan.request_id,
             previous_revision: plan.previous_revision,
             prospective_session: Some(plan.prospective_session),
             replay_plan: plan.replay_plan,
             request: request.into_boxed_slice(),
-            response: Some(response),
+            response,
             session_committed,
             event_sequence: plan.event_sequence,
             applied_operations: plan.applied_operations,
             applied,
             observation_ended: None,
-            armed: true,
         })
     }
 
@@ -3273,10 +3221,10 @@ impl<P: ControlProvider> ProtocolController<P> {
         &self,
         prepared: &PreparedStructuralCommand,
     ) -> Result<(), PreparedCommandCommitError> {
-        if !Arc::ptr_eq(&self.structural_generation, &prepared.owner) {
+        if !self.token_lock.issued(&prepared.lease) {
             return Err(PreparedCommandCommitError::WrongController);
         }
-        if self.structural_generation.load(Ordering::Acquire) != prepared.generation
+        if !self.token_lock.is_current(&prepared.lease)
             || self.session.revision() != prepared.previous_revision
         {
             return Err(PreparedCommandCommitError::StaleGeneration);
@@ -3417,11 +3365,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 "the cell attached to the token is free: only a commit fills one"
             );
         }
-        let response = prepared
-            .response
-            .take()
-            .expect("affine token owns committed response");
-        let mut bytes = response.frame;
+        let mut bytes = prepared.response.frame;
         let final_frame = TypedSuccessResponseFrame {
             request_id: prepared.request_id,
             revision: response_revision,
@@ -3484,9 +3428,8 @@ impl<P: ControlProvider> ProtocolController<P> {
                 );
             }
         }
-        self.structural_generation
-            .store(prepared.generation.saturating_add(1), Ordering::Release);
-        prepared.armed = false;
+        // The last write is done: the lock is released here, as a dropped token releases it.
+        drop(prepared.lease);
         Ok(CommittedCommandFrame { bytes, displaced })
     }
 
@@ -3911,13 +3854,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         &self.queues
     }
 
-    /// Mutably borrow preallocated protocol queues for fixed render-side consumption fixtures.
-    pub fn queues_mut(&mut self) -> &mut ProtocolQueues {
-        assert!(
-            !self.structural_outstanding(),
-            "prepared structural command owns exact queue reservations"
-        );
-        &mut self.queues
+    /// The controller with no prepared token outstanding (#2359), or `None` while one is: the
+    /// only way to borrow its queues mutably or change its provider features, which an
+    /// outstanding token's plan was made against.
+    pub fn idle(&mut self) -> Option<IdleController<'_, P>> {
+        self.token_lock
+            .is_idle()
+            .then_some(IdleController { controller: self })
     }
 
     /// Borrow the provider for conformance/mock inspection.
@@ -3943,15 +3886,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         &self.replay
     }
 
-    /// Replace only typed provider/event enablement for endpoint configuration tests/hosts.
-    pub fn set_provider_features(&mut self, features: ProviderFeatures) {
-        assert!(
-            !self.structural_outstanding(),
-            "prepared structural command freezes provider features"
-        );
-        self.config.provider_features = features;
-    }
-
     /// Borrow the accepted endpoint telemetry configuration without permitting mutation.
     #[must_use]
     pub const fn telemetry_configuration(&self) -> &TelemetryConfiguration {
@@ -3974,9 +3908,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         records: &[MeterRecord],
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
-            return Err(EventEgressError::ReliableQueueFull(
-                self.queues.reliable_event_admission_report(),
-            ));
+            return Err(EventEgressError::PreparedCommandOutstanding);
         }
         if !self.config.provider_features.meters
             || self.telemetry_configuration.meters.is_empty()
@@ -4024,9 +3956,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         snapshot: &CounterSnapshot,
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
-            return Err(EventEgressError::ReliableQueueFull(
-                self.queues.reliable_event_admission_report(),
-            ));
+            return Err(EventEgressError::PreparedCommandOutstanding);
         }
         if !self.config.provider_features.counters
             || self.telemetry_configuration.counter_ids.is_empty()
@@ -4068,9 +3998,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         event: DiagnosticEvent,
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
-            return Err(EventEgressError::ReliableQueueFull(
-                self.queues.reliable_event_admission_report(),
-            ));
+            return Err(EventEgressError::PreparedCommandOutstanding);
         }
         if !self.config.provider_features.diagnostics
             || !self.telemetry_configuration.diagnostics_enabled
@@ -4114,9 +4042,9 @@ impl<P: ControlProvider> ProtocolController<P> {
     ///
     /// # Errors
     ///
-    /// [`ResponseReadyEnqueueError`], which returns the event unchanged, when a structural
-    /// transaction is outstanding or the reliable event queue is full
-    /// ([`EventEgressError::ReliableQueueFull`]), the cell is occupied
+    /// [`ResponseReadyEnqueueError`], which returns the event unchanged, when a prepared token is
+    /// outstanding ([`EventEgressError::PreparedCommandOutstanding`]), the reliable event queue is
+    /// full ([`EventEgressError::ReliableQueueFull`]), the cell is occupied
     /// ([`EventEgressError::ResponseReadyOccupied`]), the endpoint does not serve `RESPONSE_GET`
     /// ([`EventEgressError::Disabled`]), or the event's frame cannot be encoded or the sequence is
     /// exhausted ([`EventEgressError::Encode`]). Nothing changes on an error.
@@ -4130,8 +4058,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<(), ResponseReadyEnqueueError> {
         let refuse = |reason, event| Err(ResponseReadyEnqueueError { reason, event });
         if self.structural_outstanding() {
-            let report = self.queues.reliable_event_admission_report();
-            return refuse(EventEgressError::ReliableQueueFull(report), event);
+            return refuse(EventEgressError::PreparedCommandOutstanding, event);
         }
         if !self.config.provider_features.response {
             return refuse(EventEgressError::Disabled, event);
@@ -5292,7 +5219,16 @@ impl<P: ControlProvider> ProtocolController<P> {
     }
 
     fn structural_outstanding(&self) -> bool {
-        self.structural_generation.load(Ordering::Acquire) & 1 != 0
+        !self.token_lock.is_idle()
+    }
+
+    /// Take the token lock for a token about to be returned (#2359). Every entry point refused an
+    /// outstanding token first, so a refusal here is reported as it would have been.
+    fn acquire_token_lease(&self) -> Result<TokenLease, CommandFrameProcessError> {
+        self.token_lock.acquire().map_err(|refusal| match refusal {
+            LeaseRefusal::Outstanding => CommandFrameProcessError::PreparedCommandOutstanding,
+            LeaseRefusal::Exhausted => CommandFrameProcessError::Internal,
+        })
     }
 }
 
