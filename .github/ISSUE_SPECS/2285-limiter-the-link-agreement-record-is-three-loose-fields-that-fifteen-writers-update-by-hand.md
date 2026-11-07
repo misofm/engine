@@ -91,11 +91,17 @@ model keeps it as `LinkRecord::unlink`.
 The other combinations of the three fields:
 - `relink_watch && relink_frames > 0`: unreachable. `arm_relink` ends the watch, and the watch
   starts only when the countdown reaches zero.
-- `relink_watch && gain_linked`: unreachable through the effect contract. It needs a
-  `desymmetrize` with no collapsed block since the watch began (a collapsed block ends the watch).
-  It is also meaningless: the next dual block ends such a watch, and no read depends on it. It is
-  the one combination the new model cannot represent. The no-bit-moved harness counted it and
-  never reached it (0 steps).
+- `relink_watch && gain_linked`: unreachable through a chain. It needs a `desymmetrize` while
+  the watch stands, so a collapse episode must begin during the watch. (The episode need not run
+  a collapsed block: `rack`'s `skip_block`, ~4458, can take every block of it.) But `Watching`
+  means the two channels' reduction words differ, so the chain's `collapse_channels_agree`
+  premise does not hold and the chain cannot collapse.
+  - Were it reached, base and head would differ in timing only. Base keeps the stale watch beside
+    a linked record. A skipped block whose `decide` then narrows the record leaves base still
+    watching, so base can re-link at a later dual block, while head stays `Apart { countdown: 0 }`.
+    Every re-link is a full `gain_state_agrees`, so no bit moves either way.
+  - It is the one combination the new model cannot represent. The no-bit-moved harness counted
+    it and never reached it (0 steps).
 
 **What a wrong `true` would do.** On base, a scratch test let a fixture-shaped bank at `Maximum`
 link on hot material. It then moved one word of lane 0's right box ring without restating the
@@ -214,14 +220,25 @@ with the reference kernel, which never links, and the two arms' digests had to b
     most a `u32` payload, and its methods are bounded by the lane and ring counts, as the code
     they replace was. The new assertion is debug-only.
 
+**Verdict (attempt 1): PASS, with two minors folded.**
+- The adversarial review found that every transition maps exactly onto base's three fields.
+- It agreed that `Linked { countdown > 0 }` is required.
+- It agreed that the four mutations that turn nothing red are bit-neutral.
+- It reproduced the no-bit-moved harness exactly (108 of 108 lines).
+- The two minors, folded:
+  - the `relink_watch && gain_linked` bullet above now gives the right exclusion
+    (`collapse_channels_agree`, not "no collapsed block") and the right consequence (a timing
+    difference after a narrowing skipped block, not "the next dual block ends it");
+  - `tests/MUTATIONS.md` row 2285-7 now says the lane reset's narrowing can fire. A restore
+    compares the gain words, not the `LaneShape`s, so a linked record can stand with lane shapes
+    apart. The next decision catches that case too.
+
 **Follow-ups (not in this issue).**
-- `effect_contract::swap_bank_lanes` (`crates/effect-contract/src/live.rs` ~3369) debug-asserts
-  that a bank never refuses its own lane's payload. The harness tripped it only in runs with NaN
-  input blocks, and never once swaps were held off for 8 steps after a NaN. The likely cause is a
-  limiter lane whose payload carries a NaN still in flight in its delay line, which `restore`
-  refuses. In release builds step 3's failure then leaves the first lane holding the second
-  lane's state, with its own defaults back, and returns `Restore`. It needs NaN input into a
-  limiter, which every upstream effect's own §4.4 check should prevent, so it may be out of
-  contract. Not confirmed beyond that; worth a separate look.
+- `effect_contract::swap_bank_lanes` (`crates/effect-contract/src/live.rs` ~3369): a NaN left in
+  a limiter lane's history, with the block's output still finite, makes that lane's own payload
+  unrestorable. When the swap's step 3 fails, its revert of the first lane then fails too
+  (debug: `"a bank never refuses its own lane's payload"`). The swap returns `Restore` with the
+  first lane changed. The reviewer confirmed this on base. The coordinator files it as its own
+  issue; it is out of #2285's scope.
 - The compressor, de-esser, dynamic EQ and multiband effects may carry a similar record (#2258
   FX-2 named the limiter only).

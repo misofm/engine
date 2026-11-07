@@ -426,7 +426,7 @@ Each row below is the whole crate suite in the dev profile, with the tree restor
 | 2285-4 | `arm` keeps a linked record linked | none, and cannot move a bit; see below |
 | 2285-5 | a collapsed block no longer unlinks the record (990-M4 again) | M4 gate, `the_linked_body_engages_exactly_where_the_record_allows`, `randomized_scenarios_match_the_current_frame_law`, `a_failed_lane_is_recovered_and_reported_alone`, `a_padded_lane_stays_at_rest_through_the_lookahead` |
 | 2285-6 | `decide` ignores its licence (every lane `Maximum`, the designed words agreeing) | 16 tests across 4 binaries, the new assertion among them |
-| 2285-7 | a lane reset never narrows the record | none, and cannot; see below |
+| 2285-7 | a lane reset never narrows the record | none, and cannot move a bit; see below |
 | 2285-8 | the countdown re-derives on a collapsed bank too | none: equivalent under the contract; see below |
 | 2285-9 | the watch never ends on a block that breaks the rings | none, and cannot move a bit; see below |
 | 2285-10 | a restore restates the record linked whatever the words | `the_linked_body_engages_exactly_where_the_record_allows`, `randomized_scenarios_match_the_current_frame_law`, `the_stationary_walk_matches_the_current_frame_law` |
@@ -443,10 +443,15 @@ Rows 4, 7, 8 and 9 turn nothing red, and none of them can move a bit:
   the countdown ends. A gliding switch is still held apart, because the glide's block unlinks the
   record. Only a snapped switch can link early, and only one that puts every lane back at
   `Maximum` before any block renders under the other mode. The words then still agree.
-- **Row 7.** While the record is linked, both channels share window shapes and survivor phases,
-  so the reset lane's words come out equal on both channels and the narrowing never fires. A
-  window shape that differs is a designed word apart, and the next block's decision narrows the
-  record.
+- **Row 7.** The narrowing fires only with lane shapes apart, which the next decision also
+  catches. A restore restates the record from `gain_state_agrees`, which does not compare
+  `LaneShape`, so a linked record can stand over a lane whose window shapes differ. Resetting
+  that lane leaves its box sums apart, and the narrowing keeps the record true until the next
+  `decide`. Without the narrowing the record is stale until then. Nothing reads it before then:
+  the reset withdraws the silent claim, so the next block or skip decides. Lane shapes apart are a
+  designed word apart, so that decision narrows the record before anything renders linked. With
+  lane shapes agreeing, both channels share survivor phases, the reset lane's words come out
+  equal, and the narrowing never fires.
 - **Row 8.** A collapsed block unlinks the record at its start (row 5). `desymmetrize` restates
   the record before any dual block reads it, so a re-derivation from the frozen right channel is
   overwritten unread. This is equivalent under the contract, as 990-M4 is.
