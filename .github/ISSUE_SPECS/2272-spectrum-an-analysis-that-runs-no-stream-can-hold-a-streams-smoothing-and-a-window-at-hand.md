@@ -133,7 +133,13 @@ changed.
   `spectrum_monitor`'s `alternating_configures_against_a_rendering_thread_allocate_nothing_on_render`
   for 48 minutes and was killed. Two later runs of that binary passed it in seconds, 2.38 s for
   the whole binary. That test drives one-shot captures against a render thread and never takes the
-  stream path this change edits. It was not rerun on the base.
+  stream path this change edits. The reviewer found that it hangs under CPU load on the base as
+  well as on the head. Under load no one-shot read comes back `Ready`, so
+  `assert!(ready > 0)` (`crates/control-plane/tests/spectrum_monitor.rs:1767`) panics. The render
+  thread's `while !done` loop is released only by `done.store(true)` at `:1768`, which runs after
+  that assert, so `thread::scope` waits forever to join it. This is the #1251 hang-on-panic shape.
+  It is unrelated to this change (the test never starts a stream), and the coordinator is filing it
+  separately.
 - `cargo clippy --locked -p host-core --all-targets -- -D warnings`: clean.
 - `cargo fmt --check`: clean.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
@@ -143,3 +149,9 @@ changed.
 `latched`/`filled` fields (`crates/host-core/src/spectrum.rs` ~1732-1748), is a different struct
 on the render path with a different outcome. It needs its own issue and a no-bit-moved
 comparison.
+
+**Verdict (Sol, adversarial review of attempt 1): PASS.**
+- The no-op on a `Stopped` analysis is correct: `Stopped` is the documented adoption state.
+- The public API is unchanged; `end_stream` only became `const`.
+- The existing suite pins the behaviour the refactor kept.
+- The new test's adoption-after-select tail stays.
