@@ -450,16 +450,16 @@ impl<L: Lane> Probe for FaderProbe<L> {
     fn lanes_at_rest(&self) -> u32 {
         let mask = self.stage.lanes_at_rest();
         let unmuted = (0..L::WIDTH).filter(|&lane| {
-            mask & (1 << lane) != 0 && (0..2).any(|channel| !self.stage.muted[channel][lane])
+            mask & (1 << lane) != 0 && (0..2).any(|channel| !self.stage.is_muted(lane, channel))
         });
         self.unmuted_claims
             .set(self.unmuted_claims.get() + unmuted.count());
         mask
     }
 
-    /// Both channels' ramp words, countdown, remembered gain, mute flag, mute ramp flag and mute
-    /// mask bit. The kernel's `f32` countdown word is residue, recomputed from the `u32` before
-    /// every read and absent from the lane export, so it is left out.
+    /// Both channels' ramp words, countdown, remembered gain, phase and mute mask bit. The
+    /// kernel's `f32` countdown word is residue, recomputed from the `u32` before every read and
+    /// absent from the lane export, so it is left out.
     fn lane_state(&self, lane: usize, out: &mut Vec<u32>) {
         for channel in 0..2 {
             let ramp = &self.stage.ramp[channel];
@@ -469,8 +469,12 @@ impl<L: Lane> Probe for FaderProbe<L> {
             out.push(mask_bit::<L>(ramp.mute, lane));
             out.push(self.stage.remaining[channel][lane]);
             out.push(self.stage.fader_gain[channel][lane].to_bits());
-            out.push(u32::from(self.stage.muted[channel][lane]));
-            out.push(u32::from(self.stage.mute_ramp[channel][lane]));
+            out.push(match self.stage.phase[channel][lane] {
+                FaderPhase::Open => 0,
+                FaderPhase::Unmuting => 1,
+                FaderPhase::Muted => 2,
+                FaderPhase::Armed { opens } => 3 + u32::from(opens),
+            });
         }
     }
 
