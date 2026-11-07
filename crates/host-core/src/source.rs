@@ -166,7 +166,8 @@ fn check_session_producers(
 /// Its push, [`Self::push_and_publish`], cannot be refused. For each producer, what the check read
 /// and the push reads again is unchanged in between:
 /// - the entry is still owned, and its producer still publishes to this session's word: the
-///   borrow keeps every producer move ([`SourceControlSet::adopt_persisting`], a donation) out;
+///   borrow keeps every producer move ([`SourceControlSet::adopt_persisting`],
+///   [`SourceControlSet::reclaim_from_withdrawn`], a donation) out;
 /// - every rule but the slot (a nonzero generation above the producer's, the anchor, the frame
 ///   limit) reads the command, which is the same, and the producer's own state, which only its
 ///   own push changes; no push changes another producer, and none publishes;
@@ -202,8 +203,9 @@ impl<'s> CheckedSessionSeek<'s> {
     /// Step 3: push every command, the timeline first, then the sources in ID order, none of them
     /// published; then publish the generation once, so render observes all of them at one block
     /// entry. Each push is one its check accepted (see the type), so none is refused. One refused
-    /// anyway would mean a ring whose slot render filled: the engine stops there (a panic is an
-    /// engine defect, and a release build aborts) rather than seek some producers and not others.
+    /// anyway would mean a broken SPSC ring (render only empties the slot): the engine stops there
+    /// (a panic is an engine defect, and a release build aborts) rather than seek some producers
+    /// and not others.
     fn push_and_publish(self) {
         let Self {
             mut seek,

@@ -199,3 +199,16 @@ Three threads differ, and none is deterministic:
 checks and pushes producers interleaved, or that changes a producer between its check and its
 push. Host-core is its only caller outside the source crate's tests. A future caller should use a
 set-level owner like `CheckedSessionSeek`.
+
+## Verdict (attempt 1): PASS
+The adversarial review confirmed that:
+- the unreachability proof holds, including the SPSC cursor argument;
+- abort in release is the right choice, because no typed error can undo a push that has landed;
+- no new test is needed: no input reaches the removed branch, and the existing refusal gates go
+  red under every mutation of the check;
+- the branch merges cleanly with `main`.
+
+Folded after the review: the `CheckedSessionSeek` doc also names
+`SourceControlSet::reclaim_from_withdrawn` among the producer moves the borrow keeps out, and the
+`push_and_publish` doc names the residual case a broken SPSC ring. The coordinator tracks
+control-plane's `session_seek_landing` cross-call invariant in #2258, outside this issue.
