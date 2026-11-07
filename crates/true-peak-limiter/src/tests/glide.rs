@@ -789,7 +789,7 @@ fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
         let (mut fast, mut slow) = (core(), core());
         let render = |core: &mut LimiterCore<L>, withdraw: bool| {
             if withdraw {
-                core.silent_fixed_point = false;
+                core.silent.withdraw();
             }
             let mut left = vec![0.0_f32; BLOCK * L::WIDTH];
             if mono {

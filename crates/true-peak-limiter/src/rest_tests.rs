@@ -280,7 +280,7 @@ impl<L: Lane> Probe for LimiterProbe<L> {
                     &mut self.bank.core.right
                 };
                 plant(channel, lane, &shape, planting);
-                self.bank.core.silent_fixed_point = false;
+                self.bank.core.silent.withdraw();
             }
         }
     }
@@ -356,8 +356,8 @@ impl<L: Lane> Probe for LimiterProbe<L> {
         copy.right.copy_state_from(&core.right);
         copy.cursors = core.cursors;
         copy.gain_linked = core.gain_linked;
-        copy.silent_bypass = core.silent_bypass;
-        copy.silent_fixed_point = false;
+        copy.silent = core.silent;
+        copy.silent.withdraw();
         Self {
             bank: PreparedTruePeakLimiterBank {
                 width: self.bank.width,
@@ -507,7 +507,7 @@ fn a_restore_off_rest_withdraws_the_standing_claim() {
 
 /// Every state word of a bank, both channels and every lane, padded lanes included: the arena,
 /// the planar words with each lane's van Herk `phase`, the ramps, the shared [`Cursors`] and the
-/// three bank flags (`gain_linked`, `silent_fixed_point`, `silent_bypass`).
+/// three bank flags (`gain_linked` and the two words of `silent`).
 pub(super) fn bank_state_words<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
     let mut out = Vec::new();
     for channel in [&core.left, &core.right] {
@@ -540,8 +540,8 @@ pub(super) fn bank_state_words<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
         core.cursors.main,
         core.cursors.ring,
         u32::from(core.gain_linked),
-        u32::from(core.silent_fixed_point),
-        u32::from(core.silent_bypass),
+        u32::from(core.silent.proved()),
+        u32::from(core.silent.bypass()),
     ]);
     out
 }
@@ -654,7 +654,7 @@ fn advance_clocks_is_a_skipped_zero_block() {
                         StatePayloadInput::new(common, l, r, sizes).expect("input"),
                     )
                     .expect("restore");
-                    assert!(!bank.core.silent_fixed_point);
+                    assert!(!bank.core.silent.proved());
                 }
             }
             assert_eq!(
@@ -687,5 +687,112 @@ fn advance_clocks_is_a_skipped_zero_block() {
                 );
             }
         }
+    });
+}
+
+/// A bank of `L` brought to rest by four loud blocks and then `+0.0`, with its #182 S2 claim
+/// standing.
+#[cfg(debug_assertions)]
+fn resting_bank<L: Lane>() -> PreparedTruePeakLimiterBank<L> {
+    let params = vec![[-6.0_f32, 10.0, 5.0]; L::WIDTH];
+    let mut bank = limiter_bank::<L>(params.clone(), params, false, LinkMode::Maximum).0;
+    let quantum = QUANTUM as usize;
+    let words = quantum * L::WIDTH;
+    let mut signal = Draw(0x2264_0001 ^ L::WIDTH as u64);
+    let mut first_sample = 0_u64;
+    for block in 0..400 {
+        if block >= 4 && bank.core.silent_claim_stands() {
+            break;
+        }
+        let (mut left, mut right) = (vec![0.0_f32; words], vec![0.0_f32; words]);
+        if block < 4 {
+            for word in left.iter_mut().chain(right.iter_mut()) {
+                *word = signal.within(-2.0, 2.0);
+            }
+        }
+        render_plain(&mut bank, &mut left, &mut right, quantum, first_sample);
+        first_sample += quantum as u64;
+    }
+    assert!(
+        bank.core.silent_claim_stands(),
+        "W{}: the claim stands",
+        L::WIDTH
+    );
+    bank
+}
+
+/// Runs `trust` on `bank` and requires it to panic with the claim-implies-scan assertion.
+#[cfg(debug_assertions)]
+fn refuses_stale_claim<L: Lane>(
+    arm: &str,
+    mut bank: PreparedTruePeakLimiterBank<L>,
+    trust: impl FnOnce(&mut PreparedTruePeakLimiterBank<L>),
+) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let outcome = catch_unwind(AssertUnwindSafe(|| trust(&mut bank)));
+    let Err(payload) = outcome else {
+        panic!("W{} {arm}: a stale claim was believed", L::WIDTH);
+    };
+    let message = payload
+        .downcast::<String>()
+        .map(|message| *message)
+        .unwrap_or_default();
+    assert!(
+        message.contains("a standing silent claim the rest scan refutes"),
+        "W{} {arm}: {message}",
+        L::WIDTH
+    );
+}
+
+/// **A claim the rest scan refutes is caught where it is trusted** (issue #2264).
+///
+/// Each arm brings a bank to rest with its #182 S2 claim standing, then moves one word of lane 0
+/// off rest *without* withdrawing the claim, as a future between-block writer that forgot to
+/// withdraw it would, and asks one trust point to believe the claim: `lanes_at_rest` and the dual
+/// fast path (the word planted on the right channel), and the collapsed fast path (on the left).
+/// In debug builds each must refuse with its claim-implies-scan assertion.
+///
+/// Test value: deleting or weakening the assertion at any of the three points (for instance
+/// scanning only the left channel on the dual body) turns this red; every other test that plants
+/// an off-rest word withdraws the claim by hand, so none exercises a stale claim.
+#[cfg(debug_assertions)]
+#[test]
+fn a_stale_silent_claim_is_refused_where_it_is_trusted() {
+    lane::each_vector_lane!(|L| {
+        let quantum = QUANTUM as usize;
+        let words = quantum * L::WIDTH;
+
+        let mut bank = resting_bank::<L>();
+        bank.core.right.box_ring[0] = 0.5;
+        refuses_stale_claim("lanes_at_rest", bank, |bank| {
+            PreparedNativeEffectBank::lanes_at_rest(bank);
+        });
+
+        let mut bank = resting_bank::<L>();
+        bank.core.right.box_ring[0] = 0.5;
+        refuses_stale_claim("dual fast path", bank, |bank| {
+            let (mut left, mut right) = (vec![0.0_f32; words], vec![0.0_f32; words]);
+            render_plain(bank, &mut left, &mut right, quantum, 0);
+        });
+
+        let mut bank = resting_bank::<L>();
+        bank.core.left.box_ring[0] = 0.5;
+        refuses_stale_claim("collapsed fast path", bank, |bank| {
+            let (mut left, mut right) = (vec![0.0_f32; words], vec![0.0_f32; words]);
+            let offsets = vec![0_u32; L::WIDTH + 1];
+            let block = EffectBankProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                QUANTUM,
+                bank.width,
+                0,
+                &[],
+                &offsets,
+                QUANTUM,
+            )
+            .expect("bank block");
+            bank.process_bank_mono(block);
+        });
     });
 }
