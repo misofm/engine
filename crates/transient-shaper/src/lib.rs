@@ -1476,12 +1476,14 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         Ok(())
     }
 
-    fn restore(
-        &mut self,
-        lane: usize,
+    /// Both channel sections of a payload, read and validated, writing nothing: the whole verdict
+    /// of [`restore`](Self::restore), which reads only the payload and the prepared sizes (issue
+    /// #2324).
+    fn parse(
+        &self,
         state_layout_version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
+        input: &StatePayloadInput<'_>,
+    ) -> Result<[LaneWords; 2], StatePayloadError> {
         if state_layout_version != TRANSIENT_SHAPER_DESCRIPTOR.state_layout_version {
             return Err(state_error("effect.state.version"));
         }
@@ -1496,6 +1498,16 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         if left.mode != right.mode {
             return Err(state_error("effect.state.link"));
         }
+        Ok([left, right])
+    }
+
+    fn restore(
+        &mut self,
+        lane: usize,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let [left, right] = self.parse(state_layout_version, &input)?;
         self.left_env.fast = replace_lane(self.left_env.fast, lane, left.fast);
         self.left_env.slow = replace_lane(self.left_env.slow, lane, left.slow);
         self.right_env.fast = replace_lane(self.right_env.fast, lane, right.fast);
@@ -2080,6 +2092,17 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, W)?;
         self.shaper.restore(track, state_layout_version, input)
+    }
+
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        checked_track(track_index, W)?;
+        self.shaper.parse(state_layout_version, input)?;
+        Ok(())
     }
     // REALTIME_POLICY_END
 

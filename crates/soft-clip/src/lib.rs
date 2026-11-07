@@ -1150,6 +1150,18 @@ fn restore_sections<L: Lane>(
     state_layout_version: u32,
     input: StatePayloadInput<'_>,
 ) -> Result<(), StatePayloadError> {
+    let [left_restore, right_restore] = decode_sections(state_layout_version, &input)?;
+    apply_lane_words(left, lane, &left_restore);
+    apply_lane_words(right, lane, &right_restore);
+    Ok(())
+}
+
+/// Both channel sections of a payload, decoded and validated, writing nothing: the whole verdict
+/// of [`restore_sections`], which reads only the payload (issue #2324).
+fn decode_sections(
+    state_layout_version: u32,
+    input: &StatePayloadInput<'_>,
+) -> Result<[LaneRestore; 2], StatePayloadError> {
     if state_layout_version != STATE_LAYOUT.version {
         return Err(StatePayloadError {
             code: payload::STATE_VERSION_CODE,
@@ -1171,11 +1183,10 @@ fn restore_sections<L: Lane>(
         },
     )
     .map_err(runtime_state_error)?;
-    let left_restore = decode_lane_words(&left_words)?;
-    let right_restore = decode_lane_words(&right_words)?;
-    apply_lane_words(left, lane, &left_restore);
-    apply_lane_words(right, lane, &right_restore);
-    Ok(())
+    Ok([
+        decode_lane_words(&left_words)?,
+        decode_lane_words(&right_words)?,
+    ])
 }
 
 /// Maps the shared codec's error onto the contract's.
@@ -1879,6 +1890,17 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
             state_layout_version,
             input,
         )
+    }
+
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        bank_track_index::<L>(track_index)?;
+        decode_sections(state_layout_version, input)?;
+        Ok(())
     }
     // REALTIME_POLICY_END
 

@@ -3247,9 +3247,14 @@ pub enum LaneSwapRefusal {
     Defaults,
     /// A bank refused to snapshot its lane (an unsupported effect, or a lane out of range).
     Snapshot,
+    /// A lane's own payload does not restore into it
+    /// ([`PreparedNativeEffectBank::validate_track_state_payload`]), found before any write
+    /// (issue #2324). A defect of that bank, which must restore every payload its own lane
+    /// writes (#1279 D6), or a bank that has not stated its restore's verdict.
+    Payload,
     /// A bank refused a restore after the checks passed: a defect, since both payloads are the
-    /// banks' own, of one layout, under the lanes' own defaults. Nothing was left half-swapped:
-    /// the swap was undone (see [`swap_bank_lanes`]).
+    /// banks' own, of one layout, under the lanes' own defaults, and both validated. Nothing was
+    /// left half-swapped: the swap was undone (see [`swap_bank_lanes`]).
     Restore,
 }
 
@@ -3334,8 +3339,10 @@ fn rotate_lane_defaults<'one, 'two>(
 /// # All or nothing
 ///
 /// Every refusal is decided before the first write to either lane: the scratch size, the lane
-/// indices, the declared defaults sizes ([`LaneSwapRefusal::Defaults`]) and both snapshots, which
-/// write only `scratch`. Then:
+/// indices, the declared defaults sizes ([`LaneSwapRefusal::Defaults`]), both snapshots, which
+/// write only `scratch`, and both lanes' own payloads, each validated against its own lane
+/// ([`PreparedNativeEffectBank::validate_track_state_payload`], [`LaneSwapRefusal::Payload`];
+/// issue #2324), which writes nothing. Then:
 ///
 /// 1. The defaults rotate. Precondition: both lanes exist (their snapshots took) and `spare` is
 ///    exactly the declared length (checked), the only two reasons an exchange refuses.
@@ -3346,17 +3353,21 @@ fn rotate_lane_defaults<'one, 'two>(
 /// Steps 2 and 3 restore a bank's own payload of one layout under the defaults it was written
 /// with, which a bank never refuses (the carry's own-payload rule, #1279 D6), so a refusal there
 /// is a defect, and it is still undone: a refused step 3 restores the first lane from its own
-/// payload (step 2's precondition again, after the rotation is undone), and the rotation undoes
-/// itself (step 1's precondition is unchanged). Both lanes are then as they were, and the call
-/// returns [`LaneSwapRefusal::Restore`]. Both banks must run one layout (`state_layout_version`
-/// and `sizes`), and a caller swaps only populated lanes: a padded lane never swaps.
+/// payload, under its own defaults once the rotation has undone itself (step 1's precondition
+/// is unchanged). That undo is the one write whose success the swap needs, and it is not
+/// assumed: it is the validation that passed before the first write, of the same payload into
+/// the same lane under the same defaults, and the verdict reads no running state. Both lanes are
+/// then as they were, and the call returns [`LaneSwapRefusal::Restore`]. Both banks must run one
+/// layout (`state_layout_version` and `sizes`), and a caller swaps only populated lanes: a
+/// padded lane never swaps.
 ///
 /// A collapsed bank holds a stale right channel; the caller disengages its chain first, as the
 /// plan-swap carry does.
 ///
 /// # Cost
 ///
-/// Two snapshots and two restores: each lane's state is read twice and written twice, plus two
+/// Two snapshots, two validations and two restores: each lane's state is read twice and written
+/// twice and each payload is validated twice (once alone, once inside its restore), plus two
 /// payloads of `scratch`, plus three passes over one lane's defaults. Allocation-free, lock-free
 /// and bounded by the prepared state size.
 ///
@@ -3431,6 +3442,23 @@ pub fn swap_bank_lanes(
     ) else {
         return Err(LaneSwapRefusal::Scratch);
     };
+    // Issue #2324: each lane's own payload restores into it, so the undo after a refused step 3
+    // is known to take. Writes nothing.
+    let second_own = match second.as_deref() {
+        Some(bank) => {
+            bank.validate_track_state_payload(second_track, state_layout_version, &from_second)
+        }
+        None => {
+            first.validate_track_state_payload(second_track, state_layout_version, &from_second)
+        }
+    };
+    if first
+        .validate_track_state_payload(first_track, state_layout_version, &from_first)
+        .is_err()
+        || second_own.is_err()
+    {
+        return Err(LaneSwapRefusal::Payload);
+    }
     // Step 1. Precondition: both lanes snapshotted, so both exist; `spare` has the declared length.
     let rotated =
         rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare);
@@ -3455,14 +3483,15 @@ pub fn swap_bank_lanes(
     if restored.is_err() {
         let undone = rotate_lane_defaults(first, first_lane, second, second_lane, spare);
         debug_assert!(undone, "a checked lane's defaults exchange");
-        // Precondition: the first lane's own payload, under its own defaults again.
+        // Precondition: the first lane's own payload, under its own defaults again, which
+        // validated before the first write.
         let own = swap_payload_input(first_payload, sizes);
         let reverted = own.is_ok_and(|own| {
             first
                 .restore_track_state_payload(first_track, state_layout_version, own)
                 .is_ok()
         });
-        debug_assert!(reverted, "a bank never refuses its own lane's payload");
+        debug_assert!(reverted, "a restore its own validation passed");
         return Err(LaneSwapRefusal::Restore);
     }
     Ok(())
@@ -3606,13 +3635,18 @@ mod lane_swap_tests {
 
     /// Four lanes of three words (common, left, right), and per lane `defaults` prepared default
     /// bytes, distinct per lane and per seed (`None`: undeclared). `refuse_restore_call` names
-    /// the restore call (counted from 1) that refuses; every other restore commits.
+    /// the restore call (counted from 1) that refuses; every other restore commits, unless its
+    /// payload holds [`POISON`].
     struct Words {
         lanes: [[u32; 3]; 4],
         defaults: Option<[Vec<u8>; 4]>,
         restores: u32,
         refuse_restore_call: Option<u32>,
     }
+
+    /// A common word no restore of any bank accepts: a lane holding it has a payload its own
+    /// snapshot writes and its own restore refuses (issue #2324).
+    const POISON: u32 = 0xDEAD_BEEF;
 
     fn words(seed: u32, refuse_restore_call: Option<u32>) -> Words {
         with_defaults(seed, refuse_restore_call, Some(DEFAULTS))
@@ -3634,6 +3668,13 @@ mod lane_swap_tests {
             restores: 0,
             refuse_restore_call,
         }
+    }
+
+    /// [`words`] whose lane `lane` holds [`POISON`].
+    fn poisoned(seed: u32, lane: usize) -> Words {
+        let mut bank = words(seed, None);
+        bank.lanes[lane][0] = POISON;
+        bank
     }
 
     impl PreparedNativeEffectBank for Words {
@@ -3679,14 +3720,40 @@ mod lane_swap_tests {
                     code: "effect.state.refused",
                 });
             }
+            let word = |bytes: &[u8]| u32::from_le_bytes(bytes.try_into().expect("four bytes"));
+            if word(input.common) == POISON {
+                return Err(StatePayloadError {
+                    code: "effect.state.poison",
+                });
+            }
             let lane = self
                 .lanes
                 .get_mut(track_index as usize)
                 .ok_or(StatePayloadError {
                     code: "effect.state.lane",
                 })?;
-            let word = |bytes: &[u8]| u32::from_le_bytes(bytes.try_into().expect("four bytes"));
             *lane = [word(input.common), word(input.left), word(input.right)];
+            Ok(())
+        }
+
+        /// The restore's content verdict: the lane and [`POISON`], never the call count, which
+        /// stands for a restore that refuses after its validation passed.
+        fn validate_track_state_payload(
+            &self,
+            track_index: u32,
+            _state_layout_version: u32,
+            input: &StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            if self.lanes.get(track_index as usize).is_none() {
+                return Err(StatePayloadError {
+                    code: "effect.state.lane",
+                });
+            }
+            if u32::from_le_bytes(input.common.try_into().expect("four bytes")) == POISON {
+                return Err(StatePayloadError {
+                    code: "effect.state.poison",
+                });
+            }
             Ok(())
         }
 
@@ -3719,8 +3786,9 @@ mod lane_swap_tests {
     ///
     /// Test value: a swap that restores before it has both snapshots, accepts a bank with
     /// undeclared or mismatched defaults, sizes its scratch without the defaults, skips the
-    /// payload or rotation undo after a restore refusal, leaves the defaults behind on an
-    /// accepted swap, or names the wrong refusal.
+    /// payload or rotation undo after a restore refusal, writes a lane before it knows both
+    /// lanes' own payloads restore (issue #2324: the undo of a refused step 3 then refuses too),
+    /// leaves the defaults behind on an accepted swap, or names the wrong refusal.
     #[test]
     fn every_lane_swap_refusal_leaves_both_lanes_unchanged() {
         let scratch_bytes =
@@ -3731,7 +3799,7 @@ mod lane_swap_tests {
             None
         );
         type Case = (Words, Option<Words>, usize, usize, usize, LaneSwapRefusal);
-        let cases: [Case; 10] = [
+        let cases: [Case; 12] = [
             // The defaults are checked before the scratch, so a short scratch does not mask them.
             (
                 with_defaults(1, None, None),
@@ -3815,6 +3883,26 @@ mod lane_swap_tests {
                 2,
                 scratch_bytes,
                 LaneSwapRefusal::Restore,
+            ),
+            // Issue #2324: a lane whose own payload no restore accepts, first or second, is
+            // refused before anything is written. In the first lane it would otherwise be the
+            // undo of a refused step 3 that refuses, leaving the first lane holding the second's
+            // payload.
+            (
+                poisoned(1, 1),
+                Some(words(100, None)),
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Payload,
+            ),
+            (
+                words(1, None),
+                Some(poisoned(100, 2)),
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Payload,
             ),
         ];
         for (index, (mut first, mut second, first_lane, second_lane, scratch, refusal)) in

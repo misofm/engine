@@ -1528,12 +1528,14 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         Ok(())
     }
 
-    fn restore_lane(
-        &mut self,
-        lane: usize,
+    /// Both channel sections of a payload, parsed and validated, writing nothing: the whole
+    /// verdict of [`restore_lane`](Self::restore_lane), whose commit can refuse only a hold time
+    /// the parse has already rounded (issue #2324). Reads only the payload and the rate.
+    fn parse_payload(
+        &self,
         state_layout_version: u32,
         input: &StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
+    ) -> Result<[LaneRestore; 2], StatePayloadError> {
         if state_layout_version != STATE_LAYOUT_VERSION {
             return Err(state_error("effect.state.version"));
         }
@@ -1549,6 +1551,16 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         if left.mode != right.mode {
             return Err(state_error("effect.state.link"));
         }
+        Ok([left, right])
+    }
+
+    fn restore_lane(
+        &mut self,
+        lane: usize,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let [left, right] = self.parse_payload(state_layout_version, input)?;
         if left.mode != self.lane_link(lane) {
             self.rest_link(lane);
         }
@@ -1766,6 +1778,17 @@ macro_rules! bank_impl {
             ) -> Result<(), StatePayloadError> {
                 let track = checked_track(track_index, <$lane>::WIDTH)?;
                 self.restore_lane(track, state_layout_version, &input)
+            }
+
+            fn validate_track_state_payload(
+                &self,
+                track_index: u32,
+                state_layout_version: u32,
+                input: &StatePayloadInput<'_>,
+            ) -> Result<(), StatePayloadError> {
+                checked_track(track_index, <$lane>::WIDTH)?;
+                self.parse_payload(state_layout_version, input)?;
+                Ok(())
             }
             // REALTIME_POLICY_END
 

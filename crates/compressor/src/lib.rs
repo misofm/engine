@@ -926,13 +926,13 @@ impl<L: Lane> Instance<L> {
         Ok(())
     }
 
-    /// Restores one lane's payload, transactionally across both channels.
-    fn restore(
-        &mut self,
+    /// The whole verdict of [`restore`](Self::restore), writing nothing: the link mode both
+    /// channel sections glide to (issue #2324). Reads only the payload and the prepared sizes.
+    fn validate(
+        &self,
         state_layout_version: u32,
-        input: StatePayloadInput<'_>,
-        lane: usize,
-    ) -> Result<(), StatePayloadError> {
+        input: &StatePayloadInput<'_>,
+    ) -> Result<LinkMode, StatePayloadError> {
         if state_layout_version != COMPRESSOR_DESCRIPTOR.state_layout_version {
             return Err(StatePayloadError {
                 code: "effect.state.version",
@@ -951,6 +951,17 @@ impl<L: Lane> Instance<L> {
                 code: "effect.state.link",
             });
         }
+        Ok(link_left)
+    }
+
+    /// Restores one lane's payload, transactionally across both channels.
+    fn restore(
+        &mut self,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+        lane: usize,
+    ) -> Result<(), StatePayloadError> {
+        let link_left = self.validate(state_layout_version, &input)?;
         // Issue #1370 D6: the weights land only under the mode they glide to. A payload taken
         // under another mode (the plan-swap carry into a successor prepared with a new mode)
         // leaves the lane's own mode at rest, as before the glide existed.
@@ -1711,6 +1722,17 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, L::WIDTH, self.active)?;
         self.instance.restore(state_layout_version, input, track)
+    }
+
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        checked_track(track_index, L::WIDTH, self.active)?;
+        self.instance.validate(state_layout_version, input)?;
+        Ok(())
     }
 
     fn as_any(&self) -> Option<&dyn core::any::Any> {

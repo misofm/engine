@@ -195,6 +195,16 @@ impl PreparedNativeEffectBank for MockBank {
         Ok(())
     }
 
+    /// The restore above, which takes every payload.
+    fn validate_track_state_payload(
+        &self,
+        _track_index: u32,
+        _state_layout_version: u32,
+        _input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        Ok(())
+    }
+
     /// No prepared per-lane defaults, so a lane swap moves only the stage's per-lane parts.
     fn lane_default_bytes(&self) -> Option<usize> {
         Some(0)

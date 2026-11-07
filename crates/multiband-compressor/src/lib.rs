@@ -2336,12 +2336,14 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         Ok(())
     }
 
-    fn restore(
-        &mut self,
-        track: usize,
+    /// Both sides of a payload, staged and validated, writing nothing: the whole verdict of
+    /// [`restore`](Self::restore), which reads only the payload, the prepared sizes and the rate
+    /// (issue #2324).
+    fn stage(
+        &self,
         version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
+        input: &StatePayloadInput<'_>,
+    ) -> Result<[StagedSide; 2], StatePayloadError> {
         if version != STATE_LAYOUT_VERSION {
             return Err(state_error(STATE_VERSION_CODE));
         }
@@ -2351,6 +2353,16 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         if left.mode != right.mode {
             return Err(state_error("effect.state.link"));
         }
+        Ok([left, right])
+    }
+
+    fn restore(
+        &mut self,
+        track: usize,
+        version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let [left, right] = self.stage(version, &input)?;
         commit_side(&mut self.sides[0], &left, track);
         commit_side(&mut self.sides[1], &right, track);
         // Issue #1367 D4 (#1370 D6): the weights land only under the mode they glide to. A
@@ -2941,6 +2953,17 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         // A restore can write any state word, so the claim goes whatever the result.
         self.silent.withdraw();
         self.instance.restore(track, state_layout_version, input)
+    }
+
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        checked_track(track_index, W, self.instance.active)?;
+        self.instance.stage(state_layout_version, input)?;
+        Ok(())
     }
     // REALTIME_POLICY_END
 }
