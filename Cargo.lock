@@ -1076,6 +1076,7 @@ dependencies = [
  "effect-contract",
  "engine",
  "host-core",
+ "loom",
  "math",
  "protocol",
  "serde_json",
