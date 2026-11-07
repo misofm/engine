@@ -573,11 +573,11 @@ impl Stream {
     /// with `lead_blocks`, `Primed` with `not_before` at the render clock (the next block's
     /// start). Returns `not_before` for a primed candidate.
     ///
-    /// A primed candidate's flags are written first (#1320 D4, the order #1403 D3 states): every
-    /// ring whose producer the running set holds reads `true` exactly when the candidate carries
-    /// it (holds it vacant), and every ring the candidate created reads `false`. Only then does the
-    /// candidate's set take the carried producers, and the commit's `Release` orders the stores
-    /// before render's load of the candidate.
+    /// A primed candidate's flags are written first (#1320 D4): every ring whose producer the
+    /// running set holds reads `true` exactly when the candidate carries it
+    /// (`SourceControlSet::carries`, #2273), and every ring the candidate created reads `false`.
+    /// Then the candidate's set takes the carried producers, and the commit's `Release` orders the
+    /// stores before render's load of the candidate.
     fn publish(
         &mut self,
         host: PreparedHost,
@@ -603,7 +603,7 @@ impl Stream {
             (Some(not_before), Some(lead_blocks)) => {
                 let mut flagged = 0;
                 self.sources.set_prime_flags(|id| {
-                    let carried = sources.holds_vacant(id);
+                    let carried = sources.carries(id);
                     flagged += usize::from(carried);
                     carried
                 });
