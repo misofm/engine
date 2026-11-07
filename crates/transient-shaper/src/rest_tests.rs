@@ -57,7 +57,7 @@ fn copy_bank<L: Lane, const W: usize>(
             state_sizes: shaper.state_sizes,
             nonfinite: shaper.nonfinite,
             active: shaper.active,
-            collapsed: shaper.collapsed,
+            collapse: shaper.collapse,
         },
         width: bank.width,
         quantum: bank.quantum,

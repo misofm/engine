@@ -27,6 +27,8 @@
 //! * [`params`] — domain validation and clamping driven by a descriptor, in the D8 select form.
 //! * [`silent`] — the silent fixed-point claim a quiet block trusts to skip the kernel, checked
 //!   against the effect's rest scan in debug builds wherever it is trusted.
+//! * [`collapse`] — a bank's mono-collapse record: engaged by a one-plane body, cleared only by the
+//!   disengage copy, and taken by a dual body entered collapsed (#2352).
 //! * [`tap_crossfade`] — the queued tap crossfade of the delay and the reverb: its phases, its
 //!   transitions and the one validator a restore applies (#2309). The blend stays in each kernel.
 //!
@@ -49,6 +51,7 @@
 extern crate alloc;
 
 pub mod bank;
+pub mod collapse;
 pub mod dynamic_band;
 pub mod dynamics;
 pub mod envelope;
