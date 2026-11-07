@@ -4134,6 +4134,7 @@ mod link {
         Watching,
     }
 
+    // REALTIME_POLICY_BEGIN: #2285, the record moves at block boundaries on the render thread.
     impl LinkRecord {
         /// The record a full reset or a preparation states: linked iff `agrees`, no countdown.
         pub(super) const fn stated(agrees: bool) -> Self {
@@ -4263,6 +4264,7 @@ mod link {
             ]
         }
     }
+    // REALTIME_POLICY_END
 }
 
 use link::LinkRecord;
