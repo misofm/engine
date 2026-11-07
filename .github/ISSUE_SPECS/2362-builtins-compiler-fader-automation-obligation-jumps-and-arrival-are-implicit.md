@@ -223,6 +223,58 @@ tests, so both sides run the same tests.
   `prepare.rs:262` link failure already exists on main.
 - Workspace policy: ok. `realtime_policy`: ok.
 
+## Verdict (attempt 2)
+Sol: **FAIL** at head `585be9c5b`, on one MAJOR. The m3 contrast case was judged sound.
+- **MAJOR: f4's gap was only half closed.** The arrival test sorted the arrivals before comparing
+  them, so it checked which arrivals were present, not which lane held which. Mutant f5 reverses
+  the arrivals inside the bank, so track 0, behind the latent limiter, renders at `a(n) = 0`.
+  f5 survived host-core, builtins-compiler and graph-compiler.
+- **MINOR:** pin the contrast case absolutely as well, and record follow-ups n1, n3 and n8.
+
+## Evidence (attempt 3)
+Terra. The branch merges origin/main `4ba877b3b` at `aeefcfd89`. Tests are at `01028f714`. The
+rule is unchanged.
+
+**What changed in the tests:**
+- **Arrival test.** `each_automated_fader_lane_takes_its_arrival_and_node_time_per_block` no
+  longer sorts. It takes the fader bank's lane-to-track map from the plan: the one banked unit
+  that does not gather its tracks' input and renders both automated tracks
+  (`PlanUnitEligibility::lane_tracks`). It then requires each probed lane's `arrival` to equal
+  that lane's own track's `a(n)`. Test value: red if a fader-bank lane takes another member's
+  `a(n)`, in any order.
+- **Contrast case.** The case in `an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp`
+  now also requires the ramp-1 output to equal the never-muted session that takes the same
+  -6 dB write at `W`. The comparison starts at the first grid completion sample `64k + 63` at or
+  after the move's end `W + 480`: 1,791, 1,727 and 1,727 at quanta 128, 64 and 37.
+  - A one-time probe placed the last differing sample at 1,790, 1,726 and 1,726, one sample
+    before each bound. So the bound is exact, not padded.
+
+**Mutants (merged tree):**
+Each mutant was applied alone. The suites run were host-core `stored_*_automation` and
+`successor_swap`, plus the builtins-compiler lib.
+
+| Mutant | Red | Assertion that fails |
+|---|---|---|
+| f4: every lane takes `members[0]`'s arrival | the arrival test | `block 0, lane 1: the lane's own track's a(n)` (`Some(486)` against `Some(0)`) |
+| f5: `members[members.len() - 1 - lane]` | the arrival test | `block 0, lane 0: the lane's own track's a(n)` (`Some(0)` against `Some(486)`) |
+| f6: off by one, `members[(lane + 1) % members.len()]` | the arrival test | `Some(0)` against `Some(486)` |
+| m3 | the contrast case | `quantum 128: plane 0` diverges at 1,280 |
+
+Attempt 2's runs of m1, m2, m4-m9 do not depend on the two edited assertions. Every one of those
+mutants that was red is caught by some other test besides these two.
+
+**Gates on the merged tree:**
+- `cargo test --locked` passes for each crate run alone, with test-support features:
+  - builtins-compiler: 58 tests
+  - graph-compiler: 194
+  - host-core: 471
+- clippy `--all-targets --all-features -D warnings` on builtins-compiler, graph, graph-compiler
+  and host-core: clean.
+- `cargo fmt --all --check`: clean.
+- Workspace policy: ok.
+- The attempt-3 commits change only host-core tests and this spec, so render code is untouched
+  and attempt 2's no-bit-moved comparison stands.
+
 ## Follow-ups (not this issue)
 - **Owner ruling needed.** On base, a move that comes due at an entry (`EndsAtBlockEnd`, owed)
   still lands over an offsets jump applied at that same entry, and cancels the jump's ramp.
@@ -231,3 +283,8 @@ tests, so both sides run the same tests.
 - **f2:** the R17-10 release also fires on `EndsAtBlockEnd`. This is probably equivalent: a hold
   that ended by itself has no cell hold left to release.
 - **f3:** the cursor's muted `rehold` gives `EndsAtBlockEnd`. That arm is untested on base too.
+- **n1:** `rehold` returns `EndsAtBlockEnd` for any hold that ends past the block. No test covers
+  a curve unmute whose ramp crosses a block boundary, followed by a live write that frees the lane
+  at the next entry. This is base behaviour.
+- **n3:** the due arm of `block()` also releases the cell's hold. This is probably equivalent.
+- **n8:** `mute_terms` ignores whether jumps are present. This is probably equivalent.
