@@ -2,15 +2,17 @@
 
 #![allow(unsafe_code)]
 
+use crate::abi::ClaimWord;
 use crate::{
     ABI_VERSION, BYTES_OUT_SIZE, BytesOut, CAPABILITIES_SIZE, Capabilities, CompileLimits,
     EXACT_LAUNCH_RATE_MASK, Engine, EngineConfig, FEATURE_MASK, HandleHeader, Plan,
     PlanResourceReport, PlanarOutput, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
-    RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
-    RESULT_OK, RESULT_RENDER_REJECTED, RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE,
-    SOURCE_SEEK_REPORT_SIZE, Session, SourceChunk, SourceSeekReport, SubmitReport, WATERMARK_SIZE,
-    Watermark,
+    RESULT_BUFFER_TOO_SMALL, RESULT_BUSY, RESULT_COMPILE_REJECTED, RESULT_INTERNAL,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_RENDER_REJECTED, RESULT_UNSUPPORTED,
+    RESULT_WRONG_HANDLE, SOURCE_SEEK_REPORT_SIZE, Session, SourceChunk, SourceSeekReport,
+    SubmitReport, WATERMARK_SIZE, Watermark,
 };
+use core::cell::RefCell;
 use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -18,8 +20,9 @@ use lane::fpenv::CanonicalFpEnv;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
-    CommandError, EventError, EventLane, PlanQueries, PlanState, SessionSeekFailure, SourceFailure,
-    SourceFailureReport, compile_children, limits_are_valid, plan_error, render_error_code,
+    CommandError, EventError, EventLane, FixedBytes, PlanQueries, PlanState, SessionSeekFailure,
+    SessionState, SourceFailure, SourceFailureReport, compile_children, limits_are_valid,
+    plan_error, render_error_code,
 };
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
@@ -115,15 +118,16 @@ unsafe fn borrowed_bytes<'a>(data: *const u8, bytes: u64, limit: u64) -> Result<
 }
 
 /// Borrows a source entry point's source ID, or refuses a null or over-long one with the core's
-/// `SourceControlError::InvalidId` result and diagnostic (`source.id.invalid`). An empty or
-/// non-UTF-8 ID is borrowed: the core refuses it with the same failure (#1706 D4).
+/// `SourceControlError::InvalidId` result and diagnostic (`source.id.invalid`), written into the
+/// claimed session's `last_error`. An empty or non-UTF-8 ID is borrowed: the core refuses it with
+/// the same failure (#1706 D4).
 ///
 /// # Safety
 ///
-/// `session` must have passed `session_kind`, and a nonnull `source_id` must be readable for
-/// `source_id_bytes` bytes for the duration of the call.
+/// A nonnull `source_id` must be readable for `source_id_bytes` bytes for the duration of the
+/// call.
 unsafe fn borrowed_source_id<'a>(
-    session: *mut Session,
+    last_error: &RefCell<FixedBytes>,
     source_id: *const u8,
     source_id_bytes: u64,
 ) -> Result<&'a [u8], u32> {
@@ -135,9 +139,7 @@ unsafe fn borrowed_source_id<'a>(
             // refuses it with this same failure (#1706 D4).
             let (code, diagnostic) =
                 SourceFailure::Control(host_core::SourceControlError::InvalidId).report();
-            // SAFETY: `session` passed the live-kind check; the ABI serializes session calls, so
-            // this short diagnostic borrow overlaps no other borrow of the session.
-            unsafe { (*session).last_error.borrow_mut() }.set(diagnostic);
+            last_error.borrow_mut().set(diagnostic);
             Err(code)
         }
     }
@@ -208,29 +210,31 @@ unsafe fn plan_error_slot(plan: *const Plan) -> *const AtomicU32 {
 /// # Safety
 ///
 /// `plan` must have passed [`plan_kind`].
-unsafe fn plan_busy_slot(plan: *const Plan) -> *const AtomicU32 {
+unsafe fn plan_busy_slot(plan: *const Plan) -> *const ClaimWord {
     // SAFETY: See `plan_state`; the projection is disjoint from `state`.
     unsafe { &raw const (*plan).render_busy }
 }
 
-/// A render-side call's claim on a plan's render state (#2213): `render_f32_planar` and
-/// `plan_prepare_seek` each hold one for the whole time they touch `state`, so at most one thread
-/// ever holds the exclusive `PlanState` borrow, even when a host breaks the thread rule. The claim
-/// is one compare-exchange (`Acquire`, so the holder sees every write of the previous holder) and
-/// its drop is one `Release` store, on every exit, an unwind included. It never waits or spins and
-/// makes no syscall: a call that finds the word held is refused.
-struct RenderClaim<'a>(&'a AtomicU32);
+/// A call's claim on a handle's exclusive state through the handle's [`ClaimWord`]: a plan's
+/// render state (#2213: `render_f32_planar` and `plan_prepare_seek`) or a session's state and
+/// diagnostic (#2276: every session call). A call holds it for the whole time it touches that
+/// state, so at most one thread ever holds the exclusive borrow, even when a host breaks the
+/// thread rule. The claim is one compare-exchange (`Acquire`, so the holder sees every write of
+/// the previous holder) and its drop is one `Release` store, on every exit, an early return and an
+/// unwind included. It never waits or spins and makes no syscall: a call that finds the word held
+/// is refused, and a refused call has no claim, so it never releases the holder's.
+struct HandleClaim<'a>(&'a ClaimWord);
 
-impl<'a> RenderClaim<'a> {
-    /// Claim `word`, or `None` when another render-side call holds it.
-    fn try_claim(word: &'a AtomicU32) -> Option<Self> {
+impl<'a> HandleClaim<'a> {
+    /// Claim `word`, or `None` when another call holds it.
+    fn try_claim(word: &'a ClaimWord) -> Option<Self> {
         word.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
             .ok()
             .map(|_| Self(word))
     }
 }
 
-impl Drop for RenderClaim<'_> {
+impl Drop for HandleClaim<'_> {
     fn drop(&mut self) {
         self.0.store(0, Ordering::Release);
     }
@@ -242,14 +246,55 @@ impl Drop for RenderClaim<'_> {
 /// # Safety
 ///
 /// `plan` must have passed [`plan_kind`].
-unsafe fn claim_render_side<'a>(plan: *const Plan) -> Option<RenderClaim<'a>> {
+unsafe fn claim_render_side<'a>(plan: *const Plan) -> Option<HandleClaim<'a>> {
     // SAFETY: The caller proved the live kind; both projections are disjoint from `state`.
-    let claim = RenderClaim::try_claim(unsafe { &*plan_busy_slot(plan) });
+    let claim = HandleClaim::try_claim(unsafe { &*plan_busy_slot(plan) });
     if claim.is_none() {
         // SAFETY: See above.
         unsafe { &*plan_error_slot(plan) }.store(plan_error::BUSY, Ordering::Relaxed);
     }
     claim
+}
+
+/// Projects a session's claim word (#2276) without borrowing the whole handle.
+///
+/// # Safety
+///
+/// `session` must have passed [`session_kind`].
+unsafe fn session_busy_slot(session: *const Session) -> *const ClaimWord {
+    // SAFETY: The live-kind check established the concrete representation; a raw field projection
+    // creates no reference to `Session` itself.
+    unsafe { &raw const (*session).busy }
+}
+
+/// One session call's hold on its session (#2276): the claim, and the two fields it makes the
+/// call's own. Every session entry point takes one right after the handle check and keeps it to
+/// the end of the call, so no second call can form another `&mut SessionState` or borrow the
+/// diagnostic's `RefCell` while this one runs. The fields are disjoint projections, never a
+/// reference to the whole `Session`, so a refused call's read of the claim word aliases neither.
+struct SessionCall<'a> {
+    state: &'a mut SessionState,
+    last_error: &'a RefCell<FixedBytes>,
+    _claim: HandleClaim<'a>,
+}
+
+/// Claims `session` for one session call, or `None` when another call holds it. A refused call
+/// returns [`RESULT_BUSY`] and touches nothing: the diagnostic belongs to the holder.
+///
+/// # Safety
+///
+/// `session` must have passed [`session_kind`].
+unsafe fn claim_session<'a>(session: *mut Session) -> Option<SessionCall<'a>> {
+    // SAFETY: The caller proved the live kind; the projection is disjoint from the other fields.
+    let claim = HandleClaim::try_claim(unsafe { &*session_busy_slot(session) })?;
+    // SAFETY: The claim excludes every other session call's borrow of these fields until it is
+    // dropped with the returned value; the projections are disjoint from `busy` and each other.
+    let (state, last_error) = unsafe { (&mut (*session).state, &(*session).last_error) };
+    Some(SessionCall {
+        state,
+        last_error,
+        _claim: claim,
+    })
 }
 
 /// Projects the any-thread resource query view without borrowing the whole handle.
@@ -518,6 +563,10 @@ pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
         if kind != RESULT_OK {
             return kind;
         }
+        // SAFETY: `session` passed the live-kind check.
+        let Some(session) = (unsafe { claim_session(session) }) else {
+            return RESULT_BUSY;
+        };
         if chunk.is_null() || out_report.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
@@ -539,12 +588,12 @@ pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
         {
             return RESULT_INVALID_ARGUMENT;
         }
-        // SAFETY: `session` passed the live-kind check and the caller promises the source-ID storage
-        // is readable for this call.
-        let source_id = match unsafe { borrowed_source_id(session, source_id, source_id_bytes) } {
-            Ok(value) => value,
-            Err(code) => return code,
-        };
+        // SAFETY: The caller promises the source-ID storage is readable for this call.
+        let source_id =
+            match unsafe { borrowed_source_id(session.last_error, source_id, source_id_bytes) } {
+                Ok(value) => value,
+                Err(code) => return code,
+            };
         let plane_count = chunk.plane_count as usize;
         // SAFETY: `chunk.planes` was proved nonnull and pointer-aligned above, `plane_count` is at
         // most the launch source-channel maximum (two) so the array is far inside `isize::MAX`
@@ -562,9 +611,6 @@ pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
             // only until the underlying source submission copies it.
             planes[index] = unsafe { core::slice::from_raw_parts(*plane, frames) };
         }
-        // SAFETY: `session` passed the live-kind check and this operation requires its exclusive
-        // serial producer owner under the ABI contract.
-        let session = unsafe { &mut *session };
         match session.state.submit(
             source_id,
             crate::runtime::SourceSubmission {
@@ -680,15 +726,16 @@ unsafe fn source_seek_entry(
         if kind != RESULT_OK {
             return kind;
         }
-        // SAFETY: `session` passed the live-kind check and the caller promises the source-ID storage
-        // is readable for this call.
-        let source_id = match unsafe { borrowed_source_id(session, source_id, source_id_bytes) } {
-            Ok(value) => value,
-            Err(code) => return code,
+        // SAFETY: `session` passed the live-kind check.
+        let Some(session) = (unsafe { claim_session(session) }) else {
+            return RESULT_BUSY;
         };
-        // SAFETY: `session` passed the live-kind check and the ABI requires exclusive serial
-        // source-control ownership for seek.
-        let session = unsafe { &mut *session };
+        // SAFETY: The caller promises the source-ID storage is readable for this call.
+        let source_id =
+            match unsafe { borrowed_source_id(session.last_error, source_id, source_id_bytes) } {
+                Ok(value) => value,
+                Err(code) => return code,
+            };
         let outcome = match anchor_sample {
             None => session.state.seek(source_id, generation, source_frame),
             Some(anchor_sample) => {
@@ -837,8 +884,10 @@ unsafe fn session_seek_landing(
         if kind != RESULT_OK {
             return kind;
         }
-        // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
-        let session = unsafe { &mut *session };
+        // SAFETY: `session` passed the live-kind check.
+        let Some(session) = (unsafe { claim_session(session) }) else {
+            return RESULT_BUSY;
+        };
         let seeked = if at_once {
             session
                 .state
@@ -860,7 +909,9 @@ unsafe fn session_seek_landing(
             }
             // B16-R9: the plain form's declaration refused; it reports as
             // `miso_engine_v1_declare_discontinuity` does.
-            Err(SessionSeekFailure::Declaration(refused)) => declaration_refused(session, &refused),
+            Err(SessionSeekFailure::Declaration(refused)) => {
+                declaration_refused(session.last_error, &refused)
+            }
         }
     })
 }
@@ -900,6 +951,10 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek_report(
         if kind != RESULT_OK {
             return kind;
         }
+        // SAFETY: `session` passed the live-kind check.
+        let Some(session) = (unsafe { claim_session(session) }) else {
+            return RESULT_BUSY;
+        };
         if out.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
@@ -910,14 +965,12 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek_report(
         if struct_size != SOURCE_SEEK_REPORT_SIZE || reserved0 != 0 || reserved != [0; 2] {
             return RESULT_INVALID_ARGUMENT;
         }
-        // SAFETY: `session` passed the live-kind check and the caller promises the source-ID storage
-        // is readable for this call.
-        let source_id = match unsafe { borrowed_source_id(session, source_id, source_id_bytes) } {
-            Ok(value) => value,
-            Err(code) => return code,
-        };
-        // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
-        let session = unsafe { &mut *session };
+        // SAFETY: The caller promises the source-ID storage is readable for this call.
+        let source_id =
+            match unsafe { borrowed_source_id(session.last_error, source_id, source_id_bytes) } {
+                Ok(value) => value,
+                Err(code) => return code,
+            };
         match session.state.seek_report(source_id) {
             Ok(report) => {
                 // SAFETY: Exact struct size establishes writable ABI V1 seek-report storage.
@@ -973,8 +1026,10 @@ pub unsafe extern "C" fn miso_engine_v1_service(session: *mut Session) -> u32 {
         if kind != RESULT_OK {
             return kind;
         }
-        // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
-        let session = unsafe { &mut *session };
+        // SAFETY: `session` passed the live-kind check.
+        let Some(session) = (unsafe { claim_session(session) }) else {
+            return RESULT_BUSY;
+        };
         match session.state.service_step() {
             Ok(()) => {
                 session.last_error.borrow_mut().clear();
@@ -992,7 +1047,7 @@ pub unsafe extern "C" fn miso_engine_v1_service(session: *mut Session) -> u32 {
             // re-preparation is COMPILE_REJECTED with the compile diagnostic, an internal fault
             // INTERNAL with control.internal.
             Err(control_plane::ServiceFailure::Deadline(refused)) => {
-                declaration_refused(session, &refused)
+                declaration_refused(session.last_error, &refused)
             }
         }
     })
@@ -1028,22 +1083,24 @@ pub unsafe extern "C" fn miso_engine_v1_declare_discontinuity(session: *mut Sess
         if kind != RESULT_OK {
             return kind;
         }
-        // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
-        let session = unsafe { &mut *session };
+        // SAFETY: `session` passed the live-kind check.
+        let Some(session) = (unsafe { claim_session(session) }) else {
+            return RESULT_BUSY;
+        };
         match session.state.declare_discontinuity() {
             Ok(()) => {
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
             }
-            Err(refused) => declaration_refused(session, &refused),
+            Err(refused) => declaration_refused(session.last_error, &refused),
         }
     })
 }
 
 /// The result of a refused declaration, its own or a plain session seek's (B16-R9): the core's
 /// diagnostic into the session's last error, and the code a rebuild's refusal has.
-fn declaration_refused(session: &Session, refused: &CommandError) -> u32 {
-    session.last_error.borrow_mut().set(&refused.diagnostic());
+fn declaration_refused(last_error: &RefCell<FixedBytes>, refused: &CommandError) -> u32 {
+    last_error.borrow_mut().set(&refused.diagnostic());
     match refused {
         CommandError::BufferTooSmall { .. } | CommandError::Internal => RESULT_INTERNAL,
         CommandError::Invalid => RESULT_INVALID_ARGUMENT,
@@ -1132,6 +1189,10 @@ unsafe fn submit(
     if kind != RESULT_OK {
         return kind;
     }
+    // SAFETY: `session` passed the live-kind check.
+    let Some(session) = (unsafe { claim_session(session) }) else {
+        return RESULT_BUSY;
+    };
     if request.is_null() || response.is_null() {
         return RESULT_INVALID_ARGUMENT;
     }
@@ -1157,9 +1218,6 @@ unsafe fn submit(
             Err(code) => return code,
         }
     };
-    // SAFETY: The live-kind check establishes the concrete session representation; generic
-    // command calls are serialized with source control by the ABI contract.
-    let session = unsafe { &mut *session };
     match session
         .state
         .command_with_document(request, document, output_capacity)
@@ -1210,6 +1268,10 @@ pub unsafe extern "C" fn miso_engine_v1_dequeue_event(
         if kind != RESULT_OK {
             return kind;
         }
+        // SAFETY: `session` passed the live-kind check.
+        let Some(session) = (unsafe { claim_session(session) }) else {
+            return RESULT_BUSY;
+        };
         let lane = match lane {
             crate::EVENT_LANE_RELIABLE => EventLane::Reliable,
             crate::EVENT_LANE_LOSSY => EventLane::Lossy,
@@ -1220,8 +1282,6 @@ pub unsafe extern "C" fn miso_engine_v1_dequeue_event(
             Ok(value) => value.capacity_bytes,
             Err(code) => return code,
         };
-        // SAFETY: The live-kind check establishes the concrete serialized session owner.
-        let session = unsafe { &mut *session };
         match session.state.dequeue_event(lane, capacity) {
             Ok(Some(bytes)) => {
                 let encoded = session.state.event_response(bytes);
@@ -1556,8 +1616,14 @@ pub unsafe extern "C" fn miso_engine_v1_last_error(
             // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
             unsafe { write_bytes(out, &bytes[..len]) }
         } else if header.is_session() {
+            // #2276: the diagnostic belongs to the call that holds the session, so a query that
+            // finds it held is refused like every other session call, with `out` untouched.
             // SAFETY: The recognized header identifies a live session handle.
-            let session = unsafe { &*live_handle.cast::<Session>() };
+            let Some(session) =
+                (unsafe { claim_session(live_handle.cast::<Session>().cast_mut()) })
+            else {
+                return RESULT_BUSY;
+            };
             let bytes = session.last_error.borrow();
             // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
             unsafe { write_bytes(out, bytes.as_slice()) }
@@ -1576,6 +1642,11 @@ pub unsafe extern "C" fn miso_engine_v1_last_error(
 
 /// Destroys a session handle off render; null is a no-op.
 ///
+/// A destroy that finds another session call holding the session (#2276) frees nothing and
+/// returns: the session stays live, and is leaked, because freeing it would free the state under
+/// the running call. A call that starts after a destroy is still the host's to prevent; freed
+/// memory carries no claim.
+///
 /// # Safety
 ///
 /// A nonnull `session` must be the unique live session handle returned by this library.
@@ -1588,10 +1659,19 @@ pub unsafe extern "C" fn miso_engine_v1_session_destroy(session: *mut Session) {
             return;
         }
         // SAFETY: Only the matching live kind may be reconstructed and destroyed.
-        if unsafe { session_kind(session) } == RESULT_OK {
-            // SAFETY: The ABI contract guarantees unique live ownership and quiescent destroy.
-            drop(unsafe { Box::from_raw(session) });
+        if unsafe { session_kind(session) } != RESULT_OK {
+            return;
         }
+        // SAFETY: `session` passed the live-kind check.
+        let Some(call) = (unsafe { claim_session(session) }) else {
+            return;
+        };
+        // The claim is never released: the word goes with the session, so a call that reaches
+        // the handle before the free below is refused, not handed state that is being freed.
+        core::mem::forget(call);
+        // SAFETY: The ABI contract guarantees unique live ownership, and the claim proves no
+        // session call is in flight.
+        drop(unsafe { Box::from_raw(session) });
     });
 }
 
@@ -1961,6 +2041,14 @@ pub(crate) fn test_plan_prepare_seek(plan: *mut Plan) -> u32 {
 pub(crate) fn test_hold_render_claim(plan: *const Plan, held: bool) {
     // SAFETY: Test callers retain the live plan; the word is an any-thread atomic projection.
     unsafe { &*plan_busy_slot(plan) }.store(u32::from(held), Ordering::Release);
+}
+
+/// Holds (`true`) or releases (`false`) `session`'s claim word, as a session call on another
+/// thread would (#2276).
+#[cfg(test)]
+pub(crate) fn test_hold_session_claim(session: *const Session, held: bool) {
+    // SAFETY: Test callers retain the live session; the word is an atomic projection.
+    unsafe { &*session_busy_slot(session) }.store(u32::from(held), Ordering::Release);
 }
 
 #[cfg(test)]
@@ -3742,5 +3830,217 @@ mod tests {
             plan_error::text(plan_error::NONE)
         );
         destroy_fixture(engine, session, plan);
+    }
+
+    /// #2276 (tracker #2258 HC-3): a session call made while another call holds the session is
+    /// refused with `RESULT_BUSY` and touches nothing, so a host that breaks the session thread
+    /// rule gets a result code, not two exclusive borrows of one `SessionState`. A destroy that
+    /// finds the session held frees nothing; released, the same session serves calls again.
+    ///
+    /// Test value: red if any session entry point, `last_error` on a session or
+    /// `session_destroy` reaches the session without claiming it, or if a refused call writes the
+    /// session's state, its diagnostic or a caller's out pointer.
+    #[test]
+    fn a_session_call_while_another_holds_the_session_is_refused_not_raced() {
+        const SOURCE: &[u8] = b"fixture-source";
+        let (engine, session, plan) = compiled_fixture();
+        // A known diagnostic, so a refusal that writes one is seen.
+        assert_eq!(
+            seek(session, b"absent-source".as_ptr(), 13, 1, 0),
+            RESULT_INVALID_ARGUMENT
+        );
+        let diagnostic = test_last_error(session);
+        assert_eq!(diagnostic, b"source.id.unknown");
+        let snapshot = test_transaction_snapshot(session);
+        let left = [0.25_f32; 128];
+        let right = [-0.5_f32; 128];
+        let planes = [left.as_ptr(), right.as_ptr()];
+        let chunk = SourceChunk {
+            struct_size: crate::SOURCE_CHUNK_SIZE,
+            sample_rate_hz: 48_000,
+            generation: 1,
+            start_frame: 0,
+            planes: planes.as_ptr(),
+            plane_count: 2,
+            frames: 128,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut submitted = SubmitReport {
+            struct_size: crate::SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: u64::MAX,
+            cumulative_written_frames: u64::MAX,
+            active_generation: u64::MAX,
+        };
+        let mut report = SourceSeekReport {
+            struct_size: SOURCE_SEEK_REPORT_SIZE,
+            reserved0: 0,
+            generation: u64::MAX,
+            first_sample: u64::MAX,
+            source_frame: u64::MAX,
+            cumulative_underrun_frames: u64::MAX,
+            cumulative_held_frames: u64::MAX,
+            reserved: [0; 2],
+        };
+        let mut storage = [0xa5_u8; 256];
+        let mut bytes_out = || BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: storage.as_mut_ptr(),
+            capacity_bytes: 256,
+            required_bytes: u64::MAX,
+        };
+        let (mut response, mut event, mut error) = (bytes_out(), bytes_out(), bytes_out());
+        let request = [1_u8; 16];
+        let document = b"{}";
+
+        test_hold_session_claim(session, true);
+        // SAFETY: Every pointer names a complete local ABI value, the live session or borrowed
+        // bytes that outlive the calls.
+        let refused = unsafe {
+            [
+                miso_engine_v1_source_submit_planar_f32(
+                    session,
+                    SOURCE.as_ptr(),
+                    SOURCE.len() as u64,
+                    &chunk,
+                    &mut submitted,
+                ),
+                miso_engine_v1_source_seek(session, SOURCE.as_ptr(), SOURCE.len() as u64, 2, 0),
+                miso_engine_v1_source_seek_at(
+                    session,
+                    SOURCE.as_ptr(),
+                    SOURCE.len() as u64,
+                    2,
+                    0,
+                    0,
+                ),
+                miso_engine_v1_session_seek(session, 2, 0),
+                miso_engine_v1_session_seek_at(session, 2, 0, 0),
+                miso_engine_v1_session_seek_at_once(session, 2, 0),
+                miso_engine_v1_source_seek_report(
+                    session,
+                    SOURCE.as_ptr(),
+                    SOURCE.len() as u64,
+                    &mut report,
+                ),
+                miso_engine_v1_service(session),
+                miso_engine_v1_declare_discontinuity(session),
+                miso_engine_v1_submit_command(
+                    session,
+                    request.as_ptr(),
+                    request.len() as u64,
+                    &mut response,
+                ),
+                miso_engine_v1_submit_document_command(
+                    session,
+                    request.as_ptr(),
+                    request.len() as u64,
+                    document.as_ptr(),
+                    document.len() as u64,
+                    &mut response,
+                ),
+                miso_engine_v1_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event),
+                miso_engine_v1_last_error(session.cast(), &mut error),
+            ]
+        };
+        assert_eq!(refused, [crate::RESULT_BUSY; 13]);
+        assert_eq!(
+            (
+                submitted.accepted_frames,
+                submitted.cumulative_written_frames,
+                submitted.active_generation
+            ),
+            (u64::MAX, u64::MAX, u64::MAX)
+        );
+        assert_eq!(
+            (report.generation, report.first_sample, report.source_frame),
+            (u64::MAX, u64::MAX, u64::MAX)
+        );
+        for out in [&response, &event, &error] {
+            assert_eq!(out.required_bytes, u64::MAX);
+        }
+        assert!(storage.iter().all(|byte| *byte == 0xa5));
+        assert_eq!(test_last_error(session), diagnostic);
+        assert_eq!(test_transaction_snapshot(session), snapshot);
+
+        // A destroy that finds the session held frees nothing.
+        test_reset_lifecycle_observer();
+        // SAFETY: The session is live; the held claim stands in for a call in flight.
+        unsafe { miso_engine_v1_session_destroy(session) };
+        assert_eq!(
+            test_lifecycle_counters(),
+            crate::runtime::TestOwnerCounters::default()
+        );
+
+        test_hold_session_claim(session, false);
+        assert_eq!(test_service(session), RESULT_OK);
+        assert_eq!(read_last_error(session.cast()), b"");
+        destroy_fixture(engine, session, plan);
+        assert_eq!(test_lifecycle_counters().current_provider_disposed, 1);
+    }
+
+    /// #2276: the claim every session call and both render-side calls take, on two threads.
+    /// Each thread claims one word and, holding it, writes the state the word guards, then leaves:
+    /// one by an early error return, the other by an unwind its entry point catches (as
+    /// `catch_result` does). In every interleaving at most one thread holds the state (loom's
+    /// `UnsafeCell` fails an access that is not ordered after the other's), at least one wins,
+    /// and both exits release the word.
+    #[cfg(loom)]
+    mod handle_claim_loom {
+        use super::super::HandleClaim;
+        use crate::abi::ClaimWord;
+        use loom::cell::UnsafeCell;
+        use loom::sync::Arc;
+        use loom::sync::atomic::Ordering;
+        use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+
+        /// One handle: its claim word and the state the word guards.
+        struct Handle {
+            word: ClaimWord,
+            state: UnsafeCell<u32>,
+        }
+
+        /// One call on `handle`, which leaves by an unwind when `unwind` and by an early error
+        /// return otherwise. `true` when it held the claim, `false` when it was refused.
+        fn call(handle: &Handle, unwind: bool) -> bool {
+            let body = || -> Result<(), ()> {
+                let Some(_claim) = HandleClaim::try_claim(&handle.word) else {
+                    return Ok(());
+                };
+                // SAFETY: loom checks this access against every other access to the cell.
+                handle.state.with_mut(|state| unsafe { *state += 1 });
+                if unwind {
+                    // `resume_unwind` skips the panic hook, so the model prints nothing.
+                    resume_unwind(Box::new("an unwinding call"));
+                }
+                Err(())
+            };
+            !matches!(catch_unwind(AssertUnwindSafe(body)), Ok(Ok(())))
+        }
+
+        #[test]
+        fn handle_claim_loom() {
+            loom::model(|| {
+                let handle = Arc::new(Handle {
+                    word: ClaimWord::new(0),
+                    state: UnsafeCell::new(0),
+                });
+                let other = Arc::clone(&handle);
+                let unwinding = loom::thread::spawn(move || call(&other, true));
+                let erring = call(&handle, false);
+                let unwinding = unwinding.join().expect("the unwinding thread");
+                assert!(erring || unwinding, "both calls were refused");
+                assert_eq!(
+                    handle.word.load(Ordering::Relaxed),
+                    0,
+                    "a claim was not released"
+                );
+                // SAFETY: Both threads have finished; loom checks the access.
+                let held = handle.state.with(|state| unsafe { *state });
+                assert_eq!(held, u32::from(erring) + u32::from(unwinding));
+            });
+        }
     }
 }

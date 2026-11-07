@@ -42,5 +42,12 @@ session.workspace = true
 sha2.workspace = true
 source.workspace = true
 
+# Issue #2276: the handles' `ClaimWord` names `loom` under `--cfg loom`, where `handle_claim_loom`
+# runs. A cfg dependency rather than a dev-dependency, because the library itself names it; the
+# same pinned crate as `engine`, `host-core` and `control-plane`. Nothing reaches it without
+# `--cfg loom`.
+[target.'cfg(loom)'.dependencies]
+loom = "=0.7.2"
+
 [lints]
 workspace = true

@@ -426,6 +426,30 @@ result code is authoritative, because the winner may overwrite the plan's last e
 `session_seek::a_stopped_host_refills_a_full_ring_before_restart` (the issue's gate) and
 `session_seek::a_render_side_call_during_render_is_refused_not_raced` hold it.
 
+The session handle refuses misuse the same way (#2276), an in-place V1 amendment: one new result
+code, `MISO_ENGINE_V1_BUSY` (9), which takes no feature bit under the growth rule below; no symbol,
+struct, size or `ABI_VERSION` changes (`Session` is opaque, so its new claim word is not a layout
+change). Before #2276 the session calls took `&mut` of the whole session on the strength of the
+header's thread rule alone, so a host that broke it got two exclusive borrows of one
+`SessionState` (undefined behaviour). Now every session call, `last_error` on a session included,
+claims the session's `busy` word right after the handle check with the plan's claim type
+(`HandleClaim`: one `Acquire` compare-exchange, one `Release` store on every exit, an unwind
+included) and reaches the state and the diagnostic only through field projections of the claim. A
+call that finds the word claimed touches no session state, writes no out pointer and no
+diagnostic, and returns `BUSY`. It is a new code rather than `BACKPRESSURE` or #2213's
+`RENDER_REJECTED` because the session's diagnostic is the holder's `RefCell`, which a refused call
+cannot write, so an existing code would leave `last_error` naming another failure.
+`miso_engine_v1_session_destroy` claims the word too and frees the session holding it; one that
+finds it claimed frees nothing (the session is leaked, not freed under the running call). A call
+that starts after a destroy stays the host's to prevent. Render and session calls may still run at
+once: they own different handles, joined only by the engine's lock-free exchange. The gates: `capi`
+`ffi::tests::a_session_call_while_another_holds_the_session_is_refused_not_raced` (with the word
+held, all thirteen session entry points return `BUSY` and change no state, diagnostic or out
+pointer, and a destroy frees nothing; released, the session serves calls) and the loom model
+`ffi::tests::handle_claim_loom::handle_claim_loom` (two threads, one leaving by an error and one
+by an unwind: at most one holds the state, at least one wins, both release), on its own
+`test-release` leg (a debug build).
+
 A plain session seek is a declared discontinuity; the engine declares it in the same call, and a
 refused seek declares nothing (root ruling B16-R9). `control_plane::SessionState::session_seek`,
 the one function behind both hosts, runs the service step, checks every consumer

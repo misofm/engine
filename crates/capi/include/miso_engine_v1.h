@@ -24,6 +24,13 @@ extern "C" {
  *                miso_engine_v1_session_seek, miso_engine_v1_session_seek_at,
  *                miso_engine_v1_session_seek_at_once, or
  *                miso_engine_v1_last_error on the session; they are serialized with each other.
+ *                Each of them claims the session on entry with one atomic compare-exchange and
+ *                releases it on return (issue 2276); a call that finds it claimed does not wait,
+ *                touches no session state, writes no diagnostic and no out pointer, and returns
+ *                MISO_ENGINE_V1_BUSY. Only a host that breaks this rule sees it: the session's
+ *                last error belongs to the call that holds the session, so the result code is the
+ *                whole report. A render call and a session call may run at once; they own
+ *                different handles.
  *   plan         Split ownership.
  *                miso_engine_v1_render_f32_planar: render thread only, never concurrently with
  *                itself, and the exclusive owner of the plan's render state.
@@ -46,6 +53,10 @@ extern "C" {
  *   *_destroy    miso_engine_v1_engine_destroy, miso_engine_v1_session_destroy and
  *                miso_engine_v1_plan_destroy require quiescence: no other call on that handle is
  *                in flight or will start. A session and its plan may be destroyed in either order.
+ *                miso_engine_v1_session_destroy claims the session as the session calls do; one
+ *                that finds it claimed frees nothing and returns, so the session stays allocated
+ *                (leaked) rather than freed under the running call. A call that starts after a
+ *                destroy is undefined, as before.
  *
  * Live edits. A committed SESSION_TRANSACTION_APPLY whose changes are all live is applied to the
  * running plan: no plan is prepared, and the source rings, the effect state and the render
@@ -749,6 +760,8 @@ extern "C" {
 #define MISO_ENGINE_V1_BACKPRESSURE UINT32_C(6)
 #define MISO_ENGINE_V1_UNSUPPORTED UINT32_C(7)
 #define MISO_ENGINE_V1_RENDER_REJECTED UINT32_C(8)
+/* Another call holds the session (issue 2276); see "Thread ownership". */
+#define MISO_ENGINE_V1_BUSY UINT32_C(9)
 #define MISO_ENGINE_V1_INTERNAL UINT32_C(255)
 
 #define MISO_ENGINE_V1_EVENT_LANE_RELIABLE UINT32_C(0)
