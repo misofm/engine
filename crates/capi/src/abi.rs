@@ -2,6 +2,14 @@
 
 use core::{cell::RefCell, marker::PhantomData, sync::atomic::AtomicU32};
 
+/// A handle's claim word (#2213, #2276): `0` while no call holds the handle's exclusive state,
+/// `1` while one does. `--cfg loom` models it: loom's atomic under loom, `core`'s otherwise, so
+/// `handle_claim_loom` explores the real claim and release.
+#[cfg(not(loom))]
+pub(crate) type ClaimWord = AtomicU32;
+#[cfg(loom)]
+pub(crate) type ClaimWord = loom::sync::atomic::AtomicU32;
+
 use crate::runtime::{FixedBytes, PlanQueries, PlanState, SessionState, plan_error};
 
 /// Frozen ABI V1 version (`major << 16 | minor`).
@@ -25,6 +33,9 @@ pub const RESULT_BACKPRESSURE: u32 = 6;
 pub const RESULT_UNSUPPORTED: u32 = 7;
 /// Render validation rejected the call without advancing state.
 pub const RESULT_RENDER_REJECTED: u32 = 8;
+/// Another call holds the session handle (#2276): the call touched nothing, wrote no diagnostic
+/// and left every out pointer as it was. Only a host that breaks the session thread rule sees it.
+pub const RESULT_BUSY: u32 = 9;
 /// A panic or other internal failure was contained at the ABI boundary.
 pub const RESULT_INTERNAL: u32 = 255;
 
@@ -489,9 +500,19 @@ impl Engine {
 }
 
 /// Opaque session-control handle. C consumers only observe pointers to this type.
+///
+/// `header` is immutable after construction and `busy` is the session's claim word (#2276);
+/// `state` and `last_error` belong to the one session call that holds `busy`. As for [`Plan`],
+/// `ffi.rs` never forms a reference to the whole value: it projects the fields with `&raw const`
+/// and `&raw mut`, so a refused call's read of `busy` never aliases the holder's
+/// `&mut SessionState`.
 #[repr(C)]
 pub struct Session {
     header: HandleHeader,
+    /// `1` while a session call holds `state` and `last_error`, else `0` (#2276). A call claims
+    /// it with one compare-exchange on entry and releases it with one store on every exit; a call
+    /// that finds it held is refused with [`RESULT_BUSY`], never waits, and touches no state.
+    pub(crate) busy: ClaimWord,
     pub(crate) state: SessionState,
     pub(crate) last_error: RefCell<FixedBytes>,
     not_sync: PhantomData<core::cell::Cell<()>>,
@@ -501,6 +522,7 @@ impl Session {
     pub(crate) fn new(state: SessionState, last_error: FixedBytes) -> Self {
         Self {
             header: HandleHeader::new(HANDLE_KIND_SESSION),
+            busy: ClaimWord::new(0),
             state,
             last_error: RefCell::new(last_error),
             not_sync: PhantomData,
@@ -525,7 +547,7 @@ pub struct Plan {
     /// render state, else `0` (#2213). A call claims it with one compare-exchange on entry and
     /// releases it with one store on every exit; a call that finds it held is refused, never
     /// waits, and touches no state.
-    pub(crate) render_busy: AtomicU32,
+    pub(crate) render_busy: ClaimWord,
     pub(crate) state: PlanState,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
@@ -536,7 +558,7 @@ impl Plan {
             header: HandleHeader::new(HANDLE_KIND_PLAN),
             queries: state.queries(),
             last_error: AtomicU32::new(plan_error::NONE),
-            render_busy: AtomicU32::new(0),
+            render_busy: ClaimWord::new(0),
             state,
             not_sync: PhantomData,
         }
@@ -690,9 +712,10 @@ mod tests {
                 RESULT_BACKPRESSURE,
                 RESULT_UNSUPPORTED,
                 RESULT_RENDER_REJECTED,
+                RESULT_BUSY,
                 RESULT_INTERNAL,
             ],
-            [0, 1, 2, 3, 4, 5, 6, 7, 8, 255]
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255]
         );
     }
 }
