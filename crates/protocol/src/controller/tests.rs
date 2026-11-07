@@ -3589,6 +3589,91 @@ fn session_commit_reserves_reliable_event_before_replacing_store() {
     assert_eq!(controller.session().canonical_snapshot(), before_snapshot);
 }
 
+/// A reliable-event slot a reservation holds is not room (#2283). With the one slot held, as the
+/// control plane holds one for each render diagnostic it stages, a structural transaction is
+/// refused as typed `BACKPRESSURE` on both frame entry points, reporting the held slot as
+/// occupied, with the model, the revision and the queue unchanged and the refusal recorded for
+/// replay; once the hold is released the same edit commits.
+///
+/// Test value: red if the structural plan's room check counts queued events only, so a held slot
+/// passes it: the prepared path's reservation then fails as `INTERNAL`, and the one-call path's
+/// reservation `expect` panics.
+#[test]
+fn a_held_reliable_event_slot_refuses_a_structural_transaction_as_backpressure() {
+    let mut controller = controller(4);
+    let before = controller.session().canonical_snapshot().to_owned();
+    let held = controller
+        .queues_mut()
+        .reserve_reliable_event()
+        .expect("the one slot");
+    let edits = [SessionEdit::SetSessionId {
+        session_id: session::StableId::parse("held-slot").expect("ID"),
+    }];
+    let frame = |request| {
+        full_command(
+            request,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::SessionTransactionApply(&edits),
+        )
+    };
+    let prepared = controller
+        .prepare_command_frame(
+            &frame(1),
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
+        .expect("a typed reply");
+    let PreparedCommandFrame::Immediate(prepared) = prepared else {
+        panic!("a held slot leaves no room for a structural token");
+    };
+    let mut output = [0_u8; 2048];
+    let length = prepared.write_into(&mut output).expect("reply bytes");
+    let replies = [
+        output[..length].to_vec(),
+        process_full_command(&mut controller, &frame(2)),
+    ];
+    for reply in &replies {
+        let crate::DecodedTypedResponseFrame::NonOk { header, payload } = decode_response(reply)
+        else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(header.status, StatusCode::Backpressure);
+        assert_eq!(
+            payload.backpressure,
+            Some(Backpressure {
+                queue_kind: BackpressureQueueKind::ReliableEvent,
+                capacity: 1,
+                occupancy: 1,
+                requested_items: 1,
+                generation: Some(4),
+                retry_boundary: None,
+                requested_bytes: None,
+                available_bytes: None,
+            }),
+            "the held slot is reported as occupied"
+        );
+    }
+    assert_eq!(controller.session().revision(), SessionRevision(7));
+    assert_eq!(controller.session().canonical_snapshot(), before);
+    assert_eq!(controller.replay().len(), 2, "both refusals are recorded");
+    assert_eq!(
+        controller
+            .queues()
+            .report(crate::QueueKind::ReliableEvent)
+            .occupancy,
+        0,
+        "nothing was queued"
+    );
+
+    controller.queues_mut().release_reliable_event(held);
+    assert!(matches!(
+        decode_response(&process_full_command(&mut controller, &frame(3))),
+        crate::DecodedTypedResponseFrame::Success { .. }
+    ));
+    assert_eq!(controller.session().revision(), SessionRevision(8));
+}
+
 /// An executed `BACKPRESSURE` outcome is cached like any other: a retry under the same request ID
 /// replays the identical response and executes nothing, even after the queue that refused the
 /// first attempt has room. Red if the cache stops storing `BACKPRESSURE` outcomes: the retry then

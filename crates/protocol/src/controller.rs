@@ -2854,6 +2854,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             .try_reserve_exact(input.len())
             .map_err(|_| CommandFrameProcessError::Internal)?;
         request.extend_from_slice(input);
+        // The plan checked this room with the queue's own check under this `&mut self`, and only
+        // a release can change it since, so this cannot fail; it stays a defect report, never a
+        // refusal.
         let event_reservations = match self.queues.reserve_reliable_events(plan.required_events) {
             Ok(reservations) => reservations,
             Err(_) => return Err(CommandFrameProcessError::Internal),
@@ -2994,13 +2997,11 @@ impl<P: ControlProvider> ProtocolController<P> {
         // A replace never writes a monitor row (a document carries no solo).
         let monitor_only =
             replacement.is_none() && monitor && crate::model::is_monitor_transaction(&edits);
+        // The room is the queue's own check, which counts a slot another holder reserved (a
+        // staged render diagnostic's) as taken, so the reservation in preparation or in the
+        // one-call commit cannot fail where this passed (#2283).
         let required_events = usize::from(!monitor_only);
-        let event_report = self.queues.report(crate::QueueKind::ReliableEvent);
-        if required_events
-            > event_report
-                .capacity
-                .saturating_sub(usize::try_from(event_report.occupancy).unwrap_or(usize::MAX))
-        {
+        if let Err(event_report) = self.queues.check_reliable_event_room(required_events) {
             return Ok(StructuralCommandDisposition::Immediate {
                 replay_plan,
                 outcome: self.queue_backpressure_outcome(event_report),
@@ -3131,12 +3132,13 @@ impl<P: ControlProvider> ProtocolController<P> {
             .map_err(CommandFrameProcessError::Encode)?;
 
         // Every fallible semantic, output, replay-capacity, and event-capacity decision completed
-        // above. Exclusive `&mut self` ownership makes these exact reservations invariant from
-        // this point through the session/event/replay commit.
+        // above; the plan checked the event room with the queue's own check, held slots counted.
+        // Exclusive `&mut self` ownership makes these exact reservations invariant from this
+        // point through the session/event/replay commit.
         let mut event_reservations = self
             .queues
             .reserve_reliable_events(plan.required_events)
-            .expect("read-only structural plan reserved exact reliable-event capacity");
+            .expect("the plan's room check admits exactly this reservation");
         self.replay
             .complete(plan.replay_plan, input, &output[..written])
             .expect("planned replay reservation accepts the measured direct response");
