@@ -83,4 +83,81 @@ shape the session lacks.
   `cargo run --release -p realtime-policy`.
 
 ## Evidence (attempt 1)
-Pending.
+
+**Beyond `ffi.rs` and `abi.rs`.** `crates/capi/Cargo.toml` names `loom = "=0.7.2"` under
+`[target.'cfg(loom)'.dependencies]` (one `Cargo.lock` line), because the library's `ClaimWord`
+names loom under that cfg; a cfg dependency also reaches the lib tests, so no dev-dependency is
+added. The header gains `MISO_ENGINE_V1_BUSY` and the refusal in its thread-ownership block,
+`abi_smoke.c` pins `BUSY == 9`, `abi.rs`'s frozen result-code test lists it, and
+`docs/C_ABI_V1_QUALIFICATION.md` records the amendment. `.github/workflows/qualification.yml` gains
+the loom leg in `test-release`, in the **debug** profile: capi's lib tests turn on the
+`test-support` features of engine, lane, graph and builtins, so a release build rebuilds nearly the
+whole graph in release (the capi test crate alone took 2:01 on 32 cores, loaded), while the debug
+build of the whole graph under the leg's flags took 22 s cold; the model runs in 0.00 s in both.
+The job's timeout is re-derived (28 to 31 minutes; to be re-derived from the first `main` run).
+
+**Red on base.** `ffi::tests::a_session_call_while_another_holds_the_session_is_refused_not_raced`
+run on base `76ff20b54` with only `RESULT_BUSY` and the test hook added (the hook a no-op, since
+base has no claim word), so every call reaches the "held" session:
+```
+assertion `left == right` failed
+  left: [0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0]
+ right: [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]
+```
+Every call ran: the submit was accepted, the seeks, the service step, the declaration, the dequeue
+and the diagnostic copy all reached the state. At head it passes.
+
+**Loom.** `ffi::tests::handle_claim_loom::handle_claim_loom` passes at head under the leg's flags
+(every interleaving explored).
+
+**Mutations (each reverted; red in every case).**
+- Release store removed from `HandleClaim::drop`: loom red, `a claim was not released`.
+- Release skipped while unwinding (`if !std::thread::panicking()`): loom red, `a claim was not
+  released`. This is the unwind leg's own catch.
+- Claim's success ordering `Acquire` weakened to `Relaxed`: loom red, `Causality violation:
+  Concurrent write accesses to UnsafeCell`.
+- Compare-exchange replaced by a separate load and store: loom red, the same causality violation.
+- `miso_engine_v1_service` without the claim: unit test red, `left: [9, 9, 9, 9, 9, 9, 9, 0, ...]`.
+- `last_error` on a session without the claim: unit test red, the thirteenth result `0`.
+- `session_destroy` without the claim: unit test red, `current_provider_disposed: 1` and
+  `replay_current_disposed: 1` against the expected zero counters (the held session was freed).
+
+**Test value.**
+- Unit test: red if any session entry point, `last_error` on a session or `session_destroy`
+  reaches the session without claiming it, or if a refused call writes the state, the diagnostic
+  or an out pointer. No existing test holds a session's claim; before this issue no session call
+  could be refused for concurrency at all.
+- Loom model: red if the claim lets two holders reach the guarded state (a non-atomic or
+  unordered claim), refuses both of two racing calls, or leaves the word held after an early
+  return or an unwind. Only a two-thread schedule reaches the ordering defects; the existing
+  `a_render_side_call_during_render_is_refused_not_raced` holds the word from one thread and
+  cannot see them.
+
+**No rendered bit moved.** The render path's only change is the claim type's name and its word's
+type alias (`AtomicU32` outside loom). Two one-time comparisons, never committed:
+- `audit capi` (release, 100,000 render calls, every one through the claim): `pcm_digest`
+  `30dcfd806e7ba058` at base `76ff20b54` and at head, 0 violations in both.
+- A scratch debug test rendering 64 blocks of the nine-track fixture fed with a sine pair, FNV over
+  every result code and output bit: `7b6a72dd2cba099b` at base and at head.
+
+**Gates (head).**
+- `cargo test --locked -p capi`: 190 lib tests, the nine integration binaries and the doc tests pass.
+- `cargo clippy --locked -p capi --all-targets --all-features -- -D warnings`: clean. The same
+  clippy of the lib tests under the loom leg's flags: clean.
+- `cargo fmt --check`: clean.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- `bash scripts/check-capi-abi.sh`: `C ABI check: ok (x86_64-unknown-linux-gnu, shared and static
+  linkage)`.
+- `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (292 marked regions in
+  46 files)`.
+- `audit capi`: `total_violations: 0`, 0 allocations, 0 syscalls.
+
+**Judgements the brief asked for.**
+- Every session entry claims: the twelve control entries (through their five shared bodies), the
+  session branch of `last_error`, and `session_destroy`. The engine handle and the plan's destroy
+  do not (non-goals above).
+- A render call and a session call overlapping is the design and needs no claim: they own
+  different handles, `Plan`'s render state and `Session`'s control state, joined only by the
+  engine's lock-free exchange. Nothing here claims against the plan.
+- Open for root review: the new code `BUSY` against `BACKPRESSURE` without a diagnostic (Decision
+  above), and the leak on a destroy that finds the session held.
