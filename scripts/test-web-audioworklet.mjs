@@ -6496,6 +6496,153 @@ async function testControlWorker() {
       assert.deepEqual([control[MSB1_CONTROL.ATTACHED], port.onmessage, late.onmessage], [0, null, null],
         "the finished dispose withdraws the ring and closes the ports");
     }
+    // #2306 attempt 2. A sticky error in the dispose window (a worklet message outside the
+    // protocol, an unreadable page message, an out-of-order request ID) still posts, but it stops
+    // no tick: the release deadline still runs and answers the dispose. Red if a sticky error
+    // stops the service tick (the stop the folded `fatal` made).
+    {
+      const { send, fromWorklet } = await boot();
+      const tick = intervals.at(-1);
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      fromWorklet({ tag: "miso.unknown.v1" });
+      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: 1, result: 255 });
+      assert.equal(tick.cleared, false, "a worklet fault in the dispose window keeps the deadline's tick");
+      globalThis.onmessageerror();
+      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: 1, result: 255 });
+      assert.equal(tick.cleared, false, "so does an unreadable page message");
+      now += RELEASE_TIMEOUT_MS;
+      tick.callback();
+      assert.deepEqual(posts.at(-1),
+        { tag: "miso.teardown.v1", requestId: 1, result: 255, reason: "release-timeout" });
+    }
+    {
+      const { send } = await boot();
+      const tick = intervals.at(-1);
+      send({ tag: "miso.sessionmap.v1", requestId: 1 });
+      send({ tag: "miso.dispose.v1", requestId: 2 });
+      send({ tag: "miso.sessionmap.v1", requestId: 1 });
+      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: 1, result: 1 });
+      assert.equal(tick.cleared, false, "an out-of-order request in the dispose window keeps the deadline's tick");
+      now += RELEASE_TIMEOUT_MS;
+      tick.callback();
+      assert.deepEqual(posts.at(-1),
+        { tag: "miso.teardown.v1", requestId: 2, result: 255, reason: "release-timeout" });
+    }
+    // A control-work refusal that follows a page request carries that request's ID (the tick's
+    // carries 0, N4). Red if the step after a request posts its sticky error as request 0.
+    {
+      const { send } = await boot();
+      fake.calls.serviceResult = 3;
+      send({ tag: "miso.sessionmap.v1", requestId: 1 });
+      assert.deepEqual(posts.slice(1).map(({ tag, requestId, result }) => [tag, requestId, result]),
+        [["miso.sessionmap.v1", 1, 0], ["miso.error.v1", 1, 3]]);
+    }
+    // A status read is answered once: by the worklet's reply, and never again by the dispose.
+    // Red if a matched read stays queued.
+    {
+      const { send, fromWorklet } = await boot();
+      send({ tag: "miso.status.v1", requestId: 1 });
+      fromWorklet({
+        tag: "miso.render-status.v1", requestId: 1,
+        status: { state: 2, lastResult: 0, renderedQuanta: 9n, blockingRebuilds: 0, meterFramesSkipped: 0 },
+      });
+      send({ tag: "miso.dispose.v1", requestId: 2 });
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      assert.equal(posts.filter((message) => message.tag === "miso.status.v1" && message.requestId === 1).length, 1,
+        "the read is answered exactly once");
+    }
+    // A worklet status reply that is no record, and a control status that cannot be read, are
+    // sticky internal errors, never a status. Red if either fault is answered or dropped.
+    for (const [name, corrupt, status] of [
+      ["a reply that is no record", () => {}, 5],
+      ["an unreadable control status", (engine) => { new DataView(engine.memory.buffer, 16384, 80).setUint32(0, 0, true); },
+        { state: 2, lastResult: 0, renderedQuanta: 9n, blockingRebuilds: 0, meterFramesSkipped: 0 }],
+    ]) {
+      const { send, fromWorklet } = await boot();
+      corrupt(fake);
+      send({ tag: "miso.status.v1", requestId: 1 });
+      fromWorklet({ tag: "miso.render-status.v1", requestId: 1, status });
+      assert.deepEqual(posts.slice(1), [{ tag: "miso.error.v1", requestId: 1, result: 255 }], name);
+    }
+    // A page message that cannot be read: before the boot it is the boot, refused 255, and a boot
+    // after it runs nothing; with a host it is sticky; with none it is dropped. Red if an
+    // unreadable boot leaves the Worker bootable, or if a refused or freed Worker posts it.
+    {
+      fake = createFakeExports(64);
+      posts = [];
+      new Function(workerSource)();
+      globalThis.onmessageerror();
+      assert.deepEqual(posts, [{ tag: "miso.error.v1", requestId: 0, result: 255 }], "an unreadable boot is refused");
+      globalThis.onmessage({ data: {
+        tag: "miso.worker-boot.v1", module, memory: fake.memory, document: new Uint8Array([1, 2, 3]),
+        options: { ...limits, sourceRingFrames: 0 }, sampleRateHz: 48000, quantumFrames: 64,
+        workletPort: { onmessage: null, postMessage() {} },
+      } });
+      assert.deepEqual([posts.length, fake.calls.boot], [1, []], "and a boot after it runs nothing");
+    }
+    {
+      await boot({ sampleRateHz: 44100 });
+      globalThis.onmessageerror();
+      assert.equal(posts.length, 1, "a refused Worker posts no error for an unreadable message");
+      const { send, fromWorklet } = await boot();
+      globalThis.onmessageerror();
+      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: 0, result: 255 }, "a live one does");
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      const answered = posts.length;
+      globalThis.onmessageerror();
+      assert.equal(posts.length, answered, "a freed one posts nothing");
+    }
+    // A feed port is opened only while a host is held. Red if a refused or freed Worker opens
+    // one (its rings could never be bound, and no dispose would close its port).
+    {
+      await boot({ sampleRateHz: 44100 });
+      const refusedPort = { onmessage: null, postMessage() {}, close() {} };
+      globalThis.onmessage({ data: { tag: "miso.feed-port.v1", port: refusedPort } });
+      const { send, fromWorklet } = await boot();
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      const freedPort = { onmessage: null, postMessage() {}, close() {} };
+      send({ tag: "miso.feed-port.v1", port: freedPort });
+      assert.deepEqual([refusedPort.onmessage, freedPort.onmessage], [null, null]);
+    }
+    // A message outside the protocol is never taken for a feed port, a release, a render clock
+    // or a status reply: each is a sticky error. Red if a field check of those messages is
+    // weakened.
+    {
+      const { send } = await boot();
+      send({ tag: "miso.feed-port.v1", port: {} });
+      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: 0, result: 1 }, "a port that cannot post");
+      const port = { onmessage: null, postMessage() {}, close() {} };
+      send({ tag: "miso.feed-port.v1", port, requestId: 1 });
+      assert.deepEqual([posts.at(-1), port.onmessage], [{ tag: "miso.error.v1", requestId: 1, result: 1 }, null],
+        "a feed port with an extra field");
+    }
+    {
+      const { fromWorklet } = await boot();
+      fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
+      for (const [name, message] of [
+        ["a release with an extra field", { tag: "miso.released.v1", token: 1n, extra: 0 }],
+        ["a release whose token is no bigint", { tag: "miso.released.v1", token: 5 }],
+        ["a zero render clock", { tag: "miso.render-clock.v1", status: 0 }],
+        ["a second render clock", { tag: "miso.render-clock.v1", status: 16384 }],
+        ["a status reply no read waits for", { tag: "miso.render-status.v1", requestId: 9, status: null }],
+      ]) {
+        const before = posts.length;
+        fromWorklet(message);
+        assert.deepEqual(posts.slice(before), [{ tag: "miso.error.v1", requestId: 0, result: 255 }], name);
+      }
+      assert.deepEqual([fake.calls.adopt, fake.calls.dispose], [[], 0]);
+    }
+    // A boot whose watermark read is refused keeps the zero counts, and the first watermark after
+    // it is posted against them. Red if the initial counts are lost (the tick then throws).
+    {
+      await boot({}, 64, (engine) => { engine.calls.watermarkResult = 6; });
+      fake.calls.watermarkResult = 0;
+      intervals.at(-1).callback();
+      const mark = posts.find((message) => message.tag === "miso.watermark.v1");
+      assert.deepEqual([mark?.revision, mark?.outcome], [3n, 1n]);
+    }
   } finally {
     WebAssembly.Instance = original.Instance;
     globalThis.postMessage = original.postMessage;

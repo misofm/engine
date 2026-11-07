@@ -176,7 +176,8 @@ class ControlWorker {
     // - `disposed`, `{ outcome, reason }`: the host is freed; `outcome` is the dispose's result
     //   and `reason` its typed teardown reason (`release-timeout`), if any.
     // Only `live` and `disposing` hold a host. A sticky error is the session's, not a phase: a
-    // failed session is still `live` (it answers status reads and must still be disposed).
+    // failed session is still `live`. It keeps its host, which only a dispose frees, and every
+    // request but a dispose gets the sticky error.
     this.phase = { kind: "unbooted" };
     this.stickyResult = RESULT_OK;
     this.lastRequestId = 0;
@@ -202,7 +203,19 @@ class ControlWorker {
     this.renderClockWords = null;
     this.lastSessionSeekGeneration = undefined;
     scope.onmessage = (event) => this.onPageMessage(event.data);
-    scope.onmessageerror = () => this.sticky(RESULT_INTERNAL, this.lastRequestId);
+    scope.onmessageerror = () => this.onMessageError();
+  }
+
+  /// A page message that could not be read. #2306: before the boot it is the boot, refused 255
+  /// (the page's boot then hears why); while a host is held it is a sticky error; with none (a
+  /// refused boot, a finished dispose) there is nothing left to fail, and it is dropped.
+  onMessageError() {
+    if (this.phase.kind === "unbooted") {
+      this.phase = { kind: "refused" };
+      this.failBoot(RESULT_INTERNAL);
+      return;
+    }
+    if (this.holdsHost()) this.sticky(RESULT_INTERNAL, this.lastRequestId);
   }
 
   /// One message from the main realm. The first is the boot; every later one is a request, run
@@ -216,16 +229,17 @@ class ControlWorker {
       if (this.phase.kind !== "live") this.failBoot(result === RESULT_OK ? RESULT_INTERNAL : result);
       return;
     }
-    if (message?.tag === "miso.feed-port.v1" && exactFields(message, ["tag", "port"])
-        && typeof message.port?.postMessage === "function") {
-      this.openFeed(message.port);
-      return;
-    }
     if (!this.holdsHost()) {
-      // Only a dispose is answered with no host: with the finished dispose's outcome.
+      // Only a dispose is answered with no host: with the finished dispose's outcome. A feed
+      // port is not opened (#2306): no ring could be bound, and no dispose would close it.
       if (message?.tag === "miso.dispose.v1" && Number.isSafeInteger(message.requestId)) {
         this.answerDispose(message.requestId);
       }
+      return;
+    }
+    if (message?.tag === "miso.feed-port.v1" && exactFields(message, ["tag", "port"])
+        && typeof message.port?.postMessage === "function") {
+      this.openFeed(message.port);
       return;
     }
     this.receive(message);
