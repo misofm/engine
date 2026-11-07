@@ -58,6 +58,7 @@ use effect_contract::{
     StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
 use effect_runtime::silent::SilentClaim;
 use lane::{Backend, Lane};
@@ -664,11 +665,23 @@ struct Instance<L: Lane> {
     /// so a claim never spans two kernel paths.
     silent: SilentClaim,
     /// Whether a collapsed block ([`render_mono`](Self::render_mono)) has rendered since the last
-    /// disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894). While
-    /// it is set the right channel is frozen and stale, so [`lanes_at_rest`](Self::lanes_at_rest)
-    /// reads the left channel alone: the effect contract's collapsed-bank rule. The compressor has
-    /// no clocks, so nothing else reads it.
-    collapsed: bool,
+    /// disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894,
+    /// [`MonoCollapse`], #2352). While it is engaged the right channel is frozen and stale, so
+    /// [`lanes_at_rest`](Self::lanes_at_rest) reads the left channel alone: the effect contract's
+    /// collapsed-bank rule. Every bank entry that reads or writes channel state takes the copy
+    /// first when it is engaged (#2352). The compressor has no clocks, so nothing else reads it.
+    collapse: MonoCollapse,
+}
+
+impl<L: Lane> CollapsibleChannels for Instance<L> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// See `kernel::Channel::copy_state_from` for the word-by-word list and why each is on it.
+    fn copy_left_channel_onto_right(&mut self) {
+        self.right.copy_state_from(&self.left);
+    }
 }
 
 impl<L: Lane> Instance<L> {
@@ -690,7 +703,7 @@ impl<L: Lane> Instance<L> {
             left: Channel::new(left_defaults, metadata.sample_rate),
             right: Channel::new(right_defaults, metadata.sample_rate),
             silent: SilentClaim::new(),
-            collapsed: false,
+            collapse: MonoCollapse::new(),
         };
         instance.rest_links();
         instance
@@ -856,8 +869,6 @@ impl<L: Lane> Instance<L> {
         frames: usize,
         mut record: impl FnMut(usize, bool, bool),
     ) {
-        // From here until the disengage copy the right channel is frozen and stale.
-        self.collapsed = true;
         let words = frames * L::WIDTH;
         let quiet = self.left.max_remaining() == 0
             && matches!(detector, Detector::Main | Detector::Silent)
@@ -891,10 +902,10 @@ impl<L: Lane> Instance<L> {
     }
 
     /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`), or
-    /// on the left channel alone while [`collapsed`](Self::collapsed) (#1894): see
+    /// on the left channel alone while [`collapse`](Self::collapse) is engaged (#1894): see
     /// `kernel::Channel::rest_lanes` for the words pinned and why the list is complete.
     fn lanes_at_rest(&self) -> u32 {
-        if self.collapsed {
+        if self.collapse.engaged() {
             self.left.rest_lanes()
         } else {
             self.left.rest_lanes() & self.right.rest_lanes()
@@ -905,8 +916,7 @@ impl<L: Lane> Instance<L> {
     ///
     /// See `kernel::Channel::copy_state_from` for the word-by-word list and why each is on it.
     fn desymmetrize(&mut self) {
-        self.right.copy_state_from(&self.left);
-        self.collapsed = false;
+        MonoCollapse::disengage(self);
     }
 
     // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
@@ -1613,6 +1623,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     // REALTIME_POLICY_BEGIN
     /// Issue #2131: see `Instance::reset_lane`.
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         self.instance.reset_lane(lane, kind);
     }
     // REALTIME_POLICY_END
@@ -1627,6 +1639,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
 
     /// A padded lane carries no track, so it takes no glide.
     fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         track < L::WIDTH
             && self.active & (1 << track) != 0
             && self.instance.retarget_link(track, mode, samples)
@@ -1685,6 +1699,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         self.instance.reset(kind);
     }
 
@@ -1720,6 +1736,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         let track = checked_track(track_index, L::WIDTH, self.active)?;
         self.instance.restore(state_layout_version, input, track)
     }
@@ -1747,6 +1765,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         from: &dyn PreparedNativeEffectBank,
         from_lane: usize,
     ) -> Option<bool> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         let from = from.as_any()?.downcast_ref::<Self>()?;
         let lane = checked_track(u32::try_from(lane).ok()?, L::WIDTH, self.active).ok()?;
         let from_lane =
@@ -1767,6 +1787,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         peer: Option<&mut dyn PreparedNativeEffectBank>,
         peer_lane: usize,
     ) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         let checked = |lane: usize, active: u32| {
             u32::try_from(lane)
                 .ok()
@@ -1787,6 +1809,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
                 else {
                     return false;
                 };
+                MonoCollapse::enter::<false>(&mut peer.instance);
                 let Some(peer_lane) = checked(peer_lane, peer.active) else {
                     return false;
                 };
@@ -1801,6 +1824,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         self.instance.exchange_lane_defaults(lane, bytes)
     }
     // REALTIME_POLICY_END
@@ -1855,6 +1880,10 @@ impl<L: Lane> PreparedCompressorBank<L> {
         {
             return report;
         }
+        // The collapse record moves before anything else the block does (#2352): a collapsed
+        // block engages it, and a dual block entered collapsed takes the disengage copy here,
+        // before this block's automation writes either channel.
+        MonoCollapse::enter::<MONO>(&mut self.instance);
         // #163 phase 4 item 1: an admitted span can redesign coefficients, and a span whose
         // smoothing resolves to zero samples snaps them outright while leaving `max_remaining` at
         // zero -- so the ramp test alone would not notice it. Withdraw the claim whenever this

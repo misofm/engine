@@ -164,6 +164,17 @@ fn configured_values(track: usize) -> Vec<effect_contract::InitialParameterValue
     values
 }
 
+/// The track's state as a collapsed bank holds it (issue #2352): the right channel of a collapsed
+/// track is its left one. A collapsed bank's own right section is whatever the collapse froze, or
+/// the left channel's once a writer took the disengage copy, so only the left section is the
+/// track's state, and a `collapsed` view writes it into both.
+fn collapsed_view(mut payload: Payload, collapsed: bool) -> Payload {
+    if collapsed {
+        payload.2 = payload.1;
+    }
+    payload
+}
+
 /// Snapshots one track of a bound bank, sized by its bind result's metadata.
 fn snapshot_bank(bank: &PreparedEffectBank, track: u32) -> Payload {
     let mut common = [0_u8; COMMON_BYTES];
@@ -967,7 +978,10 @@ impl Layout {
                     ),
                 }
                 fold_report(transcript, &report.reports[lane]);
-                fold_payload(transcript, &snapshot_bank(processor, lane as u32));
+                fold_payload(
+                    transcript,
+                    &collapsed_view(snapshot_bank(processor, lane as u32), right.is_none()),
+                );
                 continue;
             }
             for plane in core::iter::once(left).chain(right) {
@@ -984,8 +998,10 @@ impl Layout {
                 "#1089: padded lane {lane} of bank {bank} ({self:?}) was reported"
             );
             assert!(
-                support::without_silence(&snapshot_bank(processor, lane as u32))
-                    == support::without_silence(bound_payload),
+                support::without_silence(&collapsed_view(
+                    snapshot_bank(processor, lane as u32),
+                    right.is_none()
+                )) == support::without_silence(&collapsed_view(*bound_payload, right.is_none())),
                 "#1089: padded lane {lane} of bank {bank} ({self:?}) moved its state"
             );
         }
@@ -1581,7 +1597,7 @@ fn select_bank_transcript(
                 }
                 // Track 0 is lane 0 of bank 0 in every layout.
                 if shape == SelectShape::PoisonedDryHpf && group == 0 && block % 16 == 0 {
-                    let mut payload = snapshot_bank(bank, 0);
+                    let mut payload = collapsed_view(snapshot_bank(bank, 0), mono);
                     plant_left_ic2(&mut payload, 0, -f32::MAX);
                     let sizes = bank.metadata.program_key.state_sizes;
                     bank.processor
@@ -2281,7 +2297,7 @@ fn cliff_bank_transcript(
             if !track.is_multiple_of(4) {
                 continue;
             }
-            let mut payload = snapshot_bank(bank, lane as u32);
+            let mut payload = collapsed_view(snapshot_bank(bank, lane as u32), mono);
             plant_left_ic2(&mut payload, 2, -f32::MAX);
             let sizes = bank.metadata.program_key.state_sizes;
             bank.processor
@@ -2690,7 +2706,7 @@ fn limit_bank_transcript(
                     if let Some(right) = limit_restore(shape, block)
                         && track.is_multiple_of(LIMIT_VOICES)
                     {
-                        let mut payload = snapshot_bank(bank, lane as u32);
+                        let mut payload = collapsed_view(snapshot_bank(bank, lane as u32), mono);
                         plant_integrators(&mut payload, right, 1, f32::MAX, -f32::MAX);
                         let sizes = bank.metadata.program_key.state_sizes;
                         bank.processor

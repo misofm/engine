@@ -50,6 +50,7 @@ use effect_contract::{
     expected_prepared_metadata,
 };
 use effect_runtime::bank::{self, NonFiniteReport, block_is_positive_zero, positive_zero_lanes};
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db, knee_coefficients};
 use effect_runtime::envelope::retention_coefficient;
 use effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
@@ -1068,9 +1069,9 @@ struct Instance<L: Lane, const W: usize> {
     /// last disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894).
     /// While it is set the right side is frozen and stale, so
     /// [`lanes_at_rest`](Self::lanes_at_rest) reads the left side alone and a skipped block
-    /// advances the left silence counter alone: the effect contract's collapsed-bank rule. A reset
-    /// leaves it alone.
-    collapsed: bool,
+    /// advances the left silence counter alone: the effect contract's collapsed-bank rule. Every
+    /// bank entry that writes channel state, a reset included, takes the copy first (#2352).
+    collapse: MonoCollapse,
 }
 
 impl<L: Lane, const W: usize> Instance<L, W> {
@@ -1091,7 +1092,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 Side::new(left, metadata.sample_rate)?,
                 Side::new(right, metadata.sample_rate)?,
             ],
-            collapsed: false,
+            collapse: MonoCollapse::new(),
         };
         instance.seat_links(&[metadata.link_mode; W]);
         Some(instance)
@@ -2441,11 +2442,28 @@ fn lanes_mask<L: Lane>(bits: u32) -> L::Mask {
     L::load(&flags[..L::WIDTH]).lt(L::zero())
 }
 
+impl<L: Lane, const W: usize> CollapsibleChannels for Instance<L, W> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// [`Instance::desymmetrize`]'s copy.
+    fn copy_left_channel_onto_right(&mut self) {
+        let [left, right] = &mut self.sides;
+        right.filter = left.filter;
+        right.silence = left.silence;
+        right.gain_db = left.gain_db;
+        right.ramps = left.ramps;
+        // Issue #1367: the link glide weights are per-channel render state too.
+        right.links = left.links;
+    }
+}
+
 impl<L: Lane, const W: usize> Instance<L, W> {
     /// Both channels' [`Side::rest_lanes`], or the left side's alone while
-    /// [`collapsed`](Self::collapsed) (#1894).
+    /// [`collapse`](Self::collapse) is engaged (#1894).
     fn lanes_at_rest(&self) -> u32 {
-        if self.collapsed {
+        if self.collapse.engaged() {
             self.sides[0].rest_lanes()
         } else {
             self.sides[0].rest_lanes() & self.sides[1].rest_lanes()
@@ -2453,9 +2471,9 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     }
 
     /// The sides a rendered `+0.0` block advances: the left alone while
-    /// [`collapsed`](Self::collapsed), both otherwise (#1894).
+    /// [`collapse`](Self::collapse) is engaged, both otherwise (#1894).
     fn live_sides(&self) -> usize {
-        if self.collapsed { 1 } else { 2 }
+        if self.collapse.engaged() { 1 } else { 2 }
     }
 
     /// Advances the silence counters of the lanes in `bits` over `frames` frames of `+0.0`, as a
@@ -2527,14 +2545,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// are each channel's own control-side values, which a collapsed block's automation updates
     /// on both channels as a dual block would, and which no render reads.
     fn desymmetrize(&mut self) {
-        let [left, right] = &mut self.sides;
-        right.filter = left.filter;
-        right.silence = left.silence;
-        right.gain_db = left.gain_db;
-        right.ramps = left.ramps;
-        // Issue #1367: the link glide weights are per-channel render state too.
-        right.links = left.links;
-        self.collapsed = false;
+        MonoCollapse::disengage(self);
     }
 
     /// [`PreparedNativeEffectBank::channels_agree`] (issue #1871): every word
@@ -2844,6 +2855,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     /// Issue #2131: [`Instance::reset_lane`], withdrawing the silent claim as
     /// [`reset`](PreparedNativeEffectBank::reset) withdraws it.
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         if lane >= W {
             return;
         }
@@ -2868,6 +2881,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         self.silent.withdraw();
         self.instance.reset(kind);
     }
@@ -2910,6 +2925,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     /// withdraws the silent fixed-point claim (the next quiet block that ends at rest re-earns
     /// it).
     fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         let accepted = self.instance.retarget_link(track, mode, samples);
         if accepted {
             self.silent.withdraw();
@@ -2949,6 +2966,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         let track = checked_track(track_index, W, self.instance.active)?;
         // A restore can write any state word, so the claim goes whatever the result.
         self.silent.withdraw();
@@ -2991,10 +3010,9 @@ impl<L: Lane, const W: usize> PreparedMultibandCompressorBank<L, W> {
         if block.width != self.width || block.sidechain.is_some() {
             return report;
         }
-        if MONO {
-            // From here until the disengage copy the right side is frozen and stale.
-            self.instance.collapsed = true;
-        }
+        // A collapsed block freezes the right side until the disengage copy; a dual
+        // block entered collapsed takes that copy first (#2352).
+        MonoCollapse::enter::<MONO>(&mut self.instance);
         // An automation span can start a ramp or move a word; the next settled quiet block
         // re-earns the claim.
         if !block.automation.is_empty() {

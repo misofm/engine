@@ -37,6 +37,7 @@ use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask,
     positive_zero_lanes_of,
 };
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::params::{ParameterSpec, is_negative_zero, normalize_zero};
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
@@ -1225,7 +1226,7 @@ struct SoftClip<L: Lane> {
     /// right channel is frozen and stale, so [`lanes_at_rest`](Self::lanes_at_rest) reads the left
     /// channel alone and a skipped block advances the left cursor alone, as the collapsed silent
     /// path does: the effect contract's collapsed-bank rule.
-    collapsed: bool,
+    collapse: MonoCollapse,
 }
 
 impl<L: Lane> SoftClip<L> {
@@ -1246,7 +1247,7 @@ impl<L: Lane> SoftClip<L> {
             right,
             nonfinite: NonFiniteReport::new(),
             active: (1 << L::WIDTH) - 1,
-            collapsed: false,
+            collapse: MonoCollapse::new(),
         }
     }
 
@@ -1326,10 +1327,6 @@ impl<L: Lane> SoftClip<L> {
         let allowed = !silent_forbidden();
         #[cfg(not(test))]
         let allowed = true;
-        if MONO {
-            // From here until the disengage copy the right channel is frozen and stale.
-            self.collapsed = true;
-        }
         let silent = if MONO {
             block_is_positive_zero(left) && self.left.rest_lanes() == all_lanes::<L>()
         } else {
@@ -1368,10 +1365,10 @@ impl<L: Lane> SoftClip<L> {
     }
 
     /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`), or
-    /// on the left channel alone while [`collapsed`](Self::collapsed) (#1894): see
+    /// on the left channel alone while [`collapse`](Self::collapse) is engaged (#1894): see
     /// [`Channel::rest_lanes`] for the words pinned, why the list is complete, and the one clock.
     fn lanes_at_rest(&self) -> u32 {
-        if self.collapsed {
+        if self.collapse.engaged() {
             self.left.rest_lanes()
         } else {
             self.left.rest_lanes() & self.right.rest_lanes()
@@ -1423,14 +1420,7 @@ impl<L: Lane> SoftClip<L> {
     /// `left_defaults` and `right_defaults` are not copied: they are each channel's own prepared
     /// values, which the kernel never reads (a full reset, preparation-side, re-seeds from them).
     fn desymmetrize(&mut self) {
-        let (left, right) = (&self.left, &mut self.right);
-        right.state = left.state;
-        right.history.pos = left.history.pos;
-        right.history.x.copy_from_slice(&left.history.x);
-        right.history.e.copy_from_slice(&left.history.e);
-        right.history.dry.copy_from_slice(&left.history.dry);
-        right.ramps.copy_from_slice(&left.ramps);
-        self.collapsed = false;
+        MonoCollapse::disengage(self);
     }
 
     /// `PreparedNativeEffectBank::channels_agree` (issue #1872): every word
@@ -1507,6 +1497,23 @@ fn same_state_lane<L: Lane>(left: &Channel<L>, right: &Channel<L>, lane: usize) 
     })
 }
 
+impl<L: Lane> CollapsibleChannels for SoftClip<L> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// [`SoftClip::desymmetrize`]'s copy.
+    fn copy_left_channel_onto_right(&mut self) {
+        let (left, right) = (&self.left, &mut self.right);
+        right.state = left.state;
+        right.history.pos = left.history.pos;
+        right.history.x.copy_from_slice(&left.history.x);
+        right.history.e.copy_from_slice(&left.history.e);
+        right.history.dry.copy_from_slice(&left.history.dry);
+        right.ramps.copy_from_slice(&left.ramps);
+    }
+}
+
 impl<L: Lane> SoftClip<L> {
     /// The heap this cohort owns (#1074): both default tables, and per channel its ramp table and
     /// its three histories. Every other field is inline.
@@ -1569,7 +1576,7 @@ impl<L: Lane> PreparedSoftClipBank<L> {
             "a lane not at rest"
         );
         self.inner.left.advance_cursor(frames as usize);
-        if !self.inner.collapsed {
+        if !self.inner.collapse.engaged() {
             self.inner.right.advance_cursor(frames as usize);
         }
     }
@@ -1824,6 +1831,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
 
     // REALTIME_POLICY_BEGIN
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.inner);
         self.inner.reset_lane(lane, kind);
     }
     // REALTIME_POLICY_END
@@ -1832,6 +1841,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.inner);
         self.inner.reset(kind);
     }
 
@@ -1882,6 +1893,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.inner);
         let lane = bank_track_index::<L>(track_index)?;
         restore_sections(
             &mut self.inner.left,
@@ -1913,6 +1926,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.inner);
         self.exchange_defaults(lane, bytes)
     }
 }
@@ -1936,6 +1951,10 @@ impl<L: Lane> PreparedSoftClipBank<L> {
         {
             return report;
         }
+        // The collapse record moves before anything else the block does (#2352): a collapsed
+        // block engages it, and a dual block entered collapsed takes the disengage copy here,
+        // before this block's automation writes either channel.
+        MonoCollapse::enter::<MONO>(&mut self.inner);
         for lane in 0..L::WIDTH {
             // A padded lane carries no track, so no span is its to apply (issue #1092).
             if self.inner.active & (1 << lane) == 0 {

@@ -67,6 +67,7 @@ use effect_contract::{
 use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
 };
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::envelope::{ArCoef, ar_one_pole_step};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as spec_value_valid,
@@ -905,7 +906,21 @@ struct Shaper<L: Lane, const W: usize> {
     /// the right channel is frozen and stale, so [`lanes_at_rest`](Self::lanes_at_rest) reads the
     /// left channel alone: the effect contract's collapsed-bank rule. The shaper has no clocks, so
     /// nothing else reads it.
-    collapsed: bool,
+    collapse: MonoCollapse,
+}
+
+impl<L: Lane, const W: usize> CollapsibleChannels for Shaper<L, W> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// [`Shaper::desymmetrize`]'s copy.
+    fn copy_left_channel_onto_right(&mut self) {
+        self.right_env = self.left_env;
+        self.right.ramps = self.left.ramps;
+        // Issue #1370: the link weights are per-channel render state too.
+        self.right.links = self.left.links;
+    }
 }
 
 impl<L: Lane, const W: usize> Shaper<L, W> {
@@ -929,7 +944,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             state_sizes: metadata.state_sizes,
             nonfinite: NonFiniteReport::new(),
             active: (1 << W) - 1,
-            collapsed: false,
+            collapse: MonoCollapse::new(),
         }
         .with_links_at_rest()
     }
@@ -1076,10 +1091,6 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         frames: usize,
     ) -> [u32; 2] {
         debug_assert_eq!(W, L::WIDTH);
-        if MONO {
-            // From here until the disengage copy the right channel is frozen and stale.
-            self.collapsed = true;
-        }
         let silent = if MONO {
             block_is_positive_zero(left)
                 && silent_allowed()
@@ -1171,12 +1182,12 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// nothing else; the boundary check passes on a `+0.0` block, so [`recover_lanes`](Self::recover_lanes) and the D7
     /// record are not reached. The shaper has **no clocks**.
     ///
-    /// While [`collapsed`](Self::collapsed) the left channel answers alone (#1894).
+    /// While [`collapse`](Self::collapse) is engaged the left channel answers alone (#1894).
     ///
     /// No allocation, bounded time, `&self`: four bit masks and `6 * W` integer compares.
     fn lanes_at_rest(&self) -> u32 {
         let left = channel_rest_lanes(&self.left_env, &self.left);
-        if self.collapsed {
+        if self.collapse.engaged() {
             left
         } else {
             left & channel_rest_lanes(&self.right_env, &self.right)
@@ -1404,11 +1415,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// per channel). The link modes and masks, the coefficients and the bypass are whole-lane or
     /// whole-instance: one word serves both channels.
     fn desymmetrize(&mut self) {
-        self.right_env = self.left_env;
-        self.right.ramps = self.left.ramps;
-        // Issue #1370: the link weights are per-channel render state too.
-        self.right.links = self.left.links;
-        self.collapsed = false;
+        MonoCollapse::disengage(self);
     }
 
     /// `PreparedNativeEffectBank::channels_agree` (issue #1873): every word
@@ -2034,6 +2041,8 @@ impl PreparedNativeEffect for PreparedTransientShaper {
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<L, W> {
     // REALTIME_POLICY_BEGIN
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         self.shaper.reset_lane(lane, kind);
     }
     // REALTIME_POLICY_END
@@ -2043,6 +2052,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         self.shaper.reset(kind);
     }
 
@@ -2090,6 +2101,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         let track = checked_track(track_index, W)?;
         self.shaper.restore(track, state_layout_version, input)
     }
@@ -2111,11 +2124,15 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         self.exchange_defaults(lane, bytes)
     }
 
     /// Issue #1370: [`Shaper::retarget_link`]; a padded lane takes no glide.
     fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         self.shaper.retarget_link(track, mode, samples)
     }
 }
@@ -2137,6 +2154,10 @@ impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
         if block.width != self.width || block.frames > self.quantum || block.sidechain.is_some() {
             return report;
         }
+        // The collapse record moves before anything else the block does (#2352): a collapsed
+        // block engages it, and a dual block entered collapsed takes the disengage copy here,
+        // before this block's automation writes either channel.
+        MonoCollapse::enter::<MONO>(&mut self.shaper);
         for track in 0..W {
             // A padded lane carries no track, so no span is its to apply (issue #1092).
             if self.shaper.active & (1 << track) == 0 {
