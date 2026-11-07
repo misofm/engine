@@ -151,6 +151,7 @@ No Rust file changed, so no other cargo gate applies.
 
 **Follow-ups (not filed):**
 - Flagged by review; the coordinator tracks it. A well-formed meter, telemetry, control-event or watermark frame still reaches its listeners after the host has failed (`#receive` dispatches unsolicited frames before any failure check). A failed host should drop such a frame, or count it. This stays out of #2317 (see Non-goals).
+- #2279's follow-ups stand: the factory-input, returned-plane, boot-reply and frame-schema clause swaps have no rows.
 
 ### Attempt 1, merged with #2306 (WEB-7) (Terra, 2026-11-07)
 #2306 replaced the Worker's `disposing`/`disposed` flags with one `this.phase` union, `unbooted | refused | live | disposing{…} | disposed{…}`. During a dispose, its tick keeps the release deadline. On the merged tree, attempt 1's `this.disposing` guard would read `undefined`. A `miso.fail.v1` during a dispose would then fail the session and stop the deadline tick.
@@ -187,4 +188,11 @@ Two rows were tightened:
 - `cargo run --locked --release -p realtime-policy`, which reported `realtime policy: ok (295 marked regions in 46 files)`.
 
 No Rust file changed. `host-web` is the crate of the touched host.
-- #2279's follow-ups stand: the factory-input, returned-plane, boot-reply and frame-schema clause swaps have no rows.
+
+### Verdict on attempt 1 at `44c0c347a` (Sol): PASS, with three MINORs
+All three are folded on the same branch, after a normal merge of `origin/main` at `5a8263c00`, which touched none of this issue's files.
+1. **`#tell`'s `try/catch` had no row.** Removing it stayed GREEN. If a post threw, `#fail` would throw after setting the phase and before rejecting any request, and those requests would never settle. The fix is a new routing case, "single: a failure whose post throws". The worklet port's `postMessage` throws on `miso.fail.v1`. The test's dispatch drops a handler's throw, as a browser's does. The control request in flight must still reject with the sticky 255. With the `try/catch` removed, the case is red at "the request in flight still settles". This supersedes the attempt-1 equivalence for line 1016 (dropping `this.#worker !== undefined` from `tellWorker`): the catch it relies on now has its own row.
+2. **The second Worker dispose-window block was redundant.** That block covered the release, then "the dispose completes", then "as does one after it", and it caught nothing the first block did not. It is deleted. A post after a finished dispose finds no host (`holdsHost()`), and `controlLive()` would refuse it anyway, so no mutant tells the two apart.
+3. **The worklet's malformed-shape loop.** The "no code" shape is dropped, because it repeats "an extra field" and "a code that is no u32". The shapes run in `single` mode only, since the handler runs before the mode's dispatch. One shape, a zero code, stays in `worker` mode, where the unknown-message path is `receiveWorkerMode`'s.
+
+Gates, run once at the end: `bash scripts/test-web-audioworklet.sh` and `bash scripts/check-workspace-policy.sh`. No Rust changed.

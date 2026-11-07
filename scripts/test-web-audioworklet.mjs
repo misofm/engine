@@ -3140,6 +3140,24 @@ async function testMainRealm() {
               controlMutation = null;
             }, [], []],
             ["single", "a processorerror", ({ node }) => node.onprocessorerror(), [], []],
+            // A peer whose port throws on the post: the host's failure stands, and the request in
+            // flight still rejects with the sticky code (a throw out of `#tell` would leave `#fail`
+            // after the phase was set and before any request was rejected).
+            ["single", "a failure whose post throws", async ({ host, node }) => {
+              const post = node.port.postMessage.bind(node.port);
+              node.port.postMessage = (message, transfer) => {
+                if (message.tag === "miso.fail.v1") throw new Error("port closed");
+                return post(message, transfer);
+              };
+              holdAll = true;
+              const call = host.control(new Uint8Array([1]));
+              holdAll = false;
+              // A browser's port dispatch drops a throw out of the handler; so does this one.
+              try { inject(node.port, { tag: "miso.meter.v1" }); } catch (_) { /* reported, not raised */ }
+              assert.equal(await settledState(call), "rejected", "the request in flight still settles");
+              await errorResult(call, 255);
+              heldAll.length = 0;
+            }, [], []],
             ["worker", "a malformed meter frame", ({ node }) => inject(node.port, { tag: "miso.meter.v1" }), [255], []],
             ["worker", "a reply that matches no request",
               ({ worker }) => inject(worker, { tag: "miso.ack.v1", requestId: 999, result: 0 }), [255], []],
@@ -5809,18 +5827,19 @@ async function testProcessor() {
         ["a zero code", { tag: "miso.fail.v1", result: 0 }],
         ["a code that is no u32", { tag: "miso.fail.v1", result: -1 }],
         ["an extra field", { tag: "miso.fail.v1", result: 9, requestId: 1 }],
-        ["no code", { tag: "miso.fail.v1" }],
       ]) {
+        // The handler runs before the mode's dispatch, so one mode carries the shapes.
         workerModeMemory = null;
         const { processor: single } = makeProcessor();
         single.port.onmessage({ data: message });
         assert.deepEqual(single.port.posts.at(-1).message,
           { tag: "miso.error.v1", requestId: message.requestId ?? 0, result: 1 }, `single: ${label} is sticky 1`);
-        const { processor: render } = constructWorkerMode(createFakeExports(64));
-        render.port.onmessage({ data: message });
-        assert.deepEqual(render.port.posts.at(-1).message,
-          { tag: "miso.error.v1", requestId: message.requestId ?? 0, result: 1 }, `worker: ${label} is sticky 1`);
       }
+      // One shape in `worker` mode, where the unknown-message path is `receiveWorkerMode`'s.
+      const { processor: render } = constructWorkerMode(createFakeExports(64));
+      render.port.onmessage({ data: { tag: "miso.fail.v1", result: 0 } });
+      assert.deepEqual(render.port.posts.at(-1).message, { tag: "miso.error.v1", requestId: 0, result: 1 },
+        "worker: a malformed post is sticky 1");
     }
     // #1332 S8: a construction that fails after the adoption releases the half at once (no half
     // stays in a worklet that never renders) and answers the Worker's release with its token,
@@ -6165,16 +6184,6 @@ async function testControlWorker() {
       assert.deepEqual(posts.at(-1),
         { tag: "miso.teardown.v1", requestId: 1, result: 255, reason: "release-timeout" },
         "which still ends an unanswered release");
-    }
-    {
-      const { send, fromWorklet } = await boot();
-      send({ tag: "miso.dispose.v1", requestId: 1 });
-      send({ tag: "miso.fail.v1", result: 255 });
-      assert.deepEqual(fake.calls.sessionFail, [], "a post during a dispose fails nothing");
-      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
-      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 1, result: 0 }, "and the dispose completes");
-      send({ tag: "miso.fail.v1", result: 255 });
-      assert.deepEqual(fake.calls.sessionFail, [], "as does one after it");
     }
     for (const [label, message] of [
       ["a zero code", { tag: "miso.fail.v1", result: 0 }],
