@@ -472,6 +472,35 @@ disposition `RENDER_REJECTED` gave the refusal, so no `ABI_VERSION` bump is need
 both calls with `BUSY` and leaves the holder's `render.time.discontinuity`); the claim itself is
 unchanged, so `handle_claim_loom` covers it as before.
 
+The plan's destroy and the engine handle take the same claim (#2321), an in-place V1 amendment
+with no symbol, struct, size, feature bit, result code or `ABI_VERSION` change. Before it,
+`miso_engine_v1_plan_destroy` freed the plan without taking `render_busy`, so a control-thread
+teardown racing an in-flight `render_f32_planar` or `plan_prepare_seek` freed `PlanState` under
+the running call, and the engine had no claim at all: two threads on one engine raced the engine
+diagnostic's `RefCell` flag in `compile_session` and `last_error`, and `engine_destroy` could free
+the engine under a running compile. Now every destroy goes through one rule,
+`HandleClaim::claim_for_destroy`: it claims the handle's word and never releases it, then frees; one that finds
+the word claimed frees nothing and returns, as `session_destroy` already did. The handle stays live
+and valid, the call in flight and every later call proceed normally, and a later quiescent destroy
+frees it; a host that never destroys it again leaks it. The plan destroy claims `render_busy`, so it
+excludes the two render-side calls only: the any-thread plan queries (`plan_resources`,
+`plan_watermark`, `last_error`) take no claim, and a destroy overlapping one of them stays the
+host's to prevent, as does a call that starts after a successful destroy. The engine gains a
+`busy` word (`Engine` is opaque and not charged to `capi_retained_bytes`, so no budget moves):
+`compile_session` claims it right after the handle check and holds it for the whole compile, and
+`last_error` on an engine claims it; a call that finds it claimed touches no engine state, writes
+neither diagnostic nor bytes output and returns `BUSY`, except that a refused compile writes null
+into both handle outputs, which every compile rejection does before its first check. Only a host
+that breaks the engine's or the plan's thread rule sees any of this. The gates: `capi`
+`ffi::tests::a_plan_destroy_while_a_render_side_call_holds_the_plan_frees_nothing` (with the
+render claim held, the destroy disposes of nothing; released, the plan renders and a quiescent
+destroy frees it), `ffi::tests::an_engine_call_while_another_holds_the_engine_is_refused_not_raced`
+(with the engine claim held, both engine calls return `BUSY` and write no diagnostic or output,
+and the destroy frees no allocation; released, the diagnostic is the holder's and a destroy frees
+the engine), and the loom model `ffi::tests::handle_claim_loom::destroy_racing_a_call_loom` on the
+same leg (a destroy racing one call: no call reaches freed state, a refused destroy leaves the
+handle valid for a later one, and a freed handle's word stays claimed).
+
 A plain session seek is a declared discontinuity; the engine declares it in the same call, and a
 refused seek declares nothing (root ruling B16-R9). `control_plane::SessionState::session_seek`,
 the one function behind both hosts, runs the service step, checks every consumer

@@ -313,8 +313,8 @@ const CASES: [GlideCase; 2] = [
         samples: 64,
         change: GLIDE_FRAME + BLOCK,
     },
-    // Longer than the 64-sample parameter ramp, and crossed by one: the bank's ramp clock must
-    // keep covering the glide when the range span reloads it.
+    // Longer than the 64-sample parameter ramp, and crossed by one: the block's ramping prefix
+    // must keep covering the glide when the range span restarts a parameter ramp.
     GlideCase {
         samples: 4_800,
         change: 4_800,

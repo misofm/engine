@@ -3,7 +3,7 @@
 //! One cohort former, over whole rack chains: see [`bind_rack_banks`] (#96 F1, #99 F3).
 
 use super::*;
-use crate::ids::{AsProjected, EffectInputs, PreparedEffectIndex, diag, prepared_effect_node};
+use crate::ids::{AsProjected, EffectInputs, EffectNodeIds, PreparedEffectIndex, diag};
 use rack_compiler::CohortPoolClass;
 
 /// The `RackLocation` a graph rack id addresses.
@@ -166,7 +166,7 @@ pub(crate) const fn min_padded_insert_members(width: BankWidth) -> usize {
 pub(crate) fn bind_rack_banks_indexed(
     effects: &EffectPreparedSession,
     prepared: &PreparedEffectIndex<'_>,
-    ids: &[Option<EffectNodeId>],
+    ids: &EffectNodeIds,
     levels: &[DependencyLevel],
     dispatch: Backend,
     classes: &mut SessionPoolClasses,
@@ -193,7 +193,7 @@ pub(crate) fn bind_rack_banks_indexed(
 pub(crate) fn rack_chains<E: AsProjected>(
     effects: &EffectInputs<'_, E>,
     prepared: &PreparedEffectIndex<'_>,
-    ids: &[Option<EffectNodeId>],
+    ids: &EffectNodeIds,
 ) -> Result<RackChains, GraphDiagnostic> {
     let model = effects.session.normalized_model();
     // One chain per (track, bankable rack), in session slot order.
@@ -233,17 +233,11 @@ pub(crate) fn rack_chains<E: AsProjected>(
                 let Some(slot) = prepared.get(key.0, key.1, key.2) else {
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };
-                let Some(entry) = effects.entry(slot.index()) else {
-                    return Err(diag("graph.internal.invariant", "$.effects"));
-                };
-                let Some(node) = prepared_effect_node(ids, slot) else {
-                    return Err(diag("graph.internal.invariant", "$.effects"));
-                };
-                nodes.push(node.clone());
+                nodes.push(ids.get(slot).clone());
                 // Issue #1087: a lowered session bypass is not in this key -- preparation turned
                 // it into shunt state -- so a bypassed track keeps its cohort. A bypass that stays
                 // prepared (the multiband's, issue #1100, and the delay's) is in the key.
-                slots.push(entry.metadata.program_key());
+                slots.push(effects.at(slot).metadata.program_key());
             }
             programs.insert(chain.clone(), RackProgram::new(location, slots));
             chains.insert(chain, nodes);
@@ -272,7 +266,7 @@ pub(crate) type RackChains = (
 pub(crate) fn plan_rack_banks_placed<E: AsProjected>(
     effects: &EffectInputs<'_, E>,
     prepared: &PreparedEffectIndex<'_>,
-    ids: &[Option<EffectNodeId>],
+    ids: &EffectNodeIds,
     levels: &[DependencyLevel],
     placement: &PlacementLevels,
     dispatch: Backend,
@@ -1536,23 +1530,19 @@ fn unbanked_console_slot(
 /// [`unbanked_console_slot`] sees only the chains the walk collected, so a walk that skipped a
 /// strip's console racks would leave those slots per node with no refusal. This takes the console
 /// population from the prepared entries instead and refuses a missing one with the same
-/// `console.slot.unbanked` spelling. A prepared entry with no node, or a node with no level, is
-/// `graph.internal.invariant`.
+/// `console.slot.unbanked` spelling. A node with no level is `graph.internal.invariant`.
 fn uncollected_console_slot<E: AsProjected>(
     effects: &EffectInputs<'_, E>,
-    ids: &[Option<EffectNodeId>],
+    ids: &EffectNodeIds,
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
     level_by_node: &BTreeMap<&EffectNodeId, u64>,
     classes: &SessionPoolClasses,
 ) -> Option<GraphDiagnostic> {
     let collected: BTreeSet<&EffectNodeId> = chains.values().flatten().collect();
-    for (index, entry) in effects.iter().enumerate() {
+    for (entry, node) in effects.iter().zip(ids.iter()) {
         if !is_console_rack(rack_location(crate::ids::rack_id(entry.rack))) {
             continue;
         }
-        let Some(node) = ids.get(index).and_then(Option::as_ref) else {
-            return Some(diag("graph.internal.invariant", "$.effects"));
-        };
         if collected.contains(node) {
             continue;
         }

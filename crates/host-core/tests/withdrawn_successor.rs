@@ -1064,7 +1064,9 @@ fn reverted_owner_carries_from_p0(a_model: SessionModel, backend: Backend) {
     let mut replacement = successor_of(&b, &base, &p0.model, backend);
     commit(&mut replacement);
     replacement.sources.adopt_persisting(&mut withdrawn.sources);
-    running.sources.adopt_persisting(&mut withdrawn.sources);
+    running
+        .sources
+        .reclaim_from_withdrawn(&mut withdrawn.sources);
     assert_eq!(
         replacement.restarted_strips(),
         [Box::<str>::from("t2")],
