@@ -112,7 +112,9 @@ copy.
   with no check that other banks decline; and the spec did not say that `RightSpan` subsumes
   `Dual`. Every row added in attempt 3 was confirmed by mutation, and dropping the `Maximum` rows
   was judged justified.
-- **Attempt 4**: below. The writer-by-argument table there replaces attempt 3's.
+- **Attempt 4** (`cf66e2285`): **PASS**, with two MINOR findings folded in afterwards (below):
+  delete the `Dual` row, which `RightSpan` subsumes; and record the reviewer's harsher check of
+  the equivalences. The writer-by-argument table in the attempt-4 evidence replaces attempt 3's.
 
 ## Evidence (attempt 1)
 
@@ -338,8 +340,8 @@ only `crates/effect-compiler/tests/collapse_dual_entry.rs` and this spec did.
   - `RightTarget` applies exactly when the effect prepares targets.
   - A bank outside `DIRECT_LANE_PATHS` must answer `None` to `copy_lane_from` and `false` to
     `swap_lanes_direct`.
-- **`RightSpan` subsumes `Dual`.** Any defect `Dual` catches also turns `RightSpan` red. `Dual`
-  stays for a clearer failure message: it names a plain dual entry, not a span.
+- **`RightSpan` subsumes `Dual`.** Any defect `Dual` catches also turns `RightSpan` red. The
+  attempt-4 review folded `Dual` into `RightSpan` (below).
 
 **Every `&mut self` entry of the nine `PreparedNativeEffectBank` impls, and every argument kind.**
 "Mutated" lists the banks whose entry copy was deleted, one at a time (tree restored and touched
@@ -347,7 +349,7 @@ after each), with every one going red on the named row. Attempt numbers are in b
 
 | entry, argument | row that turns red, or why the copy is an equivalent mutant | mutated |
 |---|---|---|
-| `process_bank`, no spans | `Dual` | compressor, gate, limiter, EQ (attempts 1-2) |
+| `process_bank`, no spans | `RightSpan`, which folds the former `Dual` row (a bank that skips the copy fails at block 8 whether or not the span moved) | compressor, gate, limiter, EQ (attempts 1-2, on `Dual`) |
 | `process_bank`, a `Right` (or `Left`) span | `RightSpan`. A copy after the automation writes the left channel's words over the right channel's. | compressor (2); 7 of 7 on attempt 1's code |
 | `process_bank`, a `Both` span | equivalent: it writes both channels alike | -- |
 | `process_bank_mono` | engages the record; it is not a writer that needs the copy | -- |
@@ -379,3 +381,21 @@ multiband `reset` as equivalent. It is not: with defaults prepared apart, it is 
 - `scripts/check-workspace-policy.sh`: ok.
 - `realtime_policy`: ok.
 - No effect crate was touched, so their lib tests stand from attempt 2.
+
+## After the attempt-4 PASS: the two MINOR findings
+
+- **The `Dual` row is deleted.** `RightSpan` subsumes it. AGENTS.md says a fold deletes every test
+  it makes useless. The clearer failure message lives on as a comment on `Boundary::RightSpan`: a
+  bank that skips the copy fails there at block 8, on its right plane or payload.
+- **The equivalences hold under a harsher setup.** The reviewer added a symmetric Left+Right span
+  pair on collapsed block 5, so ramps could still be in flight at the boundary.
+  - The copy was then made to run only for `FullToDefaults`: on `reset` in all nine banks, and on
+    `reset_lane` in the compressor, gate and limiter. Everything stayed green, so the DKP
+    `reset`/`reset_lane` equivalence holds with ramps in flight.
+  - Deleting the `retarget_link` copy in the compressor, limiter, multiband and gate also stayed
+    green.
+  - These were the reviewer's runs; this attempt did not repeat them.
+- `origin/main` had not moved (the merge was a no-op). Run once on this head:
+  `cargo test --locked -p effect-compiler --test collapse_dual_entry`, clippy `-D warnings` on
+  effect-compiler, `cargo fmt --check` and `scripts/check-workspace-policy.sh`: all green (10 tests
+  pass; workspace policy ok).

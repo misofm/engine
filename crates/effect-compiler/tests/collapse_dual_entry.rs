@@ -204,10 +204,12 @@ struct Observed {
 /// enter on live state.
 #[derive(Clone, Copy, Debug)]
 enum Boundary {
-    /// Nothing: the first dual block is entered collapsed.
-    Dual,
-    /// The first dual block carries a right-channel span on every lane, which the block applies
-    /// before it renders: the copy must land before the automation, not over it.
+    /// The first dual block, entered collapsed, carries a right-channel span on every lane, which
+    /// the block applies before it renders: the copy must land before the automation, not over it.
+    ///
+    /// This row also stands for the plain dual entry. A bank that skips the copy fails here at
+    /// block 8 on its right plane or payload; one that copies after the automation fails here
+    /// alone, on the lanes the span moved.
     RightSpan,
     /// Lane 0 is restored from a payload whose channels differ before the first dual block: the
     /// copy must land before the restore, not over it at the next dual entry.
@@ -361,7 +363,6 @@ fn check(effect: &str) {
     };
     let lanes = width.lanes() as usize;
     for boundary in [
-        Boundary::Dual,
         Boundary::RightSpan,
         Boundary::Restore,
         Boundary::CopyLane,
@@ -498,7 +499,7 @@ fn check_case(
         }
         Boundary::ResetToDefaults | Boundary::ResetLaneToDefaults => asymmetric.is_some(),
         Boundary::RightTarget => !targets.is_empty(),
-        Boundary::Dual | Boundary::RightSpan | Boundary::Restore => true,
+        Boundary::RightSpan | Boundary::Restore => true,
     };
     if matches!(boundary, Boundary::RightTarget) {
         assert_eq!(
@@ -576,7 +577,6 @@ fn check_case(
             if index == COLLAPSED {
                 frozen = payloads(&*bank, lanes, sizes);
                 match boundary {
-                    Boundary::Dual => {}
                     Boundary::RightSpan => automation = (&spans, &span_offsets),
                     Boundary::Restore => {
                         let (common, rest) = donor.split_at(sizes.common_bytes as usize);
