@@ -4960,10 +4960,14 @@ impl BankChain {
     /// may collapse at once; one that took a lane from a chain whose channels had been driven
     /// apart waits for a proof ([`BankStage::channels_agree`]), as that chain would have.
     ///
-    /// A successor inherits before it renders, so it is never collapsed here. Were it, the
-    /// disengage boundary is taken first, so the chain and its prefix stages leave
-    /// `CollapseMode::Collapsed` together.
+    /// A successor inherits before it renders, so it is never collapsed here: a debug build
+    /// asserts it. Were it, the disengage boundary is taken first, so the chain and its prefix
+    /// stages leave `CollapseMode::Collapsed` together.
     pub fn inherit_channel_agreement(&mut self, agree: bool) {
+        debug_assert!(
+            self.mode != CollapseMode::Collapsed,
+            "a successor inherits before it renders"
+        );
         if !agree {
             self.disengage_collapse();
             self.mode = CollapseMode::Diverged;

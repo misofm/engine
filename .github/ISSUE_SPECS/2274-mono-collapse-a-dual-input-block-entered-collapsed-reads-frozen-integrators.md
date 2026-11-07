@@ -18,7 +18,7 @@ The mono-collapse phase lives in two places.
   reset, a plan swap or carry, a lane swap, an import, a skip).
 - Model the chain's phase as one `CollapseMode`, so the illegal combination cannot be represented
   and `Collapsed` has one exit, the one that desymmetrizes every prefix stage.
-- The input stage owns its own transitions: every way out of `collapsed` leaves both channels
+- The input stage owns its collapse on every entry: every way out of `collapsed` leaves both channels
   holding the counterfactual dual run's state, whatever order a caller uses.
 - No rendered bit moves, banked or per-node, collapsed or not.
 
@@ -36,7 +36,7 @@ combination of them is legal); the fader parts of `crates/builtins/src/lib.rs` (
   `host-core`; clippy `-D warnings`; `cargo fmt --check`; `scripts/check-workspace-policy.sh`; the
   realtime policy tool.
 
-## Evidence (attempt 1)
+## Evidence
 
 Base is `de0878e23`; line numbers below are base lines.
 
@@ -63,75 +63,151 @@ call `disengage_collapse` (`4655`) first, which calls `desymmetrize` on every pr
 - *Errors.* A prefix slot that errors in `process_mono` leaves the chain collapsed, so the next
   block still disengages every prefix slot.
 
-**Reachable through the bank's public surface.** `BuiltinInputBank::process_mono` followed by
-`process` without `desymmetrize` renders the right plane from frozen integrators in release, and is
-a `debug_assert!` panic in debug. Reset never cleared the flag either, but that is not observable
-once the dual body takes the disengage itself: reset writes `+0.0` and one silence count on both
-channels, so a stage left collapsed after a reset is a collapsed stage whose channels already agree.
+**Reachable through the bank's public surface.** Each of these misbehaves on base:
+- `BuiltinInputBank::process_mono` and then `process` without `desymmetrize`: the right plane is
+  rendered from frozen integrators in release, and a `debug_assert!` panics in debug.
+- `process_mono`, then `import_lane`, then `process`: base panics on that assertion. Attempt 1's
+  self-heal then copied left over the imported lane's right channel.
+- `process_mono`, then `reset`, then `advance_clocks`: the stage stayed collapsed, so the skipped
+  block advanced channel `0`'s silence counter alone.
+- `export_lane` and `channels_agree` on a collapsed bank: they read channel `1`'s frozen integrators
+  and silence counter.
 
-**Model chosen.**
-- *Chain:* `enum CollapseMode { Agreeing, Diverged, Collapsed }` replaces `collapsed` and
-  `collapse_channels_agree`, so the illegal combination cannot be represented and the
-  `debug_assert!` plus its redundant assignment go. `disengage_collapse` is now the only exit from
-  `Collapsed`: it is a no-op unless collapsed, desymmetrizes every prefix stage, and then sets
-  `Agreeing`. `disengage_for_carry` is that call. `inherit_channel_agreement(false)` now disengages
-  before it records `Diverged`, so a hypothetical collapsed successor cannot leave the chain
-  `Diverged` over collapsed stages (on base it was an unrepresented illegal combination that a later
-  disengage silently reset to "agree"). A successor inherits before it renders, so this is
-  unreachable today. The public accessors (`is_collapsed`, `collapse_channels_agree`,
-  `carried_channel_agreement`) keep their meaning and stay `const`.
-- *Stage:* the input stage owns its own way out. `InputStage::process` entered collapsed takes the
-  disengage copy (`desymmetrize`) before its body, which replaces the `debug_assert!`. From the
-  chain this is one untaken branch per bank per block: the chain has always copied first.
-  `reset_with_kind` clears the flag, so it always describes the state. The SIMD lane words are
-  unchanged.
+**Model.**
+- *Chain:*
+  - `enum CollapseMode { Agreeing, Diverged, Collapsed }` replaces `collapsed` and
+    `collapse_channels_agree`. The illegal combination cannot be represented, so its
+    `debug_assert!` and the redundant assignment are gone.
+  - `disengage_collapse` is the only exit from `Collapsed`. It does nothing unless collapsed,
+    desymmetrizes every prefix stage, then sets `Agreeing`. `disengage_for_carry` is that call.
+  - `inherit_channel_agreement` now `debug_assert!`s that the chain is not `Collapsed`, because a
+    successor inherits before it renders. In release a collapsed chain disengages before it records
+    `Diverged`, so the chain and its stages leave `Collapsed` together. On base this combination
+    was unrepresented, and a later disengage silently reset it to "agree".
+  - The public accessors (`is_collapsed`, `collapse_channels_agree`, `carried_channel_agreement`)
+    keep their meaning and stay `const`.
+- *Input stage:* it owns its collapse on every entry.
+  - The two `&mut` entries that treat channel `1`'s retained state as real take the disengage copy
+    (`desymmetrize`) first: `process`, which replaces the `debug_assert!`, and `import_lane`, which
+    must take the copy *before* it writes the imported lane.
+  - The two `&self` readers, `export_lane` and `channels_agree`, answer channel `1`'s integrators
+    and silence counter from `live_state_channel`. That is the counterfactual dual state, the same
+    rule `lanes_at_rest`, `advance_clocks`, the elision plan and the filter retarget's predicate
+    already followed.
+  - `swap_lanes` drops its two `debug_assert!`s and needs nothing more: its exports answer
+    counterfactually, and its first import on each stage disengages it.
+  - `reset_with_kind` clears the flag.
+  - The SIMD lane words are unchanged.
 
-**Red/green.** `a_desymmetrized_bank_is_a_never_collapsed_bank` (`crates/builtins/tests/mono_collapse.rs`)
-gains a second arm (`explicit = false`) that goes from collapsed blocks straight to the dual body.
-On base it fails in debug with
-`a dual block after a collapsed one needs the disengage copy first (desymmetrize)`, and in release
-(`cargo test --release -p builtins --test mono_collapse`) with
-`width=4 explicit=false block=4 word=1: right plane  left: 3135754338  right: 1027169682`. Head
-passes, debug and release. Test value: the new arm turns red if a dual block entered collapsed
-renders the right channel from the integrators the collapse froze. No existing test reaches the
-dual body without the explicit `desymmetrize`. A dedicated reset test was written and then deleted:
-it stayed green with the reset line reverted (the dual body's own disengage covers it), so it
-caught nothing unique.
+**Every `BuiltinInputBank` entry that touches per-channel state, collapsed.** "Mirrored" means
+`process_mono` copies the record onto channel `1` at the bottom of every collapsed block (the trim
+ramp, `coef.trim`, the filter coefficient, target, step and countdown records). "Frozen" means
+channel `1`'s integrators and silence counter.
 
-**Mutations (head).**
-- Drop `self.desymmetrize()` from `InputStage::process`: the new arm fails (`explicit=false block=4
-  word=1: right plane`).
-- Drop `self.collapsed = false` from `reset_with_kind`: every test stays green, as argued above. The
-  line keeps the flag truthful; it has no observable effect.
-- Make `disengage_collapse` leave the chain `Diverged`: three `rack` `mono_reengage` tests fail
-  (transitions `[1, 1, 1]` against `[1, 1, 0]`). That test's stale red-mutation note named the
-  deleted assignment and is updated.
-- Make `run` leave `Collapsed` without `disengage_collapse`: `rack`'s
-  `disengaging_copies_the_prefixs_state_once` and
-  `stage_witness_bank_entire_armed_decision_publishes_once_even_when_declining` fail, as does
-  `builtins-compiler`'s `actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input`.
+| Entry | Collapsed behaviour | Correct because |
+|---|---|---|
+| `process` | disengage copy, then the dual body | the copy writes the counterfactual right state |
+| `process_mono` | stays collapsed | precondition: dispatched under the symmetric witness (debug-asserted) |
+| `desymmetrize` | copies frozen state left to right, clears | is the disengage |
+| `reset` | writes both channels, clears | one state on both channels |
+| `lanes_at_rest` | reads channel `0`'s integrators | counterfactual |
+| `advance_clocks` | advances channel `0`'s silence counter | counterfactual; the copy overwrites the frozen one |
+| `channels_agree` | frozen words read from channel `0`; mirrored words raw | counterfactual |
+| `export_lane` | frozen words read from channel `0`; mirrored words raw | counterfactual |
+| `import_lane` | disengage copy, then writes the lane | the imported right channel is not overwritten afterwards |
+| `swap_lanes` | export, then import, on each stage | from the two rows above |
+| `apply_prepared_filter` | rule-3 predicate via `live_state_channel`; writes per-channel targets | targets are not frozen; a one-channel write declines the witness |
+| `set_trim_db`, `set_polarity_invert` | write per-channel ramp records | not frozen; the disengage copy deliberately leaves the ramp (`a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy`) |
+| `trim_signed`, `lane_symmetry`, `copy_response_snapshot_lane` | read mirrored words | mirrored |
+| `new`, `backend`, `width`, `active_lanes`, `supports_mono_collapse`, `can_swap_lanes` | no per-channel retained state | n/a |
+| `test_support` readers and `set_bank_lane_state_words` | raw retained words, documented as raw | evidence and fault-injection hooks only |
 
-**No bit moved.** Three scratch dumps, never committed, were run at base and at head (release,
-AVX2), with only `crates/rack/src/lib.rs` and `crates/builtins/src/lib.rs` swapped between runs:
-- A scratch host-core test rendering 7 documents (mono-mapped EQ bank, builtins only, symmetric
-  and asymmetric EQs, symmetric and asymmetric per-node delay, misaligned cohorts) at `Simd8`,
-  `Simd4` (only the builtins-only document prepares there; the console slot refuses a foreign width)
-  and `Scalar` (per-node), under four live-write schedules (none, `Both` trim rides, a `Left` trim
-  later equalised, a `Left` polarity flip). Each ran armed and forced off over 64 blocks, with 36
-  silent blocks to reach the silent skip. That is 168 rendered cases: 2,650 collapsed blocks,
-  5,506 skipped blocks and 16 cases with disengages. An FNV-1a hash of every output bit, plus the
-  collapse counters, transitions and skips, was identical in all 208 lines.
-- `host-core/tests/randomized.rs`'s armed-against-dual differential at
-  `MISO_ENGINE_RANDOMIZED_SCALE=4` (48 seeds, 384 blocks), hashing both arms' outputs per block:
-  identical.
-- `host-core/tests/successor_swap.rs` (125 tests, every plan swap and carry gate), hashing every
-  block rendered through its `render` helper: 12,903 block hashes over 56 tests, identical.
+`InputBuiltins` (the scalar per-node section) has no `process_mono` and never collapses.
 
-**Gates (head).**
+**What still guards the chain.** The chain could, in principle, leave `Collapsed` without
+disengaging. The input stage's self-heal now masks that at audio level for the input stage. What
+still catches it is `rack`'s own tests (`disengaging_copies_the_prefixs_state_once`,
+`stage_witness_bank_entire_armed_decision_publishes_once_even_when_declining`, the `mono_reengage`
+`bank_collapse_transitions()`/`collapse_transitions()` asserts) and `builtins-compiler`'s
+`actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input`. An effect
+stage in the prefix (FX-4) would still render wrong. This is the trade for making the input stage
+correct under every caller order.
+
+**Tests** (`crates/builtins/tests/mono_collapse.rs`). Base results are at `de0878e23`. Attempt-1
+results are at `d1f31d4c5`.
+- `a_desymmetrized_bank_is_a_never_collapsed_bank`, new arm `explicit = false`: collapsed blocks
+  straight into the dual body.
+  - Base, debug: `a dual block after a collapsed one needs the disengage copy first (desymmetrize)`.
+  - Base, release: `width=4 explicit=false block=4 word=1: right plane left: 3135754338 right: 1027169682`.
+  - Test value: red if a dual block entered collapsed renders the right channel from frozen
+    integrators.
+- `an_import_into_a_collapsed_bank_keeps_the_imported_right_channel`, the reviewer's probe:
+  - Base, debug: the same assertion panic. Base, release: `width=4 word=1` mismatch.
+  - Attempt 1: `width=4 word=0`.
+  - Test value: red if a disengage copy taken after an import overwrites the imported lane's right
+    channel.
+- `a_reset_bank_forgets_its_collapse`, the reviewer's probe plus a retained-silence assertion:
+  - Base: `channels_agree` is `false` against the reference's `true` (`width=4`).
+  - Test value: red if a reset leaves the stage collapsed, so the next skipped block advances
+    channel `0`'s silence clock alone.
+- `a_collapsed_bank_exports_the_dual_runs_state`, new:
+  - Base and attempt 1: `width=4: channels_agree`.
+  - Test value: red if `export_lane` or `channels_agree` reads the frozen right integrators or
+    silence counter. A carry that reached a collapsed bank would then hand a successor stale state,
+    or the proof would refuse agreeing channels.
+
+**Mutations (head).** Each is red in exactly one test:
+| Mutation | Red test |
+|---|---|
+| Drop `process`'s disengage | `a_desymmetrized_bank_is_a_never_collapsed_bank` (`explicit=false block=4 word=1: right plane`) |
+| Drop `import_lane`'s disengage | `an_import_into_a_collapsed_bank_keeps_the_imported_right_channel` (`width=4 word=0`) |
+| Drop `reset_with_kind`'s clear | `a_reset_bank_forgets_its_collapse` (`the retained silence counters`) |
+| `channels_agree`: read channel `1`'s integrators raw | `a_collapsed_bank_exports_the_dual_runs_state` (`channels_agree`) |
+| `channels_agree`: read channel `1`'s silence counter raw | `a_collapsed_bank_exports_the_dual_runs_state` (`channels_agree`) |
+| `export_lane`: read channel `1`'s integrators raw | `a_collapsed_bank_exports_the_dual_runs_state` (`the exported lane`) |
+| `export_lane`: read channel `1`'s silence counter raw | `a_collapsed_bank_exports_the_dual_runs_state` (`the exported lane`). This was green until that test also rendered a silent collapsed tail. |
+| `disengage_collapse` leaves `Diverged` | three `rack` `mono_reengage` tests (`[1, 1, 1]` against `[1, 1, 0]`) |
+| `run` leaves `Collapsed` without `disengage_collapse` | two `rack` unit tests and one `builtins-compiler` test (listed above) |
+
+With the counterfactual readers in place, the reset clear is visible through the public engine
+surface only through the clock it leaves behind. The reset test therefore pins it with the
+retained-silence assertion (`test_support::bank_lane_silence_words`) as well as `channels_agree`
+and the export. Its `channels_agree` and export assertions alone stay green with the clear
+reverted, because a stage wrongly left collapsed after a reset answers them counterfactually.
+
+**No bit moved.** Three scratch dumps were run at base `de0878e23` and at head. They were never
+committed, and only `crates/rack/src/lib.rs` and `crates/builtins/src/lib.rs` differed between the
+runs. All are release builds on AVX2.
+- *A scratch host-core matrix.*
+  - 7 documents: a mono-mapped EQ bank, builtins only, symmetric and asymmetric EQs, symmetric
+    and asymmetric per-node delay, and misaligned cohorts.
+  - 3 backends: `Simd8`, `Simd4` and `Scalar` (per-node).
+  - 4 live-write schedules: none, `Both` trim rides, a `Left` trim later equalised, and a `Left`
+    polarity flip.
+  - Each case ran armed and forced off over 64 blocks, 36 of them silent, so it reached the silent
+    skip.
+  - That is 168 cases: 128 rendered and 40 refused at prepare (`console.slot.foreign_width`).
+  - At `Simd4` only the builtins-only and misaligned documents prepare; the other five put an EQ
+    console slot at a foreign width.
+  - The rendered cases cover 2,650 collapsed blocks, 5,506 skipped blocks and 16 cases with
+    disengages.
+  - Every line is identical at base and head: an FNV-1a hash of every output bit, the collapse
+    counters, the transitions and the skips (or the refusal).
+- *`host-core/tests/randomized.rs`*, armed against dual at `MISO_ENGINE_RANDOMIZED_SCALE=4`: 48
+  seeds, 384 blocks, both arms hashed per block. Identical.
+- *`host-core/tests/successor_swap.rs`*, every block rendered through its `render` helper: 12,903
+  block hashes over 56 tests. Identical.
+
+Attempt 1 miscounted the matrix as 168 rendered cases, because each refusal's diagnostic spans two
+lines. Attempt 2 re-ran all three dumps at its own builtins and rack changes (head before the spec
+commit) against the same base dumps. All three are identical: 208 matrix lines, 384 randomized
+blocks and 12,903 swap block hashes.
+
+**Gates (attempt-2 head).**
 - `cargo test --locked -p builtins -p rack -p builtins-compiler -p graph -p host-core`: 100 test
-  binaries, all pass; the same with `host-core/test-support`, `graph/test-support`,
+  binaries, all pass. The same with `host-core/test-support`, `graph/test-support`,
   `builtins-compiler/test-support` and `builtins/test-support`: 100 binaries, all pass.
-- `cargo test --locked --release -p builtins --test mono_collapse`: pass.
+- `cargo test --locked --release -p builtins --test mono_collapse`: 6 pass.
 - `cargo clippy --locked -p rack -p builtins -p builtins-compiler -p graph -p host-core
   --all-targets -- -D warnings`, with and without those features: clean.
 - `cargo fmt --check`: clean. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p rack -p builtins`:
@@ -139,9 +215,22 @@ AVX2), with only `crates/rack/src/lib.rs` and `crates/builtins/src/lib.rs` swapp
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `./target/release/realtime_policy`: `realtime policy: ok (292 marked regions in 46 files)`.
 
-**Follow-ups (not this issue).**
+## Attempt record
+- **Attempt 1** (`d1f31d4c5`): FAIL, two MAJORs.
+  - The self-heal in `process` silently dropped an imported lane's right channel when an import
+    landed between `process_mono` and `process`.
+  - The reset clear was claimed unobservable, but `advance_clocks` after a reset left the right
+    silence clock behind, and `channels_agree`/`export_lane` read it.
+  - Three MINORs: record the remaining tripwire; assert the unreachable inherit precondition;
+    correct the no-bit-moved counts (attempt 1 reported 168 rendered cases; 128 rendered, 40
+    refused).
+  - The reviewer found the rack half sound and the chain reachability proof complete.
+- **Attempt 2:** the input stage owns its collapse on every entry (import, export,
+  `channels_agree`, swap), plus the reviewer's two probes, a collapsed-export test, the inherit
+  `debug_assert!`, the entry table above, and re-run dumps.
+
+## Follow-ups (not this issue)
 - FX-4: each native effect crate's `collapsed` mirror (parametric-eq, gate-expander,
   transient-shaper, soft-clip, de-esser, multiband-compressor, dynamic-eq, compressor) is cleared
-  only by its `desymmetrize`. Their resets and dual bodies should get the same ownership.
-- The input stage's lane export and `channels_agree` still read channel `1` directly, and are
-  proven unreached while collapsed. A stage-owned answer there would finish the job.
+  only by its `desymmetrize`. Their resets, imports, exports and dual bodies should get the same
+  ownership.
