@@ -974,11 +974,9 @@ struct ControlHalf {
     /// The structural commands this instance's control half ran in place of its render half
     /// (#1290a D6), saturating: a rebuild's preparation and publication run on the thread that
     /// also renders, so each one is a blocking rebuild, counted and reported. A rebuild published
-    /// while the render half renders on another thread (#1332 S6) blocks nothing and counts nothing.
+    /// while the render half renders on another thread (#1332 S6) blocks nothing and counts nothing:
+    /// the host's [`RenderSlot`] says which, and each call that may publish is told (#2332).
     blocking_rebuilds: u32,
-    /// Whether the render half is on this thread (#1332 S6): `false` from a release to the
-    /// adoption back.
-    render_here: bool,
     /// The writer of the newest committed plan's own words (#1332 S5, [`PlanShape::words`]):
     /// the boot plan's, then each published replacement's, which its preparation left.
     plan_words: PublishedWordsWriter<2>,
@@ -1032,7 +1030,9 @@ impl ControlHalf {
     /// its successor in place (#1597), which the first block then renders with no swap.
     ///
     /// With the render half on another thread (#1332 S5) there is no plan to lend: the command
-    /// runs as the C ABI's does, and the S6 Worker routes the two commands that need the plan.
+    /// runs as the C ABI's does, and the S6 Worker routes the two commands that need the plan. The
+    /// plan is lent exactly when the render half is here, so `plan` also says whether a rebuild it
+    /// publishes blocked this thread (#2332).
     fn run_command(
         &mut self,
         plan: Option<&mut WebPlan>,
@@ -1048,18 +1048,22 @@ impl ControlHalf {
             .get(..request_len)
             .ok_or(control_plane::CommandError::Invalid)?;
         let before = control.newest_plan_epoch();
+        let render_here = plan.is_some();
         let result = match plan {
             Some(plan) => control.command_with_plan(request, document, output_capacity, plan),
             None => control.command_with_document(request, document, output_capacity),
         };
-        self.after_control(before, result)
+        self.after_control(before, result, render_here)
     }
 
     /// Declare a discontinuity through the control plane (#1323), the function the C ABI's
     /// `miso_engine_v1_declare_discontinuity` runs. A plan it publishes is counted as
-    /// [`Self::run_command`] counts a rebuild.
-    fn declare_discontinuity(&mut self) -> Result<(), control_plane::CommandError> {
-        self.run_control(WebSession::declare_discontinuity)
+    /// [`Self::run_command`] counts a rebuild, when `render_here` (the host's [`RenderSlot`]).
+    fn declare_discontinuity(
+        &mut self,
+        render_here: bool,
+    ) -> Result<(), control_plane::CommandError> {
+        self.run_control(render_here, WebSession::declare_discontinuity)
     }
 
     /// Seek the session through the control plane (#1643 D1): `SessionState::session_seek`, the
@@ -1069,6 +1073,7 @@ impl ControlHalf {
     /// nothing and so publishes nothing.
     fn session_seek(
         &mut self,
+        render_here: bool,
         generation: u64,
         timeline_frame: u64,
         anchor_sample: Option<u64>,
@@ -1079,7 +1084,7 @@ impl ControlHalf {
                 .control
                 .session_seek(generation, timeline_frame, anchor_sample);
         }
-        self.run_control(|control| {
+        self.run_control(render_here, |control| {
             if at_once {
                 control.session_seek_at_once(generation, timeline_frame)
             } else {
@@ -1092,18 +1097,26 @@ impl ControlHalf {
     /// publish the words the render half reads (#1332 S4, S5): when the call published a plan,
     /// the control half keeps that plan's word writer and header address, and after every call
     /// that succeeded it publishes the newest plan's own words and the successor record.
+    /// `render_here` is whether the host's render half is on this thread ([`RenderSlot::Here`]),
+    /// so that a plan the call publishes is a blocking rebuild.
     fn run_control<T, E>(
         &mut self,
+        render_here: bool,
         call: impl FnOnce(&mut WebSession) -> Result<T, E>,
     ) -> Result<T, E> {
         let before = self.control.newest_plan_epoch();
         let result = call(&mut self.control);
-        self.after_control(before, result)
+        self.after_control(before, result, render_here)
     }
 
     /// The bookkeeping of [`Self::run_control`] after its call: `before` is the newest plan epoch
-    /// the call started from.
-    fn after_control<T, E>(&mut self, before: u64, result: Result<T, E>) -> Result<T, E> {
+    /// the call started from, and `render_here` whether the render half is on this thread.
+    fn after_control<T, E>(
+        &mut self,
+        before: u64,
+        result: Result<T, E>,
+        render_here: bool,
+    ) -> Result<T, E> {
         // Whatever the preparer left is taken: a command refused after its preparation leaves an
         // address and a writer nothing will read; the writer drops here, on the control thread.
         let prepared = self
@@ -1123,7 +1136,7 @@ impl ControlHalf {
             let prepared = prepared.expect("a committed rebuild's preparer left the plan's words");
             self.successor_header = prepared.header;
             self.plan_words = prepared.words;
-            if self.render_here {
+            if render_here {
                 self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
             }
         }
@@ -1184,13 +1197,24 @@ struct RenderHalf {
     failure: Option<&'static [u8]>,
     /// What renders the session, from boot until [`AudioWorkletEngineHost::dispose`].
     ready: Option<RenderReady>,
-    /// Whether this is the status shell [`AudioWorkletEngineHost::release_render`] leaves
-    /// (#1332 S5): a render call on it is refused and changes nothing, since the session renders
-    /// elsewhere.
-    released: bool,
     /// Whether the host was prepared with a meter window (issue #137 D2), so the lease is served
     /// (#1332 S6: the render half answers the lease wherever it renders).
     lease_supported: bool,
+}
+
+/// Where a host's render half is (#1332 S6, #2332): on this thread, or released to the thread
+/// that renders it, with the status shell the release left in its place. One discriminant, which
+/// the release and the adoption alone move, so the half and its shell are never both here, and
+/// the host's every call reads where the half is from it.
+enum RenderSlot {
+    /// The render half is here: the render calls run it, and the status is its own.
+    Here(Box<RenderHalf>),
+    /// The render half was released ([`AudioWorkletEngineHost::release_render`]); this is the
+    /// status shell the release left. It starts as the half's status at the release; from then
+    /// on it names the control half's results and the lifecycle state, while the render clock and
+    /// counters stay as they were at the release. A render call on it is refused and changes
+    /// nothing but its last result, since the session renders elsewhere.
+    Away(WebStatus),
 }
 
 /// Everything the render half owns of one prepared session (#1332 S4).
@@ -1283,13 +1307,11 @@ pub struct AudioWorkletEngineHost {
     /// [`Self::dispose`].
     control: Option<ControlHalf>,
     /// The render half (#1332 S4): the status, the staging buffers and the plan owner that
-    /// `render_next` renders through, beside the control half, so the two borrow apart. Boxed
-    /// since #1332 S6, so a release and an adoption exchange two boxes and allocate nothing.
-    render: Box<RenderHalf>,
-    /// The status shell a release leaves in [`Self::render`] (#1332 S6), allocated at boot, so
-    /// [`Self::release_render`] allocates nothing and [`Self::adopt_render`] frees nothing: it is
-    /// here while the render half is, and in the host's `render` slot while the half is away.
-    spare_shell: Option<Box<RenderHalf>>,
+    /// `render_next` renders through, beside the control half, so the two borrow apart; or, while
+    /// it is released, the status shell the release left (#2332). The half is boxed (#1332 S6) and
+    /// the shell is a status inline here, so [`Self::release_render`] moves one box out and
+    /// allocates nothing, and [`Self::adopt_render`] moves it back and frees nothing.
+    render: RenderSlot,
 }
 
 /// What [`AudioWorkletEngineHost::control_response`] reads (issue #1562a D1).
@@ -1441,7 +1463,7 @@ impl AudioWorkletEngineHost {
             seek_report: WebSeekReport::default(),
             control_response: ControlResponse::None,
             control: Some(control),
-            render: Box::new(RenderHalf {
+            render: RenderSlot::Here(Box::new(RenderHalf {
                 status: WebStatus {
                     struct_size: STATUS_BYTES,
                     abi_version: ABI_VERSION,
@@ -1461,10 +1483,8 @@ impl AudioWorkletEngineHost {
                 buffers: Some(buffers),
                 failure: None,
                 ready: Some(ready),
-                released: false,
                 lease_supported,
-            }),
-            spare_shell: Some(Box::new(RenderHalf::shell(lease_supported))),
+            })),
         })
     }
 
@@ -1560,7 +1580,7 @@ impl AudioWorkletEngineHost {
     /// Read fixed status without allocation.
     #[must_use]
     pub const fn status(&self) -> &WebStatus {
-        &self.render.status
+        self.render.status()
     }
 
     /// Read the current exact resource projection.
@@ -1598,8 +1618,7 @@ impl AudioWorkletEngineHost {
     #[cfg(test)]
     pub(crate) fn test_render(&self) -> &RenderReady {
         self.render
-            .ready
-            .as_ref()
+            .ready()
             .expect("a ready host has its render half")
     }
 
@@ -1607,8 +1626,7 @@ impl AudioWorkletEngineHost {
     #[cfg(test)]
     pub(crate) fn test_render_mut(&mut self) -> &mut RenderReady {
         self.render
-            .ready
-            .as_mut()
+            .ready_mut()
             .expect("a ready host has its render half")
     }
 
@@ -1617,18 +1635,18 @@ impl AudioWorkletEngineHost {
     /// support: the tests find a tap's readers through it.
     #[cfg(test)]
     fn observation_index(&self) -> Option<&host_core::observation::ObservationIndex> {
-        let epoch = self.render.ready.as_ref()?.shape_epoch;
+        let epoch = self.render.ready()?.shape_epoch;
         self.control.as_ref()?.control.observation_index(epoch)
     }
 
     /// The render half's plan owner, for the calls that need no render in flight.
     fn plan_mut(&mut self) -> Option<&mut WebPlan> {
-        self.render.ready.as_mut().map(|ready| &mut ready.plan)
+        self.render.ready_mut().map(|ready| &mut ready.plan)
     }
 
     /// The tables of the plan that renders, or `None` for a host with no session.
     fn shape(&self) -> Option<&PlanShape> {
-        self.render.ready.as_ref().map(|ready| &*ready.shape)
+        self.render.ready().map(|ready| &*ready.shape)
     }
 
     /// The observation handle of the effect at dense slot `effect`, from the active plan's
@@ -1664,8 +1682,7 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn active_plan_epoch_for_test(&self) -> Option<u64> {
         self.render
-            .ready
-            .as_ref()
+            .ready()
             .map(|ready| ready.plan.owner().active_epoch().0)
     }
 
@@ -1706,8 +1723,11 @@ impl AudioWorkletEngineHost {
     /// status) do not move.
     #[cfg(feature = "test-support")]
     pub fn render_plan_at_for_test(&mut self, absolute_sample: u64) -> bool {
-        let quantum = self.render.status.quantum_frames as usize;
-        let RenderHalf { buffers, ready, .. } = &mut *self.render;
+        let RenderSlot::Here(half) = &mut self.render else {
+            return false;
+        };
+        let quantum = half.status.quantum_frames as usize;
+        let RenderHalf { buffers, ready, .. } = &mut **half;
         let (Some(ready), Some(buffers)) = (ready.as_mut(), buffers.as_mut()) else {
             return false;
         };
@@ -1782,7 +1802,7 @@ impl AudioWorkletEngineHost {
         };
         // #1332 S5: the render half's plan is lent only while it is here, on this thread.
         let result = control.run_command(
-            self.render.ready.as_mut().map(|ready| &mut ready.plan),
+            self.render.ready_mut().map(|ready| &mut ready.plan),
             len as usize,
             document,
             u64::from(self.control_frame_bytes),
@@ -1820,7 +1840,7 @@ impl AudioWorkletEngineHost {
         let Some(control) = self.control.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let result = control.declare_discontinuity();
+        let result = control.declare_discontinuity(self.render.is_here());
         self.publish_words_here();
         match result {
             Ok(()) => self.record(RESULT_OK),
@@ -2289,8 +2309,7 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn meter_windows(&self) -> u64 {
         self.render
-            .ready
-            .as_ref()
+            .ready()
             .map_or(0, |ready| ready.meters.folded_windows())
     }
 
@@ -2298,8 +2317,7 @@ impl AudioWorkletEngineHost {
     pub(crate) fn meter_poll_work(&mut self) -> (u64, u64) {
         let scans = self
             .render
-            .ready
-            .as_ref()
+            .ready()
             .map_or(0, |ready| ready.meter_effect_scan_count);
         let meters = self
             .plan_mut()
@@ -2320,7 +2338,10 @@ impl AudioWorkletEngineHost {
     /// delivered from the block that adopts them.
     #[must_use]
     pub fn meters_attached(&self) -> bool {
-        self.render.ready.is_some() && self.render.lease_supported
+        match &self.render {
+            RenderSlot::Here(half) => half.ready.is_some() && half.lease_supported,
+            RenderSlot::Away(_) => false,
+        }
     }
 
     /// Take or release the meter lease. Returns the frozen result code.
@@ -2332,7 +2353,10 @@ impl AudioWorkletEngineHost {
     /// The render half's own call (#1332 S6): with the half released, the shell left here refuses
     /// with [`RESULT_WRONG_STATE`].
     pub fn set_meter_lease(&mut self, enabled: bool) -> u32 {
-        let code = self.render.set_meter_lease(enabled);
+        let code = match &mut self.render {
+            RenderSlot::Here(half) => half.set_meter_lease(enabled),
+            RenderSlot::Away(_) => RESULT_WRONG_STATE,
+        };
         self.record(code)
     }
 
@@ -2362,7 +2386,10 @@ impl AudioWorkletEngineHost {
     /// Contiguous dual-mono render output, left plane then right plane.
     #[must_use]
     pub fn output_pcm(&self) -> Option<&[f32]> {
-        self.render.buffers.as_ref().map(|value| &*value.output_pcm)
+        match &self.render {
+            RenderSlot::Here(half) => half.buffers.as_ref().map(|value| &*value.output_pcm),
+            RenderSlot::Away(_) => None,
+        }
     }
 
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
@@ -2521,7 +2548,7 @@ impl AudioWorkletEngineHost {
         let Some(control) = self.control.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let Some(ready) = self.render.ready.as_mut() else {
+        let Some(ready) = self.render.ready_mut() else {
             let code = match control
                 .control
                 .seek_unserviced(source_id, generation, source_frame)
@@ -2636,8 +2663,7 @@ impl AudioWorkletEngineHost {
         // feed can refill the engine's ring before `play()`. A consumer whose ring did not get
         // this seek (a fresh ring of a pending candidate) is not ready and stays as it is; the
         // at-once landing still moves it at its next block.
-        let (Some(control), Some(ready)) = (self.control.as_ref(), self.render.ready.as_mut())
-        else {
+        let (Some(control), Some(ready)) = (self.control.as_ref(), self.render.ready_mut()) else {
             return code;
         };
         let plan = &mut ready.plan;
@@ -2666,7 +2692,13 @@ impl AudioWorkletEngineHost {
         let Some(control) = self.control.as_mut() else {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         };
-        let result = control.session_seek(generation, timeline_frame, anchor_sample, at_once);
+        let result = control.session_seek(
+            self.render.is_here(),
+            generation,
+            timeline_frame,
+            anchor_sample,
+            at_once,
+        );
         self.publish_words_here();
         match result {
             Ok(()) => self.record(RESULT_OK),
@@ -2686,8 +2718,17 @@ impl AudioWorkletEngineHost {
     /// the control half's, the one diagnostic its page reads (#1332 S5): a fixed text into
     /// preallocated storage.
     pub fn render_next(&mut self) -> u32 {
-        let code = self.render.render_next();
-        if let Some(failure) = self.render.failure.take()
+        let half = match &mut self.render {
+            RenderSlot::Here(half) => half,
+            // #1332 S5: the shell a release leaves renders nothing and records no failure, so
+            // the shared lifecycle word and this status cannot disagree.
+            RenderSlot::Away(status) => {
+                status.last_result = RESULT_WRONG_STATE;
+                return RESULT_WRONG_STATE;
+            }
+        };
+        let code = half.render_next();
+        if let Some(failure) = half.failure.take()
             && let Some(control) = self.control.as_mut()
         {
             control.staging.write_diagnostic(failure);
@@ -2708,7 +2749,10 @@ impl AudioWorkletEngineHost {
     /// Allocation-free by construction: it moves `Copy` snapshots out of bounded queues into
     /// buffers allocated at compilation.
     pub fn poll_meters(&mut self) -> u32 {
-        self.render.poll_meters()
+        match &mut self.render {
+            RenderSlot::Here(half) => half.poll_meters(),
+            RenderSlot::Away(_) => 0,
+        }
     }
     // REALTIME_POLICY_END
     pub(crate) fn record_boundary_result(&mut self, code: u32) -> u32 {
@@ -2723,7 +2767,12 @@ impl AudioWorkletEngineHost {
     /// no failure of its own. The status shell a release leaves refuses with
     /// [`RESULT_WRONG_STATE`] too.
     pub fn reject_output_quantum(&mut self, actual_frames: u32) -> u32 {
-        let code = self.render.reject_output_quantum(actual_frames);
+        let code = match &mut self.render {
+            RenderSlot::Here(half) => half.reject_output_quantum(actual_frames),
+            // #2298: the shell a release leaves renders nothing, so it records no failure the
+            // lifecycle word does not have (as `render_next` on it refuses).
+            RenderSlot::Away(_) => RESULT_WRONG_STATE,
+        };
         self.record(code)
     }
 
@@ -2744,10 +2793,12 @@ impl AudioWorkletEngineHost {
             control.lifecycle.dispose();
         }
         self.control = None;
-        self.render.ready = None;
-        self.render.buffers = None;
-        self.render.failure = None;
-        self.render.status.state = STATE_DISPOSED;
+        if let RenderSlot::Here(half) = &mut self.render {
+            half.ready = None;
+            half.buffers = None;
+            half.failure = None;
+        }
+        self.render.status_mut().state = STATE_DISPOSED;
         self.record(RESULT_OK)
     }
 
@@ -2784,20 +2835,26 @@ impl AudioWorkletEngineHost {
     /// back through the hand-back ring, and the staging is the control half's own. `None` when
     /// the render half is not here or no session is prepared.
     ///
-    /// Control path. It allocates nothing (#1332 S6): the status shell it leaves was allocated
-    /// at boot, and the release exchanges two boxes. The shell's status starts as the render
-    /// half's was at the release; from then on it names the control half's results and the
-    /// lifecycle state, while the render clock and counters are in the released half's status.
+    /// Control path. It allocates nothing (#1332 S6, #2332): the half's box moves out, and the
+    /// status shell it leaves is a status inline in the host. The shell's status starts as the
+    /// render half's was at the release; from then on it names the control half's results and
+    /// the lifecycle state, while the render clock and counters are in the released half's
+    /// status.
     pub fn release_render(&mut self) -> Option<RenderHost> {
-        self.render.ready.as_ref()?;
-        // #1332 S6: the shell was allocated at boot; the release exchanges two boxes.
-        let mut shell = self.spare_shell.take()?;
-        shell.status = self.render.status;
-        core::mem::swap(&mut self.render, &mut shell);
-        if let Some(control) = self.control.as_mut() {
-            control.render_here = false;
+        let RenderSlot::Here(half) = &self.render else {
+            return None;
+        };
+        half.ready.as_ref()?;
+        let shell = RenderSlot::Away(half.status);
+        match core::mem::replace(&mut self.render, shell) {
+            RenderSlot::Here(half) => Some(RenderHost { half }),
+            // Checked `Here` above, so never taken; a shell holds a status only, and it is
+            // forgotten, so no drop glue joins the call.
+            away @ RenderSlot::Away(_) => {
+                core::mem::forget(away);
+                None
+            }
         }
-        Some(RenderHost { half: shell })
     }
 
     /// Take back a render half [`Self::release_render`] released (#1332 S5, the Rust form of
@@ -2805,7 +2862,8 @@ impl AudioWorkletEngineHost {
     /// control half, or is not the session the render half renders. A render failure recorded
     /// while it was away becomes this host's diagnostic.
     ///
-    /// It allocates and frees nothing (#1332 S6): the shell goes back to its spare slot.
+    /// It allocates and frees nothing (#1332 S6, #2332): the half's box moves back into the slot,
+    /// and the status shell it displaces is forgotten.
     ///
     /// # Errors
     ///
@@ -2815,31 +2873,25 @@ impl AudioWorkletEngineHost {
             (Some(control), Some(ready)) => Arc::ptr_eq(&control.lifecycle, &ready.lifecycle),
             _ => false,
         };
-        if !ours || self.render.ready.is_some() || self.spare_shell.is_some() {
+        if !ours || self.render.is_here() {
             return Err(render);
         }
         let RenderHost { mut half } = render;
-        core::mem::swap(&mut self.render, &mut half);
-        // `half` is the shell now, and the spare slot is empty (checked above): an exchange, and
-        // the `None` it returns is forgotten, so no drop glue joins the call.
-        let mut slot = Some(half);
-        core::mem::swap(&mut self.spare_shell, &mut slot);
-        core::mem::forget(slot);
-        if let Some(control) = self.control.as_mut() {
-            control.render_here = true;
-        }
-        if let Some(failure) = self.render.failure.take()
+        if let Some(failure) = half.failure.take()
             && let Some(control) = self.control.as_mut()
         {
             control.staging.write_diagnostic(failure);
         }
+        // The slot was checked `Away` above: the shell it held is a status only, and it is
+        // forgotten, so no drop glue joins the call.
+        core::mem::forget(core::mem::replace(&mut self.render, RenderSlot::Here(half)));
         Ok(())
     }
 
     /// Whether the render half is here (#1332 S6): `false` from a release to the adoption back.
     #[must_use]
-    pub fn render_here(&self) -> bool {
-        !self.render.released
+    pub const fn render_here(&self) -> bool {
+        self.render.is_here()
     }
 
     /// The address of the meter header of the newest replacement plan the control half
@@ -2866,7 +2918,7 @@ impl AudioWorkletEngineHost {
     /// them before the next block, as before the split. A render half on another thread reads
     /// them before its next block.
     fn publish_words_here(&mut self) {
-        if let Some(ready) = self.render.ready.as_mut() {
+        if let Some(ready) = self.render.ready_mut() {
             ready.publish_words();
         }
     }
@@ -2875,7 +2927,7 @@ impl AudioWorkletEngineHost {
     /// is not ready (#1332 S5).
     #[cfg(all(test, feature = "test-support"))]
     pub(crate) fn set_state_for_test(&mut self, state: u32) {
-        self.render.status.state = state;
+        self.render.status_mut().state = state;
         if let Some(control) = self.control.as_ref() {
             control.lifecycle.force_for_test(state);
         }
@@ -2891,12 +2943,14 @@ impl AudioWorkletEngineHost {
             control.last_result = code;
             // #1332 S6: with the render half away, the shell's state is the lifecycle word's, so
             // the Worker's status shows a failure of either half.
-            if self.render.released {
-                self.render.status.state = control.lifecycle.state();
+            if let RenderSlot::Away(shell) = &mut self.render {
+                shell.state = control.lifecycle.state();
             }
         }
-        self.render.status.last_result = code;
-        self.render.status.blocking_rebuilds = self.blocking_rebuilds();
+        let blocking_rebuilds = self.blocking_rebuilds();
+        let status = self.render.status_mut();
+        status.last_result = code;
+        status.blocking_rebuilds = blocking_rebuilds;
         code
     }
 
@@ -2926,7 +2980,10 @@ impl AudioWorkletEngineHost {
             return Ending::AlreadyEnded;
         }
         control.staging.write_diagnostic(diagnostic);
-        self.render.silence();
+        match &mut self.render {
+            RenderSlot::Here(half) => half.silence(),
+            RenderSlot::Away(shell) => shell.state = STATE_FAILED,
+        }
         self.record(code);
         Ending::First
     }
@@ -3148,37 +3205,8 @@ impl RenderReady {
 }
 
 impl RenderHalf {
-    /// The status shell a release leaves in the host (#1332 S6), allocated at boot: no session,
-    /// no buffers, `released`. Its status is the render half's, copied at the release.
-    fn shell(lease_supported: bool) -> Self {
-        Self {
-            status: WebStatus {
-                struct_size: STATUS_BYTES,
-                abi_version: ABI_VERSION,
-                state: STATE_READY,
-                last_result: RESULT_OK,
-                backend: 0,
-                sample_rate_hz: 0,
-                quantum_frames: 0,
-                blocking_rebuilds: 0,
-                next_absolute_sample: 0,
-                rendered_quanta: 0,
-                live_values_superseded: 0,
-                watermark_revision: 0,
-                watermark_first_sample: 0,
-                watermark_outcome_flags: 0,
-            },
-            buffers: None,
-            failure: None,
-            ready: None,
-            released: true,
-            lease_supported,
-        }
-    }
-
     // REALTIME_POLICY_BEGIN: #1332 S6, the lease and the output-shape check on the render half.
-    /// [`AudioWorkletEngineHost::set_meter_lease`] on this half: wherever it renders, and refused
-    /// with [`RESULT_WRONG_STATE`] on the shell a release leaves.
+    /// [`AudioWorkletEngineHost::set_meter_lease`] on this half, wherever it renders.
     fn set_meter_lease(&mut self, enabled: bool) -> u32 {
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -3186,7 +3214,7 @@ impl RenderHalf {
         let from = self.status.next_absolute_sample;
         let lease_supported = self.lease_supported;
         let Some(ready) = self.ready.as_mut() else {
-            // The shell: the session renders elsewhere.
+            // A disposed half: no session.
             return self.record(RESULT_WRONG_STATE);
         };
         if enabled && !lease_supported {
@@ -3208,9 +3236,7 @@ impl RenderHalf {
 
     /// [`AudioWorkletEngineHost::reject_output_quantum`] on this half.
     fn reject_output_quantum(&mut self, actual_frames: u32) -> u32 {
-        // #2298: the shell a release leaves renders nothing, so it records no failure the
-        // lifecycle word does not have (as `render_next` on it refuses).
-        if self.status.state != STATE_READY || self.released {
+        if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
         if actual_frames == self.status.quantum_frames {
@@ -3236,11 +3262,6 @@ impl RenderHalf {
         // leave an `expect_failed` trap owner in the render export's call graph.
         let quantum = self.status.quantum_frames as usize;
         let Some(ready) = self.ready.as_mut() else {
-            // #1332 S5: the shell a release leaves renders nothing and records no failure, so
-            // the shared lifecycle word and this status cannot disagree.
-            if self.released {
-                return self.record(RESULT_WRONG_STATE);
-            }
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         // #1332 S5: a sticky failure the control half recorded, on whatever thread it runs, is
@@ -3414,6 +3435,47 @@ impl RenderHalf {
         self.status.state = STATE_FAILED;
         if let Some(buffers) = self.buffers.as_mut() {
             buffers.output_pcm.fill(0.0);
+        }
+    }
+}
+
+// #2332: below `impl RenderReady` and `impl RenderHalf`, so their impl indices (`Ms2`, `Ms3`) in
+// the mangled names the call-graph gate pins stay where they were.
+impl RenderSlot {
+    /// Whether the render half is on this thread.
+    const fn is_here(&self) -> bool {
+        matches!(self, Self::Here(_))
+    }
+
+    /// The status the host publishes: the half's while it is here, the shell's while it is away.
+    const fn status(&self) -> &WebStatus {
+        match self {
+            Self::Here(half) => &half.status,
+            Self::Away(status) => status,
+        }
+    }
+
+    /// [`Self::status`], mutably.
+    fn status_mut(&mut self) -> &mut WebStatus {
+        match self {
+            Self::Here(half) => &mut half.status,
+            Self::Away(status) => status,
+        }
+    }
+
+    /// The render half's session: `None` while the half is away or after a dispose.
+    fn ready(&self) -> Option<&RenderReady> {
+        match self {
+            Self::Here(half) => half.ready.as_ref(),
+            Self::Away(_) => None,
+        }
+    }
+
+    /// [`Self::ready`], mutably.
+    fn ready_mut(&mut self) -> Option<&mut RenderReady> {
+        match self {
+            Self::Here(half) => half.ready.as_mut(),
+            Self::Away(_) => None,
         }
     }
 }
@@ -3853,12 +3915,12 @@ fn project_buffers(
         .ok_or_else(arithmetic)?;
     let host_shell_bytes =
         u64::try_from(size_of::<AudioWorkletEngineHost>()).map_err(|_| arithmetic())?;
-    // #1332 S6: the render half and the status shell a release leaves are two boxes of their own,
-    // and the status row is the half's.
-    let render_halves_bytes =
-        u64::try_from(2 * size_of::<RenderHalf>()).map_err(|_| arithmetic())?;
+    // #1332 S6: the render half is a box of its own, and the status row is the half's. The status
+    // shell a release leaves is inline in the host's render slot (#2332), so the host's size
+    // already holds it.
+    let render_half_bytes = u64::try_from(size_of::<RenderHalf>()).map_err(|_| arithmetic())?;
     let fixed_metadata = host_shell_bytes
-        .checked_add(render_halves_bytes)
+        .checked_add(render_half_bytes)
         .ok_or_else(arithmetic)?
         .checked_sub(u64::from(BOOT_OPTIONS_BYTES) + u64::from(STATUS_BYTES))
         .ok_or_else(arithmetic)?;
@@ -5607,7 +5669,6 @@ fn compile_ready(
         queries,
         record,
         blocking_rebuilds: 0,
-        render_here: true,
         plan_words: plan_words_writer,
         successor: successor_writer,
         successor_header: 0,
