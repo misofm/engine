@@ -77,8 +77,9 @@ All in `crates/builtins-compiler/src/lib.rs` unless named.
 
 ## Gates
 - No observable defect, so no structural red-on-base test is added (test-value rule). The
-  refactor is covered by the existing tests, shown by mutation: each changed transition reverted
-  or perturbed turns a named existing test red.
+  refactor is covered by tests shown by mutation: each changed transition reverted or perturbed
+  turns a named test red. Attempt 2 folds the two assertions attempt 1's review found missing
+  into existing tests (they pin the base rule, so they are green on base).
 - One-time no-bit-moved comparison against base (PR evidence, not a committed test).
 - `cargo test --locked` for builtins-compiler, graph, graph-compiler, host-core (with
   `test-support` where the suites gate on it); clippy `--all-targets -D warnings` on the four;
@@ -141,3 +142,92 @@ slot. No committed fixture pins those bytes, and the graph fixtures are not touc
   the failure is not caused by this change.
 - `scripts/check-workspace-policy.sh`: ok.
 - `realtime_policy`: ok (298 marked regions in 48 files).
+
+## Verdict (attempt 1)
+Sol: **FAIL** at head `cefd78dec`, on two MAJORs and one MINOR. The refactor itself held up:
+- Rendered bits are identical to base.
+- The workspace builds on the merged tree, and fixtures and budgets hold.
+- m6 is equivalent.
+
+1. **MAJOR: m3 changes rendered bits, and the new `jumped_at_entry` transition has no test.**
+   - The reviewer's probe: track 0 is prepared muted on a curve flat at -30 dB to 300, then
+     fading to 0 dB at 10,000. A live unmute at 0 ends its ramp exactly on a block's last
+     sample, then an offsets write `S = -6` dB (ramp 0, 1 or 200) lands at the next entry.
+   - Base and the branch agree. Under m3, every case whose window ends on a block's last sample
+     differs, at quanta 128, 64 and 37. At q128 with ramp 0, the first sample is 0.020517617
+     against 0.020516941.
+2. **MAJOR: the per-member arrival lookup in `lower_strip_banks` is untested.** Mutant f4 gives
+   every lane `members[0]`'s arrival and survives everything. The reason:
+   `each_automated_fader_lane_takes_its_arrival_and_node_time_per_block` claims to cover another
+   member's arrival, but its two tracks land in different banks.
+3. **MINOR:** mutants f2 and f3 are recorded as follow-ups below.
+
+## Evidence (attempt 2)
+Terra, merged origin/main `2aa2aa60c` (#2354's builtins change and its regenerated fixtures) at
+`465f92653`. Tests are at `5207c3cdd`. The rule is unchanged.
+
+**The two folded assertions** (host-core `stored_fader_automation.rs`):
+- **Contrast case** in `an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp`, at
+  quanta 128, 64 and 37 on every render form:
+  - Setup: a live unmute drained at 0 over a window `W` (the first multiple of the quantum at or
+    after 1,200). Its hold ends on a block's last sample, over the fade's grid events from 1,100,
+    so a move is owed and due at `W`. An offsets write `S = -6` dB lands at `W` with ramp 1 or
+    480.
+  - Assertion: from `W` on, the two outputs are bit-identical. The due move lands over the
+    fader length and replaces the jump's ramp.
+  - Test value: red if an offsets jump at an entry where an owed held ramp ended on the previous
+    block's last sample cancels the due move. It is red under m3: `quantum 128: plane 0`
+    diverges at 1,280.
+  - A one-time probe on the merged tree showed the same split the reviewer saw. Ramps 1 and 200
+    are identical from the entry. Ramp 0 differs, because its jump lands before the move. This
+    is why the test compares two nonzero ramps.
+- **Shared bank** in `each_automated_fader_lane_takes_its_arrival_and_node_time_per_block`:
+  - Track 1 gains a latency-free `miso.compressor` insert, which puts its fader at track 0's
+    dependency level, so both faders are lanes 0 and 1 of one bank. The test asserts this.
+  - The arrivals assertion now separates the members. Under f4 it is red: `[486, 486]` against
+    `[0, 486]`.
+
+**Mutants re-run** on the merged tree, each alone (host-core `stored_*_automation`,
+`successor_swap`, builtins-compiler lib):
+
+| Mutant | Tests red |
+|---|---|
+| m3 | 1 (the contrast case above) |
+| f4 | 1 (the arrival test) |
+| m1 | 3 |
+| m2 | 1 |
+| m4 | 1 |
+| m5 | 8 (now including the contrast case) |
+| m6 | 0 (equivalent, as attempt 1's review agreed) |
+| m7 | 8 |
+| m8 | 6 |
+| m9 | 19 |
+
+**No bit moved on the merged tree.** Same method as attempt 1, with one difference: the base
+side is `2aa2aa60c`'s builtins-compiler, graph and graph-compiler under the branch's host-core
+tests, so both sides run the same tests.
+- 118 dump files and about 63.2k block hashes. Everything is identical except `session_seek`'s
+  timing-dependent concurrent test (21,279 against 21,293 blocks), whose common prefix is
+  identical.
+- Pass/fail verdicts are identical on both sides.
+
+**Gates on the merged tree:**
+- `cargo test --locked` passes for each crate run alone, with test-support features:
+  - builtins-compiler: 58 tests
+  - graph: 150
+  - graph-compiler: 194
+  - host-core: 471
+- clippy `--all-targets --all-features -D warnings` on the four crates: clean.
+- `cargo fmt --all --check`: clean.
+- rustdoc `-D warnings` for builtins-compiler, graph and graph-compiler: clean. The host-core
+  `prepare.rs:262` link failure already exists on main.
+- Workspace policy: ok. `realtime_policy`: ok.
+
+## Follow-ups (not this issue)
+- **Owner ruling needed.** On base, a move that comes due at an entry (`EndsAtBlockEnd`, owed)
+  still lands over an offsets jump applied at that same entry, and cancels the jump's ramp.
+  That sits oddly with the F1 rule, which says a jump's hold is newer than a ramp a live write
+  ended. The contrast case pins the current rule until an owner decides.
+- **f2:** the R17-10 release also fires on `EndsAtBlockEnd`. This is probably equivalent: a hold
+  that ended by itself has no cell hold left to release.
+- **f3:** the cursor's muted `rehold` gives `EndsAtBlockEnd`. That arm is untested on base too.
