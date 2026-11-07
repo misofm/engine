@@ -129,7 +129,7 @@ impl<L: Lane> Channel<L> {
         let mut most = 0;
         for weight in &self.link_ramps {
             for ramp in weight.iter().take(L::WIDTH) {
-                most = most.max(ramp.remaining);
+                most = most.max(ramp.remaining());
             }
         }
         most
@@ -188,7 +188,7 @@ impl<L: Lane> Channel<L> {
         let mut values = [0.0; RAMP_COUNT];
         for (parameter, ramp) in self.ramps.iter_mut().enumerate() {
             ramp[lane].snap();
-            values[parameter] = ramp[lane].current;
+            values[parameter] = ramp[lane].current();
         }
         design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
         self.seed_rate_ramps(lane);
@@ -214,7 +214,7 @@ impl<L: Lane> Channel<L> {
     // REALTIME_POLICY_END
 
     pub(crate) fn current_values(&self, lane: usize) -> [f32; RAMP_COUNT] {
-        core::array::from_fn(|parameter| self.ramps[parameter][lane].current)
+        core::array::from_fn(|parameter| self.ramps[parameter][lane].current())
     }
 
     fn seed_rate_ramps(&mut self, lane: usize) {
@@ -244,12 +244,7 @@ impl<L: Lane> Channel<L> {
         // that was mid-interpolation to the exact design for that value. Keep the exposed time
         // current/target fixed and use its existing remaining field to carry that bounded return.
         if !self.ramps[parameter][lane].is_ramping() && self.rate_ramps[slot][lane].is_ramping() {
-            self.ramps[parameter][lane] = LinearRamp {
-                current: value,
-                target: value,
-                step: 0.0,
-                remaining: SMOOTHING_SAMPLES,
-            };
+            self.ramps[parameter][lane] = LinearRamp::holding(value, SMOOTHING_SAMPLES);
         }
     }
 
@@ -284,7 +279,7 @@ impl<L: Lane> Channel<L> {
             .chain(self.link_ramps.iter())
         {
             for (lane, ramp) in parameter.iter().take(L::WIDTH).enumerate() {
-                if ramp.remaining != 0 {
+                if ramp.remaining() != 0 {
                     mask &= !(1 << lane);
                 }
             }
@@ -303,7 +298,7 @@ impl<L: Lane> Channel<L> {
         let mut most = 0;
         for parameter in &self.ramps {
             for ramp in parameter.iter().take(L::WIDTH) {
-                most = most.max(ramp.remaining);
+                most = most.max(ramp.remaining());
             }
         }
         most
@@ -332,7 +327,7 @@ impl<L: Lane> Channel<L> {
                 values[parameter] = if changed & (1 << parameter) != 0 {
                     ramp[lane].next_value()
                 } else {
-                    ramp[lane].current
+                    ramp[lane].current()
                 };
             }
             let rate_bits = (1 << 3) | (1 << 4);
@@ -1309,10 +1304,10 @@ impl<L: Lane> RampVec<L> {
         let mut step = [0.0_f32; MAX_WIDTH];
         let mut remaining = [0.0_f32; MAX_WIDTH];
         for (lane, ramp) in ramps.iter().enumerate().take(L::WIDTH) {
-            current[lane] = ramp.current;
-            target[lane] = ramp.target;
-            step[lane] = ramp.step;
-            remaining[lane] = ramp.remaining as f32;
+            current[lane] = ramp.current();
+            target[lane] = ramp.target();
+            step[lane] = ramp.step();
+            remaining[lane] = ramp.remaining() as f32;
         }
         Self {
             current: L::load(&current),
@@ -1332,14 +1327,12 @@ impl<L: Lane> RampVec<L> {
         self.step.store(&mut step);
         self.remaining.store(&mut remaining);
         for (lane, ramp) in ramps.iter_mut().enumerate().take(L::WIDTH) {
-            ramp.current = current[lane];
-            ramp.step = step[lane];
-            ramp.remaining = remaining[lane] as u32;
+            ramp.record_advance(current[lane], step[lane], remaining[lane] as u32);
         }
     }
 
     /// `LinearRamp::next_value` on the lanes of `gate`, as selects: `remaining == 0` leaves every
-    /// word as it is (at rest, or a restored ramp whose `current` is not its `target`),
+    /// word as it is (at rest: `current` is its `target`, issue #2368),
     /// `remaining == 1` assigns the target and clears the step, and otherwise the word advances
     /// once by `ramp_toward(current, step, target)` (the step added, held inside `[min(current,
     /// target), max(current, target)]` so it never passes its target, issue #1409) and `remaining`
@@ -1992,7 +1985,7 @@ mod coefficient_ramp_tests {
     fn assert_ramp_matches(channel: &Channel<f32>, slot: usize, coefficient: usize) {
         let ramp = channel.rate_ramps[slot][0];
         assert_eq!(
-            ramp.current.to_bits(),
+            ramp.current().to_bits(),
             channel.words[coefficient][0].to_bits(),
             "the current coefficient word and its ramp state must agree"
         );
@@ -2045,7 +2038,7 @@ mod coefficient_ramp_tests {
                 second_coefficient_target.to_bits(),
                 "the 64th sample snaps to the exact f64-designed endpoint"
             );
-            assert_eq!(channel.rate_ramps[slot][0].remaining, 0);
+            assert_eq!(channel.rate_ramps[slot][0].remaining(), 0);
         }
     }
 
@@ -2056,7 +2049,7 @@ mod coefficient_ramp_tests {
         for _ in 0..19 {
             channel.advance_ramps(SAMPLE_RATE);
         }
-        let current_time = channel.ramps[3][0].current;
+        let current_time = channel.ramps[3][0].current();
         let live_coefficient = channel.words[COEF_ATTACK][0];
         let exact_target = rate_coefficient(current_time, SAMPLE_RATE);
         assert_ne!(
@@ -2067,10 +2060,10 @@ mod coefficient_ramp_tests {
 
         channel.set_parameter_target(3, 0, current_time, SAMPLE_RATE);
         let parameter_ramp = channel.ramps[3][0];
-        assert_eq!(parameter_ramp.current.to_bits(), current_time.to_bits());
-        assert_eq!(parameter_ramp.target.to_bits(), current_time.to_bits());
-        assert_eq!(parameter_ramp.step.to_bits(), 0.0_f32.to_bits());
-        assert_eq!(parameter_ramp.remaining, 64);
+        assert_eq!(parameter_ramp.current().to_bits(), current_time.to_bits());
+        assert_eq!(parameter_ramp.target().to_bits(), current_time.to_bits());
+        assert_eq!(parameter_ramp.step().to_bits(), 0.0_f32.to_bits());
+        assert_eq!(parameter_ramp.remaining(), 64);
         assert_eq!(
             channel.words[COEF_ATTACK][0].to_bits(),
             live_coefficient.to_bits(),
@@ -2088,7 +2081,7 @@ mod coefficient_ramp_tests {
                 "cancel return update {update}"
             );
             assert_eq!(
-                channel.ramps[3][0].current.to_bits(),
+                channel.ramps[3][0].current().to_bits(),
                 current_time.to_bits()
             );
         }
@@ -2096,7 +2089,7 @@ mod coefficient_ramp_tests {
             channel.words[COEF_ATTACK][0].to_bits(),
             exact_target.to_bits()
         );
-        assert_eq!(channel.ramps[3][0].remaining, 0);
+        assert_eq!(channel.ramps[3][0].remaining(), 0);
     }
 
     /// #1278 D2a: a lane restored mid-ramp resumes both ramps -- the release time and its
@@ -2114,7 +2107,7 @@ mod coefficient_ramp_tests {
 
         let mut restored = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
         commit_channel(&bytes, &mut restored, 0, SAMPLE_RATE, true);
-        let remaining = source.ramps[4][0].remaining;
+        let remaining = source.ramps[4][0].remaining();
         assert!(remaining > 0, "the fixture restores mid-ramp");
         for update in 0..=remaining {
             assert_eq!(
@@ -2130,7 +2123,7 @@ mod coefficient_ramp_tests {
             source.advance_ramps(SAMPLE_RATE);
             restored.advance_ramps(SAMPLE_RATE);
         }
-        assert_eq!(restored.ramps[4][0].remaining, 0);
+        assert_eq!(restored.ramps[4][0].remaining(), 0);
     }
 
     #[test]
@@ -2144,8 +2137,11 @@ mod coefficient_ramp_tests {
 
         channel.discontinuity_reset(SAMPLE_RATE);
         assert_reset_rate_state(&channel);
-        assert_eq!(channel.ramps[3][0].current.to_bits(), 180.0_f32.to_bits());
-        assert_eq!(channel.ramps[4][0].current.to_bits(), 3_200.0_f32.to_bits());
+        assert_eq!(channel.ramps[3][0].current().to_bits(), 180.0_f32.to_bits());
+        assert_eq!(
+            channel.ramps[4][0].current().to_bits(),
+            3_200.0_f32.to_bits()
+        );
 
         channel.set_parameter_target(3, 0, 100.0, SAMPLE_RATE);
         channel.set_parameter_target(4, 0, 900.0, SAMPLE_RATE);
@@ -2155,11 +2151,11 @@ mod coefficient_ramp_tests {
         channel.full_reset(SAMPLE_RATE);
         assert_reset_rate_state(&channel);
         assert_eq!(
-            channel.ramps[3][0].current.to_bits(),
+            channel.ramps[3][0].current().to_bits(),
             PARAMETER_SPECS[3].default.to_bits()
         );
         assert_eq!(
-            channel.ramps[4][0].current.to_bits(),
+            channel.ramps[4][0].current().to_bits(),
             PARAMETER_SPECS[4].default.to_bits()
         );
     }
@@ -2167,15 +2163,15 @@ mod coefficient_ramp_tests {
     fn assert_reset_rate_state(channel: &Channel<f32>) {
         for (slot, parameter, coefficient) in [(0, 3, COEF_ATTACK), (1, 4, COEF_RELEASE)] {
             let rate_ramp = channel.rate_ramps[slot][0];
-            assert_eq!(rate_ramp.remaining, 0);
-            assert_eq!(rate_ramp.current.to_bits(), rate_ramp.target.to_bits());
+            assert_eq!(rate_ramp.remaining(), 0);
+            assert_eq!(rate_ramp.current().to_bits(), rate_ramp.target().to_bits());
             assert_eq!(
-                rate_ramp.current.to_bits(),
+                rate_ramp.current().to_bits(),
                 channel.words[coefficient][0].to_bits()
             );
             assert_eq!(
-                rate_ramp.current.to_bits(),
-                rate_coefficient(channel.ramps[parameter][0].current, SAMPLE_RATE).to_bits()
+                rate_ramp.current().to_bits(),
+                rate_coefficient(channel.ramps[parameter][0].current(), SAMPLE_RATE).to_bits()
             );
         }
     }
@@ -2556,10 +2552,10 @@ mod settled_body_tests {
         for row in channel.ramps.iter().chain(channel.rate_ramps.iter()) {
             for ramp in row {
                 words.extend([
-                    ramp.current.to_bits(),
-                    ramp.target.to_bits(),
-                    ramp.step.to_bits(),
-                    ramp.remaining,
+                    ramp.current().to_bits(),
+                    ramp.target().to_bits(),
+                    ramp.step().to_bits(),
+                    ramp.remaining(),
                 ]);
             }
         }
@@ -3109,7 +3105,7 @@ mod settled_body_tests {
                                     &dual.oracle.0
                                 };
                                 let [a, b] = RETARGETS[parameter];
-                                let value = if heading.ramps[parameter][lane].target == a {
+                                let value = if heading.ramps[parameter][lane].target() == a {
                                     b
                                 } else {
                                     a
@@ -3356,16 +3352,17 @@ mod settled_body_tests {
                 }
             }
             if rng.chance(0.03) {
-                // A payload restore that leaves a ramp at `remaining = 0` with `current !=
-                // target` (or, one time in four, mid-window), through the restore path (#1006).
+                // A payload restore that leaves a ramp settled at another value (or, one time in
+                // four, mid-window), through the restore path (#1006). A settled ramp is at its
+                // target: the restore refuses one that is not (issue #2368).
                 let lane = rng.below(width);
                 let parameter = rng.below(PARAMETER_COUNT);
                 let current = self::parameter(&mut rng, parameter);
                 let target = self::parameter(&mut rng, parameter);
-                let remaining = if rng.chance(0.75) {
-                    0
+                let (current, remaining) = if rng.chance(0.75) {
+                    (target, 0)
                 } else {
-                    1 + rng.below(64) as u32
+                    (current, 1 + rng.below(64) as u32)
                 };
                 dual.restore(
                     rng.chance(0.5),

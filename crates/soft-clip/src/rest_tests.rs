@@ -74,10 +74,10 @@ fn channel_lane_state<L: Lane>(channel: &Channel<L>, lane: usize, out: &mut Vec<
         out.push(lane_of(channel.state.field(parameter), lane).to_bits());
         let ramp = &channel.ramps[lane][parameter];
         out.extend([
-            ramp.current.to_bits(),
-            ramp.target.to_bits(),
-            ramp.step.to_bits(),
-            ramp.remaining,
+            ramp.current().to_bits(),
+            ramp.target().to_bits(),
+            ramp.step().to_bits(),
+            ramp.remaining(),
         ]);
     }
     for history in [&channel.history.x, &channel.history.e, &channel.history.dry] {

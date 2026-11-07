@@ -333,10 +333,10 @@ impl<L: Lane> Probe for LimiterProbe<L> {
             ]);
             for ramp in [channel.limit[lane], channel.release[lane]] {
                 out.extend([
-                    ramp.current.to_bits(),
-                    ramp.target.to_bits(),
-                    ramp.step.to_bits(),
-                    ramp.remaining,
+                    ramp.current().to_bits(),
+                    ramp.target().to_bits(),
+                    ramp.step().to_bits(),
+                    ramp.remaining(),
                 ]);
             }
             // `phase` is a clock (module note).
@@ -529,10 +529,10 @@ pub(super) fn bank_state_words<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
         }
         for ramp in channel.limit.iter().chain(channel.release.iter()) {
             out.extend([
-                ramp.current.to_bits(),
-                ramp.target.to_bits(),
-                ramp.step.to_bits(),
-                ramp.remaining,
+                ramp.current().to_bits(),
+                ramp.target().to_bits(),
+                ramp.step().to_bits(),
+                ramp.remaining(),
             ]);
         }
     }

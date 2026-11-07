@@ -914,18 +914,19 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         let weights = effect_contract::link_glide_weights(mode);
         for state in &mut self.state {
             for (slot, &weight) in state.links.iter_mut().zip(&weights) {
-                let [current, target, step, remaining] = link_lane(slot, lane);
-                let mut ramp = LinearRamp {
-                    current,
-                    target,
-                    step,
-                    remaining: remaining as u32,
-                };
+                // `set_target` reads only `current`: the glide restarts from the word in force.
+                let [current, ..] = link_lane(slot, lane);
+                let mut ramp = LinearRamp::fixed(current);
                 ramp.set_target(weight, samples);
                 set_link_lane(
                     slot,
                     lane,
-                    [ramp.current, ramp.target, ramp.step, ramp.remaining as f32],
+                    [
+                        ramp.current(),
+                        ramp.target(),
+                        ramp.step(),
+                        ramp.remaining() as f32,
+                    ],
                 );
             }
         }
@@ -1177,14 +1178,15 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             if !restart && chunk[1].to_bits() == design.to_bits() {
                 continue;
             }
-            let mut ramp = LinearRamp {
-                current: chunk[0],
-                target: chunk[1],
-                step: chunk[2],
-                remaining: chunk[3] as u32,
-            };
+            // `set_target` reads only `current`: the ramp restarts from the word in force.
+            let mut ramp = LinearRamp::fixed(chunk[0]);
             ramp.set_target(design, RAMP_SAMPLES);
-            chunk.copy_from_slice(&[ramp.current, ramp.target, ramp.step, ramp.remaining as f32]);
+            chunk.copy_from_slice(&[
+                ramp.current(),
+                ramp.target(),
+                ramp.step(),
+                ramp.remaining() as f32,
+            ]);
         }
         set_lane_words(&mut self.state[channel], lane, &words);
     }
@@ -1536,16 +1538,13 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         }
         let designs = targets(&values, self.sample_rate);
         for (index, chunk) in words[SIGNAL_WORDS..].as_chunks::<4>().0.iter().enumerate() {
-            let ramp = LinearRamp {
-                current: chunk[0],
-                target: chunk[1],
-                step: chunk[2],
-                remaining: chunk[3] as u32,
-            };
+            // A settled ramp is at its target with a `+0.0` step, or `from_words` refuses it.
+            let ramp = LinearRamp::from_words(chunk[0], chunk[1], chunk[2], chunk[3] as u32);
             let valid = chunk[1].to_bits() == designs[index].to_bits()
                 && integral_within(chunk[3], RAMP_SAMPLES as f32)
-                && (chunk[3] != 0.0 || chunk[0].to_bits() == chunk[1].to_bits())
-                && payload::ramp_path_inside(ramp, WORD_BOUNDS[index % BAND_RAMPS], RAMP_SAMPLES);
+                && ramp.is_some_and(|ramp| {
+                    payload::ramp_path_inside(ramp, WORD_BOUNDS[index % BAND_RAMPS], RAMP_SAMPLES)
+                });
             if !valid {
                 return Err(state_error("effect.state.parameter"));
             }
@@ -1573,17 +1572,8 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             let valid = integral_within(remaining, maximum as f32)
                 && !is_negative_zero(current)
                 && (remaining == 0.0 || step != 0.0)
-                && (remaining != 0.0 || current.to_bits() == target.to_bits())
-                && payload::ramp_path_inside(
-                    LinearRamp {
-                        current,
-                        target,
-                        step,
-                        remaining: remaining as u32,
-                    },
-                    (0.0, 1.0),
-                    maximum,
-                );
+                && LinearRamp::from_words(current, target, step, remaining as u32)
+                    .is_some_and(|ramp| payload::ramp_path_inside(ramp, (0.0, 1.0), maximum));
             if !valid {
                 return Err(state_error("effect.state.link"));
             }

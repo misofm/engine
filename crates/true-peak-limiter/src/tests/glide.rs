@@ -810,10 +810,10 @@ fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
                 .flat_map(|channel| channel.link[..L::WIDTH].iter())
                 .flat_map(|ramp| {
                     [
-                        ramp.current.to_bits(),
-                        ramp.target.to_bits(),
-                        ramp.step.to_bits(),
-                        ramp.remaining,
+                        ramp.current().to_bits(),
+                        ramp.target().to_bits(),
+                        ramp.step().to_bits(),
+                        ramp.remaining(),
                     ]
                 })
                 .collect()
@@ -839,7 +839,7 @@ fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
                 "{context}: a skipped glide"
             );
             assert_eq!(
-                fast.left.link[0].remaining,
+                fast.left.link[0].remaining(),
                 GLIDE.saturating_sub(block * BLOCK as u32),
                 "{context}: the glide's countdown"
             );

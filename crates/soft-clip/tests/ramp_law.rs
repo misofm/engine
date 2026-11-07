@@ -46,11 +46,11 @@ fn the_driver_reproduces_the_runtime_ramp_law_bit_for_bit() {
             word_f32(&payload, DRIVE_CURRENT)
         );
         assert_eq!(word(&payload, DRIVE_TARGET), target.to_bits());
-        assert_eq!(word(&payload, DRIVE_STEP), expected.step.to_bits());
-        assert_eq!(word(&payload, DRIVE_REMAINING), expected.remaining);
+        assert_eq!(word(&payload, DRIVE_STEP), expected.step().to_bits());
+        assert_eq!(word(&payload, DRIVE_REMAINING), expected.remaining());
     }
-    assert_eq!(expected.remaining, 0);
-    assert_eq!(expected.current.to_bits(), target.to_bits());
+    assert_eq!(expected.remaining(), 0);
+    assert_eq!(expected.current().to_bits(), target.to_bits());
 }
 
 /// The same law across arbitrary block sizes: only one division happens, at the event.
@@ -82,11 +82,11 @@ fn the_ramp_divides_once_and_snaps_exactly_whatever_the_block_size() {
             let (_, payload, _) = support::snapshot(effect.as_ref());
             assert_eq!(
                 word(&payload, DRIVE_CURRENT),
-                expected.current.to_bits(),
+                expected.current().to_bits(),
                 "block {block}, after {} frames",
                 done + span
             );
-            assert_eq!(word(&payload, DRIVE_REMAINING), expected.remaining);
+            assert_eq!(word(&payload, DRIVE_REMAINING), expected.remaining());
             done += span;
         }
         assert_eq!(
@@ -130,7 +130,7 @@ fn a_new_point_restarts_from_the_current_value() {
     for _ in 0..32 {
         let _ = expected.next_value();
     }
-    assert_eq!(word(&payload, DRIVE_STEP), expected.step.to_bits());
-    assert_eq!(word(&payload, DRIVE_CURRENT), expected.current.to_bits());
+    assert_eq!(word(&payload, DRIVE_STEP), expected.step().to_bits());
+    assert_eq!(word(&payload, DRIVE_CURRENT), expected.current().to_bits());
     assert_eq!(word(&payload, DRIVE_REMAINING), 32);
 }

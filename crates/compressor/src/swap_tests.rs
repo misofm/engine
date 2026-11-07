@@ -135,7 +135,9 @@ impl<L: Lane + 'static> Probe for CompressorProbe<L> {
     fn ramp_in_flight(&self, left: &[u8], right: &[u8]) -> bool {
         let ramps = (state::STATE_HEADER_WORDS - 1) / RAMP_WORDS;
         [left, right].iter().any(|section| {
-            (0..ramps).any(|ramp| read_ramp(section, 1 + ramp * RAMP_WORDS).remaining > 0)
+            (0..ramps).any(|ramp| {
+                read_ramp(section, 1 + ramp * RAMP_WORDS).is_some_and(|ramp| ramp.remaining() > 0)
+            })
         })
     }
 

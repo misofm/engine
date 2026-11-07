@@ -1188,10 +1188,10 @@ impl<L: Lane> Instance<L> {
         }
         for parameter in 0..RAMP_COUNT {
             let (l, r) = (&left.ramps[parameter][lane], &right.ramps[parameter][lane]);
-            if l.current.to_bits() != r.current.to_bits()
-                || l.target.to_bits() != r.target.to_bits()
-                || l.step.to_bits() != r.step.to_bits()
-                || l.remaining != r.remaining
+            if l.current().to_bits() != r.current().to_bits()
+                || l.target().to_bits() != r.target().to_bits()
+                || l.step().to_bits() != r.step().to_bits()
+                || l.remaining() != r.remaining()
             {
                 return false;
             }
@@ -1203,10 +1203,10 @@ impl<L: Lane> Instance<L> {
             .zip(right.rate_ramps.iter().chain(&right.link_ramps))
         {
             let (l, r) = (&l[lane], &r[lane]);
-            if l.current.to_bits() != r.current.to_bits()
-                || l.target.to_bits() != r.target.to_bits()
-                || l.step.to_bits() != r.step.to_bits()
-                || l.remaining != r.remaining
+            if l.current().to_bits() != r.current().to_bits()
+                || l.target().to_bits() != r.target().to_bits()
+                || l.step().to_bits() != r.step().to_bits()
+                || l.remaining() != r.remaining()
             {
                 return false;
             }
@@ -1543,8 +1543,8 @@ impl PreparedNativeEffect for PreparedCompressor {
         };
         let ramp = channel.ramps[index][0];
         Ok(PreparedParameterState {
-            current_value: ramp.current,
-            target_value: ramp.target,
+            current_value: ramp.current(),
+            target_value: ramp.target(),
         })
     }
 
@@ -2095,13 +2095,11 @@ mod witness_tests {
         )
     }
 
+    /// A ramp with random words: settled at a random value, or in flight with any words.
     fn ramp(draw: &mut Draw) -> LinearRamp {
-        LinearRamp {
-            current: draw.noise(4.0),
-            target: draw.noise(4.0),
-            step: draw.noise(0.1),
-            remaining: draw.below(65) as u32,
-        }
+        let (current, target, step) = (draw.noise(4.0), draw.noise(4.0), draw.noise(0.1));
+        LinearRamp::from_words(current, target, step, draw.below(65) as u32)
+            .unwrap_or(LinearRamp::fixed(current))
     }
 
     /// Moves one field to a value with other bits.
@@ -2151,12 +2149,20 @@ mod witness_tests {
             _ => Some(&mut right.rate_ramps[draw.below(2)][moved]),
         };
         if let Some(ramp) = ramp {
+            let mut words = [ramp.current(), ramp.target(), ramp.step()];
+            let mut remaining = ramp.remaining();
             match field {
-                0 => perturb(&mut ramp.current, &mut draw),
-                1 => perturb(&mut ramp.target, &mut draw),
-                2 => perturb(&mut ramp.step, &mut draw),
-                _ => ramp.remaining += 1,
+                0..=2 => perturb(&mut words[field], &mut draw),
+                _ => remaining += 1,
             }
+            // A settled ramp cannot leave its target, so a field moved on one moves the value.
+            *ramp = LinearRamp::from_words(words[0], words[1], words[2], remaining).unwrap_or_else(
+                || {
+                    let mut value = ramp.current();
+                    perturb(&mut value, &mut draw);
+                    LinearRamp::fixed(value)
+                },
+            );
         }
         for lane in 0..L::WIDTH {
             assert_eq!(

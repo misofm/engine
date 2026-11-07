@@ -178,10 +178,10 @@ fn fingerprint<L: Lane, const W: usize>(instance: &Instance<L, W>) -> Vec<u32> {
         }
         for track in 0..W {
             for ramp in &side.ramps[track] {
-                words.push(ramp.current.to_bits());
-                words.push(ramp.target.to_bits());
-                words.push(ramp.step.to_bits());
-                words.push(ramp.remaining);
+                words.push(ramp.current().to_bits());
+                words.push(ramp.target().to_bits());
+                words.push(ramp.step().to_bits());
+                words.push(ramp.remaining());
             }
             words.push(side.crossover_hz[track].to_bits());
         }
@@ -458,8 +458,8 @@ fn a_settled_bank_meets_the_flat_paths_precondition() {
     }
     assert!(instance.flat_path_is_identity(), "after a window closed");
     let settled = instance.sides[0].ramps[0][LOW_MAKEUP];
-    assert_eq!(settled.remaining, 0);
-    assert_eq!(settled.current.to_bits(), 0.0f32.to_bits(), "not -0.0");
+    assert_eq!(settled.remaining(), 0);
+    assert_eq!(settled.current().to_bits(), 0.0f32.to_bits(), "not -0.0");
 
     // A discontinuity reset snaps every ramp; the precondition must survive it.
     instance.reset(ResetKind::DiscontinuityKeepParameters);
@@ -546,7 +546,7 @@ fn the_ramped_path_advances_both_channels() {
 fn a_window_lands_on_its_target_on_the_exact_sample() {
     const TARGET: f32 = 8.3;
     let mut instance = instance::<f32, 1>(LinkMode::DualMono, false);
-    let start = instance.sides[0].ramps[0][LOW_MAKEUP].current;
+    let start = instance.sides[0].ramps[0][LOW_MAKEUP].current();
     let step = (TARGET - start) / SMOOTHING_SAMPLES as f32;
 
     // The iterated form, which is what the ramp would arrive at with the snap removed.
@@ -570,7 +570,8 @@ fn a_window_lands_on_its_target_on_the_exact_sample() {
     instance.apply_automation(0, &spans, 32, 0, &mut report);
     assert_eq!(report.invalid_spans, 0);
     assert_eq!(
-        instance.sides[0].ramps[0][LOW_MAKEUP].remaining, SMOOTHING_SAMPLES,
+        instance.sides[0].ramps[0][LOW_MAKEUP].remaining(),
+        SMOOTHING_SAMPLES,
         "the window opens at its full length"
     );
 
@@ -585,20 +586,20 @@ fn a_window_lands_on_its_target_on_the_exact_sample() {
         render::<f32, 1, false>(&mut instance, &mut left, &mut right, 1, &mut reports);
         let ramp = instance.sides[0].ramps[0][LOW_MAKEUP];
         assert_eq!(
-            ramp.remaining,
+            ramp.remaining(),
             SMOOTHING_SAMPLES - sample,
             "the window counts down one sample per frame"
         );
         if sample < SMOOTHING_SAMPLES {
             assert_ne!(
-                ramp.current.to_bits(),
+                ramp.current().to_bits(),
                 TARGET.to_bits(),
                 "the window must not arrive early, at sample {sample}"
             );
         }
     }
     assert_eq!(
-        instance.sides[0].ramps[0][LOW_MAKEUP].current.to_bits(),
+        instance.sides[0].ramps[0][LOW_MAKEUP].current().to_bits(),
         TARGET.to_bits(),
         "the window arrives exactly on its target, on its last sample"
     );

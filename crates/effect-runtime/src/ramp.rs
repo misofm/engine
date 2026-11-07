@@ -37,18 +37,31 @@ use lane::kernels::{RampSegment, ramp_toward};
 
 /// A linear ramp from `current` to `target` in `remaining` samples.
 ///
-/// `step` is `(target - current) / samples`, computed once by [`LinearRamp::set_target`]. The
-/// invariant that matters is `remaining == 0` implies `current == target`.
+/// `step` is `(target - current) / samples`, computed once by [`LinearRamp::set_target`].
+///
+/// # The phase invariant (issue #2368, tracker #2258 GR-7)
+///
+/// `remaining` is the phase: `0` is *settled*, anything else is *ramping*. A settled ramp is at
+/// its target with a `+0.0` step, bit for bit: `current.to_bits() == target.to_bits()` and
+/// `step.to_bits() == 0`. A ramping ramp may hold any words. The fields are private and every
+/// constructor and method keeps the invariant ([`LinearRamp::fixed`], [`LinearRamp::holding`],
+/// [`LinearRamp::set_target`], [`LinearRamp::snap`], [`LinearRamp::next_value`],
+/// [`LinearRamp::advance_block`]), so a settled ramp off its target cannot be built; words from
+/// outside the engine enter only through [`LinearRamp::from_words`], which refuses them.
+///
+/// The phase is not a `Settled | Ramping` enum: the countdown already is the discriminant, and an
+/// enum would duplicate it and change the hot [`LinearRamp::next_value`] match and the layout the
+/// effects gather lane vectors from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LinearRamp {
     /// Value the ramp has reached. This is the value the *previous* sample used.
-    pub current: f32,
+    current: f32,
     /// Value the ramp is heading for, assigned exactly on the final sample.
-    pub target: f32,
+    target: f32,
     /// Per-sample increment, precomputed at event time. The only division in the ramp.
-    pub step: f32,
+    step: f32,
     /// Samples still to be produced before the ramp is at its target.
-    pub remaining: u32,
+    remaining: u32,
 }
 
 impl LinearRamp {
@@ -61,6 +74,72 @@ impl LinearRamp {
             step: 0.0,
             remaining: 0,
         }
+    }
+
+    /// A ramp at `value` that stays in flight, unmoving, for `samples` samples: step `+0.0`, so
+    /// it produces `value` on every sample and then settles there. `samples == 0` is
+    /// [`LinearRamp::fixed`].
+    ///
+    /// The compressor uses it to keep a parameter in flight while the coefficient it designs
+    /// returns to that parameter's design.
+    #[must_use]
+    pub const fn holding(value: f32, samples: u32) -> Self {
+        Self {
+            current: value,
+            target: value,
+            step: 0.0,
+            remaining: samples,
+        }
+    }
+
+    /// The ramp held in four words, or `None` when they break the phase invariant: a settled
+    /// ramp (`remaining == 0`) whose `current` is not its `target` bit for bit, or whose step is
+    /// not `+0.0`. A ramping ramp's words are accepted as they are.
+    ///
+    /// This is the only way to build a ramp from words, so a state restore cannot admit a
+    /// settled ramp that would render a stale `current` for as long as it stays settled. It
+    /// checks the phase only; a restore still checks domains, bounds and the path
+    /// ([`crate::state_payload::ramp_path_inside`]). Allocation-free, so a restore may run it on
+    /// the render thread.
+    #[must_use]
+    pub const fn from_words(current: f32, target: f32, step: f32, remaining: u32) -> Option<Self> {
+        if remaining == 0 && (current.to_bits() != target.to_bits() || step.to_bits() != 0) {
+            return None;
+        }
+        Some(Self {
+            current,
+            target,
+            step,
+            remaining,
+        })
+    }
+
+    /// The value the ramp has reached: the value the previous sample used.
+    #[must_use]
+    #[inline(always)]
+    pub const fn current(&self) -> f32 {
+        self.current
+    }
+
+    /// The value the ramp is heading for, or holds when settled.
+    #[must_use]
+    #[inline(always)]
+    pub const fn target(&self) -> f32 {
+        self.target
+    }
+
+    /// The per-sample increment: `+0.0` when settled.
+    #[must_use]
+    #[inline(always)]
+    pub const fn step(&self) -> f32 {
+        self.step
+    }
+
+    /// Samples still to be produced before the ramp is at its target: `0` when settled.
+    #[must_use]
+    #[inline(always)]
+    pub const fn remaining(&self) -> u32 {
+        self.remaining
     }
 
     /// Points the ramp at `target`, to be reached in `samples` samples.
@@ -121,6 +200,22 @@ impl LinearRamp {
         const NEGATIVE_ZERO: u32 = 0x8000_0000;
         let bits = current.to_bits();
         bits == target.to_bits() && bits != NEGATIVE_ZERO && current.is_finite()
+    }
+
+    /// Records an advance made outside the ramp: a lane-vector walk of the same law as
+    /// [`LinearRamp::next_value`] (the effects' banked gather, advance and scatter), which leaves
+    /// the ramp at `current` with `step` and `remaining` samples to go. `target` does not change.
+    ///
+    /// A walk of the law settles exactly on the target with a `+0.0` step, so for it this is a
+    /// plain store. A settled `remaining == 0` stores the target and `+0.0` whatever `current` and
+    /// `step` say, so no caller can leave a settled ramp off its target (issue #2368). Branch-free
+    /// selects, once per lane per block, never per sample.
+    #[inline(always)]
+    pub fn record_advance(&mut self, current: f32, step: f32, remaining: u32) {
+        let settled = remaining == 0;
+        self.current = if settled { self.target } else { current };
+        self.step = if settled { 0.0 } else { step };
+        self.remaining = remaining;
     }
 
     /// Assigns the target immediately and stops the ramp.

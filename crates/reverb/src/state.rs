@@ -15,7 +15,7 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, read_u32, write_f32, write_ramp, write_u32,
+    RAMP_WORDS, ramp_path_inside, read_f32, read_u32, write_f32, write_ramp, write_u32,
 };
 use effect_runtime::tap_crossfade::TapCrossfade;
 
@@ -126,19 +126,23 @@ fn read_carried_ramp(
     word: usize,
     spec: &ParameterSpec,
 ) -> Result<LinearRamp, StatePayloadError> {
-    let read = read_ramp(bytes, word);
-    if !parameter_value_valid(spec, read.current)
-        || !parameter_value_valid(spec, read.target)
-        || !ramp_path_inside(read, (spec.minimum, spec.maximum), RAMP_SAMPLES)
-        || (read.remaining == 0 && read.current != read.target)
-    {
+    let (current, target) = (read_f32(bytes, word), read_f32(bytes, word + 1));
+    if !parameter_value_valid(spec, current) || !parameter_value_valid(spec, target) {
         return Err(state_error("effect.state.parameter"));
     }
-    Ok(LinearRamp {
-        current: normalize_zero(read.current),
-        target: normalize_zero(read.target),
-        ..read
-    })
+    // As the delay's: `-0.0` normalised before the phase check, so a settled `-0.0`/`+0.0` pair
+    // is at its target, as the float compare this replaced held it (issue #2368).
+    let read = LinearRamp::from_words(
+        normalize_zero(current),
+        normalize_zero(target),
+        read_f32(bytes, word + 2),
+        read_u32(bytes, word + 3),
+    )
+    .ok_or(state_error("effect.state.parameter"))?;
+    if !ramp_path_inside(read, (spec.minimum, spec.maximum), RAMP_SAMPLES) {
+        return Err(state_error("effect.state.parameter"));
+    }
+    Ok(read)
 }
 
 /// A validated common header, held until every section has been accepted.
@@ -313,16 +317,15 @@ impl PreparedReverb {
         }
         let gains = &header.gains;
         for line in 0..LINES {
-            let ramp = LinearRamp {
-                current: gains.current[line],
-                target: gains.target[line],
-                step: gains.step[line],
-                remaining: gains.remaining,
-            };
-            if !ramp_path_inside(ramp, (0.0, 0.25), RAMP_SAMPLES)
+            // A settled gain is at its target with a `+0.0` step, or `from_words` refuses it.
+            let ramp = LinearRamp::from_words(
+                gains.current[line],
+                gains.target[line],
+                gains.step[line],
+                gains.remaining,
+            );
+            if !ramp.is_some_and(|ramp| ramp_path_inside(ramp, (0.0, 0.25), RAMP_SAMPLES))
                 || !(gains.current[line] > 0.0 && gains.target[line] > 0.0)
-                || (gains.remaining == 0
-                    && (gains.current[line] != gains.target[line] || gains.step[line] != 0.0))
             {
                 return Err(state_error("effect.state.parameter"));
             }

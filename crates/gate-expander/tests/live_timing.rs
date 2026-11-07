@@ -92,12 +92,12 @@ fn a_changed_attack_or_release_ramps_its_coefficient_from_the_live_value() {
                 );
                 assert_eq!(
                     word(section, index + 1).to_bits(),
-                    ramp.target.to_bits(),
+                    ramp.target().to_bits(),
                     "{name} target"
                 );
                 assert_eq!(
                     word(section, index + 3),
-                    ramp.remaining as f32,
+                    ramp.remaining() as f32,
                     "{name} remaining"
                 );
             }
@@ -124,7 +124,7 @@ fn a_changed_attack_or_release_ramps_its_coefficient_from_the_live_value() {
     let second = frames(&mut effect, &mut at, 70, 0.5, &both);
     attack.set_target(design(10.0), 64);
     release.set_target(design(2000.0), 64);
-    let start = attack.current;
+    let start = attack.current();
     check(&second, &mut attack, &mut release);
     for section in &second {
         let c = word(section, ATTACK_WORD);

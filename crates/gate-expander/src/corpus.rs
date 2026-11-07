@@ -83,7 +83,7 @@ fn clamped_move(lane: usize, channel: usize, word: usize) -> (f32, f32, f32, u32
     let samples = clamped_window(lane, channel);
     let mut ramp = effect_runtime::ramp::LinearRamp::fixed(start);
     ramp.set_target(target, samples);
-    (start, ramp.target, ramp.step, ramp.remaining)
+    (start, ramp.target(), ramp.step(), ramp.remaining())
 }
 
 /// Result words per case: two channels of [`LANES`] signals.

@@ -8,10 +8,10 @@ use lane::kernels::RampSegment;
 
 /// A settled ramp returns the supplied value, without advancing any state.
 fn assert_constant(mut ramp: LinearRamp, expected: f32, count: usize) {
-    assert_eq!(ramp.remaining, 0, "the stationary window must not arm");
-    assert_eq!(ramp.step.to_bits(), 0);
-    assert_eq!(ramp.current.to_bits(), expected.to_bits());
-    assert_eq!(ramp.target.to_bits(), expected.to_bits());
+    assert_eq!(ramp.remaining(), 0, "the stationary window must not arm");
+    assert_eq!(ramp.step().to_bits(), 0);
+    assert_eq!(ramp.current().to_bits(), expected.to_bits());
+    assert_eq!(ramp.target().to_bits(), expected.to_bits());
     for update in 0..count {
         assert_eq!(
             ramp.next_value().to_bits(),
@@ -30,7 +30,7 @@ fn negative_zero_remains_armed_and_snaps_back_to_its_sign() {
 
     let mut ramp = LinearRamp::fixed(-0.0);
     ramp.set_target(-0.0, 64);
-    assert_eq!(ramp.remaining, 64, "the -0.0 window must still be armed");
+    assert_eq!(ramp.remaining(), 64, "the -0.0 window must still be armed");
     for update in 0..63 {
         assert_eq!(ramp.next_value().to_bits(), 0, "update {update}");
     }
@@ -46,7 +46,7 @@ fn signed_zeros_are_distinct_targets() {
 
     let mut ramp = LinearRamp::fixed(0.0);
     ramp.set_target(-0.0, 32);
-    assert_eq!(ramp.remaining, 32, "a sign flip is a real retarget");
+    assert_eq!(ramp.remaining(), 32, "a sign flip is a real retarget");
 }
 
 /// Subnormal targets settle without flushing their words in the canonical FP environment.
@@ -82,7 +82,7 @@ fn a_retarget_to_the_value_in_force_mid_ramp_settles() {
         for _ in 0..elapsed {
             ramp.next_value();
         }
-        let live = ramp.current;
+        let live = ramp.current();
         ramp.set_target(live, 64);
         assert_constant(ramp, live, 96);
     }
@@ -96,8 +96,12 @@ fn a_window_that_closes_on_a_block_boundary_hoists_on_the_next_block() {
         let mut ramp = LinearRamp::fixed(0.0);
         ramp.set_target(0.25, samples);
         let _: RampSegment<f32> = ramp.advance_block::<f32>(frames);
-        assert_eq!(ramp.remaining, 0, "the window closes at the block boundary");
-        assert_eq!(ramp.current.to_bits(), 0.25_f32.to_bits());
+        assert_eq!(
+            ramp.remaining(),
+            0,
+            "the window closes at the block boundary"
+        );
+        assert_eq!(ramp.current().to_bits(), 0.25_f32.to_bits());
 
         ramp.set_target(0.25, 64);
         let segment: RampSegment<f32> = ramp.advance_block::<f32>(128);
@@ -117,6 +121,6 @@ fn a_one_ulp_move_is_never_hoisted() {
         assert!(!LinearRamp::stationary_at(value, moved));
         let mut ramp = LinearRamp::fixed(value);
         ramp.set_target(moved, 64);
-        assert_eq!(ramp.remaining, 64, "a one-ULP move must arm the window");
+        assert_eq!(ramp.remaining(), 64, "a one-ULP move must arm the window");
     }
 }

@@ -606,3 +606,43 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
         }
     }
 }
+
+/// Issue #2368 (tracker #2258 GR-7): a settled parameter ramp whose `current` is one ulp off its
+/// `target`, inside the domain, is refused with `effect.state.parameter`, and the refusal changes
+/// nothing. No engine writer settles a ramp off its target, so such a ramp would render its stale
+/// `current` until the next retarget.
+///
+/// Test value: a restore that holds a settled ramp only to its domain (as `read_lane` did) accepts
+/// every case and turns this red.
+#[test]
+fn a_settled_ramp_off_its_target_is_refused() {
+    let values = initial_values();
+    let effect_prepared = prepared(&values);
+    let sizes = effect_prepared.metadata.state_sizes;
+    let mut effect = effect_prepared.processor;
+    let saved = snapshot(effect.as_ref());
+    for (index, row) in TRANSIENT_SHAPER_DESCRIPTOR.parameters.iter().enumerate() {
+        let at = 2 + index * 4;
+        assert_eq!(state_u32(&saved.0, at + 3), 0, "ramp {index} is settled");
+        let current = f32::from_bits(state_u32(&saved.0, at));
+        let high = row.maximum.expect("max");
+        let off = if current.next_up() <= high {
+            current.next_up()
+        } else {
+            current.next_down()
+        };
+        let mut section = saved.0.clone();
+        section[at * 4..at * 4 + 4].copy_from_slice(&off.to_le_bytes());
+        assert_eq!(
+            effect.restore_state_payload(
+                1,
+                StatePayloadInput::new(&[], &section, &saved.1, sizes).expect("input"),
+            ),
+            Err(StatePayloadError {
+                code: "effect.state.parameter"
+            }),
+            "ramp {index}: settled current {off:e} off its target {current:e}"
+        );
+        assert_eq!(snapshot(effect.as_ref()), saved, "ramp {index}: atomic");
+    }
+}

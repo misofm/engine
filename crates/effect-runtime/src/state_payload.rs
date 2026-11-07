@@ -247,34 +247,36 @@ pub const RAMP_WORDS: usize = 4;
 ///
 /// As [`write_u32`].
 pub fn write_ramp(bytes: &mut [u8], word: usize, ramp: LinearRamp) {
-    write_f32(bytes, word, ramp.current);
-    write_f32(bytes, word + 1, ramp.target);
-    write_f32(bytes, word + 2, ramp.step);
-    write_u32(bytes, word + 3, ramp.remaining);
+    write_f32(bytes, word, ramp.current());
+    write_f32(bytes, word + 1, ramp.target());
+    write_f32(bytes, word + 2, ramp.step());
+    write_u32(bytes, word + 3, ramp.remaining());
 }
 
-/// Reads the ramp [`write_ramp`] wrote at `word`, unvalidated.
+/// Reads the ramp [`write_ramp`] wrote at `word` through [`LinearRamp::from_words`]: `None` when
+/// the words break its phase invariant (a settled ramp off its target or with a step, issue
+/// #2368). Nothing else is validated.
 ///
 /// # Panics
 ///
 /// As [`read_u32`].
 #[must_use]
-pub fn read_ramp(bytes: &[u8], word: usize) -> LinearRamp {
-    LinearRamp {
-        current: read_f32(bytes, word),
-        target: read_f32(bytes, word + 1),
-        step: read_f32(bytes, word + 2),
-        remaining: read_u32(bytes, word + 3),
-    }
+pub fn read_ramp(bytes: &[u8], word: usize) -> Option<LinearRamp> {
+    LinearRamp::from_words(
+        read_f32(bytes, word),
+        read_f32(bytes, word + 1),
+        read_f32(bytes, word + 2),
+        read_u32(bytes, word + 3),
+    )
 }
 
 /// Whether every value a restored ramp can take lies in the closed interval `[low, high]`: its
 /// `current` and `target`, and each value its remaining steps visit before the snap to the target,
 /// iterated exactly as [`LinearRamp::next_value`] iterates them.
 ///
-/// A ramp also needs `remaining <= max_remaining` and a finite step, and a settled ramp
-/// (`remaining == 0`) must carry the `+0.0` step that [`LinearRamp::fixed`], [`LinearRamp::snap`],
-/// [`LinearRamp::set_target`] and the last [`LinearRamp::next_value`] all write.
+/// A ramp also needs `remaining <= max_remaining` and a finite step. That a settled ramp is at
+/// its target with a `+0.0` step is not checked here: a [`LinearRamp`] cannot be built otherwise
+/// ([`LinearRamp::from_words`], issue #2368).
 ///
 /// `[low, high]` is the word's strict domain or designed range, with no rounding budget: under the
 /// clamped law no engine ramp word leaves its endpoints (issue #1409 D2), so a word outside the
@@ -292,14 +294,10 @@ pub fn read_ramp(bytes: &[u8], word: usize) -> LinearRamp {
 #[must_use]
 pub fn ramp_path_inside(ramp: LinearRamp, (low, high): (f32, f32), max_remaining: u32) -> bool {
     let inside = |value: f32| (low..=high).contains(&value);
-    if ramp.remaining > max_remaining
-        || !ramp.step.is_finite()
-        || !inside(ramp.current)
-        || !inside(ramp.target)
-    {
-        return false;
-    }
-    ramp.remaining != 0 || ramp.step.to_bits() == 0
+    ramp.remaining() <= max_remaining
+        && ramp.step().is_finite()
+        && inside(ramp.current())
+        && inside(ramp.target())
 }
 // REALTIME_POLICY_END
 

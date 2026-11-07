@@ -733,18 +733,14 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         let weights = effect_contract::link_glide_weights(mode);
         for state in &mut self.state {
             for (slot, &weight) in state.links.iter_mut().zip(&weights) {
-                let mut ramp = LinearRamp {
-                    current: lane_get(slot.current, lane),
-                    target: lane_get(slot.target, lane),
-                    step: lane_get(slot.step, lane),
-                    remaining: lane_get(slot.remaining, lane) as u32,
-                };
+                // `set_target` reads only `current`: the ramp restarts from the word in force.
+                let mut ramp = LinearRamp::fixed(lane_get(slot.current, lane));
                 ramp.set_target(weight, samples);
-                lane_set(&mut slot.current, lane, ramp.current);
-                lane_set(&mut slot.target, lane, ramp.target);
-                lane_set(&mut slot.step, lane, ramp.step);
-                lane_set(&mut slot.remaining, lane, ramp.remaining as f32);
-                self.ramp_frames_left = self.ramp_frames_left.max(ramp.remaining);
+                lane_set(&mut slot.current, lane, ramp.current());
+                lane_set(&mut slot.target, lane, ramp.target());
+                lane_set(&mut slot.step, lane, ramp.step());
+                lane_set(&mut slot.remaining, lane, ramp.remaining() as f32);
+                self.ramp_frames_left = self.ramp_frames_left.max(ramp.remaining());
             }
         }
         true
@@ -901,17 +897,13 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                     continue;
                 }
                 let slot = &mut self.state[channel].ramps[index];
-                let mut ramp = LinearRamp {
-                    current: lane_get(slot.current, lane),
-                    target: lane_get(slot.target, lane),
-                    step: lane_get(slot.step, lane),
-                    remaining: lane_get(slot.remaining, lane) as u32,
-                };
+                // `set_target` reads only `current`: the ramp restarts from the word in force.
+                let mut ramp = LinearRamp::fixed(lane_get(slot.current, lane));
                 ramp.set_target(value, RAMP_SAMPLES);
-                lane_set(&mut slot.current, lane, ramp.current);
-                lane_set(&mut slot.target, lane, ramp.target);
-                lane_set(&mut slot.step, lane, ramp.step);
-                lane_set(&mut slot.remaining, lane, ramp.remaining as f32);
+                lane_set(&mut slot.current, lane, ramp.current());
+                lane_set(&mut slot.target, lane, ramp.target());
+                lane_set(&mut slot.step, lane, ramp.step());
+                lane_set(&mut slot.remaining, lane, ramp.remaining() as f32);
                 self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
             }
         }
@@ -938,17 +930,13 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         }
         let design = attack_release_coefficient(milliseconds, self.sample_rate);
         let rate = &mut self.state[channel].rates[slot];
-        let mut ramp = LinearRamp {
-            current: lane_get(rate.current, lane),
-            target: lane_get(rate.target, lane),
-            step: lane_get(rate.step, lane),
-            remaining: lane_get(rate.remaining, lane) as u32,
-        };
+        // `set_target` reads only `current`: the ramp restarts from the word in force.
+        let mut ramp = LinearRamp::fixed(lane_get(rate.current, lane));
         ramp.set_target(design, RAMP_SAMPLES);
-        lane_set(&mut rate.current, lane, ramp.current);
-        lane_set(&mut rate.target, lane, ramp.target);
-        lane_set(&mut rate.step, lane, ramp.step);
-        lane_set(&mut rate.remaining, lane, ramp.remaining as f32);
+        lane_set(&mut rate.current, lane, ramp.current());
+        lane_set(&mut rate.target, lane, ramp.target());
+        lane_set(&mut rate.step, lane, ramp.step());
+        lane_set(&mut rate.remaining, lane, ramp.remaining() as f32);
         self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
     }
 
@@ -1372,16 +1360,10 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             // `set_target` and the last `advance_ramp` step both land `current` on it.
             let spec = &GATE_SPECS[index];
             let path = integral_within(remaining, RAMP_SAMPLES as f32)
-                && (remaining != 0.0 || current.to_bits() == target.to_bits())
-                && payload::ramp_path_inside(
-                    LinearRamp {
-                        current,
-                        target,
-                        step,
-                        remaining: remaining as u32,
+                && LinearRamp::from_words(current, target, step, remaining as u32).is_some_and(
+                    |ramp| {
+                        payload::ramp_path_inside(ramp, (spec.minimum, spec.maximum), RAMP_SAMPLES)
                     },
-                    (spec.minimum, spec.maximum),
-                    RAMP_SAMPLES,
                 );
             if is_negative_zero(current)
                 || is_negative_zero(target)
@@ -1409,16 +1391,8 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             let design = attack_release_coefficient(milliseconds, self.sample_rate);
             let valid = target.to_bits() == design.to_bits()
                 && integral_within(remaining, RAMP_SAMPLES as f32)
-                && (remaining != 0.0 || current.to_bits() == target.to_bits())
-                && payload::ramp_path_inside(
-                    LinearRamp {
-                        current,
-                        target,
-                        step,
-                        remaining: remaining as u32,
-                    },
-                    (RATE_MIN, RATE_MAX),
-                    RAMP_SAMPLES,
+                && LinearRamp::from_words(current, target, step, remaining as u32).is_some_and(
+                    |ramp| payload::ramp_path_inside(ramp, (RATE_MIN, RATE_MAX), RAMP_SAMPLES),
                 );
             if !valid {
                 return Err(state_error("effect.state.parameter"));
@@ -1442,17 +1416,8 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             let valid = integral_within(remaining, maximum as f32)
                 && !is_negative_zero(current)
                 && (remaining == 0.0 || step != 0.0)
-                && (remaining != 0.0 || current.to_bits() == target.to_bits())
-                && payload::ramp_path_inside(
-                    LinearRamp {
-                        current,
-                        target,
-                        step,
-                        remaining: remaining as u32,
-                    },
-                    (0.0, 1.0),
-                    maximum,
-                );
+                && LinearRamp::from_words(current, target, step, remaining as u32)
+                    .is_some_and(|ramp| payload::ramp_path_inside(ramp, (0.0, 1.0), maximum));
             if !valid {
                 return Err(state_error("effect.state.link"));
             }

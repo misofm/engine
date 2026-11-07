@@ -118,6 +118,16 @@ pub(crate) fn write_channel<L: Lane>(bytes: &mut [u8], channel: &Channel<L>, lan
     }
 }
 
+/// Commits the ramp at `word` of a section [`validate_channel`] accepted, which read every ramp
+/// through the same `read_ramp`, so it is always `Some`.
+fn commit_ramp(slot: &mut LinearRamp, bytes: &[u8], word: usize) {
+    let ramp = read_ramp(bytes, word);
+    debug_assert!(ramp.is_some(), "validate_channel read this ramp");
+    if let Some(ramp) = ramp {
+        *slot = ramp;
+    }
+}
+
 /// Validates one channel section and returns the link mode its weights glide to.
 pub(crate) fn validate_channel(bytes: &[u8]) -> Result<LinkMode, StatePayloadError> {
     let expected = STATE_HEADER_WORDS
@@ -131,13 +141,16 @@ pub(crate) fn validate_channel(bytes: &[u8]) -> Result<LinkMode, StatePayloadErr
         return Err(state_error("effect.state.gain"));
     }
     for (index, spec) in PARAMETER_SPECS.iter().enumerate() {
-        let ramp = read_ramp(bytes, PARAMETER_RAMP_WORD + index * RAMP_WORDS);
+        // A settled ramp is at its target with a `+0.0` step (issue #2368): `read_ramp` refuses
+        // any other, as no live writer leaves one.
+        let ramp = read_ramp(bytes, PARAMETER_RAMP_WORD + index * RAMP_WORDS)
+            .ok_or(state_error("effect.state.parameter"))?;
         // The target is a designed value and lies in the domain exactly. A `current`, moving or
         // settled, is held to the strict domain too: the clamped law keeps every word the
         // effect's own ramps produce between its start and its target, both in the domain
         // (issue #1409 D2), so a word outside it is one the engine never holds (issue #1411 D1).
-        if !parameter_state_valid(index, ramp.current)
-            || !parameter_state_valid(index, ramp.target)
+        if !parameter_state_valid(index, ramp.current())
+            || !parameter_state_valid(index, ramp.target())
             || !ramp_path_inside(ramp, (spec.minimum, spec.maximum), SMOOTHING_SAMPLES)
         {
             return Err(state_error("effect.state.parameter"));
@@ -151,10 +164,11 @@ pub(crate) fn validate_channel(bytes: &[u8]) -> Result<LinkMode, StatePayloadErr
     // settled, lies between two designed values under the clamped law (issue #1409 D2), so it is
     // held to the same designed range, with no rounding budget (issue #1411 D1).
     for index in 0..RATE_RAMPS {
-        let ramp = read_ramp(bytes, RATE_RAMP_WORD + index * RAMP_WORDS);
+        let ramp = read_ramp(bytes, RATE_RAMP_WORD + index * RAMP_WORDS)
+            .ok_or(state_error("effect.state.parameter"))?;
         let designed = |value: f32| value > 0.0 && value <= 1.0;
-        if !designed(ramp.target)
-            || !designed(ramp.current)
+        if !designed(ramp.target())
+            || !designed(ramp.current())
             || !ramp_path_inside(ramp, (0.0, 1.0), SMOOTHING_SAMPLES)
         {
             return Err(state_error("effect.state.parameter"));
@@ -166,14 +180,15 @@ pub(crate) fn validate_channel(bytes: &[u8]) -> Result<LinkMode, StatePayloadErr
     // mode's rest weights, a mode the compressor supports.
     let mut targets = [0.0_f32; LINK_RAMPS];
     for (index, target) in targets.iter_mut().enumerate() {
-        let ramp = read_ramp(bytes, LINK_RAMP_WORD + index * RAMP_WORDS);
-        if is_negative_zero(ramp.current)
-            || (ramp.remaining != 0 && ramp.step == 0.0)
+        let ramp = read_ramp(bytes, LINK_RAMP_WORD + index * RAMP_WORDS)
+            .ok_or(state_error("effect.state.link"))?;
+        if is_negative_zero(ramp.current())
+            || (ramp.remaining() != 0 && ramp.step() == 0.0)
             || !ramp_path_inside(ramp, (0.0, 1.0), LINK_GLIDE_MAX_SAMPLES)
         {
             return Err(state_error("effect.state.link"));
         }
-        *target = ramp.target;
+        *target = ramp.target();
     }
     effect_contract::link_glide_mode(targets)
         .filter(|mode| {
@@ -202,14 +217,18 @@ pub(crate) fn commit_channel<L: Lane>(
     channel.gain_reduction_db = L::load(&reduction);
 
     for (index, parameter) in channel.ramps.iter_mut().enumerate() {
-        parameter[lane] = read_ramp(bytes, PARAMETER_RAMP_WORD + index * RAMP_WORDS);
+        commit_ramp(
+            &mut parameter[lane],
+            bytes,
+            PARAMETER_RAMP_WORD + index * RAMP_WORDS,
+        );
     }
     for (index, ramp) in channel.rate_ramps.iter_mut().enumerate() {
-        ramp[lane] = read_ramp(bytes, RATE_RAMP_WORD + index * RAMP_WORDS);
+        commit_ramp(&mut ramp[lane], bytes, RATE_RAMP_WORD + index * RAMP_WORDS);
     }
     if carried {
         for (index, ramp) in channel.link_ramps.iter_mut().enumerate() {
-            ramp[lane] = read_ramp(bytes, LINK_RAMP_WORD + index * RAMP_WORDS);
+            commit_ramp(&mut ramp[lane], bytes, LINK_RAMP_WORD + index * RAMP_WORDS);
         }
     }
     let values = channel.current_values(lane);
@@ -220,8 +239,8 @@ pub(crate) fn commit_channel<L: Lane>(
         &mut channel.words,
         lane,
     );
-    channel.words[COEF_ATTACK][lane] = channel.rate_ramps[0][lane].current;
-    channel.words[COEF_RELEASE][lane] = channel.rate_ramps[1][lane].current;
+    channel.words[COEF_ATTACK][lane] = channel.rate_ramps[0][lane].current();
+    channel.words[COEF_RELEASE][lane] = channel.rate_ramps[1][lane].current();
 }
 
 /// One lane of one channel as plain words (issue #2229): every word [`write_channel`] writes for
@@ -252,7 +271,7 @@ impl LaneWords {
     /// The link mode these weights glide to, as [`validate_channel`] reads it from a payload:
     /// `None` for a pair of targets no supported mode rests at, which a restore refuses.
     pub(crate) fn link_mode(&self) -> Option<LinkMode> {
-        effect_contract::link_glide_mode(self.link_ramps.map(|ramp| ramp.target)).filter(|mode| {
+        effect_contract::link_glide_mode(self.link_ramps.map(|ramp| ramp.target())).filter(|mode| {
             crate::COMPRESSOR_DESCRIPTOR
                 .supported_link_modes
                 .contains(*mode)
@@ -303,8 +322,8 @@ pub(crate) fn words_are_designed<L: Lane>(
         &mut designed,
         lane,
     );
-    designed[COEF_ATTACK][lane] = channel.rate_ramps[0][lane].current;
-    designed[COEF_RELEASE][lane] = channel.rate_ramps[1][lane].current;
+    designed[COEF_ATTACK][lane] = channel.rate_ramps[0][lane].current();
+    designed[COEF_RELEASE][lane] = channel.rate_ramps[1][lane].current();
     designed
         .iter()
         .zip(&channel.words)

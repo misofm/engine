@@ -358,10 +358,10 @@ pub(super) fn lane_state<L: Lane>(channel: &Channel<L>, lane: usize) -> Vec<u32>
     for ramp in channel.ramps.iter().chain(channel.rate_ramps.iter()) {
         let ramp = ramp[lane];
         state.extend([
-            ramp.current.to_bits(),
-            ramp.target.to_bits(),
-            ramp.step.to_bits(),
-            ramp.remaining,
+            ramp.current().to_bits(),
+            ramp.target().to_bits(),
+            ramp.step().to_bits(),
+            ramp.remaining(),
         ]);
     }
     state

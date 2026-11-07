@@ -140,10 +140,10 @@ fn lane_state<L: Lane, const W: usize>(
         out.extend(words.iter().map(|word| lane_value(*word, track).to_bits()));
         for ramp in &side.ramps[track] {
             out.extend([
-                ramp.current.to_bits(),
-                ramp.target.to_bits(),
-                ramp.step.to_bits(),
-                ramp.remaining,
+                ramp.current().to_bits(),
+                ramp.target().to_bits(),
+                ramp.step().to_bits(),
+                ramp.remaining(),
             ]);
         }
         out.push(side.crossover_hz[track].to_bits());

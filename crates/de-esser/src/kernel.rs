@@ -428,10 +428,10 @@ mod glide_law_tests {
                     }))
                 };
                 let mut links: [WordRamp<L>; LINK_COUNT] = core::array::from_fn(|w| WordRamp {
-                    current: load(|ramp| ramp.current, w),
-                    target: load(|ramp| ramp.target, w),
-                    step: load(|ramp| ramp.step, w),
-                    remaining: load(|ramp| ramp.remaining as f32, w),
+                    current: load(|ramp| ramp.current(), w),
+                    target: load(|ramp| ramp.target(), w),
+                    step: load(|ramp| ramp.step(), w),
+                    remaining: load(|ramp| ramp.remaining() as f32, w),
                 });
                 let coef = Coef {
                     bypass: L::zero(),
