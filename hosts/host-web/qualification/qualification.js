@@ -1266,18 +1266,23 @@ async function runObservationRun(createHost, sessionDocument, armed) {
 /// The three SDK controls belong to `sdk-response-entry.ts`'s live track-response, collection and
 /// hop workloads, which run first and only when the SDK qualification does; then the growth row's
 /// [`resumeThroughClick`] button (#1332 S9); then the unsubscribe run's one
-/// [`resumeThroughClick`] button (#1535); the last are the suspend-then-resume row's two buttons per
-/// cycle, `first` and `again` (#2245).
+/// [`resumeThroughClick`] button (#1535). The suspend-then-resume row runs after this plan, one
+/// cycle per evaluate, each with its own two-click plan ([`suspendResumeCycleClickPlan`], #2353).
 export function resumeClickPlan(sdkEnabled) {
   if (!WebAssembly.validate(SIMD128_PROBE)) return [];
   return [
     ...(sdkEnabled ? ["#track-response-resume", "#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
     resumeControlSelector(GROWTH_RESUME),
     resumeControlSelector(UNSUBSCRIBE_RESUME),
-    ...Array.from({ length: SUSPEND_RESUME_CYCLES }, (_, cycle) => [
-      resumeControlSelector(suspendResumeLabel(cycle, "first")),
-      resumeControlSelector(suspendResumeLabel(cycle, "again")),
-    ]).flat(),
+  ];
+}
+
+/// Issue #2353: the two controls one suspend-then-resume cycle asks the harness to click, `first`
+/// and `again` (#2245), in order.
+export function suspendResumeCycleClickPlan(cycle) {
+  return [
+    resumeControlSelector(suspendResumeLabel(cycle, "first")),
+    resumeControlSelector(suspendResumeLabel(cycle, "again")),
   ];
 }
 
@@ -1294,9 +1299,14 @@ function resumeControlSelector(what) {
 /// trusted click handler (`window.event` is that click) or anywhere else (`direct`). Offline contexts
 /// are not counted: they need no activation. The count is part of the result, so a `resume()` that
 /// is not inside a click handler (an SDK workload's, or one added later) turns the
-/// `resume-clicks` gate red whatever the browser happens to allow.
+/// `resume-clicks` gate red whatever the browser happens to allow. The counter is installed once per
+/// page; the suspend-then-resume cycles that run after `runQualification` read their own share as a
+/// difference (#2353).
+let resumeCounter = null;
 function countResumes() {
+  if (resumeCounter !== null) return resumeCounter;
   const record = { inClick: 0, direct: 0 };
+  resumeCounter = record;
   if (typeof AudioContext !== "function") return record;
   const resume = AudioContext.prototype.resume;
   AudioContext.prototype.resume = function countedResume(...args) {
@@ -1316,15 +1326,48 @@ function delay(milliseconds) {
 /// run, the same 10 s as `sdk-response-entry.ts` uses for its `suspend()` and `resume()` bounds.
 const AUDIO_STEP_TIMEOUT_MS = 10_000;
 
+/// Issue #2353: what the page awaits, told to the harness as it happens. Every wait primitive below
+/// logs the step it starts (`AWAITING_PREFIX`, once per change of step), and a one-second
+/// heartbeat (`HEARTBEAT_MESSAGE`) shows the event loop still runs. Both are console messages,
+/// which the harness has already received when the page stops: a WebKit page whose audio output
+/// wedges can stop running its event loop altogether (no timer fires, no evaluate answers), and
+/// then the last step it logged is the only record of what it was waiting on.
+export const AWAITING_PREFIX = "qualification awaiting: ";
+export const HEARTBEAT_MESSAGE = "qualification heartbeat";
+const HEARTBEAT_INTERVAL_MS = 1_000;
+let awaitedStep = null;
+let heartbeat = null;
+function awaiting(step) {
+  if (heartbeat === null) {
+    heartbeat = setInterval(() => console.debug(HEARTBEAT_MESSAGE), HEARTBEAT_INTERVAL_MS);
+    // The hermetic boot-contract test runs these waits in Node, where an armed interval would keep
+    // the process alive; a browser's timer id is a number and has no `unref`.
+    heartbeat.unref?.();
+  }
+  if (step === awaitedStep) return;
+  awaitedStep = step;
+  console.debug(`${AWAITING_PREFIX}${step}`);
+}
+
+/// A timeout of one of the bounded waits below: its message, and the step it timed out at as
+/// `awaiting`, which marks it as a timeout for the suspend-then-resume row (`wedgeOf`).
+function timeoutError(message, step) {
+  const error = new Error(message);
+  error.awaiting = step;
+  return error;
+}
+
 /// Await `start()`, failing with `<kind> timeout at <step>` and the context's state if it has not
 /// settled within `AUDIO_STEP_TIMEOUT_MS`. A timeout is a failure of the gate: never a pass, a skip
 /// or a retry. WebKit leaves a `resume()` that has no user activation pending; an unbounded wait
 /// there hangs the page until CI kills the job.
 async function bounded(kind, step, context, start) {
+  awaiting(`${kind} ${step}`);
   let timer;
   const stalled = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(
+    timer = setTimeout(() => reject(timeoutError(
       `${kind} timeout at ${step} after ${AUDIO_STEP_TIMEOUT_MS} ms: state=${context.state} currentTime=${context.currentTime}`,
+      `${kind} ${step}`,
     )), AUDIO_STEP_TIMEOUT_MS);
   });
   try {
@@ -1355,11 +1398,13 @@ export function requestFailure(step, kind, inFlight, cause) {
 /// poll is what keeps the run from going on with a context that is still running. Returns the
 /// state it saw, which the run records.
 async function requireSuspended(context, step) {
+  awaiting(`suspended ${step}`);
   const started = performance.now();
   while (context.state !== "suspended") {
     if (performance.now() - started > AUDIO_STEP_TIMEOUT_MS) {
-      throw new Error(
+      throw timeoutError(
         `suspend timeout at ${step} after ${AUDIO_STEP_TIMEOUT_MS} ms: state=${context.state} currentTime=${context.currentTime}`,
+        `suspended ${step}`,
       );
     }
     await delay(4);
@@ -1455,6 +1500,7 @@ async function boundedSample(describe) {
 /// `true` returns "deadline" (the caller's own named failure, D4's shortfall); otherwise it throws
 /// the named stall failure carrying the [`classifyStallSignature`] of the window.
 async function renderUntil(context, condition, what, describe, started, atDeadline = () => false) {
+  awaiting(`render ${what}`);
   const atResume = await boundedSample(describe);
   let lastPoll = performance.now();
   let repliesSent = 0;
@@ -1470,10 +1516,10 @@ async function renderUntil(context, condition, what, describe, started, atDeadli
     if (now - started > AUDIO_STEP_TIMEOUT_MS) {
       const atTimeout = await poll();
       if (atDeadline(atTimeout)) return "deadline";
-      const error = new Error(`stall timeout at ${what} after ${AUDIO_STEP_TIMEOUT_MS} ms: ${diagnosticJson({
+      const error = timeoutError(`stall timeout at ${what} after ${AUDIO_STEP_TIMEOUT_MS} ms: ${diagnosticJson({
         atResume,
         atTimeout,
-      })}`);
+      })}`, `render ${what}`);
       error.stallSignature = classifyStallSignature({ atResume, atTimeout, repliesSent, replyIds });
       throw error;
     }
@@ -1779,6 +1825,18 @@ function suspendResumeLabel(cycle, which) {
   return `suspend-resume cycle ${cycle} ${which}`;
 }
 
+/// Issue #2353: the record of a cycle that timed out from its first click on, or `null` for any
+/// other error, which the cycle throws. A bounded wait's timeout carries the step it timed out at
+/// (`timeoutError`), and a stall timeout its signature too. Linux WebKit's audio output can leave
+/// any wait of the resume path unresolved (#2245: a resume whose render never restarts, a
+/// `suspend()` that never settles), so a timeout there is the row's `wedge`: recorded in the cycle,
+/// which goes on to dispose its host and close its context, and reported, not gated, on WebKit
+/// (owner ruling 2026-11-05).
+function wedgeOf(error) {
+  if (typeof error?.awaiting !== "string") return null;
+  return { by: "page", awaiting: error.awaiting, message: error.message, stallSignature: error.stallSignature ?? null };
+}
+
 /// One cycle of the suspend-then-resume row: boot suspended on the unsubscribe session with a
 /// prefilled ring (`SUSPEND_RESUME_RING_BLOCKS`) and a meter lease (the console holds one), resume through a click, suspend as
 /// soon as a status read reports a rendered quantum, then resume through a second click and wait
@@ -1788,7 +1846,8 @@ function suspendResumeLabel(cycle, which) {
 /// the wait. After a good resume they were all rendered after it, so the capture check proves that
 /// audio is present there. It does not detect a stall: a stalled context's analyser keeps the audio
 /// from before the suspend (a WebKit stall read a peak of 0.462). The clock, render and stall checks
-/// catch a stall.
+/// catch a stall. A timeout before the first click throws; from the first click on it is the
+/// cycle's `wedge` (`wedgeOf`), and the fields the cycle did not reach stay `null`.
 async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
   const step = (what) => `${what} (suspend-resume cycle ${cycle})`;
   const context = new AudioContext({ sampleRate: SAMPLE_RATE });
@@ -1840,64 +1899,107 @@ async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
     };
   };
 
-  // The first segment: suspend as soon as a status read reports a rendered quantum.
-  await resumeThroughClick(context, suspendResumeLabel(cycle, "first"));
-  let atSuspendCall;
-  await renderUntil(context, async () => {
-    atSuspendCall = await status("status (first segment)");
-    return atSuspendCall.renderedQuanta >= 1n;
-  }, suspendResumeLabel(cycle, "first"), describe, performance.now());
-  await bounded("suspend", step("the first segment's suspend"), context, () => context.suspend());
-  await requireSuspended(context, step("the first segment's suspend"));
-  const suspended = await sample("status (suspended)");
-
-  // The second resume: the clock and the render must both move, and the capture must hold audio.
-  // A stall here is recorded with its signature, not thrown: Linux WebKit stalls on this path (the
-  // owner's ruling of 2026-11-05 reports the row there), and the cycle still disposes its host and
-  // closes its context (a close of a stalled context returns; a `suspend()` would hang the page).
-  await resumeThroughClick(context, suspendResumeLabel(cycle, "again"));
+  let wedge = null;
+  const record = (error) => {
+    const found = wedgeOf(error);
+    if (found === null) throw error;
+    wedge ??= found;
+  };
+  let atSuspendCall = null;
+  let suspended = null;
+  let resumed = null;
   let stall = null;
+  let capturePeak = null;
   try {
+    // The first segment: suspend as soon as a status read reports a rendered quantum.
+    await resumeThroughClick(context, suspendResumeLabel(cycle, "first"));
     await renderUntil(context, async () => {
-      const reply = await status("status (after the resume)");
-      return reply.renderedQuanta >= BigInt(suspended.renderedQuanta) + SUSPEND_RESUME_AFTER_QUANTA
-        && context.currentTime > suspended.currentTime;
-    }, suspendResumeLabel(cycle, "again"), describe, performance.now());
-  } catch (error) {
-    if (error?.stallSignature === undefined) throw error;
-    stall = error.stallSignature;
-  }
-  const resumed = await sample("status (resumed)");
-  const captured = new Float32Array(SUSPEND_RESUME_CAPTURE_FRAMES);
-  capture.getFloatTimeDomainData(captured);
-  const capturePeak = captured.reduce((peak, value) => Math.max(peak, Math.abs(value)), 0);
+      atSuspendCall = await status("status (first segment)");
+      return atSuspendCall.renderedQuanta >= 1n;
+    }, suspendResumeLabel(cycle, "first"), describe, performance.now());
+    await bounded("suspend", step("the first segment's suspend"), context, () => context.suspend());
+    await requireSuspended(context, step("the first segment's suspend"));
+    suspended = await sample("status (suspended)");
 
-  const allocations = await bounded("await", step("renderAllocationCount"), context,
-    () => renderAllocationCount(host));
-  await bounded("await", step("dispose"), context, () => host.dispose());
-  await bounded("await", step("close"), context, () => context.close());
+    // The second resume: the clock and the render must both move, and the capture must hold audio.
+    // A stall here is recorded with its signature, not thrown: Linux WebKit stalls on this path (the
+    // owner's ruling of 2026-11-05 reports the row there), and the cycle still disposes its host and
+    // closes its context (a close of a stalled context returns; a `suspend()` would hang the page).
+    await resumeThroughClick(context, suspendResumeLabel(cycle, "again"));
+    try {
+      await renderUntil(context, async () => {
+        const reply = await status("status (after the resume)");
+        return reply.renderedQuanta >= BigInt(suspended.renderedQuanta) + SUSPEND_RESUME_AFTER_QUANTA
+          && context.currentTime > suspended.currentTime;
+      }, suspendResumeLabel(cycle, "again"), describe, performance.now());
+    } catch (error) {
+      if (error?.stallSignature === undefined) throw error;
+      stall = error.stallSignature;
+    }
+    resumed = await sample("status (resumed)");
+    const captured = new Float32Array(SUSPEND_RESUME_CAPTURE_FRAMES);
+    capture.getFloatTimeDomainData(captured);
+    capturePeak = captured.reduce((peak, value) => Math.max(peak, Math.abs(value)), 0);
+  } catch (error) {
+    record(error);
+  }
+
+  let allocations = null;
+  try {
+    allocations = await bounded("await", step("renderAllocationCount"), context, () => renderAllocationCount(host));
+  } catch (error) {
+    record(error);
+  }
+  try {
+    await bounded("await", step("dispose"), context, () => host.dispose());
+  } catch (error) {
+    record(error);
+  }
+  try {
+    await bounded("await", step("close"), context, () => context.close());
+  } catch (error) {
+    record(error);
+  }
   return {
     cycle,
     contextStateBeforeBoot: stateBeforeBoot,
     meterLeaseResult: lease.result,
-    quantaAtSuspendCall: atSuspendCall.renderedQuanta.toString(),
+    quantaAtSuspendCall: atSuspendCall?.renderedQuanta.toString() ?? null,
     suspended,
     resumed,
     stall,
+    wedge,
     capturePeak,
     meterFrames,
     renderAllocations: allocations,
   };
 }
 
-/// Issue #2245: every cycle of the suspend-then-resume row, in order. A stall throws from the
-/// cycle's `renderUntil` with its stall signature, naming the cycle and the resume.
-async function runSuspendResumeQualification(createHost, sessionDocument) {
-  const cycles = [];
-  for (let cycle = 0; cycle < SUSPEND_RESUME_CYCLES; cycle += 1) {
-    cycles.push(await runSuspendResumeCycle(createHost, sessionDocument, cycle));
-  }
-  return { cycles };
+/// Issue #2353: one cycle of the suspend-then-resume row, run by the harness in its own evaluate
+/// after `runQualification` (the page's earlier rows have already returned), so a page that stops
+/// in one cycle loses that cycle and nothing else: the harness records it as the cycle's `wedge`
+/// and runs the next cycle in a new browser. Returns the cycle record (`runSuspendResumeCycle`),
+/// with the mode its host reported and the page's resumes during the cycle (`resumes`).
+export async function runSuspendResumeCyclePage(cycle) {
+  const resumeRecord = countResumes();
+  const before = { ...resumeRecord };
+  const [{ createMisoAudioWorkletHost }, sessionResponse] = await Promise.all([
+    import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
+    fetch("/qualification/unsubscribe-session.json"),
+  ]);
+  if (!sessionResponse.ok) throw new Error("qualification fixture fetch failed");
+  const sessionDocument = new TextEncoder().encode(await sessionResponse.text());
+  let instanceMode = null;
+  const record = await runSuspendResumeCycle(async (arguments_) => {
+    const host = await createMisoAudioWorkletHost(arguments_);
+    instanceMode = host.instanceMode;
+    return host;
+  }, sessionDocument, cycle);
+  return {
+    ...record,
+    instanceMode,
+    resumes: { inClick: resumeRecord.inClick - before.inClick, direct: resumeRecord.direct - before.direct },
+  };
 }
 
 /// Issue #2245: the `suspend-resume` gate's named failures, empty on a pass. `count`: not exactly
@@ -1908,8 +2010,12 @@ async function runSuspendResumeQualification(createHost, sessionDocument) {
 /// the second resume the context was not "running", its clock did not move, or the engine did not
 /// render `SUSPEND_RESUME_AFTER_QUANTA` more quanta with result 0), `stall` (the wait after the
 /// second resume timed out; the cycle carries its stall signature), and `capture` (the output after
-/// the resume was silent or not finite). `SUSPEND_RESUME_SETUP_CHECKS` are the checks of the boot
-/// and the first segment; the others are the checks of the second resume.
+/// the resume was silent or not finite). `wedge` (#2353): a wait from the cycle's first click on did
+/// not settle within its bound (the page's own record, `wedgeOf`), or the page stopped and the
+/// harness recorded the cycle (`by: "harness"`, with the step the page last said it awaited). A
+/// wedged cycle is held to nothing past the steps it reached: a page record still to `context`, a
+/// harness record to nothing else. `SUSPEND_RESUME_SETUP_CHECKS` are the checks of the boot and the
+/// first segment; the others are the checks of the second resume, and `wedge`.
 export const SUSPEND_RESUME_SETUP_CHECKS = Object.freeze(["result", "count", "context", "first-segment", "suspended"]);
 
 export function suspendResumeFailures(run) {
@@ -1918,9 +2024,15 @@ export function suspendResumeFailures(run) {
   if (run.cycles.length !== SUSPEND_RESUME_CYCLES) failures.add("count");
   const quanta = (value) => (typeof value === "string" && /^[0-9]+$/.test(value) ? BigInt(value) : null);
   for (const cycle of run.cycles) {
+    const wedged = cycle?.wedge !== null;
+    if (wedged) {
+      failures.add("wedge");
+      if (cycle?.wedge?.by !== "page") continue;
+    }
     if (cycle?.contextStateBeforeBoot !== "suspended" || cycle?.meterLeaseResult !== RESULT_OK) {
       failures.add("context");
     }
+    if (wedged) continue;
     const first = quanta(cycle?.quantaAtSuspendCall);
     if (first === null || first < 1n) failures.add("first-segment");
     const suspendedQuanta = quanta(cycle?.suspended?.renderedQuanta);
@@ -2182,7 +2294,6 @@ export async function runQualification() {
       consoleLimits: null,
       warmGrowth: null,
       observation: null,
-      suspendResume: null,
       stall: null,
       stagingReads: null,
       renderAllocations: null,
@@ -2311,15 +2422,6 @@ export async function runQualification() {
     if (error?.stallSignature !== undefined) failure.stallSignature = error.stallSignature;
     throw failure;
   }
-  let suspendResume;
-  try {
-    suspendResume = await runSuspendResumeQualification(createMisoAudioWorkletHost, unsubscribeDocument);
-  } catch (error) {
-    // #2245: the message and the stall signature only, as for the unsubscribe run.
-    const failure = new Error(`suspend-resume qualification failed: ${error?.message ?? String(error)}`);
-    if (error?.stallSignature !== undefined) failure.stallSignature = error.stallSignature;
-    throw failure;
-  }
   let stall;
   try {
     stall = await runStallQualification(createMisoAudioWorkletHost, stallDocument);
@@ -2361,7 +2463,6 @@ export async function runQualification() {
     consoleLimits,
     warmGrowth,
     observation,
-    suspendResume,
     stall,
     stagingReads,
     // Issue #1333 D3: every booted instance's render-locked allocator count, each read before
@@ -2383,9 +2484,6 @@ export async function runQualification() {
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },
-      ...suspendResume.cycles.map((cycle) => ({
-        workload: `suspend-resume-${cycle.cycle}`, count: cycle.renderAllocations,
-      })),
       { workload: "stall", count: stall.renderAllocations },
       { workload: "staging-reads", count: stagingReads.renderAllocations },
     ],
