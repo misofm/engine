@@ -4106,10 +4106,10 @@ fn runtime_state_error(error: payload::StatePayloadError) -> StatePayloadError {
     StatePayloadError { code: error.code }
 }
 
-/// Reads a whole payload — header, then both lane sections — rejecting before anything is decoded.
 /// One channel of a decoded payload: every band as it commits, and the silence run.
 type ParsedChannel = ([RestoredBand; EQ_SECTION_COUNT], f32);
 
+/// Reads a whole payload — header, then both lane sections — rejecting before anything is decoded.
 fn read_payload(
     input: StatePayloadInput<'_>,
 ) -> Result<([u32; STATE_LANE_WORDS], [u32; STATE_LANE_WORDS]), StatePayloadError> {
@@ -4168,7 +4168,6 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         write_payload(output, &left, &right)
     }
 
-    /// Restores one track, all or none across both channels.
     /// Both channels of a payload for lane `track`, decoded and validated, writing nothing: the
     /// whole verdict of [`restore_track`](Self::restore_track), as `[(bands, silence); 2]`. Reads
     /// only the payload, the lane's prepared targets and the rate (issue #2324).
@@ -4203,6 +4202,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         Ok([(decoded_left, left_silence), (decoded_right, right_silence)])
     }
 
+    /// Restores one track, all or none across both channels.
     fn restore_track(
         &mut self,
         track: usize,

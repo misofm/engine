@@ -86,8 +86,11 @@ half-swapped in release.
      write, and refuses with a new `LaneSwapRefusal::Payload` that leaves both lanes as they were.
    - The undo after a refused step 3 restores exactly the payload, lane and defaults that passed
      validation. It is now proven rather than assumed, and its `debug_assert` names that contract.
-   - No allocation: the validation runs in the swap's existing `REALTIME_POLICY` region on the same
-     scratch, and every implementation sits in its crate's payload region.
+   - `swap_bank_lanes` runs on the render thread: `graph::Runtime::pack_lanes` and
+     `restore_home_lanes` call it at a block boundary. A render-thread swap now pays two more
+     `O(state)` validations, one per lane. They are allocation-free, lock-free and syscall-free,
+     run on the same scratch inside the swap's existing `REALTIME_POLICY` region, and every
+     implementation sits in its crate's payload region. The kernels are bit-identical.
 2. **The limiter's restore admits every word its kernel holds** in the `history` and `main_ring`.
    This is soft-clip's #1071/#1300 rule: "accept every word the effect itself can hold, refuse the
    rest".
@@ -186,8 +189,10 @@ half-swapped in release.
   (`Ok` vs `effect.bank.track`).
 
 **No rendered bit moved.**
-- No kernel, recovery or render body changed. The changes are payload validation, which runs at
-  a block boundary, and the swap's pre-write check.
+- No kernel, recovery or render body changed; the kernels are bit-identical. The changes are
+  payload validation and the swap's pre-write check. Both run on the render thread at a block
+  boundary (`Runtime::pack_lanes`, `restore_home_lanes`). A swap there now pays two more
+  `O(state)` validations, which stay allocation-free and inside `REALTIME_POLICY` regions.
 - One-time comparison, never committed: #2285's harness adapted. It is the random 700-step
   schedule of loud, quiet and signed-zero blocks, collapse transitions, automation, both resets,
   lane resets, link retargets, own and donor restores, in-bank and cross-bank lane swaps and
@@ -225,3 +230,24 @@ half-swapped in release.
   targeted tests.
 - The scalar delay and reverb restores refuse non-normal ring words (`normal_or_zero`). The survey
   found their kernels never leave one, but nothing ties the two.
+- The limiter's validator still admits a `history` that disagrees with its main ring. The kernel
+  never writes one: each history tap is the same sample as a main-ring word. If that relation
+  holds across resets and the D7 recovery, tie `history[k]` bitwise to the matching main-ring
+  word.
+- Tie `lane_default_bytes` and validation together at the type level, so a bank cannot declare
+  defaults without a validator. One shape is a single `Option<&dyn LaneSwap>` hook carrying the
+  defaults size, the exchange and the validation. Today only the trait docs and
+  `restore_verdict` hold them together.
+
+## Verdict (attempt 1)
+**PASS**, with minor findings only, all folded on the branch after merging `origin/main` at
+`08193b32e`:
+1. The parametric EQ's doc comments are back on their items. "Reads a whole payload" is on
+   `read_payload`, not `ParsedChannel`; "Restores one track, all or none" is on `restore_track`,
+   not `parse_track`. `StatePayloadInput` is not `Copy`, so `parse_track` still rebuilds the
+   literal it hands to `read_payload`.
+2. The decision and the evidence now say that `swap_bank_lanes` runs on the render thread
+   (`Runtime::pack_lanes`, `restore_home_lanes`). A swap there pays two more `O(state)`
+   validations, which stay allocation-free and inside `REALTIME_POLICY` regions.
+3. Two follow-ups are recorded: tying the limiter's `history` to its main ring, and tying lane
+   defaults and validation at the type level.
