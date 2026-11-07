@@ -49,14 +49,6 @@ pub(crate) fn active_resources<Row: Copy>(shared: &SharedPlanState<Row>) -> Row 
 pub struct PlanState<A: ControlAdapter> {
     pub(crate) owner: RealtimePlanOwner,
     pub(crate) shared: Arc<SharedPlanState<A::Row>>,
-    /// Issue #146: the render thread's floating-point environment has been attested once.
-    ///
-    /// The C ABI has no "the render thread starts now" call, so the plan's first render *is* its
-    /// session start on that thread: the first block verifies that
-    /// [`lane::fpenv::CanonicalFpEnv`] actually installed the canonical word, and every
-    /// block after it takes an untaken branch. A plan is render-thread-exclusive, so a plain `Cell`
-    /// is the whole synchronisation this needs.
-    pub(crate) fp_env_attested: core::cell::Cell<bool>,
     /// The output meter's render half (#1581 D4): made with the session's first plan and part of
     /// no plan, so a plan swap does not touch it. The session hands out its reader and gate.
     pub(crate) output_meter: host_core::OutputPeakObserver,
@@ -91,7 +83,6 @@ impl<A: ControlAdapter> PlanState<A> {
         Self {
             owner,
             shared,
-            fp_env_attested: core::cell::Cell::new(false),
             output_meter,
             loudness,
             response_capture,
@@ -288,16 +279,6 @@ impl<A: ControlAdapter> PlanState<A> {
     #[cfg(feature = "test-support")]
     pub fn test_active_epoch(&self) -> &AtomicU64 {
         &self.shared.active_epoch
-    }
-
-    /// Whether this plan's render thread has attested its floating-point environment (#146).
-    pub fn fp_env_attested(&self) -> bool {
-        self.fp_env_attested.get()
-    }
-
-    /// Records that this plan's render thread attested its floating-point environment (#146).
-    pub fn attest_fp_env(&self) {
-        self.fp_env_attested.set(true);
     }
 
     /// The active plan's host attachment as a `T` (#1381a D3), or `None` when the plan carries

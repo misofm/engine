@@ -361,7 +361,7 @@ pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
 
 /// Whether this thread is currently in the canonical floating-point control state.
 ///
-/// This is what a render entry's session-start attestation asks after installing the guard, and
+/// This is what the C ABI render entry asks on every block after installing the guard (#2357), and
 /// what a host asks if it wants to check the state it is about to render in. Sticky exception flags
 /// are ignored; see [`fp_control_bits`].
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
