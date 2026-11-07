@@ -58,6 +58,9 @@ export class StemSessionGate {
     } catch (error) {
       this.#opening = undefined
       removeParentAbort()
+      // An open in flight was aborted above and will no longer write the
+      // state, so this refusal is the gate's terminal state.
+      if (this.#state === "loading") this.#state = "refused"
       throw new StemStoreError(
         "session.resume.failed",
         "The audio context could not resume inside the user gesture",
@@ -73,7 +76,6 @@ export class StemSessionGate {
     this.#state = "loading"
     options.onProgress?.({ stage: "loading", sessionId: options.sessionId })
     let lease
-    let storeOpening
     try {
       // The lease holds a Web Lock whose name includes the session ID. Release
       // an identically named predecessor before asking the store to acquire its
@@ -84,14 +86,13 @@ export class StemSessionGate {
         this.#lease = undefined
         await replaced.close()
       }
-      storeOpening = this.#store.openSession({
+      lease = await this.#store.openSession({
         sessionId: options.sessionId,
         stems: options.stems,
         resolver: this.#resolver,
         signal: opening.signal,
         onProgress: options.onProgress,
       })
-      lease = await storeOpening
       // A resume that never settles must not keep a superseded open's lease
       // (and its pin) alive, so the wait for it ends at the abort.
       const resumed = await abortable(resumeOutcome, opening.signal)
@@ -112,9 +113,8 @@ export class StemSessionGate {
       })
       return lease
     } catch (error) {
-      opening.abort(error)
-      const orphanedLease = await storeOpening?.catch(() => undefined)
-      if (orphanedLease !== lease) await orphanedLease?.close().catch(() => {})
+      // Every path here has seen the store open settle, so `lease` is the
+      // only lease this open can hold.
       await lease?.close().catch(() => {})
       if (this.#opening === opening) this.#state = "refused"
       throw error
@@ -124,12 +124,15 @@ export class StemSessionGate {
     }
   }
 
+  // Every write happens before the await, so an open started while the lease
+  // closes owns the state from then on.
   async close() {
     this.#opening?.abort(new DOMException("Session gate closed", "AbortError"))
     this.#opening = undefined
-    await this.#lease?.close()
+    const lease = this.#lease
     this.#lease = undefined
     this.#state = "idle"
+    await lease?.close()
   }
 }
 

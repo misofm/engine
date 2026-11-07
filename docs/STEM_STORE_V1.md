@@ -152,7 +152,9 @@ open, `close()` or its own signal aborted never becomes the gate's session,
 even when the abort lands after its lease was granted: it closes that lease and
 rejects with the abort reason. Its waits for `resume()` and for the session pin
 lock end at the same abort, so an aborted open never keeps its lease for a
-resume that does not settle, nor waits on another holder of that pin (#2266).
+resume that does not settle, nor waits on another holder of that pin. `close()`
+reports `idle` at once, and an open started while the old lease closes owns the
+state from then on (#2266).
 
 The PCM pump is a dedicated module Worker. MSB1 ring descriptors cross the
 Worker port after construction; they are never processor options. The Worker

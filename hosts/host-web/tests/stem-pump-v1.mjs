@@ -605,7 +605,15 @@ async function supersededOpenNeverCommits() {
     },
   })
   await untilPending(locks, indexLock)
-  const second = gate.open({ sessionId: "same", stems, resume() {} })
+  let stateAtSecondReady
+  const second = gate.open({
+    sessionId: "same",
+    stems,
+    resume() {},
+    onProgress(event) {
+      if (event.stage === "ready") stateAtSecondReady = gate.state
+    },
+  })
   unstall()
   await stall
   const [firstOutcome, secondOutcome] = await Promise.all([
@@ -623,6 +631,11 @@ async function supersededOpenNeverCommits() {
     "the newer open deadlocked on the superseded open's session pin"
   )
   assert.equal(secondOutcome.error, undefined)
+  assert.equal(
+    stateAtSecondReady,
+    "loading",
+    "the superseded open's refusal overwrote the newer open's loading state"
+  )
   assert.equal(gate.state, "interactive")
   assert.equal((await secondOutcome.value.read(stemIdentity)).size, bytes.byteLength)
   const pins = () =>
@@ -707,43 +720,157 @@ async function supersededAsResumeSettlesNeverCommits() {
 
 // Issue #2266: an open waiting on a resume that never settles holds its granted lease, and so the
 // session pin; superseding it must end that wait, release the pin and let the newer open through.
+// Two legs: superseded once the lease is granted, and superseded from the store's synchronous
+// "ready" progress callback, which lands before the open starts waiting on its resume.
 async function neverSettlingResumeReleasesItsLease() {
   const bytes = pcm16([9, 8, 7, 6], 1)
   const stemIdentity = identity(bytes)
   const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
-  const backend = new FakeOpfsBackend()
+  for (const leg of ["after ready", "from ready"]) {
+    const backend = new FakeOpfsBackend()
+    const gate = new StemSessionGate(
+      new OpfsStemStore({ storage: backend.storage(), locks: new FakeLockManager(), tabId: "stuck" }),
+      new MemoryStemResolver({ [stemIdentity]: bytes })
+    )
+    let ready = false
+    let second
+    const supersede = () => gate.open({ sessionId: "same", stems, resume() {} })
+    const first = gate.open({
+      sessionId: "same",
+      stems,
+      resume: () => new Promise(() => {}),
+      onProgress(event) {
+        if (event.stage !== "ready" || ready) return
+        ready = true
+        if (leg === "from ready") second = supersede()
+      },
+    })
+    const firstSettled = settledWithin(first, 500)
+    await until(() => ready, "the first lease")
+    second ??= supersede()
+    const [firstOutcome, secondOutcome] = await Promise.all([
+      firstSettled,
+      settledWithin(second, 500),
+    ])
+    assert.equal(
+      firstOutcome.error?.name,
+      "AbortError",
+      `a superseded open waiting on its resume kept its lease (${leg})`
+    )
+    assert.notEqual(
+      secondOutcome,
+      "timed-out",
+      `the newer open deadlocked on the stuck open's pin (${leg})`
+    )
+    assert.equal(secondOutcome.error, undefined)
+    assert.equal(gate.state, "interactive")
+    assert.deepEqual(
+      JSON.parse(new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json")))
+        .stems[stemIdentity].pins,
+      ["session:stuck:same"]
+    )
+    await gate.close()
+  }
+}
+
+// Issue #2266: a resume() that throws synchronously refuses its open after that open has already
+// aborted the one in flight, so it must leave a terminal state itself; with nothing in flight it
+// must leave the current session alone.
+async function throwingResumeLeavesATerminalState() {
+  const bytes = pcm16([4, 4, -4, -4], 1)
+  const stemIdentity = identity(bytes)
+  const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
   const gate = new StemSessionGate(
-    new OpfsStemStore({ storage: backend.storage(), locks: new FakeLockManager(), tabId: "stuck" }),
+    new OpfsStemStore({
+      storage: new FakeOpfsBackend().storage(),
+      locks: new FakeLockManager(),
+      tabId: "resume-throws",
+    }),
     new MemoryStemResolver({ [stemIdentity]: bytes })
   )
-  let ready = false
-  const first = gate.open({
-    sessionId: "same",
+  const throwing = {
+    sessionId: "b",
     stems,
-    resume: () => new Promise(() => {}),
-    onProgress(event) {
-      if (event.stage === "ready") ready = true
+    resume() {
+      throw new Error("no gesture")
     },
-  })
-  await until(() => ready, "the first lease")
-  const second = gate.open({ sessionId: "same", stems, resume() {} })
-  const [firstOutcome, secondOutcome] = await Promise.all([
-    settledWithin(first, 500),
-    settledWithin(second, 500),
-  ])
-  assert.equal(
-    firstOutcome.error?.name,
-    "AbortError",
-    "a superseded open waiting on its resume kept its lease"
+  }
+  const inFlight = settledWithin(gate.open({ sessionId: "a", stems, resume() {} }), 500)
+  await assert.rejects(gate.open(throwing), (error) => error.code === "session.resume.failed")
+  assert.equal((await inFlight).error?.name, "AbortError")
+  assert.equal(gate.state, "refused", "a refused open left the gate loading with no open in flight")
+
+  const lease = await gate.open({ sessionId: "a", stems, resume() {} })
+  await assert.rejects(gate.open(throwing), (error) => error.code === "session.resume.failed")
+  assert.equal(gate.state, "interactive", "a refused resume displaced a session it never replaced")
+  assert.equal((await lease.read(stemIdentity)).size, bytes.byteLength)
+  await gate.close()
+}
+
+// Issue #2266: close() then open() at once. The open owns the state from its first line; close()
+// must not report idle over it once the old lease has closed.
+async function closeNeverOverwritesALaterOpen() {
+  const bytes = pcm16([1, 3, 5, 7], 1)
+  const stemIdentity = identity(bytes)
+  const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
+  const backend = new FakeOpfsBackend()
+  const gate = new StemSessionGate(
+    new OpfsStemStore({ storage: backend.storage(), locks: new FakeLockManager(), tabId: "reopen" }),
+    new MemoryStemResolver({ [stemIdentity]: bytes })
   )
-  assert.notEqual(secondOutcome, "timed-out", "the newer open deadlocked on the stuck open's pin")
-  assert.equal(secondOutcome.error, undefined)
+  await gate.open({ sessionId: "x", stems, resume() {} })
+  const closing = gate.close()
+  assert.equal(gate.state, "idle")
+  const reopening = gate.open({ sessionId: "x", stems, resume() {} })
+  await closing
+  assert.equal(gate.state, "loading", "close() reported idle while a later open was loading")
+  await reopening
+  assert.equal(gate.state, "interactive")
   assert.deepEqual(
     JSON.parse(new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json")))
       .stems[stemIdentity].pins,
-    ["session:stuck:same"]
+    ["session:reopen:x"]
   )
   await gate.close()
+}
+
+// Issue #2266: once a superseded open has settled, close() must still reach the newest open (here
+// queued on a session pin another lease holds), and leave the gate idle.
+async function closeReachesTheNewestOpen() {
+  const bytes = pcm16([2, 4, 6, 8], 1)
+  const stemIdentity = identity(bytes)
+  const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
+  const locks = new FakeLockManager()
+  const store = new OpfsStemStore({
+    storage: new FakeOpfsBackend().storage(),
+    locks,
+    tabId: "close-newest",
+  })
+  const resolver = new MemoryStemResolver({ [stemIdentity]: bytes })
+  const holder = await store.openSession({ sessionId: "held", stems, resolver })
+  const gate = new StemSessionGate(store, resolver)
+  let ready = false
+  const first = settledWithin(
+    gate.open({
+      sessionId: "other",
+      stems,
+      resume: () => new Promise(() => {}),
+      onProgress(event) {
+        if (event.stage === "ready") ready = true
+      },
+    }),
+    500
+  )
+  await until(() => ready, "the first lease")
+  const newest = settledWithin(gate.open({ sessionId: "held", stems, resume() {} }), 500)
+  assert.equal((await first).error?.name, "AbortError")
+  await untilPending(locks, `${LOCKS}:pin:session:close-newest:held`)
+  await gate.close()
+  const outcome = await newest
+  assert.notEqual(outcome, "timed-out", "close() no longer reached the newest open")
+  assert.equal(outcome.error?.name, "AbortError")
+  assert.equal(gate.state, "idle", "a closed open's refusal overwrote the closed gate's idle")
+  await holder.close()
 }
 
 // Issue #2266: the session pin lock is the one wait in an open that did not take the opening's
@@ -767,6 +894,11 @@ async function pinLockWaitObeysAbort() {
   assert.equal(outcome.error?.name, "AbortError")
   assert.equal(gate.state, "refused")
   await holder.close()
+  await assert.rejects(
+    gate.open({ sessionId: "held", stems, resume() {}, signal: AbortSignal.abort() }),
+    (error) => error.name === "AbortError",
+    "an open whose caller's signal was already aborted went ahead"
+  )
   const lease = await gate.open({ sessionId: "held", stems, resume() {} })
   assert.equal((await lease.read(stemIdentity)).size, bytes.byteLength)
   await gate.close()
@@ -1096,7 +1228,10 @@ await sameSessionReplacementReleasesPredecessorPin()
 await supersededOpenNeverCommits()
 await supersededAsResumeSettlesNeverCommits()
 await neverSettlingResumeReleasesItsLease()
+await throwingResumeLeavesATerminalState()
+await closeNeverOverwritesALaterOpen()
 await pinLockWaitObeysAbort()
+await closeReachesTheNewestOpen()
 await refusedGateNeverBecomesInteractive()
 await rejectedResumeDoesNotLeakPins()
 await selfDrivingFillsWithoutPumpMessages()
