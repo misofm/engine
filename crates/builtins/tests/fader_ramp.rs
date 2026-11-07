@@ -449,15 +449,26 @@ impl FaderOperationSource for Source<'_> {
 
 impl Subject {
     fn subjects() -> Vec<(&'static str, Build)> {
-        let mut subjects: Vec<(&'static str, Build)> =
-            vec![("simd4", Box::new(|| Self::bank(Backend::Simd4)))];
+        Self::subjects_with(false)
+    }
+
+    /// [`Self::subjects`], with lane `0`'s left channel (the scalar track's left channel)
+    /// prepared muted when `left_muted`.
+    fn subjects_with(left_muted: bool) -> Vec<(&'static str, Build)> {
+        let mut subjects: Vec<(&'static str, Build)> = vec![(
+            "simd4",
+            Box::new(move || Self::bank(Backend::Simd4, left_muted)),
+        )];
         #[cfg(target_feature = "avx2")]
-        subjects.push(("simd8", Box::new(|| Self::bank(Backend::Simd8))));
+        subjects.push((
+            "simd8",
+            Box::new(move || Self::bank(Backend::Simd8, left_muted)),
+        ));
         subjects.push((
             "scalar",
-            Box::new(|| {
+            Box::new(move || {
                 Self::Scalar(Box::new(
-                    FaderMuteRampBuiltins::new(parameters(-2.0, -5.0, false, false))
+                    FaderMuteRampBuiltins::new(parameters(-2.0, -5.0, left_muted, false))
                         .expect("fader"),
                 ))
             }),
@@ -466,11 +477,14 @@ impl Subject {
     }
 
     /// A bank with one padding lane, so padding lanes ride along inert.
-    fn bank(backend: Backend) -> Self {
+    fn bank(backend: Backend, left_muted: bool) -> Self {
         let width = BankWidth::for_backend(backend).expect("bank width");
         let members = width.lanes() as usize - 1;
         let faders = (0..members)
-            .map(|lane| parameters(-2.0 - lane as f32, -5.0 + lane as f32, false, false))
+            .map(|lane| {
+                let muted = left_muted && lane == 0;
+                parameters(-2.0 - lane as f32, -5.0 + lane as f32, muted, false)
+            })
             .collect();
         Self::Bank(Box::new(
             BuiltinFaderBank::new(backend, width, faders).expect("fader bank"),
@@ -540,6 +554,31 @@ impl Subject {
     /// Every index whose address covers what [`Self::arm`] arms.
     fn armed_indices(&self) -> &'static [usize] {
         if self.scalar() { &[0, 1] } else { &[0] }
+    }
+
+    /// Mutes or unmutes only channel `channel` (`0` left, `1` right) of lane `0`.
+    fn channel_mute(&mut self, channel: usize, muted: bool, window: u32) {
+        let channels = [BuiltinLaneSelector::Left, BuiltinLaneSelector::Right][channel];
+        match self {
+            Self::Bank(bank) => bank.set_mute(0, channels, muted, window).expect("lane"),
+            Self::Scalar(track) => track.set_mute(channels, muted, window),
+        }
+    }
+
+    /// Lane `0`'s `[is_muted, is_armed, gain_held]` on channel `channel`.
+    fn channel_state(&self, channel: usize) -> [bool; 3] {
+        match self {
+            Self::Bank(bank) => [
+                bank.is_muted(0, channel).expect("member lane"),
+                bank.is_armed(0, channel).expect("member lane"),
+                bank.gain_held(0, channel).expect("member lane"),
+            ],
+            Self::Scalar(track) => [
+                track.is_muted(channel),
+                track.is_armed(channel).expect("a channel"),
+                track.gain_held(channel).expect("a channel"),
+            ],
+        }
     }
 
     fn held(&self, index: usize) -> bool {
@@ -1300,6 +1339,131 @@ fn an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute() {
                     }
                 }
                 assert!(!subject.armed(), "{name}: the fire disarms");
+            }
+        }
+    }
+}
+
+/// How lane `0`'s right plane renders once a row's window is over.
+#[derive(Clone, Copy, Debug)]
+enum RightRenders {
+    /// Exact `+0.0` on every frame: held muted.
+    Zero,
+    /// The undriven twin's bits: open at its prepared gain.
+    Twin,
+}
+
+/// A dual-mono strip's two channels are two faders (issue #2355): a transition driven on the
+/// right channel alone -- an unmute with a window, a mute with a window, an arm whose left channel
+/// the session mutes, a fire -- moves the right channel's `is_muted`, `is_armed` and `gain_held`
+/// and its rendered plane, and leaves the left channel's answers and bits those of an undriven
+/// twin, on every bank width and on the scalar track.
+///
+/// Red if a per-channel query or transition reads or writes channel `0` for both channels: the
+/// scalar's or the bank's `is_armed` or `gain_held` answering with the left channel's state, or
+/// the end of a ramp window settling the unmute phase on the left channel only, so the right
+/// channel's unmute holds its gain for good.
+#[test]
+fn a_transition_on_the_right_channel_leaves_the_left_channel_alone() {
+    /// `[left, right]`, each `[is_muted, is_armed, gain_held]`.
+    type Channels = [[bool; 3]; 2];
+    // Name, left channel prepared muted, the drive, the channels after the drive and once the
+    // window is over, and how the right plane then renders.
+    type Row = (
+        &'static str,
+        bool,
+        fn(&mut Subject),
+        Channels,
+        Channels,
+        RightRenders,
+    );
+    const WINDOW: u32 = 200;
+    const OPEN: [bool; 3] = [false, false, false];
+    const MUTED: [bool; 3] = [true, false, true];
+    const UNMUTING: [bool; 3] = [false, false, true];
+    const ARMED_TO_OPEN: [bool; 3] = [true, true, true];
+    let rows: [Row; 4] = [
+        (
+            "unmute with a window",
+            false,
+            |subject| {
+                subject.channel_mute(1, true, 0);
+                subject.channel_mute(1, false, WINDOW);
+            },
+            [OPEN, UNMUTING],
+            [OPEN, OPEN],
+            RightRenders::Twin,
+        ),
+        (
+            "mute with a window",
+            false,
+            |subject| subject.channel_mute(1, true, WINDOW),
+            [OPEN, MUTED],
+            [OPEN, MUTED],
+            RightRenders::Zero,
+        ),
+        (
+            "arm",
+            true,
+            |subject| assert!(subject.arm()),
+            [MUTED, ARMED_TO_OPEN],
+            [MUTED, ARMED_TO_OPEN],
+            RightRenders::Zero,
+        ),
+        (
+            "fire",
+            true,
+            |subject| {
+                assert!(subject.arm());
+                subject.fire(WINDOW);
+            },
+            [MUTED, UNMUTING],
+            [MUTED, OPEN],
+            RightRenders::Twin,
+        ),
+    ];
+    for (row, left_muted, drive, driven, settled, renders) in rows {
+        for (name, build) in Subject::subjects_with(left_muted) {
+            let (mut subject, mut twin) = (build(), build());
+            let undriven_left = twin.channel_state(0);
+            drive(&mut subject);
+            let context = format!("{name} {row}");
+            assert_eq!(
+                [subject.channel_state(0), subject.channel_state(1)],
+                driven,
+                "after the drive: {context}"
+            );
+            assert_eq!(subject.channel_state(0), undriven_left, "left: {context}");
+            let width = subject.width();
+            // Two blocks run the window out; the third renders settled.
+            for block in 0..3 {
+                let start = (block * 128) as u64;
+                let (mut left, mut right) = signal(128, width, block);
+                let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
+                subject.process(&mut left, &mut right, start);
+                twin.process(&mut twin_left, &mut twin_right, start);
+                let context = format!("{context} block={block}");
+                assert_eq!(bits(&left), bits(&twin_left), "left plane: {context}");
+                if block < 2 {
+                    continue;
+                }
+                assert_eq!(
+                    [subject.channel_state(0), subject.channel_state(1)],
+                    settled,
+                    "after the window: {context}"
+                );
+                for frame in 0..128 {
+                    let at = frame * width;
+                    let expected = match renders {
+                        RightRenders::Zero => 0,
+                        RightRenders::Twin => twin_right[at].to_bits(),
+                    };
+                    assert_eq!(
+                        right[at].to_bits(),
+                        expected,
+                        "right plane frame {frame}: {context}"
+                    );
+                }
             }
         }
     }
