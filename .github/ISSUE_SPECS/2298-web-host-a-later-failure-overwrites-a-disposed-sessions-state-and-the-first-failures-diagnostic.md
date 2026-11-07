@@ -82,12 +82,13 @@ assertion `left == right` failed: a shape mismatch on a failed session is refuse
 |---|---|---|
 | `fail` as load, then `store(max)` | loom | red: "a failure undid the dispose" (3 vs 4) |
 | `fail` takes its `Ending` from a load before the `fetch_max` | loom | red: "exactly one of two failures is the session's" (both first) |
-| `dispose` as load, then `store(max)` | loom | red: "a failure undid the dispose" |
 | `fail` as `swap` (a plain store) | unit | red: "a failure after a dispose leaves the session disposed" (3 vs 4) |
 | render `reject_output_quantum` ignores `AlreadyEnded` | unit | red: `9` vs `3` |
 | render `fail` keeps its diagnostic when `AlreadyEnded` | unit | red: "the first failure's diagnostic stands across the adoption" |
 | the shell's `|| self.released` refusal removed | unit | red: "the released status shell renders nothing, so it rejects no shape" (`9` vs `3`) |
 | control `end_session` ignores `AlreadyEnded` | unit | the #2267 test red: a second `fail_session` accepted (`0` vs `3`) |
+
+A third loom row, `dispose` as a load and then `store(max)`, went red too, but it is dropped: it is a loom artifact, not a real defect. Under C11 the store writes the maximum state, and no later `fetch_max` of a failure can lower it, so that mutation cannot undo a dispose on real hardware. Only `fail` needs to be one read-modify-write for the rules to hold; `dispose` is one `fetch_max` for uniformity.
 
 The last row matters because `fail_session` no longer has its own readiness check: the #2267 test's "a second failure keeps the first code" now defends the transition.
 
@@ -129,4 +130,17 @@ The one code that differs is in the control-then-render scenario: the half's `fa
 
 **Test value.**
 - Unit test: red if a render-side failure writes the lifecycle word with a plain store, so a dispose is undone. Also red if it records a second failure, whose code and diagnostic would replace the first one's at the adoption, or if the released shell records a shape failure. No existing test fails the render half after the session ended.
-- `lifecycle_loom`: red if either transition is not one read-modify-write, a defect no sequential test can see.
+- `lifecycle_loom`: red if `fail` is not one read-modify-write (a dispose undone, or two failures both first), a defect no sequential test can see.
+
+**Verdict on attempt 1 (Sol): PASS with four MINORs**, folded in the commits after the merge of `origin/main`. The reviewer confirmed:
+- no JS reader misbehaves on the new codes;
+- `fetch_max(AcqRel)` is correct;
+- the CI leg is wired correctly;
+- the artifact export set is unchanged: 62 exports, the same render closure, and the full artifact gate passes;
+- the tree combined with `main` and #2304 is green.
+
+The four MINORs:
+1. **Public docs.** `miso_engine_web_v1_host_release`, `RenderHost::fail` and `AudioWorkletEngineHost::reject_output_quantum` now document the refusal: on a session that already ended, they return `RESULT_WRONG_STATE` and record no diagnostic.
+2. **No control half.** `end_session` on a host with no control half now returns `Ending::AlreadyEnded` and writes nothing. Before, it silenced and recorded, and returned `First`.
+3. **Mutation evidence.** The `dispose` load-then-store loom row is dropped as a loom artifact (above).
+4. **CI comment.** The `test-release` timeout comment names the three loom legs added since the 15:05 run; the job has six in all.
