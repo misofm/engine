@@ -113,8 +113,8 @@ export class StemSessionGate {
       })
       return lease
     } catch (error) {
-      // Every path here has seen the store open settle, so `lease` is the
-      // only lease this open can hold.
+      // Every path here has seen the store open settle, or never started it,
+      // so `lease` is the only lease this open can hold.
       await lease?.close().catch(() => {})
       if (this.#opening === opening) this.#state = "refused"
       throw error

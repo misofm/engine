@@ -32,20 +32,46 @@ Reachability: the window is the predecessor close, an index lock round trip with
 - No change to the render path, Rust code or the `.d.ts` (the `state` union and `open()` signature are unchanged).
 
 ## Gates
-- `hosts/host-web/tests/stem-pump-v1.mjs` (run by `node scripts/check-stem-store-v1.mjs`, the qualification `stem-store` step):
-  - `supersededOpenNeverCommits`: red on base (the superseded open resolves with its lease and the newer open times out), green after.
-  - `supersededAsResumeSettlesNeverCommits` (attempt 2): a gate with no current lease, the first lease granted, and a newer open of the same session started at each microtask offset 0-8 after the first resume settles. Before the commit the first open must reject; after it, the newer open is a legitimate reopen. Every offset's newer open resolves with one pin, and the sweep must span the commit. Red on base and when the post-resume check is deleted.
-  - `neverSettlingResumeReleasesItsLease` (attempt 2): the first resume never settles; a newer open of the same session supersedes it. Red on base and on attempt 1 (the first open never settles and the newer one deadlocks on its pin).
-  - `neverSettlingResumeReleasesItsLease` has a second leg (attempt 3): the newer open starts from the first open's synchronous `"ready"` progress callback. That abort lands before the resume wait begins and fires no event, so only `abortable`'s early return ends the wait.
-  - `throwingResumeLeavesATerminalState` (attempt 3): a throwing resume with an open in flight leaves `"refused"`; with nothing in flight it leaves the session `"interactive"`. Red on base.
-  - `closeNeverOverwritesALaterOpen` (attempt 3): `close(); open()`. `idle` at once, `loading` after the close settles, then `interactive` with one pin. Red on base.
-  - `closeReachesTheNewestOpen` (attempt 3): after a superseded open has settled, `close()` still aborts the newest open, which is queued on a pin another lease holds, and the gate ends `idle`. Red on base.
-  - `supersededOpenNeverCommits` also asserts the newer open sees `"loading"` while it loads (attempt 3), and `pinLockWaitObeysAbort` also refuses an already-aborted caller signal.
-  - `pinLockWaitObeysAbort`: red on base (the aborted open times out), green after.
-  - The tests' lock-queue and readiness waits are bounded (`until`, 1,000 ticks) and throw, so a regression goes red instead of hanging the gate or the ledger.
-- Seven entries in the nightly mutation ledger (`scripts/check-stem-store-v1.mjs --self-test`), each red at its target assertion: removing the post-close check; removing the post-resume check; waiting for the resume without the abort; removing `abortable`'s early return; dropping the throwing-resume refusal; letting `close()` write `idle` after its await; dropping the pin lock's `signal`.
-- Every guard line in `session-gate.js` is in the attempt-3 guard table: deleting it turns a test red, or the table gives the reason it is equivalent.
-- `node scripts/check-stem-store-v1.mjs` and `--self-test` pass; `bash scripts/test-web-audioworklet.sh` and `bash scripts/check-workspace-policy.sh` pass.
+- `hosts/host-web/tests/stem-pump-v1.mjs` is run by `node scripts/check-stem-store-v1.mjs`, the qualification `stem-store` step. Its #2266 tests:
+  - `everyAbortSourceInEveryPhase`: the claim matrix below, one cell per abort source and phase. Each cell asserts four things:
+    - the aborted open rejects with `AbortError` within 500 ms;
+    - the gate ends in the state the source implies: `interactive` for a newer open, which must also see `loading` at its own `ready`; `idle` for `close()`; `refused` for the caller's signal;
+    - the index holds exactly the newer open's pin, or none;
+    - a direct `store.openSession({sessionId: "same"})` gets its lease within 500 ms, unless the newer open itself holds "same".
+  - Its last leg is a caller signal that was already aborted.
+  - `abortAsResumeSettlesNeverCommits`: the matrix's last column. Each source lands at microtask offsets 0-8 after the first open's resume settles, with no current lease. It applies the same assertions before the commit, and it must span the commit for every source.
+  - `throwingResumeLeavesATerminalState`: a synchronous `resume()` throw has three legs:
+    - with an open in flight, it leaves `refused`;
+    - with only a current lease, it leaves the lease `interactive`;
+    - with an open in flight behind a current lease, it leaves `refused`.
+  - `closeNeverOverwritesALaterOpen`: for `close(); open()`, the state is `idle` at once, `loading` once the close settles, then `interactive`.
+  - `closeReachesTheNewestOpen`: after a superseded open has settled, `close()` still aborts the newest open, and the gate ends `idle`.
+  - Every lock-queue and readiness wait is bounded (`until`, 1,000 ticks) and throws.
+- Ten #2266 entries in the nightly mutation ledger (`scripts/check-stem-store-v1.mjs --self-test`), each red at its target assertion:
+  - the post-close check;
+  - the post-resume check;
+  - waiting for the resume without the abort;
+  - `abortable`'s early return;
+  - the throwing-resume refusal;
+  - `close()` writing `idle` after its await;
+  - removing the caller-signal forwarding once the lease is granted (M14);
+  - checking ownership by identity, not by the signal (M5);
+  - refusing a throwing resume only when no lease is current (M10);
+  - the pin lock's `signal`.
+- The claim matrix below has every cell filled. The attempt-4 guard table lists every guard line in `session-gate.js`: deleting it turns a test red, or the table gives the reason the mutant is equivalent.
+- `node scripts/check-stem-store-v1.mjs` and `--self-test --budgets` pass; `bash scripts/test-web-audioworklet.sh` and `bash scripts/check-workspace-policy.sh` pass.
+
+### Claim matrix
+The claim: an open aborted by any source, in any phase, rejects with `AbortError`, never commits and never keeps its session pin. The gate ends `interactive` when a newer open aborted it (and that open saw `loading` while it loaded), `idle` after `close()`, and `refused` after the caller's signal. `E` is `everyAbortSourceInEveryPhase`; `S` is `abortAsResumeSettlesNeverCommits`. All 20 cells are reachable, and each runs.
+
+| Abort source | Queued on a lock (the session pin, held by another lease) | From the store's `ready` callback (after `openSession`'s last signal check; no abort event reaches the resume wait) | During the resume wait | During the predecessor close | Between the last await and the commit |
+|---|---|---|---|---|---|
+| Newer open, same session (changes `#opening`) | E `(same-session open, queued on the pin)` | E `(same-session open, from ready)` | E `(same-session open, resume wait)` | E `(same-session open, predecessor close)` | S, same-session open, offsets 0-8 |
+| Newer open, another session (changes `#opening`) | E `(other-session open, queued on the pin)` | E `(other-session open, from ready)` | E `(other-session open, resume wait)` | E `(other-session open, predecessor close)` | S, other-session open, offsets 0-8 |
+| `close()` (clears `#opening`) | E `(close(), queued on the pin)`; also `closeReachesTheNewestOpen` | E `(close(), from ready)` | E `(close(), resume wait)` | E `(close(), predecessor close)` | S, `close()`, offsets 0-8 |
+| The caller's signal (leaves `#opening` alone) | E `(caller signal, queued on the pin)`; already aborted: E's last leg | E `(caller signal, from ready)` | E `(caller signal, resume wait)` | E `(caller signal, predecessor close)` | S, caller signal, offsets 0-8 |
+
+The first column holds the session pin, the lock this issue gave a signal. The ingest and index locks already took the opening's signal in `#withLock`. To the gate, every lock wait ends the same way: the store rejects with the abort reason before granting a lease. The predecessor column needs a current lease of another session ID. A same-ID predecessor is closed before the store open (the `sameSessionReplacementReleasesPredecessorPin` path), so that window is the first column's. A fifth source, a newer open whose `resume()` throws synchronously, aborts in the same way; `throwingResumeLeavesATerminalState` holds its state.
 
 ## Evidence
 ### Attempt 1 (Terra, 2026-11-07)
@@ -116,38 +142,7 @@ Base `de0878e23`; branch `codex/issue-2266-session-gate-supersession`.
   - `closeReachesTheNewestOpen`: the first open never rejects.
 - On attempt 2: `throwingResumeLeavesATerminalState` and `closeNeverOverwritesALaterOpen` are red with the same messages. The `"from ready"` leg passes on attempt 2 (which had the early return) and is red when the early return is deleted (table below).
 
-**Guard table.** Each guard line in `session-gate.js` at the attempt-3 commit was deleted or weakened, and both gate test files were run (`stem-pump-v1.mjs`, then `stem-store-core-v1.mjs`). The first red assertion is listed.
-
-| Line | Guard | Mutation | Result |
-|---|---|---|---|
-| 47 | a new open aborts the open in flight | delete | red: `a superseded open committed its lease over the newer open` |
-| 52 | the caller's signal is forwarded | no forwarding | red: `an aborted open kept waiting on a held session pin` |
-| 153 | `forwardAbort` honours an already-aborted caller signal | listener only | red: `an open whose caller's signal was already aborted went ahead` |
-| 63 | a throwing resume refuses when it displaced an open in flight | delete | red: `a refused open left the gate loading with no open in flight` |
-| 63 | ... only then | unconditional | red: `a refused resume displaced a session it never replaced` |
-| 76 | `"loading"` on open | delete | red (existing gesture-gate test) |
-| 84 | same-session predecessor released first | `if (false)` | red: `same-session replacement waited on its own predecessor pin lock` |
-| 93 | the store open takes the opening's signal | delete | red: `an aborted open kept waiting on a held session pin` |
-| 98 | the resume wait ends at the abort | plain await | red: `... kept its lease (after ready)` |
-| 141 | `abortable` rejects an already-aborted signal | delete | red: `... kept its lease (from ready)` |
-| 99 | a rejected resume refuses | delete | red: `Missing expected rejection` (`rejectedResumeDoesNotLeakPins`) |
-| 101 | post-resume ownership check | delete | red: `an open superseded as its resume settled committed its lease (offset 1)` |
-| 106 | post-close ownership check | delete | red: `a superseded open committed its lease over the newer open` |
-| 118 | the catch closes the open's lease | delete | red: `the newer open deadlocked on the superseded open's session pin` |
-| 119 | `"refused"` only while the owner | unconditional | red: `the superseded open's refusal overwrote the newer open's loading state` |
-| 119 | `"refused"` on failure | delete | red (quota-failure test) |
-| 123 | `finally` clears `#opening` only while the owner | unconditional | red: `close() no longer reached the newest open` |
-| 130 | `close()` aborts the open in flight | delete | red: `close() no longer reached the newest open` |
-| 131 | `close()` clears `#opening` | delete | red: `a closed open's refusal overwrote the closed gate's idle` |
-| 134 | `close()` sets `"idle"` before its await | move after it (base) | red: `gate.state` not `idle` right after `close()` |
-| 134 | ... and never after it | also write after it | red: `close() reported idle while a later open was loading` |
-| 134 | `close()` sets `"idle"` | delete | red |
-| `opfs-store.js` 1184 | the pin lock wait takes the signal | drop `signal` | red: `an aborted open kept waiting on a held session pin` |
-
-Equivalent mutants, kept for the representation; green, with the reason none can be observed:
-- Line 59 (the throwing-resume path clears `#opening`) and line 123 (`finally` clears `#opening` at all). `#opening` is only aborted, which is a no-op on a finished open's controller, or compared with the reader's own controller, which a finished open's controller never is.
-- Lines 86, 104 and 133 (take `#lease` out before awaiting its close). `#lease` is private, and its only use is `close()`, which returns at once on a lease already closing or closed. Leaving the closing lease in place changes no outcome.
-- Line 147 (`abortable` removes its listener). Listener hygiene on a per-open signal; no behaviour.
+**Guard table.** Attempt 3's table is superseded by attempt 4's, which uses the folded test names and adds M5, M14, M10 and the `removeParentAbort()` rows.
 
 **Green.**
 - `node scripts/check-stem-store-v1.mjs`: PASS. `stem-pump-v1.mjs` passed 10 serial runs and 24 parallel runs.
@@ -160,3 +155,75 @@ Equivalent mutants, kept for the representation; green, with the reason none can
 - `throwingResumeLeavesATerminalState`: red if a throwing resume that displaced an open in flight leaves `"loading"`, or if one with nothing in flight touches the current session's state. No other test throws from `resume()` with an open in flight.
 - `closeNeverOverwritesALaterOpen`: red if `close()` writes the state after its await. No other test opens during a close.
 - `closeReachesTheNewestOpen`: red if a settled superseded open, or `close()` itself, loses track of the newest open. No other test closes the gate while an open is queued.
+
+**Verdict: FAIL** (Sol, one MAJOR). The reviewer re-verified the 23-row guard table, the six equivalent mutants and the dead catch code; all held. The MAJOR: no test aborted an open through the caller's signal after its lease was granted. Supersession and `close()` both change `#opening`, so no test could tell the signal checks from base's identity check. Two mutations stayed green on every suite, and under either one the caller-aborted open committed and held the pin, so a direct same-session `openSession` timed out (the headline deadlock):
+- M14: `removeParentAbort()` right after the store open.
+- M5: both `opening.signal.throwIfAborted()` replaced by `this.#opening !== opening` checks.
+
+MINORs:
+- An open in flight behind a current lease, then a throwing resume: M10 (`#state === "loading"` → `#lease === undefined`) stayed green.
+- `removeParentAbort()` at lines 60 and 122 was missing from the equivalent mutants.
+- The catch comment should read "…or never started it".
+
+The reviewer asked for a claim matrix (abort source × phase) to replace the guard-line table.
+
+### Attempt 4 (Terra, 2026-11-07)
+**Merge.** `origin/main` (merge `9fe8a979f`, with #2263) was merged in with a normal merge commit. Both issues' tests and ledger entries survive, and every entry from both is `RED` at its target under `--self-test --budgets`.
+
+**Change.** No product change beyond the comment fix: attempt 3's code already passes the full matrix. The tests are folded into the claim matrix:
+- `everyAbortSourceInEveryPhase` and `abortAsResumeSettlesNeverCommits` (the matrix above) replace `supersededOpenNeverCommits`, `supersededAsResumeSettlesNeverCommits`, `neverSettlingResumeReleasesItsLease` and `pinLockWaitObeysAbort`. Each of those was one row or one cell of the matrix, so they were deleted, and their ledger entries were retargeted to the matrix cell that now holds them.
+- `throwingResumeLeavesATerminalState` has its third leg, the open in flight behind a current lease.
+
+**Red.**
+- Base: `the aborted open never settled (same-session open, from ready)`. With the matrix removed, the sweep is red: `the aborted open committed (same-session open, after the resume settles, offset 2)`.
+- M14: `the aborted open never settled (caller signal, resume wait)`.
+- M5: `the aborted open committed (caller signal, predecessor close)`.
+- M10: `a refused open left the gate loading behind a current lease with no open in flight`.
+- Attempt-3 code: green, as expected (the MAJOR was a test gap).
+
+**Guard table** (replaces attempt 3's). Each guard line in `session-gate.js` at the attempt-4 commit was deleted or weakened, and both gate test files were run. The first red assertion is listed; `E` and `S` are the matrix tests.
+
+| Line | Guard | Mutation | Result |
+|---|---|---|---|
+| 47 | a new open aborts the open in flight | delete | red: E `never settled (same-session open, queued on the pin)` |
+| 52 | the caller's signal is forwarded | no forwarding | red: E `never settled (caller signal, queued on the pin)` |
+| 95 | ... until the open settles | M14: stop forwarding once the lease is granted | red: E `never settled (caller signal, resume wait)` |
+| 153 | `forwardAbort` honours an already-aborted caller signal | listener only | red: E's last leg `an open whose caller's signal was already aborted went ahead` |
+| 63 | a throwing resume refuses when it displaced an open in flight | delete | red: `a refused open left the gate loading with no open in flight` |
+| 63 | ... whenever an open was in flight | M10: only with no lease | red: `... loading behind a current lease with no open in flight` |
+| 63 | ... and only then | unconditional | red: `a refused resume displaced a session it never replaced` |
+| 76 | `"loading"` on open | delete | red (gesture-gate test) |
+| 84 | same-session predecessor released first | `if (false)` | red: `same-session replacement waited on its own predecessor pin lock` |
+| 93 | the store open takes the opening's signal | delete | red: E `never settled (same-session open, queued on the pin)` |
+| 98 | the resume wait ends at the abort | plain await | red: E `never settled (same-session open, resume wait)` |
+| 141 | `abortable` rejects an already-aborted signal | delete | red: E `never settled (same-session open, from ready)` |
+| 99 | a rejected resume refuses | delete | red: `Missing expected rejection` (`rejectedResumeDoesNotLeakPins`) |
+| 101 | post-resume check, by the signal | delete | red: S `committed (same-session open, after the resume settles, offset 1)` |
+| 101, 106 | ... by the signal, not identity | M5: `this.#opening !== opening` | red: E `committed (caller signal, predecessor close)` |
+| 106 | post-close check | delete | red: E `committed (same-session open, predecessor close)` |
+| 118 | the catch closes the open's lease | delete | red: E `the newer open never settled (same-session open, resume wait)` |
+| 119 | `"refused"` only while the owner | unconditional | red: E `refusal overwrote the newer open's loading state (same-session open, queued on the pin)` |
+| 119 | `"refused"` on failure | delete | red: E `the gate's state after the abort (caller signal, queued on the pin)` |
+| 123 | `finally` clears `#opening` only while the owner | unconditional | red: `close() no longer reached the newest open` |
+| 130 | `close()` aborts the open in flight | delete | red: E `never settled (close(), queued on the pin)` |
+| 131 | `close()` clears `#opening` | delete | red: E `the gate's state after the abort (close(), queued on the pin)` |
+| 134 | `close()` sets `"idle"` before its await | move after it (base) | red: `closeNeverOverwritesALaterOpen`, not `idle` right after `close()` |
+| 134 | ... and never after it | also write after it | red: `close() reported idle while a later open was loading` |
+| 134 | `close()` sets `"idle"` | delete | red: E `the gate's state after the abort (close(), queued on the pin)` |
+| `opfs-store.js` 1184 | the pin lock wait takes the signal | drop `signal` | red: E `never settled (same-session open, queued on the pin)` |
+
+Equivalent mutants. They are kept for the representation, and each stays green for the reason given:
+- **Lines 59 and 123** (the throwing-resume path clears `#opening`; `finally` clears it at all). `#opening` is only ever aborted, which does nothing to a finished open's controller, or compared with the reader's own controller, which a finished open's controller never is.
+- **Lines 86, 104 and 133** (take `#lease` out before awaiting its close). `#lease` is private, and its only use is `close()`, which returns at once on a lease already closing or closed.
+- **Lines 60, 122 and 147** (`removeParentAbort()` on the throwing-resume path and in `finally`; `abortable` removing its listener). Listener hygiene. After an open settles, an abort reaching its controller or its finished race changes nothing.
+
+**Green.**
+- `node scripts/check-stem-store-v1.mjs`: PASS. `stem-pump-v1.mjs` passed 10 serial runs and 32 parallel runs.
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS. All ten #2266 entries and all #2263 entries are `RED` at their targets.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+
+**Test value.**
+- `everyAbortSourceInEveryPhase`: red if any abort source, in any open phase, leaves the open committed, waiting, holding its pin, or the gate in the wrong state. The caller-signal row is the only one that tells a signal-based ownership check from an identity check (M5), or a forwarding that stops early (M14).
+- `abortAsResumeSettlesNeverCommits`: red if an abort from any source between the resume settling and the commit still commits.
+- `throwingResumeLeavesATerminalState` third leg: red if the throwing-resume refusal keys on the lease rather than on an open being in flight (M10).
