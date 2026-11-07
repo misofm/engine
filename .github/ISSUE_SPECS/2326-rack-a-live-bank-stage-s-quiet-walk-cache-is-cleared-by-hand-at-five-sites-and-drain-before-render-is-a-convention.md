@@ -100,10 +100,13 @@ test is the settle record's swap rule, through the public surface.
   - A swap between two drained stages trades both bits, as before.
   - A drained stage that takes a lane from an undrained one records the moved lane's own settled
     state (what the undrained stage reported for it) and no edge. This is the one behaviour change.
-- **`Drained`** (zero-sized, private, `#[must_use]`): returned only by `BankChain::drain_slots`,
-  which is step 0 extracted from `run_with_input`. `render_slots` (the two process loops and the
-  seam, extracted) and `skip_block` take it by value, so neither runs in a block whose drains did
-  not, and a block runs at most one of them. No run-time cost.
+- **`Drained`** (zero-sized, `#[must_use]`, `crates/rack/src/drain.rs`, a private module):
+  returned only by `BankChain::drain_slots`, which is step 0 extracted from `run_with_input` and
+  lives in that module. The field is private to the module, so the compiler makes `drain_slots`
+  its only constructor (folded after the attempt-1 review: minting one in `lib.rs` is `E0423`).
+  `render_slots` (the two process loops and the seam, extracted) and `skip_block` take it by
+  value, so neither runs in a block whose drains did not, and a block runs at most one of them.
+  No run-time cost.
 - **The trait is unchanged.** A `Drained` in `BankStage::process`'s signature would touch every
   implementation: 41 impls (25 of `BankStage`, 16 of `GraphPreparedBuiltinBankProcessor`) in
   `rack`, `graph`, `builtins-compiler`, `graph-compiler` and their tests. Every overriding
@@ -154,6 +157,7 @@ host-core`.
 | The walk's verdict ignores `LaneWalk::quiet` (marks quiet on an empty partition alone) | `a_bank_whose_every_lane_is_settled_bypassed_skips_unless_a_lane_has_work`, `the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly`. In debug the `quiet_walk_holds` assertion fires; in release the tests' own assertions fire. |
 | The first drain reports the settled bits as edges | the new test (`the session's bypass is no settle`). Green in every other `rack`, `graph` and `host-core` test. |
 | A drained stage keeps its own bit when it takes an undrained peer's lane | the new test (`the moved lane is settled at bypass`). Green in every other `rack`, `graph` and `host-core` test. |
+| The mirrored arm: an undrained caller's swap leaves the drained peer's bit (folded after the attempt-1 review, which found it green) | the new test (`the lane moved in from the undrained caller is wet`: `left: 9, right: 1`) |
 
 On base, dropping each hand clear in turn: `carry_lane_from` (1952), `swap_lanes` self (2428) and
 `swap_lanes` peer (2494) are each red in `a_quiet_live_slot_renders_what_one_read_every_block_does`.
@@ -203,8 +207,25 @@ does not see it. `builtins` is untouched.
 - `./target/release/realtime_policy`: `realtime policy: ok (297 marked regions in 47 files)`.
 
 ## Attempt record
-- **Attempt 1** (Terra): the model above, the settle test and the evidence above. Awaiting Sol's
-  verdict.
+- **Attempt 1** (Terra, `6cc82fbef`): PASS.
+  - The review confirmed four things: the mixed-swap change is correct and unreachable from the
+    graph; the rescan `debug_assert!` is free in release and never fires falsely; the hash lines
+    are explained; the merge with main is clean.
+  - Folded after the PASS (merge of `origin/main`, then normal commits):
+    - The settle test now drives the mirrored arm of `SettleRecord::trade` too: an undrained chain
+      calling the swap into the drained one. Emptying that arm was green; it is now red.
+    - `Drained` and the slot-drain loop moved into `crates/rack/src/drain.rs`, so `drain_slots` is
+      the only constructor by the compiler's privacy rule, not by convention.
+  - The coordinator records the two follow-ups below in #2258, with the departure from GR-5's
+    suggested trait-level model.
+  - Fold evidence (head `1e877ba33` against `origin/main` `912696ac1`):
+    - The probe above, with the test-support features: 273 thread lines and 229,007 chain blocks.
+      They are identical except the new test's line (head only) and `session_seek`'s two
+      wall-clock threads; the failing probe-perturbed tests are the same set in both trees.
+    - `cargo test --locked -p rack -p graph -p builtins-compiler -p host-core`, with and without
+      the test-support features: 82 result lines each, all ok. clippy `-D warnings` on both: clean.
+    - `cargo fmt --check`, rustdoc `-D warnings` (`rack`): clean. Workspace policy: ok.
+      `realtime_policy`: ok (298 marked regions in 48 files).
 
 ## Follow-ups (not this issue)
 - A `Drained` proof in the `BankStage` trait itself, if the drain-then-process order should be
