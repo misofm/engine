@@ -511,6 +511,117 @@ fn a_bypass_crossfade_is_bypassed_to_the_witness_and_needs_dry_until_it_settles_
     assert!(!rig.lane.needs_dry() && rig.lane.symmetry().holds(UNBYPASSED));
 }
 
+/// Frames per block of [`Held`]; its warm-up is three blocks.
+const HELD_FRAMES: usize = 64;
+
+/// A lane rendered through the per-node crossfade, block by block, over one fixed dry and one
+/// fixed wet block whose words differ everywhere.
+struct Held {
+    rig: Rig,
+    shunt: BypassShunt,
+    dry: [f32; HELD_FRAMES],
+    wet: [f32; HELD_FRAMES],
+}
+
+impl Held {
+    /// A lane that left settled bypass by a step, took its rest and has held dry for one block of
+    /// a three-block warm-up (issue #2129 D3).
+    fn new() -> Self {
+        use effect_contract::BypassSwitch;
+        let mut held = Self {
+            rig: Rig::new(shape(&[], &[], 0), 0),
+            shunt: BypassShunt::new(HELD_FRAMES, 0),
+            dry: core::array::from_fn(|frame| 0.25 + frame as f32 * 0.0078125),
+            wet: core::array::from_fn(|frame| -0.5 - frame as f32 * 0.00390625),
+        };
+        held.rig
+            .commit_bypass(BypassSwitch::step(true))
+            .expect("a cell");
+        held.rig.stage();
+        assert!(held.rig.lane.settled_bypassed());
+        held.unbypass_from_rest();
+        assert!(held.rig.lane.bypass_ramping());
+        assert_eq!(held.rig.lane.bypass_mix(), 0.0, "a held lane renders dry");
+        held
+    }
+
+    /// Un-bypass by a step, take the rest it must report, begin the three-block hold and render
+    /// one block of it, which is dry.
+    fn unbypass_from_rest(&mut self) {
+        use effect_contract::BypassSwitch;
+        self.rig
+            .commit_bypass(BypassSwitch::step(false))
+            .expect("a cell");
+        self.rig.stage();
+        let rest = self.rig.lane.take_rest().expect("left settled bypass");
+        self.rig.lane.begin_hold(rest, 3 * HELD_FRAMES as u32);
+        assert!(self.block_is_dry(), "the hold's first block is dry");
+    }
+
+    /// Render one block as the per-node path does (the mix runs when the lane needs dry);
+    /// whether every word of it is the dry word, bit for bit, on both channels.
+    fn block_is_dry(&mut self) -> bool {
+        let (mut left, mut right) = (self.wet, self.wet);
+        self.shunt.capture(&self.dry, &self.dry);
+        if self.rig.lane.needs_dry() {
+            self.rig
+                .lane
+                .apply_bypass::<lane::Native>(&self.shunt, &mut left, &mut right);
+        }
+        let dry = self.dry.map(f32::to_bits);
+        left.map(f32::to_bits) == dry && right.map(f32::to_bits) == dry
+    }
+}
+
+/// Issue #2129 D3 as a phase (#2271): a lane that left settled bypass by a step holds dry for its
+/// warm-up. A switch back to bypass with a ramp during that hold keeps the dry the hold emits,
+/// bit for bit: the lane settles at bypass at once. Un-bypassed again, it resumes from rest, as
+/// every un-bypass from settled bypass does (#2129 D2): it reports its rest, so its effect is
+/// reset, and it holds dry for a whole warm-up again.
+///
+/// Test value: red if the switch crossfades from the mix of the un-bypass ramp it interrupts (`1`,
+/// the target a step reaches at once) instead of the `0` the hold renders, a jump onto the reset
+/// effect's warm-up output; or if it leaves the lane ramping toward bypass rather than settled
+/// there, so the un-bypass during that ramp reports no rest, takes no reset and no hold, and
+/// crossfades straight onto an effect fewer than its warm-up frames past its last reset.
+#[test]
+fn an_un_bypass_after_a_bypass_during_a_hold_resumes_from_rest() {
+    use effect_contract::BypassSwitch;
+    let mut held = Held::new();
+    held.rig
+        .commit_bypass(BypassSwitch {
+            bypassed: true,
+            ramp_samples: 2 * HELD_FRAMES as u32,
+        })
+        .expect("a cell");
+    held.rig.stage();
+    assert!(
+        held.rig.lane.take_rest().is_none(),
+        "a hold is not settled bypass"
+    );
+    assert_eq!(
+        held.rig.lane.bypass_mix(),
+        0.0,
+        "the switch keeps the hold's dry"
+    );
+    assert!(
+        held.rig.lane.settled_bypassed(),
+        "settled at bypass at once"
+    );
+    assert!(held.block_is_dry(), "the block after the switch");
+    // Two blocks after the reset, one short of its warm-up.
+    held.unbypass_from_rest();
+    assert!(
+        held.block_is_dry(),
+        "a whole hold again, past the first one's end"
+    );
+    assert!(held.block_is_dry());
+    assert!(
+        !held.block_is_dry(),
+        "the un-bypass reaches wet after its own hold"
+    );
+}
+
 /// A ramp the indexed ramp law cannot spell is refused before the first write.
 #[test]
 fn a_bypass_ramp_longer_than_the_law_is_refused_and_writes_nothing() {
