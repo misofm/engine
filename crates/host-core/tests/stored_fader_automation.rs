@@ -423,6 +423,31 @@ fn each_automated_fader_lane_takes_its_arrival_and_node_time_per_block() {
     assert_eq!(plain, 0, "track 1's fader has no latency before it");
     let fader_jump = controls::LiveRamps::for_session(&model).fader_samples;
     assert_eq!(fader_jump, 960, "20 ms at 48 kHz");
+    // The fader bank's lane -> track map, from the plan: the one banked chain that does not
+    // gather its tracks' input and renders both automated tracks. Each lane must hold its own
+    // track's `a(n)`, whatever order the planner gave the lanes.
+    let ids = [model.tracks[0].id.as_str(), model.tracks[1].id.as_str()];
+    let units = prepared.plan.unit_eligibility();
+    let fader_banks: Vec<_> = units
+        .iter()
+        .filter(|unit| {
+            unit.banked
+                && !unit.gathers_track_input
+                && ids
+                    .iter()
+                    .all(|id| unit.lane_tracks.iter().any(|lane| lane.as_ref() == *id))
+        })
+        .collect();
+    assert_eq!(fader_banks.len(), 1, "both faders are lanes of one bank");
+    let expected: Vec<Option<u64>> = fader_banks[0]
+        .lane_tracks
+        .iter()
+        .map(|track| {
+            ids.iter()
+                .position(|id| track.as_ref() == *id)
+                .map(|index| [latent, plain][index])
+        })
+        .collect();
 
     let _ = builtins_compiler::test_only_take_fader_lane_times();
     let mut allocations = (0, 0, 0);
@@ -469,17 +494,13 @@ fn each_automated_fader_lane_takes_its_arrival_and_node_time_per_block() {
             2,
             "block {block}: one entry per automated lane"
         );
-        let mut lanes: Vec<usize> = times.iter().map(|time| time.lane).collect();
-        lanes.sort_unstable();
-        assert_eq!(
-            lanes,
-            [0, 1],
-            "block {block}: both faders are lanes of one bank"
-        );
-        let mut arrivals: Vec<u64> = times.iter().map(|time| time.arrival).collect();
-        arrivals.sort_unstable();
-        assert_eq!(arrivals, [plain, latent], "block {block}: each lane's a(n)");
         for time in &times {
+            assert_eq!(
+                Some(time.arrival),
+                expected.get(time.lane).copied().flatten(),
+                "block {block}, lane {}: the lane's own track's a(n)",
+                time.lane
+            );
             let start = base as i64 - time.arrival as i64;
             assert_eq!(
                 time.span,
@@ -2408,7 +2429,8 @@ fn a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold() {
 /// grid events from 1,100 (remembered, so a move is owed), makes the move due at the entry `W`;
 /// an offsets write `S = -6` dB at `W` does not cancel it. The due move lands at `W` over the
 /// fader length and replaces the jump's ramp, so from `W` the output is the same, bit for bit,
-/// whether that ramp is 1 or 480 samples. (This pins the base rule; whether the due move should
+/// whether that ramp is 1 or 480 samples, and from the first grid completion sample after the
+/// move's end `W + 480` it equals the never-muted session taking the same write at `W`. (This pins the base rule; whether the due move should
 /// override a jump whose own hold is newer is an open question for the owner, #2362.)
 ///
 /// Test value: red if the R17-10 release of the ended unmute overwrites the hold the offsets
@@ -2420,6 +2442,8 @@ fn a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold() {
 fn an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp() {
     use builtins::BuiltinLaneSelector::Both;
     const FRAMES: u64 = 4_096;
+    // The fader length (10 ms at 48 kHz) the due move lands over.
+    const SETTLED: usize = 480;
     let (model, _) = muted_ride(
         vec![
             segment(AutomationShape::Linear, 0, 1_100, -30.0, -30.0),
@@ -2501,11 +2525,31 @@ fn an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp() {
         };
         let (short, long) = (due(1), due(480));
         let w = window as usize;
+        // Once the due move has completed, the lane is where the never-muted session that takes
+        // the same write at `W` is (an absolute pin of the due move's target).
+        let (settled, _) = acted(
+            &twin,
+            quantum,
+            FRAMES,
+            &[Act {
+                offsets: Some((-6.0, 480)),
+                ..act(u64::from(window))
+            }],
+        );
+        // The first completion sample `64k + 63` at or after the move's end `W + 480`: the
+        // grid's next retarget, from which both lanes follow the same composed curve.
+        let after = (w + SETTLED) | 63;
         for plane in 0..2 {
             assert_eq!(
                 first_difference(&long[plane][w..], &short[plane][w..]).map(|at| at + w),
                 None,
                 "quantum {quantum}: plane {plane}: the move due at {w} replaces the jump's ramp"
+            );
+            assert_eq!(
+                first_difference(&short[plane][after..], &settled[plane][after..])
+                    .map(|at| at + after),
+                None,
+                "quantum {quantum}: plane {plane}: from {after} the never-muted lane"
             );
         }
     }
