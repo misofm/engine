@@ -1063,6 +1063,12 @@ pub(crate) struct InputStage<L: Lane> {
     filter_initial: [[SvfCoef<L>; 2]; 2],
     /// Authoritative per-lane fixed-64 countdowns, indexed `[channel][section][lane]`.
     filter_remaining: [[[u32; MAX_BANK_LANES]; 2]; 2],
+    /// Whether any member lane of either channel has a filter countdown in flight.
+    ///
+    /// A cache of [`InputStage::filter_remaining`], held for the reason
+    /// [`InputStage::ramping`] gives and kept the same way: the definition is
+    /// [`InputStage::countdowns_in_flight`], the only writer is
+    /// [`InputStage::refresh_ramp_flags`], and every block-boundary reader asserts the two agree.
     filter_ramping: bool,
     /// Retained integrator state, indexed like [`InputChainCoef::section`].
     state: InputChainState<L>,
@@ -1092,7 +1098,16 @@ pub(crate) struct InputStage<L: Lane> {
     /// [`FaderRampStage::remaining`] has to [`GainMuteRamp::remaining`]: the kernel's word is
     /// recomputed from this at the top of every ramping block and never carried across one.
     remaining: [[u32; MAX_BANK_LANES]; 2],
-    /// Whether any lane of either channel is mid-ramp.
+    /// Whether any member lane of either channel is mid-ramp.
+    ///
+    /// A cache of [`InputStage::remaining`] (tracker #2258 GR-8): its definition is
+    /// [`InputStage::countdowns_in_flight`] and its only writer after [`InputStage::new`] is
+    /// [`InputStage::refresh_ramp_flags`], which every countdown writer calls once it has written
+    /// (the retarget, both settles, a lane import and a reset). Every reader at a block boundary
+    /// -- [`InputStage::process`], [`InputStage::process_mono`] and
+    /// [`InputStage::lanes_at_rest`] -- asserts the cache against a fresh scan in debug builds.
+    /// It is held rather than scanned because the scan is sixteen counters, plus thirty-two for
+    /// [`InputStage::filter_ramping`], on every block of every bank, and a ramp is rare.
     ///
     /// **This is the feature's off gate.** A session that has never had a trim or polarity command
     /// admitted for this bank leaves it `false` for the life of the plan, and
@@ -1445,6 +1460,47 @@ impl<L: Lane> InputStage<L> {
         }
     }
 
+    /// Whether any member lane of `channels` has a trim countdown in flight, and whether any has
+    /// a filter countdown in flight: the one definition of [`InputStage::ramping`] and
+    /// [`InputStage::filter_ramping`] (tracker #2258 GR-8).
+    ///
+    /// Member lanes only, like the filter prefix bound and the elision plan: nothing writes a
+    /// padding lane's countdown, so the definition cannot differ from a whole-width scan, and
+    /// there is one span for every reader. The walk is a fixed-length masked OR rather than an
+    /// early-exit search, so it has no data-dependent branch and is a few vector operations.
+    fn countdowns_in_flight(&self, channels: core::ops::Range<usize>) -> (bool, bool) {
+        let mut trim = 0_u32;
+        let mut filter = 0_u32;
+        for channel in channels {
+            for lane in 0..MAX_BANK_LANES {
+                let member = if lane < self.members { u32::MAX } else { 0 };
+                trim |= self.remaining[channel][lane] & member;
+                filter |= (self.filter_remaining[channel][0][lane]
+                    | self.filter_remaining[channel][1][lane])
+                    & member;
+            }
+        }
+        (trim != 0, filter != 0)
+    }
+
+    /// The only writer of [`InputStage::ramping`] and [`InputStage::filter_ramping`] after
+    /// [`InputStage::new`]: every countdown writer calls it once it has written.
+    ///
+    /// `channels` is the channels whose countdowns the writer just made current. A one-plane
+    /// (collapsed) body passes channel `0` alone: it advances channel `0`'s countdowns and mirrors
+    /// them onto channel `1` only afterwards, so channel `1` still holds the block's starting
+    /// countdowns when the flags are published (the collapsed-stage invariant,
+    /// [`InputStage::collapsed`]). Every other writer passes both channels.
+    fn refresh_ramp_flags(&mut self, channels: core::ops::Range<usize>) {
+        (self.ramping, self.filter_ramping) = self.countdowns_in_flight(channels);
+    }
+
+    /// Whether both ramp flags say what the countdowns say. Asserted where the flags are read at
+    /// a block boundary, where both channels' countdowns are current.
+    fn ramp_flags_are_current(&self) -> bool {
+        (self.ramping, self.filter_ramping) == self.countdowns_in_flight(0..2)
+    }
+
     /// Recompute the elision plan while a filter target is in flight.  An in-flight section is
     /// conservative even when its current words still happen to be identity words: the target
     /// is already accepted and the ramp body must execute it.
@@ -1525,7 +1581,7 @@ impl<L: Lane> InputStage<L> {
 
     fn settle_filter(&mut self, frames: usize, channels: core::ops::Range<usize>) {
         let frames = u32::try_from(frames).unwrap_or(u32::MAX);
-        for channel in channels {
+        for channel in channels.clone() {
             for section in 0..2 {
                 let mut current = self.coef.section[channel][section];
                 let target = self.filter_target[channel][section];
@@ -1551,14 +1607,7 @@ impl<L: Lane> InputStage<L> {
                 self.coef.section[channel][section] = current;
             }
         }
-        self.filter_ramping = (0..2).any(|channel| {
-            (0..2).any(|section| {
-                self.filter_remaining[channel][section]
-                    .iter()
-                    .take(self.members)
-                    .any(|remaining| *remaining != 0)
-            })
-        });
+        self.refresh_ramp_flags(channels);
     }
 
     /// Apply one already-validated fixed-size target to one section and one or both channels.
@@ -1692,14 +1741,7 @@ impl<L: Lane> InputStage<L> {
             };
             self.filter_remaining[channel][section] = remaining;
         }
-        self.filter_ramping = (0..2).any(|channel| {
-            (0..2).any(|section| {
-                self.filter_remaining[channel][section]
-                    .iter()
-                    .take(self.members)
-                    .any(|remaining| *remaining != 0)
-            })
-        });
+        self.refresh_ramp_flags(0..2);
         self.refresh_filter_plan();
         self.refresh_channel_symmetry();
     }
@@ -1749,10 +1791,8 @@ impl<L: Lane> InputStage<L> {
             self.ramp.current[channel] = lane_words::<L>(&current);
             self.coef.trim[channel] = self.ramp.current[channel];
             self.remaining[channel][lane] = smoothing_samples;
-            if smoothing_samples > 0 {
-                self.ramping = true;
-            }
         }
+        self.refresh_ramp_flags(0..2);
         self.refresh_channel_symmetry_lane(lane);
     }
 
@@ -1827,8 +1867,7 @@ impl<L: Lane> InputStage<L> {
     /// block edge is assigned too.
     fn settle(&mut self, frames: usize, channels: core::ops::Range<usize>) {
         let frames = u32::try_from(frames).unwrap_or(u32::MAX);
-        let mut ramping = false;
-        for channel in channels {
+        for channel in channels.clone() {
             let mut current = lane_read::<L>(self.ramp.current[channel]);
             let target = lane_read::<L>(self.ramp.target[channel]);
             for lane in 0..L::WIDTH {
@@ -1848,14 +1887,12 @@ impl<L: Lane> InputStage<L> {
                         "the ramp kernel assigns the exact target on the frame it settles"
                     );
                     current[lane] = target[lane];
-                } else {
-                    ramping = true;
                 }
             }
             self.ramp.current[channel] = lane_words::<L>(&current);
             self.coef.trim[channel] = self.ramp.current[channel];
         }
-        self.ramping = ramping;
+        self.refresh_ramp_flags(channels);
     }
 
     /// Duplicates the left channel's whole trim-ramp record onto the right channel.
@@ -1942,6 +1979,7 @@ impl<L: Lane> InputStage<L> {
     ///
     /// State only, `&self`, allocation-free and bounded by the lane count.
     fn lanes_at_rest(&self) -> u32 {
+        debug_assert!(self.ramp_flags_are_current(), "a ramp flag is stale");
         if self.ramping || self.filter_ramping {
             return 0;
         }
@@ -2008,6 +2046,7 @@ impl<L: Lane> InputStage<L> {
         if self.collapsed {
             self.desymmetrize();
         }
+        debug_assert!(self.ramp_flags_are_current(), "a ramp flag is stale");
         let report = if self.filter_ramping {
             let prefix = self.filter_prefix_frames(frames, 0..2);
             if self.ramping {
@@ -2160,6 +2199,7 @@ impl<L: Lane> InputStage<L> {
             (0..self.members.min(L::WIDTH)).all(|lane| self.lane_channel_symmetry(lane)),
             "a collapsed block needs every member lane's designed words channel-symmetric"
         );
+        debug_assert!(self.ramp_flags_are_current(), "a ramp flag is stale");
         // From here until the disengage copy, channel `0` is the only live state.
         self.collapsed = true;
         let report = if self.filter_ramping {
@@ -2544,7 +2584,6 @@ impl<L: Lane> InputStage<L> {
         self.ramp.step = [L::zero(); 2];
         self.ramp.remaining = [L::zero(); 2];
         self.remaining = [[0; MAX_BANK_LANES]; 2];
-        self.ramping = false;
         self.coef.trim = self.ramp.current;
         if matches!(kind, BuiltinResetKind::FullToPrepared) {
             self.filter_target = self.filter_initial;
@@ -2556,7 +2595,7 @@ impl<L: Lane> InputStage<L> {
         };
         self.filter_step = [[zero_svf_coef::<L>(); 2]; 2];
         self.filter_remaining = [[[0; MAX_BANK_LANES]; 2]; 2];
-        self.filter_ramping = false;
+        self.refresh_ramp_flags(0..2);
         self.refresh_filter_plan();
         self.refresh_channel_symmetry();
     }
@@ -2897,8 +2936,9 @@ impl<L: Lane> InputStage<L> {
     }
 
     /// Overwrite one populated lane with `state`, word for word, and re-derive only the caches
-    /// those words feed: the two ramping flags, the elision plan and the lane's channel-symmetry
-    /// bit. The lane then renders exactly what the lane it was exported from would have.
+    /// those words feed: the two ramping flags ([`InputStage::refresh_ramp_flags`]), the elision
+    /// plan and the lane's channel-symmetry bit. The lane then renders exactly what the lane it
+    /// was exported from would have.
     ///
     /// The prepared endpoint (`filter_initial`) is this stage's own and stays: a full reset
     /// returns to what *this* plan prepared.
@@ -2946,19 +2986,7 @@ impl<L: Lane> InputStage<L> {
                 put(&mut integrators.ic2, lane, words.integrators[1]);
             }
         }
-        // The flags `settle` and `settle_filter` would publish at a block boundary.
-        self.ramping = self
-            .remaining
-            .iter()
-            .any(|channel| channel[..L::WIDTH].iter().any(|remaining| *remaining != 0));
-        self.filter_ramping = self.filter_remaining.iter().any(|channel| {
-            channel.iter().any(|section| {
-                section
-                    .iter()
-                    .take(self.members)
-                    .any(|remaining| *remaining != 0)
-            })
-        });
+        self.refresh_ramp_flags(0..2);
         // Both refreshes are defence rather than load-bearing today: a settled carried lane
         // holds the coefficients its successor prepared, a ramping lane's body ignores the
         // elision plan, and `lane_channel_symmetry`'s debug assertion backs the symmetry bit, so
