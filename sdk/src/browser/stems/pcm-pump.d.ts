@@ -54,7 +54,10 @@ export interface CanonicalPcmPumpOptions {
   readonly onError?: (error: unknown) => void;
 }
 
-/** A typed pump refusal: `code` is `stem.pump.ring_shape` when a ring's shape is not its source's. */
+/**
+ * A typed pump refusal: `code` is `stem.pump.ring_shape` when a ring's shape is not its source's,
+ * and `stem.pump.stopped` for a seek or pass asked of a stopped pump.
+ */
 export class CanonicalPcmPumpError extends Error {
   readonly code: string;
   readonly details: Readonly<Record<string, unknown>>;
@@ -70,12 +73,13 @@ export class CanonicalPcmPump {
   constructor(options: CanonicalPcmPumpOptions);
   /** Every source reached the end of its region. */
   readonly finished: boolean;
-  /** Fill every ring until it is full or its source ends. */
+  /** Fill every ring until it is full or its source ends. Rejects once the pump is stopped. */
   pumpUntilFull(): Promise<{ chunks: number; frames: number; finished: boolean }>;
   /**
    * Reposition every stem to `frame`, clamped to its region, under a new generation: `generation`
    * when given (it must be above the pump's own; pass a session seek's only after the engine
-   * accepted it), else the pump's next. It is a `SessionSeekProducer`.
+   * accepted it), else the pump's next. It is a `SessionSeekProducer`. Once the pump is stopped it
+   * rejects and publishes nothing.
    */
   seek(frame: number, generation?: bigint): Promise<void>;
   /** Release every ring. */

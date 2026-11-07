@@ -1,5 +1,5 @@
 import { OpfsStemStore } from "./opfs-store.js"
-import { CanonicalPcmPump, Msb1RingWriter } from "./pcm-pump.js"
+import { CanonicalPcmPump, CanonicalPcmPumpError, Msb1RingWriter } from "./pcm-pump.js"
 
 /**
  * The idle backoff when a `pumpUntilFull()` pass writes nothing (issue #278).
@@ -12,16 +12,29 @@ import { CanonicalPcmPump, Msb1RingWriter } from "./pcm-pump.js"
  */
 const DEFAULT_IDLE_MS = 4
 
-let pump
-let lease
 let messageTail = Promise.resolve()
 
-// Self-driving state (#278). All three are undefined/false unless `initialize`
-// asked for the cadence, so a host that does not opt in runs the exact
-// pull-driven worker it ran before.
-let selfDrivingIdleMs
-let driveToken
-let idleWake
+/**
+ * The Worker's one session, as an explicit phase (issue #2263). Exactly one of:
+ *
+ * - `IDLE`: no session, before the first `initialize` and after `stop`. `seek`
+ *   and `pump` are refused as not initialized.
+ * - `{ kind: "running", pump, lease, idleMs, drive, idleWake }`: a live pump.
+ *   `idleMs` is the opt-in cadence's backoff (#278), `undefined` for the
+ *   pull-driven Worker; `drive` is the token of the loop now running, if any,
+ *   and `idleWake` cancels that loop's idle sleep.
+ * - `{ kind: "failed", error, lease }`: the session answered a `session-error`
+ *   and its pump is stopped. It holds no pump and no cadence, so nothing can
+ *   drive it: `seek` and `pump` are refused with `stem.pump.session_failed`
+ *   until `initialize` starts a new session, and `stop` returns to `IDLE`.
+ *
+ * Every transition runs as a link in `messageTail`, so a message and a cadence
+ * tick never observe each other half-done. A running session is left only
+ * through `leaveRunning`, which ends its loop, cancels its idle timer and stops
+ * its pump, whichever path the session ends on.
+ */
+const IDLE = Object.freeze({ kind: "idle" })
+let session = IDLE
 
 self.onmessage = (event) => {
   messageTail = messageTail.then(() => handleMessage(event)).catch((error) => {
@@ -32,18 +45,19 @@ self.onmessage = (event) => {
 async function handleMessage(event) {
   const message = event.data
   if (message?.type === "initialize") {
-    stopDriving()
-    pump?.stop()
-    await lease?.close()
+    await endSession()
+    // Validated before any ring is engaged, so a refused option leaves nothing
+    // engaged that no session owns.
+    const idleMs = requestedIdleMs(message.selfDriving)
     const store = new OpfsStemStore({ folderName: message.folderName })
     await store.open()
     // The main-realm loading gate owns verification and pins. This narrow
     // lease facade limits the Worker to getFile()/slice reads only.
-    lease = {
+    const lease = {
       read: (identity) => store.read(identity),
       close: async () => {},
     }
-    pump = new CanonicalPcmPump({
+    const pump = new CanonicalPcmPump({
       lease,
       windowFrames: message.windowFrames,
       generation: BigInt(message.generation ?? 1),
@@ -52,40 +66,72 @@ async function handleMessage(event) {
         ring: new Msb1RingWriter(source.ring),
       })),
     })
-    selfDrivingIdleMs = requestedIdleMs(message.selfDriving)
+    const running = {
+      kind: "running",
+      pump,
+      lease,
+      idleMs,
+      drive: undefined,
+      idleWake: undefined,
+    }
+    session = running
     self.postMessage({ type: "initialized", requestId: message.requestId })
-    startDriving()
+    startDriving(running)
     return
   }
   if (message?.type === "pump") {
-    if (pump === undefined) throw new Error("PCM pump is not initialized")
+    const running = runningSession()
     self.postMessage({
       type: "pumped",
       requestId: message.requestId,
-      ...(await pump.pumpUntilFull()),
+      ...(await running.pump.pumpUntilFull()),
     })
     return
   }
   if (message?.type === "seek") {
-    if (pump === undefined) throw new Error("PCM pump is not initialized")
-    await pump.seek(message.frame)
+    const running = runningSession()
+    await running.pump.seek(message.frame)
     self.postMessage({ type: "sought", requestId: message.requestId })
     // A seek moves the cursor off end-of-region, so a loop that had exited on
     // `finished` has work again. Waking the idle timer is the other half: a
     // seek backwards through a full ring is exactly the case where the loop is
     // asleep and the rings it filled are now the wrong generation.
-    wakeIdle()
-    startDriving()
+    running.idleWake?.()
+    startDriving(running)
     return
   }
   if (message?.type === "stop") {
-    stopDriving()
-    pump?.stop()
-    pump = undefined
-    await lease?.close()
-    lease = undefined
+    await endSession()
     self.postMessage({ type: "stopped", requestId: message.requestId })
   }
+}
+
+/** The running session a `seek` or `pump` acts on; every other phase refuses. */
+function runningSession() {
+  if (session.kind === "running") return session
+  if (session.kind === "failed") {
+    throw new CanonicalPcmPumpError(
+      "stem.pump.session_failed",
+      "The PCM pump session failed; send initialize to start a new one",
+      { failure: session.error }
+    )
+  }
+  throw new Error("PCM pump is not initialized")
+}
+
+/** End the current session, whatever its phase, and return to `IDLE`. */
+async function endSession() {
+  const ending = session
+  session = IDLE
+  if (ending.kind === "running") leaveRunning(ending)
+  await ending.lease?.close()
+}
+
+/** End a running session's loop and idle sleep, and stop its pump. */
+function leaveRunning(running) {
+  running.drive = undefined
+  running.idleWake?.()
+  running.pump.stop()
 }
 
 /**
@@ -112,9 +158,9 @@ async function handleMessage(event) {
  *
  * That is also why `stop` does not await the loop. `stop` runs *as* a link in
  * the tail, so awaiting a loop that enqueues onto the same tail would deadlock.
- * It clears the token instead; the tick already queued (if any) runs to
- * completion against the pump it started with, and the one after it sees a
- * cleared token and exits.
+ * It leaves the session instead (`leaveRunning`): the tick already queued (if
+ * any) sees that its session is no longer current and does nothing, and the
+ * loop exits on the cleared token.
  *
  * # Why it posts nothing
  *
@@ -123,46 +169,45 @@ async function handleMessage(event) {
  * two things depending on who started the pass. The ring's own `endOfRegion`
  * flag already tells the reader where the region ends, so the loop stays
  * silent on the happy path. A failure still reports on `session-error`,
- * exactly as an externally driven `pump` would.
+ * exactly as an externally driven `pump` would, and fails the session.
  */
-function startDriving() {
-  if (selfDrivingIdleMs === undefined || driveToken !== undefined) return
-  if (pump === undefined) return
+function startDriving(running) {
+  if (session !== running || running.idleMs === undefined) return
+  if (running.drive !== undefined) return
   const token = {}
-  driveToken = token
-  void drive(token).finally(() => {
-    if (driveToken === token) driveToken = undefined
+  running.drive = token
+  void drive(running, token).finally(() => {
+    if (running.drive === token) running.drive = undefined
   })
 }
 
-function stopDriving() {
-  selfDrivingIdleMs = undefined
-  driveToken = undefined
-  wakeIdle()
-}
-
-async function drive(token) {
-  while (driveToken === token) {
-    let outcome
-    try {
-      outcome = await enqueue(() =>
-        driveToken === token ? pump?.pumpUntilFull() : undefined
-      )
-    } catch (error) {
-      // `pumpUntilFull` already hard-stopped the writer on its way out.
-      driveToken = undefined
-      reportSessionError(error)
-      return
-    }
-    if (driveToken !== token || outcome === undefined) return
+async function drive(running, token) {
+  while (running.drive === token) {
+    const outcome = await enqueue(() => tick(running, token))
+    if (running.drive !== token || outcome === undefined) return
     if (outcome.finished) {
       // Clear the token here rather than leaving it to the `finally`, which is a
       // microtask: a `seek` arriving before that microtask ran would see a token
       // that still looks live, decline to re-arm, and stall the session.
-      driveToken = undefined
+      running.drive = undefined
       return
     }
-    if (outcome.chunks === 0) await sleep(selfDrivingIdleMs ?? DEFAULT_IDLE_MS)
+    if (outcome.chunks === 0) await sleep(running, running.idleMs)
+  }
+}
+
+/**
+ * One cadence pass, run as a link in the message tail. A failure fails the
+ * session here, inside the tail, so no message lands between the pass that
+ * failed and the phase that records it.
+ */
+async function tick(running, token) {
+  if (session !== running || running.drive !== token) return undefined
+  try {
+    return await running.pump.pumpUntilFull()
+  } catch (error) {
+    reportSessionError(error)
+    return undefined
   }
 }
 
@@ -178,20 +223,16 @@ function enqueue(work) {
   return queued
 }
 
-function sleep(ms) {
+function sleep(running, ms) {
   return new Promise((resolve) => {
     const finish = () => {
       clearTimeout(timer)
-      if (idleWake === finish) idleWake = undefined
+      if (running.idleWake === finish) running.idleWake = undefined
       resolve()
     }
     const timer = setTimeout(finish, ms)
-    idleWake = finish
+    running.idleWake = finish
   })
-}
-
-function wakeIdle() {
-  idleWake?.()
 }
 
 function requestedIdleMs(requested) {
@@ -205,16 +246,24 @@ function requestedIdleMs(requested) {
   return idleMs
 }
 
+/**
+ * Answer a failure on `session-error`, and fail a running session (issue
+ * #2263): `leaveRunning` ends its loop, cancels its idle timer and stops its
+ * pump, and the session becomes `failed`. A refusal from `IDLE` or from a
+ * session that already failed changes no phase; a failed session keeps its
+ * first error.
+ */
 function reportSessionError(error, requestId) {
-  pump?.stop()
-  self.postMessage({
-    type: "session-error",
-    requestId,
-    error: {
-      name: error?.name ?? "Error",
-      code: error?.code ?? "stem.pump.failed",
-      message: error?.message ?? String(error),
-      details: error?.details ?? {},
-    },
-  })
+  const record = {
+    name: error?.name ?? "Error",
+    code: error?.code ?? "stem.pump.failed",
+    message: error?.message ?? String(error),
+    details: error?.details ?? {},
+  }
+  if (session.kind === "running") {
+    const failing = session
+    leaveRunning(failing)
+    session = { kind: "failed", error: record, lease: failing.lease }
+  }
+  self.postMessage({ type: "session-error", requestId, error: record })
 }

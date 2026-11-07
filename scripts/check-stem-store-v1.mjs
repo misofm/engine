@@ -371,11 +371,69 @@ async function runMutationLedger() {
       name: "let stop leave the idle sleep pending",
       file: "web/stem-store/pcm-pump-worker.js",
       search:
-        "function stopDriving() {\n  selfDrivingIdleMs = undefined\n  driveToken = undefined\n  wakeIdle()\n}",
-      replace:
-        "function stopDriving() {\n  selfDrivingIdleMs = undefined\n  driveToken = undefined\n}",
+        "function leaveRunning(running) {\n  running.drive = undefined\n  running.idleWake?.()\n",
+      replace: "function leaveRunning(running) {\n  running.drive = undefined\n",
       test: "stem-pump-v1.mjs",
       expectedFailure: "stop cancelled the idle timer rather than waiting it out",
+    },
+    // Issue #2263: a stopped pump refuses work, and a failed Worker session drives nothing. Six
+    // mutations for six claims: the pump's two refusals, the Worker's `failed` phase, the failure
+    // ending the cadence (the drive-path failure ends its own loop, so only the message-path test
+    // can see that one), `selfDriving` refused before any ring engages, and a cadence failure
+    // recorded inside the message tail.
+    {
+      name: "let a stopped pump seek",
+      file: "web/stem-store/pcm-pump.js",
+      search: "    this.#refuseIfStopped()\n    const target",
+      replace: "    const target",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a stopped pump accepted a seek",
+    },
+    {
+      name: "let a stopped pump report a pass",
+      file: "web/stem-store/pcm-pump.js",
+      search: "  async pumpUntilFull() {\n    this.#refuseIfStopped()\n",
+      replace: "  async pumpUntilFull() {\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a stopped pump reported a pass",
+    },
+    {
+      name: "leave a failed Worker session running",
+      file: "web/stem-store/pcm-pump-worker.js",
+      search:
+        "    leaveRunning(failing)\n    session = { kind: \"failed\", error: record, lease: failing.lease }\n",
+      replace: "",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the refusal must come from the failed session, not from a pump it still held",
+    },
+    {
+      name: "fail a Worker session without ending its cadence",
+      file: "web/stem-store/pcm-pump-worker.js",
+      search: "    leaveRunning(failing)\n",
+      replace: "",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a message-path failure left the cadence sleeping",
+    },
+    {
+      name: "check selfDriving after the pump engages its rings",
+      file: "web/stem-store/pcm-pump-worker.js",
+      edits: [
+        { search: "    const idleMs = requestedIdleMs(message.selfDriving)\n", replace: "" },
+        {
+          search: "      idleMs,\n      drive: undefined,\n",
+          replace: "      idleMs: requestedIdleMs(message.selfDriving),\n      drive: undefined,\n",
+        },
+      ],
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a refused selfDriving option left a ring engaged",
+    },
+    {
+      name: "record a cadence failure outside the message tail",
+      file: "web/stem-store/pcm-pump-worker.js",
+      search: "    reportSessionError(error)\n    return undefined\n",
+      replace: "    setTimeout(() => reportSessionError(error), 5)\n    return undefined\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the failed pass was recorded before the next message ran, and only once",
     },
   ]
 
