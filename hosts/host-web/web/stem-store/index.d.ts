@@ -213,6 +213,7 @@ export class CanonicalPcmPump {
     onError?: (error: unknown) => void
   })
   readonly finished: boolean
+  /** Rejects `stem.pump.stopped` once the pump is stopped. */
   pumpUntilFull(): Promise<{
     chunks: number
     frames: number
@@ -221,6 +222,7 @@ export class CanonicalPcmPump {
   /**
    * Reposition every stem under a new generation: `generation` when given (it must be above the
    * pump's own; pass a session seek's only after the engine accepted it), else the pump's next.
+   * Rejects `stem.pump.stopped`, publishing nothing, once the pump is stopped.
    */
   seek(frame: number, generation?: bigint): Promise<void>
   stop(): void

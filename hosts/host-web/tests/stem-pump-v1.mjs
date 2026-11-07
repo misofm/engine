@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import {
   CanonicalPcmPump,
+  CanonicalPcmPumpError,
   Msb1RingWriter,
   createFixtureMsb1Ring,
   deinterleaveCanonicalPcm,
@@ -464,6 +465,41 @@ async function readFailureHardStops() {
   await assert.rejects(pump.pumpUntilFull(), /disk read died/)
   assert.equal(released, true, "mid-play read failure hard-stops the writer")
   assert.match(surfaced.message, /disk read died/)
+}
+
+// --- Issue #2263: a stopped pump refuses work ----------------------------------------------------
+
+const SEEK_EPOCH = 11
+const GENERATION_TAG = 10
+
+async function stoppedPumpRefusesSeekAndPump() {
+  // A stopped pump has released its rings. A seek that still succeeded would re-tag and re-seek a
+  // ring no writer owns, and every later pass would report zero chunks and `finished: false`, which
+  // is exactly what a full ring reports: the caller cannot tell a dead pump from a busy one.
+  const shared = createFixtureMsb1Ring({ channels: 1, frameCapacity: 2, capacity: 2 })
+  const control = new Int32Array(shared, 0, 128 / 4)
+  const pump = new CanonicalPcmPump({
+    lease: { async read() { throw new Error("unreachable: the pump never reads") } },
+    windowFrames: 2,
+    sources: [{
+      sourceId: "stopped",
+      identity: `blake3:${"3".repeat(64)}`,
+      channels: 1,
+      bitDepth: 16,
+      frames: 8,
+      ring: new Msb1RingWriter(shared),
+    }],
+  })
+  pump.stop()
+  const epoch = Atomics.load(control, SEEK_EPOCH)
+  const tag = Atomics.load(control, GENERATION_TAG)
+  const stopped = (error) =>
+    error instanceof CanonicalPcmPumpError && error.code === "stem.pump.stopped"
+  await assert.rejects(pump.seek(0), stopped, "a stopped pump accepted a seek")
+  await assert.rejects(pump.seek(0, 9n), stopped, "a stopped pump accepted a session seek")
+  await assert.rejects(pump.pumpUntilFull(), stopped, "a stopped pump reported a pass")
+  assert.equal(Atomics.load(control, SEEK_EPOCH), epoch, "a refused seek published nothing")
+  assert.equal(Atomics.load(control, GENERATION_TAG), tag, "a refused seek re-tagged the ring")
 }
 
 async function resumeInsideGestureGate() {
@@ -1215,6 +1251,231 @@ async function seekReArmsAFinishedLoop() {
   await lease.close()
 }
 
+// --- Issue #2263: a failed Worker session drives nothing and refuses seek and pump ---------------
+
+/** The reply that answers `requestId`, whatever its type. */
+function answer(worker, requestId) {
+  return worker.posted.find((message) => message.requestId === requestId)
+}
+
+function idleTimers() {
+  return process.getActiveResourcesInfo().filter((resource) => resource === "Timeout").length
+}
+
+async function failedSessionRefusesSeekAndPump() {
+  // The source declares nine frames but the stored stem holds five, so the cadence's second window
+  // comes back truncated and the session fails on the drive path. A `seek` after that used to be
+  // answered `sought` and re-arm the loop against the stopped pump: zero chunks and
+  // `finished: false` on every pass, a 1 ms sleep, forever, with nothing reported.
+  const fixture = { ...cadenceFixture(), frames: 9 }
+  const { identity: stemIdentity, lease } = await stagedStore(fixture.bytes, "failed-session")
+  const shared = createFixtureMsb1Ring(fixture.ring)
+  const control = new Int32Array(shared, 0, 128 / 4)
+  const worker = await mountWorker("failed-session")
+  worker.send(
+    initializeMessage({
+      identity: stemIdentity,
+      shared,
+      fixture,
+      folderName: "failed-session",
+      selfDriving: { idleMs: 1 },
+    })
+  )
+  await worker.until(() => worker.reply("session-error") !== undefined, "the truncation to fail the session")
+  assert.match(worker.reply("session-error").error.message, /PCM window is truncated/)
+  assert.equal(Atomics.load(control, WRITER_STATE), 0, "the failure released the ring")
+  const epoch = Atomics.load(control, SEEK_EPOCH)
+
+  const refused = (requestId) => {
+    const reply = answer(worker, requestId)
+    assert.equal(reply?.type, "session-error", `a failed session answered \`${requestId}\` with ${reply?.type}`)
+    assert.equal(
+      reply.error.code,
+      "stem.pump.session_failed",
+      "the refusal must come from the failed session, not from a pump it still held"
+    )
+    assert.match(
+      String(reply.error.details?.failure?.message),
+      /PCM window is truncated/,
+      `the \`${requestId}\` refusal names the failure that ended the session`
+    )
+  }
+  worker.send({ type: "seek", requestId: "seek", frame: 0 })
+  await worker.until(() => answer(worker, "seek") !== undefined, "the seek answer")
+  refused("seek")
+  worker.send({ type: "pump", requestId: "pump" })
+  await worker.until(() => answer(worker, "pump") !== undefined, "the pump answer")
+  refused("pump")
+  assert.equal(Atomics.load(control, SEEK_EPOCH), epoch, "a refused seek published nothing")
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(idleTimers(), 0, "a failed session left the cadence sleeping")
+
+  worker.send({ type: "stop", requestId: "stop" })
+  await worker.until(() => worker.reply("stopped") !== undefined, "the stop reply")
+  await lease.close()
+}
+
+async function messagePathFailureStopsTheCadence() {
+  // A one-slot ring fills at once and the loop sleeps for 30 s. A `seek` the pump refuses fails the
+  // session on the message path; the loop must end with it rather than wake against a stopped pump
+  // and keep sleeping on it for as long as the Worker lives.
+  const fixture = cadenceFixture()
+  const { identity: stemIdentity, lease } = await stagedStore(fixture.bytes, "message-failure")
+  const shared = createFixtureMsb1Ring({ channels: 2, frameCapacity: 3, capacity: 1 })
+  const control = new Int32Array(shared, 0, 128 / 4)
+  const worker = await mountWorker("message-failure")
+  worker.send(
+    initializeMessage({
+      identity: stemIdentity,
+      shared,
+      fixture,
+      folderName: "message-failure",
+      selfDriving: { idleMs: 30_000 },
+    })
+  )
+  await worker.until(() => control[WROTE] === 1, "the one-slot ring to fill")
+  worker.send({ type: "seek", requestId: "bad-seek", frame: -1 })
+  await worker.until(() => answer(worker, "bad-seek") !== undefined, "the bad seek answer")
+  assert.equal(answer(worker, "bad-seek").type, "session-error")
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(idleTimers(), 0, "a message-path failure left the cadence sleeping")
+  assert.equal(Atomics.load(control, WRITER_STATE), 0, "a message-path failure released the ring")
+
+  worker.send({ type: "stop", requestId: "stop" })
+  await worker.until(() => worker.reply("stopped") !== undefined, "the stop reply")
+  await lease.close()
+}
+
+async function refusedSelfDrivingEngagesNoRing() {
+  // `selfDriving` is checked before the pump is built. Checked after, the pump would already have
+  // engaged its rings when the option is refused, and a session that never began owns nothing that
+  // would release them: the reader would see a live writer that never writes.
+  const fixture = cadenceFixture()
+  const { identity: stemIdentity, lease } = await stagedStore(fixture.bytes, "refused-option")
+  const shared = createFixtureMsb1Ring(fixture.ring)
+  const control = new Int32Array(shared, 0, 128 / 4)
+  const worker = await mountWorker("refused-option")
+  worker.send(
+    initializeMessage({
+      identity: stemIdentity,
+      shared,
+      fixture,
+      folderName: "refused-option",
+      selfDriving: { idleMs: -1 },
+    })
+  )
+  await worker.until(() => answer(worker, "init") !== undefined, "the initialize answer")
+  assert.equal(answer(worker, "init").type, "session-error")
+  assert.match(answer(worker, "init").error.message, /selfDriving\.idleMs/)
+  assert.equal(
+    Atomics.load(control, WRITER_STATE),
+    0,
+    "a refused selfDriving option left a ring engaged"
+  )
+  await lease.close()
+}
+
+/**
+ * Wrap `navigator.storage` so the first window read of `fileName` calls `beforeReject` and then
+ * rejects. Only that stem's file is wrapped; the store's index and directories are the fake's own.
+ */
+function failFirstWindowRead(fileName, beforeReject) {
+  const storage = globalThis.navigator.storage
+  let fired = false
+  const forward = (target, wrap) =>
+    new Proxy(target, {
+      get(handle, property) {
+        const wrapped = wrap(handle, property)
+        if (wrapped !== undefined) return wrapped
+        const value = Reflect.get(handle, property)
+        return typeof value === "function" ? value.bind(handle) : value
+      },
+    })
+  const file = (handle) =>
+    forward(handle, (target, property) => {
+      if (property !== "getFile") return undefined
+      return async () => {
+        const blob = await target.getFile()
+        return {
+          slice(start, end) {
+            if (fired) return blob.slice(start, end)
+            fired = true
+            return {
+              arrayBuffer() {
+                beforeReject()
+                return Promise.reject(new Error("synthetic window read failure"))
+              },
+            }
+          },
+        }
+      }
+    })
+  const directory = (handle) =>
+    forward(handle, (target, property) => {
+      if (property === "getDirectoryHandle") {
+        return async (...args) => directory(await target.getDirectoryHandle(...args))
+      }
+      if (property === "getFileHandle") {
+        return async (name, ...rest) => {
+          const opened = await target.getFileHandle(name, ...rest)
+          return name === fileName ? file(opened) : opened
+        }
+      }
+      return undefined
+    })
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      ...globalThis.navigator,
+      storage: { ...storage, getDirectory: async () => directory(await storage.getDirectory()) },
+    },
+  })
+}
+
+async function cadenceFailureIsRecordedBeforeTheNextMessage() {
+  // The cadence's first window read fails, and the host's next `initialize` arrives while that
+  // read is still in flight. The failed pass must be recorded inside the message tail, before that
+  // `initialize` runs. Recorded later, it would land on the session `initialize` just started and
+  // fail it.
+  const fixture = cadenceFixture()
+  const { identity: stemIdentity, lease } = await stagedStore(fixture.bytes, "tail-failure")
+  const first = createFixtureMsb1Ring(fixture.ring)
+  const second = createFixtureMsb1Ring(fixture.ring)
+  const worker = await mountWorker("tail-failure")
+  const reinitialize = {
+    ...initializeMessage({ identity: stemIdentity, shared: second, fixture, folderName: "tail-failure" }),
+    requestId: "second-init",
+  }
+  failFirstWindowRead(`blake3-${stemIdentity.slice("blake3:".length)}`, () => worker.send(reinitialize))
+  worker.send(
+    initializeMessage({
+      identity: stemIdentity,
+      shared: first,
+      fixture,
+      folderName: "tail-failure",
+      selfDriving: { idleMs: 1 },
+    })
+  )
+  await worker.until(() => answer(worker, "second-init") !== undefined, "the second initialize answer")
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.deepEqual(
+    worker.posted.map((message) => message.type),
+    ["initialized", "session-error", "initialized"],
+    "the failed pass was recorded before the next message ran, and only once"
+  )
+  worker.send({ type: "pump", requestId: "second-pump" })
+  await worker.until(() => answer(worker, "second-pump") !== undefined, "the second pump answer")
+  assert.equal(
+    answer(worker, "second-pump").type,
+    "pumped",
+    "the first session's failure failed the session after it"
+  )
+
+  worker.send({ type: "stop", requestId: "stop" })
+  await worker.until(() => worker.reply("stopped") !== undefined, "the stop reply")
+  await lease.close()
+}
+
 await transformContract()
 await workerPumpContract()
 await unalignedSeekKeepsChunksQuantumShaped()
@@ -1223,6 +1484,7 @@ await seekDuringReadCommitsNoStaleWindow()
 await truncatedReadAheadStopsOnce()
 await rejectsWindowSmallerThanRingBeforeEngaging()
 await readFailureHardStops()
+await stoppedPumpRefusesSeekAndPump()
 await resumeInsideGestureGate()
 await sameSessionReplacementReleasesPredecessorPin()
 await supersededOpenNeverCommits()
@@ -1237,4 +1499,8 @@ await rejectedResumeDoesNotLeakPins()
 await selfDrivingFillsWithoutPumpMessages()
 await stopInterruptsTheIdleLoop()
 await seekReArmsAFinishedLoop()
+await failedSessionRefusesSeekAndPump()
+await messagePathFailureStopsTheCadence()
+await refusedSelfDrivingEngagesNoRing()
+await cadenceFailureIsRecordedBeforeTheNextMessage()
 process.stdout.write("stem-pump-v1: PASS\n")

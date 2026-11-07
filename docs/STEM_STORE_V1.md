@@ -194,6 +194,20 @@ reason `stop` does not await the loop -- it runs *as* a link in that tail, so
 awaiting would deadlock. It clears the loop's token and cancels the idle timer,
 and the next tick sees the cleared token and exits.
 
+### Failure (issue #2263)
+
+The Worker's session is one phase: `idle`, `running` or `failed`. Any error,
+from a message or from a cadence pass, answers `session-error`, stops the pump,
+ends the cadence and cancels its idle timer, and moves a running session to
+`failed`. A failed session holds no pump: `seek` and `pump` are answered
+`session-error` with code `stem.pump.session_failed` (the first failure is in
+its `details.failure`) until `initialize` starts a new session; `stop` returns
+the Worker to `idle`. The pump itself refuses the same way: `seek` and
+`pumpUntilFull` on a stopped `CanonicalPcmPump` reject with
+`stem.pump.stopped` and publish nothing to its released rings, so a dead
+producer passed to `BrowserEngine.seek` surfaces as `SessionSeekProducerError`
+instead of a silent success.
+
 ### Documented future arm: `bit_depth = 32f` (not implemented)
 
 STEM_IDENTITY_V1 admits the closed token set `{16, 24, 32f}`. The web launch
