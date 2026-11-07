@@ -11,8 +11,8 @@ import { qualifySuspendedPcmFeed } from "./pcm-feed-suspended.mjs";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
 import {
-  classifyStallSignature, largeReplaceSource, qualificationConstants, requestFailure, SUSPEND_RESUME_SETUP_CHECKS,
-  suspendResumeFailures, unsubscribeFailures,
+  AWAITING_PREFIX, classifyStallSignature, cycleWedged, HEARTBEAT_MESSAGE, largeReplaceSource, qualificationConstants, requestFailure,
+  SUSPEND_RESUME_SETUP_CHECKS, suspendResumeCycleClickPlan, suspendResumeFailures, unsubscribeFailures,
 } from "./qualification.js";
 import { worstReplaceDocument } from "./worst-replace-document.js";
 import { ARTIFACT_NAMES, exactArtifacts, startQualificationServer } from "./server.mjs";
@@ -154,6 +154,9 @@ const MUTATIONS = Object.freeze([
   // with a silent capture. Proved on Chromium only: the WebKit row is reported, not gated, so the
   // same record passes there (owner ruling 2026-11-05).
   ...onBrowser("chromium", caughtBy("suspend-resume", "suspend-resume-skipped")),
+  // Issue #2353: a cycle whose page stopped after its first click, as the harness records it. Red on
+  // Chromium; on WebKit the same record passes every gate (`mutationProofs` holds it green there).
+  ...onBrowser("chromium", caughtBy("suspend-resume", "suspend-resume-wedged")),
   // Issue #1530 gate 4: the browser observation wait, one predicate each.
   ...caughtBy("sdk-observation-wait", "sdk-observation-wait-unbounded", "sdk-observation-wait-late",
     "sdk-observation-wait-early", "sdk-observation-wait-untyped", "sdk-observation-wait-rendered",
@@ -178,12 +181,12 @@ const MUTATIONS = Object.freeze([
 // instead of waiting on a locator.
 const PAGE_DEADLINE_MS = 300_000;
 
-// Issue #1332 S9: the raw hosts the page boots (one render-allocation row each); #2245 adds one per
-// suspend-then-resume cycle.
-const RAW_INSTANCES = 19 + qualificationConstants.suspendResumeCycles;
-// The page's trusted-click resumes: growth and unsubscribe, two per suspend-then-resume cycle (#2245),
-// and the three SDK controls when the SDK runs.
-const RAW_RESUME_CLICKS = 2 + 2 * qualificationConstants.suspendResumeCycles;
+// Issue #1332 S9: the raw hosts `runQualification` boots (one render-allocation row each). The
+// suspend-then-resume cycles each boot one more and report it in their own record (#2353).
+const RAW_INSTANCES = 19;
+// The trusted-click resumes of `runQualification`: growth and unsubscribe, and the three SDK
+// controls when the SDK runs. Each suspend-then-resume cycle has its own two (#2353).
+const RAW_RESUME_CLICKS = 2;
 // Issue #1332 S9 (R-S7-meters 3): the bound on the meter frames a worker-mode growth row may skip.
 // A frame is skipped only between render adopting a plan and the worklet's handler cutting that
 // plan's set from the Worker's `miso.meter-view.v1`. The Worker posts the view as soon as the
@@ -393,15 +396,22 @@ function validate(browserName, result, leg) {
   const worker = leg === "worker";
   const mode = LEGS[leg].instanceMode;
   const sdkModes = result.sdkResponse?.instanceModes;
+  // Issue #2353: the suspend-then-resume cycles, each with its host's mode, render-allocation count
+  // and resumes in its own record. A cycle the harness recorded as wedged has none of them (its page
+  // stopped); its `wedge` is the `suspend-resume` gate's (gated on Chromium, reported on WebKit).
+  const cycles = Array.isArray(result.suspendResume?.cycles) ? result.suspendResume.cycles : [];
+  const pageLost = (cycle) => cycle?.wedge?.by === "harness";
   gate(browserName, "instance-mode", result.crossOriginIsolated === LEGS[leg].isolated
     && Array.isArray(result.instanceModes)
     && result.instanceModes.length === RAW_INSTANCES
     && result.instanceModes.every((instanceMode) => instanceMode === mode)
+    && cycles.every((cycle) => (pageLost(cycle) ? cycle.instanceMode === null : cycle?.instanceMode === mode))
     && (result.sdkResponse === null || (Array.isArray(sdkModes)
       && sdkModes.length === result.sdkResponse.renderAllocationInstances
       && sdkModes.every((instanceMode) => instanceMode === mode))),
   `the ${leg} leg did not run every instance in ${mode} mode: ${JSON.stringify({
-    crossOriginIsolated: result.crossOriginIsolated, raw: result.instanceModes, sdk: sdkModes ?? null })}`);
+    crossOriginIsolated: result.crossOriginIsolated, raw: result.instanceModes,
+    suspendResume: cycles.map((cycle) => cycle?.instanceMode), sdk: sdkModes ?? null })}`);
   const corpus = result.corpus;
   gate(browserName, "native-corpus-digest", corpus?.nativeDigest === corpus?.shippedArtifactDigest
     && Array.isArray(corpus?.browserDigests)
@@ -678,12 +688,18 @@ function validate(browserName, result, leg) {
     && resumes.declared === RAW_RESUME_CLICKS + (result.sdkResponse === null ? 0 : 3)
     && resumes.inClick === resumes.declared
     && resumes.planned === resumes.declared
-    && resumes.clicksPerformed === resumes.declared,
-  `a real AudioContext was resumed outside a trusted click, the page did not declare its growth, unsubscribe and suspend-resume clicks (plus the three SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
+    && resumes.clicksPerformed === resumes.declared
+    // Issue #2353: each suspend-then-resume cycle resumed only in the harness's clicks, both of them
+    // unless the cycle wedged before its second control.
+    && cycles.every((cycle) => pageLost(cycle) || (cycle?.resumes?.direct === 0
+      && cycle.resumes.inClick === cycle.clicks
+      && (cycle.clicks === 2 || (cycleWedged(cycle) && cycle.clicks === 1)))),
+  `a real AudioContext was resumed outside a trusted click, the page did not declare its growth and unsubscribe clicks (plus the three SDK clicks when the SDK runs), the harness did not click exactly the declared controls, or a suspend-resume cycle resumed outside its two clicks: ${JSON.stringify({ resumes, suspendResume: cycles.map((cycle) => ({ cycle: cycle?.cycle, clicks: cycle?.clicks, resumes: cycle?.resumes })) })}`);
   // Issue #2245: on fresh real contexts, a short first segment, a suspend and a second trusted-click
   // resume, every cycle's clock and render moved on and its output after the resume was audible. A
-  // resume that never restarted the render fails earlier, as a named stall with its signature.
-  // On WebKit the row is reported, not gated: only the setup checks are held (owner ruling 2026-11-05).
+  // resume that never restarted the render is a `stall` with its signature, and a cycle whose wait
+  // never settled, or whose page stopped, a `wedge` (#2353). On WebKit the row is reported, not
+  // gated: only the setup checks are held (owner ruling 2026-11-05).
   const suspendResumeGated = SUSPEND_RESUME_GATED.has(browserOf(browserName));
   const suspendResumeFailed = suspendResumeFailures(result.suspendResume)
     .filter((check) => suspendResumeGated || SUSPEND_RESUME_SETUP_CHECKS.includes(check));
@@ -726,9 +742,13 @@ function validate(browserName, result, leg) {
   // export its processor calls on the render thread after boot -- including everything the plan
   // executor does behind its `call_indirect`, which the static gate cannot see.
   const allocations = result.renderAllocations;
+  // A suspend-then-resume cycle adds its row when it read its count: every cycle but a wedged one
+  // must have (#2353).
+  const cycleRows = cycles.filter((cycle) => cycle?.renderAllocations !== null).length;
   gate(browserName, "render-allocations", Array.isArray(allocations)
-    && allocations.length === RAW_INSTANCES
-    && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
+    && allocations.length === RAW_INSTANCES + cycleRows
+    && allocations.every((row) => typeof row?.workload === "string" && row.count === 0)
+    && cycles.every((cycle) => cycleWedged(cycle) || cycle?.renderAllocations === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse, leg);
   return "simd128 supported";
@@ -1459,6 +1479,17 @@ function mutate(result, mutation, leg) {
     cycle.resumed = { ...cycle.suspended };
     cycle.capturePeak = 0;
   }
+  if (mutation === "suspend-resume-wedged") {
+    const cycles = copy.suspendResume.cycles;
+    const last = cycles.length - 1;
+    cycles[last] = harnessWedgedCycle(last, {
+      by: "harness", reason: "the page logged nothing for 20001 ms",
+      awaiting: `suspend the first segment's suspend (suspend-resume cycle ${last})`,
+      awaitingForMs: 20001, heartbeatAgeMs: 20001,
+    }, 1);
+    // A lost page read no count, so the cycle adds no render-allocation row.
+    copy.renderAllocations = copy.renderAllocations.filter((row) => row.workload !== `suspend-resume-${last}`);
+  }
   if (mutation === "resume-clicks-extra") copy.resumes.clicksPerformed += 1;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
   if (mutation === "sdk-observation-subscription-window-reversed") {
@@ -1592,6 +1623,7 @@ function suspendResumeFailureProofs() {
     quantaAtSuspendCall: String(suspendResumeFirstQuanta),
     suspended: { state: "suspended", currentTime: 0.032, renderedQuanta: "9", lastResult: 0 },
     stall: null,
+    wedge: null,
     resumed: {
       state: "running", currentTime: 0.12, renderedQuanta: String(9n + suspendResumeAfterQuanta), lastResult: 0,
     },
@@ -1600,6 +1632,12 @@ function suspendResumeFailureProofs() {
     renderAllocations: 0,
   });
   const green = () => ({ cycles: Array.from({ length: suspendResumeCycles }, (_, index) => cycle(index)) });
+  const last = suspendResumeCycles - 1;
+  const wedgedAt = {
+    suspend: `suspend the first segment's suspend (suspend-resume cycle ${last})`,
+    suspended: `suspended the first segment's suspend (suspend-resume cycle ${last})`,
+    again: `resume suspend-resume cycle ${last} again (click)`,
+  };
   const lastCycle = (change) => {
     const run = green();
     Object.assign(run.cycles[run.cycles.length - 1], change);
@@ -1620,6 +1658,44 @@ function suspendResumeFailureProofs() {
       ["resume-render"]],
     ["render result", lastCycle({ resumed: { ...cycle(0).resumed, lastResult: 6 } }), ["resume-render"]],
     ["stalled", lastCycle({ stall: { full: true } }), ["stall"]],
+    // Issue #2353: a wedged cycle is held to every check whose field it filled, and no further.
+    ["wedged at the first suspend", lastCycle({
+      wedge: { by: "page", awaiting: wedgedAt.suspend }, suspended: null, resumed: null, capturePeak: null,
+    }), ["wedge"]],
+    ["wedged at the first suspend, empty first segment", lastCycle({
+      wedge: { by: "page", awaiting: wedgedAt.suspend }, quantaAtSuspendCall: "0", suspended: null, resumed: null,
+      capturePeak: null,
+    }), ["wedge", "first-segment"]],
+    ["wedged at the second click, not suspended", lastCycle({
+      wedge: { by: "page", awaiting: wedgedAt.again }, suspended: { ...cycle(0).suspended, state: "running" },
+      resumed: null, capturePeak: null,
+    }), ["wedge", "suspended"]],
+    ["wedged in the page, context running", lastCycle({
+      wedge: { by: "page", awaiting: wedgedAt.suspended }, contextStateBeforeBoot: "running",
+      suspended: null, resumed: null, capturePeak: null,
+    }), ["wedge", "context"]],
+    // A timeout the evidence does not cover is no wedge: the cycle throws it, and a record that
+    // names one anyway is a gated failure.
+    ["a close timeout recorded as a wedge", lastCycle({
+      wedge: { by: "page", awaiting: `await close (suspend-resume cycle ${suspendResumeCycles - 1})` },
+    }), ["wedge", "wedge-step"]],
+    ["a first-segment stall recorded as a wedge", lastCycle({
+      wedge: { by: "page", awaiting: `render suspend-resume cycle ${suspendResumeCycles - 1} first` },
+      quantaAtSuspendCall: null, suspended: null, resumed: null, capturePeak: null,
+    }), ["wedge", "wedge-step"]],
+    ["wedged by the harness at an uncovered step", lastCycle(harnessWedgedCycle(last, {
+      by: "harness", awaiting: `await dispose (suspend-resume cycle ${last})`,
+    }, 1)), ["wedge", "wedge-step"]],
+    ["wedged by the harness at no logged step", lastCycle(harnessWedgedCycle(last, { by: "harness", awaiting: null }, 1)),
+      ["wedge", "wedge-step"]],
+    ["every cycle wedged", { cycles: green().cycles.map((each) => harnessWedgedCycle(each.cycle, {
+      by: "harness", awaiting: `suspend the first segment's suspend (suspend-resume cycle ${each.cycle})`,
+    }, 1)) }, ["wedge-all", "wedge"]],
+    // A malformed cycle is not a wedge: it fails its checks.
+    ["a missing cycle", { cycles: [...green().cycles.slice(1), null] },
+      ["context", "first-segment", "suspended", "resume-state", "stall", "resume-clock", "resume-render", "capture"]],
+    ["a cycle with no wedge field", lastCycle({ wedge: undefined, resumed: null }),
+      ["resume-state", "resume-clock", "resume-render"]],
     ["silent capture", lastCycle({ capturePeak: 0 }), ["capture"]],
     ["capture at the floor", lastCycle({ capturePeak: 0.01 }), ["capture"]],
     ["NaN capture", lastCycle({ capturePeak: Number.NaN }), ["capture"]],
@@ -1729,6 +1805,13 @@ function mutationProofs(browserName, result, leg) {
       () => validate(browserName, mutate(result, mutation, leg), leg),
       (error) => error instanceof Error && error.message.startsWith(`${browserName}: ${expected}:`),
       `${browserName}: ${mutation}: red mutation escaped its gate ${expected}`,
+    );
+  }
+  if (!SUSPEND_RESUME_GATED.has(browserOf(browserName))) {
+    // Issue #2353: the owner's ruling reports a wedged WebKit cycle; it fails no gate there.
+    assert.doesNotThrow(
+      () => validate(browserName, mutate(result, "suspend-resume-wedged", leg), leg),
+      `${browserName}: suspend-resume-wedged: a wedged cycle failed a gate on a browser that reports the row`,
     );
   }
   if (result.sdkResponse === null) return;
@@ -1886,6 +1969,227 @@ async function largeReplaceReference(artifacts, large) {
   });
 }
 
+/// The module specifier the page imports the qualification from: with `?sdk=1` when the SDK rows
+/// run, which the module reads from its own URL. One page, one specifier, so its evaluates share one
+/// module instance.
+function qualificationModule(sdkEnabled) {
+  return `/qualification/qualification.js${sdkEnabled ? "?sdk=1" : ""}`;
+}
+
+/// Issue #2353: what the page last told the harness it was waiting on (`AWAITING_PREFIX`) and when
+/// its event loop last ran (`HEARTBEAT_MESSAGE`). A page whose event loop has stopped answers no
+/// evaluate, so these console records, already received, are what a deadline names.
+function pageWatch() {
+  return {
+    awaiting: null,
+    heartbeatAt: null,
+    observe(text) {
+      const now = Date.now();
+      if (text === HEARTBEAT_MESSAGE) {
+        this.heartbeatAt = now;
+        return true;
+      }
+      if (!text.startsWith(AWAITING_PREFIX)) return false;
+      this.awaiting = { step: text.slice(AWAITING_PREFIX.length), at: now };
+      this.heartbeatAt = now;
+      return true;
+    },
+    describe() {
+      const now = Date.now();
+      const step = this.awaiting === null
+        ? "the page logged no awaited step"
+        : `the page last logged that it awaited "${this.awaiting.step}", ${now - this.awaiting.at} ms ago`;
+      const beat = this.heartbeatAt === null ? "and no heartbeat" : `and its last heartbeat ${now - this.heartbeatAt} ms ago`;
+      return `${step}, ${beat}`;
+    },
+  };
+}
+
+/// Open the qualification page in `browser`, with its diagnostics and page-error channels feeding
+/// `sink` (shared by every page of one leg) and its own `pageWatch`.
+async function openQualificationPage(browser, origin, sink) {
+  const page = await browser.newPage();
+  const watch = pageWatch();
+  page.on("console", (message) => {
+    if (!watch.observe(message.text())) sink.diagnostics.push(`console ${message.type()}: ${message.text()}`);
+  });
+  // Issue #1533 D1: two channels, one gate. Playwright's `pageerror` (uncaught main-thread
+  // exceptions), and page-side `error`/`unhandledrejection` listeners installed before any page
+  // script runs.
+  page.on("pageerror", (error) => {
+    sink.diagnostics.push(`pageerror: ${error.message}`);
+    sink.pageErrors.push(`pageerror: ${error.name}: ${error.message}`);
+  });
+  page.on("response", (response) => {
+    if (!response.ok()) sink.diagnostics.push(`HTTP ${response.status()}: ${response.url()}`);
+  });
+  page.setDefaultTimeout(120000);
+  await page.addInitScript(() => {
+    const list = [];
+    Object.defineProperty(window, "__qualificationPageErrors", {
+      value: list, writable: false, configurable: false, enumerable: false,
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      list.push(`unhandledrejection: ${reason?.name ?? typeof reason}: ${reason?.message ?? String(reason)}`);
+    });
+    window.addEventListener("error", (event) => {
+      list.push(`error: ${event.message} at ${event.filename}:${event.lineno}`);
+    });
+  });
+  await page.goto(`${origin}/qualification/index.html`);
+  return { page, watch };
+}
+
+/// Issue #1533 D2: read the page list once, after two task turns so a rejection the last microtask
+/// checkpoint left unhandled has reached its event. A page that does not answer is `timeout` at the
+/// 10 s timer (or `error` with the evaluate's error); no retry.
+async function readPageErrors(page) {
+  let errorReadTimer;
+  return Promise.race([
+    page.evaluate(async () => {
+      for (let turn = 0; turn < 2; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+      return [...window.__qualificationPageErrors];
+    }).then((list) => ({ kind: "read", list }), (error) => ({ kind: "error", error })),
+    new Promise((resolve) => {
+      errorReadTimer = setTimeout(() => resolve({ kind: "timeout" }), 10_000);
+    }),
+  ]).finally(() => clearTimeout(errorReadTimer));
+}
+
+/// Issue #2353: the bounds on one suspend-then-resume cycle's page. Every wait in the page is
+/// bounded at 10 s and its heartbeat beats each second, so a page that has logged nothing for
+/// `SUSPEND_RESUME_SILENCE_MS` has stopped running its event loop: Linux WebKit's audio output can
+/// leave the whole page there (#2245; CI saw it silent for 5.5 minutes before a cycle's second
+/// click). `SUSPEND_RESUME_CYCLE_DEADLINE_MS` bounds a page that still runs but never finishes the
+/// cycle; a cycle takes about 3 s, or 13 s when its second resume stalls (measured on WebKit).
+const SUSPEND_RESUME_SILENCE_MS = 20_000;
+const SUSPEND_RESUME_CYCLE_DEADLINE_MS = 120_000;
+
+/// One cycle on `page`: its evaluate and its two-click plan, raced against the bounds above.
+/// Resolves `complete` with the page's record, `wedged` with the bound that fired, `evaluate-error`
+/// or `click-error`; each with the clicks done.
+async function runSuspendResumeCycleOnPage({ page, watch }, cycle, specifier) {
+  const started = Date.now();
+  const execution = page.evaluate(async ({ specifier: module, cycle: index }) => {
+    try {
+      return await (await import(module)).runSuspendResumeCyclePage(index);
+    } catch (error) {
+      return {
+        qualificationError: {
+          message: error?.message ?? String(error),
+          name: error?.name ?? typeof error,
+          value: error !== null && typeof error === "object" ? { ...error } : error,
+        },
+      };
+    }
+  }, { specifier, cycle });
+  const completion = execution.then((value) => ({ kind: "complete", value }), (error) => ({ kind: "evaluate-error", error }));
+  let timer;
+  const wedged = new Promise((resolve) => {
+    timer = setInterval(() => {
+      const now = Date.now();
+      const sign = Math.max(started, watch.heartbeatAt ?? 0, watch.awaiting?.at ?? 0);
+      if (now - sign > SUSPEND_RESUME_SILENCE_MS) {
+        resolve({ kind: "wedged", reason: `the page logged nothing for ${now - sign} ms` });
+      } else if (now - started > SUSPEND_RESUME_CYCLE_DEADLINE_MS) {
+        resolve({ kind: "wedged", reason: `the cycle did not finish within ${SUSPEND_RESUME_CYCLE_DEADLINE_MS} ms` });
+      }
+    }, 250);
+  });
+  let clicks = 0;
+  try {
+    for (const selector of suspendResumeCycleClickPlan(cycle)) {
+      const click = page.locator(selector).first().click({ timeout: SUSPEND_RESUME_CYCLE_DEADLINE_MS }).then(
+        () => ({ kind: "clicked" }),
+        (error) => ({ kind: "click-error", error }),
+      );
+      const outcome = await Promise.race([completion, click, wedged]);
+      if (outcome.kind !== "clicked") return { ...outcome, clicks };
+      clicks += 1;
+    }
+    return { ...(await Promise.race([completion, wedged])), clicks };
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+/// Issue #2353: the record of a cycle whose page stopped after `clicks` of its clicks: its `wedge`
+/// and the clicks, every field the page would have filled `null`.
+function harnessWedgedCycle(cycle, wedge, clicks) {
+  return {
+    cycle,
+    contextStateBeforeBoot: null,
+    meterLeaseResult: null,
+    quantaAtSuspendCall: null,
+    suspended: null,
+    resumed: null,
+    stall: null,
+    wedge,
+    capturePeak: null,
+    meterFrames: null,
+    renderAllocations: null,
+    instanceMode: null,
+    resumes: null,
+    clicks,
+  };
+}
+
+/// Issue #2353: the suspend-then-resume row (#2245), one cycle per evaluate on the leg's page after
+/// its other rows. A cycle the page finishes is its record, with the clicks the harness made. A
+/// page that stops after the cycle's first click is the cycle's `wedge` (`by: "harness"`, with what
+/// the page last said it awaited), the browser is closed, and the next cycle runs on a new page in a
+/// new browser: the row keeps every cycle and the job does not hang on one. A page that stops
+/// before the cycle's first click, or any other failure, fails the leg by name. The page's error list
+/// is read after every cycle it finishes, so a page the harness later abandons keeps nothing back.
+/// Returns the cycles and the window errors the leg's first read did not see.
+async function runSuspendResumeCycles(label, engine, launchOptions, origin, sdkEnabled, browsers, first, sink) {
+  let current = first;
+  let specifier = qualificationModule(sdkEnabled);
+  const cycles = [];
+  const windowErrors = [];
+  const readErrors = async (cycle) => {
+    const errorRead = await readPageErrors(current.page);
+    if (errorRead.kind !== "read") {
+      throw new Error(`${label}: page-errors: the error read after suspend-resume cycle ${cycle} ${errorRead.kind === "timeout" ? "was not answered within 10 s" : `failed: ${errorRead.error?.message ?? String(errorRead.error)}`}; page diagnostics: ${sink.diagnostics.join("; ")}`);
+    }
+    windowErrors.push(...errorRead.list.slice(current.windowErrorsRead));
+    current.windowErrorsRead = errorRead.list.length;
+  };
+  for (let cycle = 0; cycle < qualificationConstants.suspendResumeCycles; cycle += 1) {
+    const outcome = await runSuspendResumeCycleOnPage(current, cycle, specifier);
+    const where = `${label}: suspend-resume cycle ${cycle}`;
+    if (outcome.kind === "complete") {
+      gate(label, "browser-execution", outcome.value?.qualificationError === undefined,
+        `suspend-resume cycle ${cycle}: ${JSON.stringify(outcome.value?.qualificationError)}${sink.diagnostics.length === 0 ? "" : `; ${sink.diagnostics.join("; ")}`}`);
+      cycles.push({ ...outcome.value, clicks: outcome.clicks });
+      await readErrors(cycle);
+      continue;
+    }
+    if (outcome.kind !== "wedged" || outcome.clicks === 0) {
+      const cause = outcome.kind === "wedged"
+        ? `the page stopped before the cycle's first click: ${outcome.reason}`
+        : `${outcome.kind}: ${outcome.error?.message ?? String(outcome.error)}`;
+      throw new Error(`${where}: ${cause}; ${current.watch.describe()}; page diagnostics: ${sink.diagnostics.join("; ")}`);
+    }
+    const now = Date.now();
+    const awaited = current.watch.awaiting;
+    cycles.push(harnessWedgedCycle(cycle, {
+      by: "harness",
+      reason: outcome.reason,
+      awaiting: awaited?.step ?? null,
+      awaitingForMs: awaited === null ? null : now - awaited.at,
+      heartbeatAgeMs: current.watch.heartbeatAt === null ? null : now - current.watch.heartbeatAt,
+    }, outcome.clicks));
+    process.stdout.write(`${where}: the page stopped after ${outcome.clicks} of 2 clicks (${outcome.reason}; ${current.watch.describe()}); recorded as the cycle's wedge, and the next cycle runs in a new browser\n`);
+    await browsers.current.close();
+    browsers.current = await engine.launch(launchOptions);
+    current = { ...(await openQualificationPage(browsers.current, origin, sink)), windowErrorsRead: 0 };
+    specifier = qualificationModule(false);
+  }
+  return { cycles, windowErrors };
+}
+
 async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, sdkEnabled, protocolReference, structuralReference) {
   // Issue #1332 S9: gate messages and reports name the leg, so a red line says which page it came from.
   const label = `${browserName} ${leg}`;
@@ -1894,45 +2198,18 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
     launchOptions.channel = "chromium";
     launchOptions.args = ["--autoplay-policy=no-user-gesture-required", "--disable-dev-shm-usage"];
   }
-  const browser = await engine.launch(launchOptions);
+  const sink = { diagnostics: [], pageErrors: [] };
+  const { diagnostics, pageErrors } = sink;
+  const browsers = { current: await engine.launch(launchOptions) };
   try {
-    const page = await browser.newPage();
-    const diagnostics = [];
-    page.on("console", (message) => diagnostics.push(`console ${message.type()}: ${message.text()}`));
-    // Issue #1533 D1: two channels, one gate. Playwright's `pageerror` (uncaught main-thread
-    // exceptions), and page-side `error`/`unhandledrejection` listeners installed before any page
-    // script runs.
-    const pageErrors = [];
-    page.on("pageerror", (error) => {
-      diagnostics.push(`pageerror: ${error.message}`);
-      pageErrors.push(`pageerror: ${error.name}: ${error.message}`);
-    });
-    page.on("response", (response) => {
-      if (!response.ok()) diagnostics.push(`HTTP ${response.status()}: ${response.url()}`);
-    });
-    page.setDefaultTimeout(120000);
-    await page.addInitScript(() => {
-      const list = [];
-      Object.defineProperty(window, "__qualificationPageErrors", {
-        value: list, writable: false, configurable: false, enumerable: false,
-      });
-      window.addEventListener("unhandledrejection", (event) => {
-        const reason = event.reason;
-        list.push(`unhandledrejection: ${reason?.name ?? typeof reason}: ${reason?.message ?? String(reason)}`);
-      });
-      window.addEventListener("error", (event) => {
-        list.push(`error: ${event.message} at ${event.filename}:${event.lineno}`);
-      });
-    });
-    await page.goto(`${origin}/qualification/index.html`);
+    const { page, watch } = await openQualificationPage(browsers.current, origin, sink);
     const plan = await page.evaluate(
-      async (enabled) => (await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`))
-        .resumeClickPlan(enabled),
-      sdkEnabled,
+      async (specifier) => (await import(specifier)).resumeClickPlan(specifier.endsWith("?sdk=1")),
+      qualificationModule(sdkEnabled),
     );
-    const execution = page.evaluate(async (enabled) => {
+    const execution = page.evaluate(async (specifier) => {
       try {
-        const module = await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`);
+        const module = await import(specifier);
         return await module.runQualification();
       } catch (error) {
         return {
@@ -1944,7 +2221,7 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
           },
         };
       }
-    }, sdkEnabled);
+    }, qualificationModule(sdkEnabled));
     // Resume each real AudioContext with a trusted gesture across browsers: WebKit starts or restarts
     // a context only inside a user activation, and leaves `resume()` pending without one. The page
     // declares the controls it needs clicked (`resumeClickPlan`), in order, and this loop clicks
@@ -1971,32 +2248,21 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
         if (outcome.kind === "deadline" || outcome.kind === "click-error") {
           // The page neither finished nor made the control this loop waits for: it is stuck. Name
           // that, with what the page logged, instead of a bare locator timeout.
-          throw new Error(`${label}: the page did not finish or offer a declared control to click (${selector}; ${clicksPerformed} of ${plan.length} clicks done) within ${PAGE_DEADLINE_MS} ms: ${outcome.error?.message ?? "total deadline"}; page diagnostics: ${diagnostics.join("; ")}`);
+          throw new Error(`${label}: the page did not finish or offer a declared control to click (${selector}; ${clicksPerformed} of ${plan.length} clicks done) within ${PAGE_DEADLINE_MS} ms: ${outcome.error?.message ?? "total deadline"}; ${watch.describe()}; page diagnostics: ${diagnostics.join("; ")}`);
         }
         clicksPerformed += 1;
       }
       const outcome = await Promise.race([completion, expired]);
       if (outcome.kind === "deadline") {
-        throw new Error(`${label}: the page did not finish within ${PAGE_DEADLINE_MS} ms (${clicksPerformed} of ${plan.length} declared clicks done); page diagnostics: ${diagnostics.join("; ")}`);
+        throw new Error(`${label}: the page did not finish within ${PAGE_DEADLINE_MS} ms (${clicksPerformed} of ${plan.length} declared clicks done); ${watch.describe()}; page diagnostics: ${diagnostics.join("; ")}`);
       }
     } finally {
       clearTimeout(deadlineTimer);
     }
     const result = await execution;
-    // Issue #1533 D2: read the page list once, after two task turns so a rejection the last
-    // microtask checkpoint left unhandled has reached its event. A page that does not answer fails
-    // by name at the 10 s timer (or with the evaluate's error); no retry. The failure is raised
-    // after the `browser-execution` gate, which names a dead page's own error first (D4).
-    let errorReadTimer;
-    const errorRead = await Promise.race([
-      page.evaluate(async () => {
-        for (let turn = 0; turn < 2; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
-        return [...window.__qualificationPageErrors];
-      }).then((list) => ({ kind: "read", list }), (error) => ({ kind: "error", error })),
-      new Promise((resolve) => {
-        errorReadTimer = setTimeout(() => resolve({ kind: "timeout" }), 10_000);
-      }),
-    ]).finally(() => clearTimeout(errorReadTimer));
+    // Issue #1533 D2: a failed read is raised after the `browser-execution` gate, which names a
+    // dead page's own error first (D4).
+    const errorRead = await readPageErrors(page);
     if (errorRead.kind === "read") {
       result.pageErrors = { playwright: [...pageErrors], window: [...errorRead.list] };
     }
@@ -2017,6 +2283,16 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
     }
     if (errorRead.kind === "error") {
       throw new Error(`${label}: page-errors: the error read failed: ${errorRead.error?.message ?? String(errorRead.error)}; page diagnostics: ${diagnostics.join("; ")}`);
+    }
+    if (result.attestation?.probe === true) {
+      // Issue #2353: the suspend-then-resume row, one cycle per evaluate, after the page's rows.
+      const row = await runSuspendResumeCycles(label, engine, launchOptions, origin, sdkEnabled, browsers,
+        { page, watch, windowErrorsRead: errorRead.list.length }, sink);
+      result.suspendResume = { cycles: row.cycles };
+      result.pageErrors.playwright = [...pageErrors];
+      result.pageErrors.window.push(...row.windowErrors);
+      result.renderAllocations.push(...row.cycles.filter((cycle) => cycle.renderAllocations !== null)
+        .map((cycle) => ({ workload: `suspend-resume-${cycle.cycle}`, count: cycle.renderAllocations })));
     }
     if (result.sdkResponse?.protocol !== undefined) {
       // #1571: the headless half of the protocol row runs here, in Node, on the page's document.
@@ -2104,16 +2380,25 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
     if (Array.isArray(result.suspendResume?.cycles)) {
       // Issue #2245: what the suspend-resume row held (Chromium) or reports (WebKit), per cycle: the
       // quanta at the first segment's suspend call, the quanta and clock at the suspend and after the
-      // second resume, and the capture's peak; then each stalled cycle's signature.
+      // second resume, and the capture's peak; then each stalled cycle's signature, and each wedged
+      // cycle's record (#2353).
       const cycles = result.suspendResume.cycles;
-      const short = cycles.filter((cycle) => BigInt(cycle.quantaAtSuspendCall)
+      const short = cycles.filter((cycle) => cycle.quantaAtSuspendCall !== null && BigInt(cycle.quantaAtSuspendCall)
         <= qualificationConstants.suspendResumeFirstQuanta).length;
       const stalled = cycles.filter((cycle) => cycle.stall !== null);
+      const wedged = cycles.filter((cycle) => cycle.wedge !== null);
       const reported = SUSPEND_RESUME_GATED.has(browserName) ? "" : " (reported, not gated)";
       const failed = suspendResumeFailures(result.suspendResume);
-      process.stdout.write(`${label}: suspend-resume${reported}: ${stalled.length} of ${cycles.length} cycles stalled after the second resume${stalled.length === 0 ? "" : ` (cycles ${stalled.map((cycle) => cycle.cycle).join(", ")}; full signature ${stalled.filter((cycle) => cycle.stall.full === true).length})`}; failed checks: ${failed.length === 0 ? "none" : failed.join(", ")}; ${short} of ${result.suspendResume.cycles.length} first segments at ${qualificationConstants.suspendResumeFirstQuanta} quanta or fewer; ${cycles.map((cycle) => `${cycle.cycle}:q${cycle.quantaAtSuspendCall}/${cycle.suspended.renderedQuanta}->${cycle.resumed.renderedQuanta},t${cycle.suspended.currentTime.toFixed(4)}->${cycle.resumed.currentTime.toFixed(4)},peak${cycle.capturePeak.toFixed(3)}`).join(" ")}\n`);
+      const fixed = (value) => (typeof value === "number" ? value.toFixed(4) : "-");
+      const summary = (cycle) => (cycle.wedge !== null && cycle.resumed === null
+        ? `${cycle.cycle}:wedged`
+        : `${cycle.cycle}:q${cycle.quantaAtSuspendCall}/${cycle.suspended?.renderedQuanta}->${cycle.resumed?.renderedQuanta},t${fixed(cycle.suspended?.currentTime)}->${fixed(cycle.resumed?.currentTime)},peak${typeof cycle.capturePeak === "number" ? cycle.capturePeak.toFixed(3) : "-"}${cycle.wedge === null ? "" : ",wedged"}`);
+      process.stdout.write(`${label}: suspend-resume${reported}: ${stalled.length} of ${cycles.length} cycles stalled after the second resume${stalled.length === 0 ? "" : ` (cycles ${stalled.map((cycle) => cycle.cycle).join(", ")}; full signature ${stalled.filter((cycle) => cycle.stall.full === true).length})`}; ${wedged.length} wedged${wedged.length === 0 ? "" : ` (cycles ${wedged.map((cycle) => cycle.cycle).join(", ")})`}; failed checks: ${failed.length === 0 ? "none" : failed.join(", ")}; ${short} of ${cycles.length} first segments at ${qualificationConstants.suspendResumeFirstQuanta} quanta or fewer; ${cycles.map(summary).join(" ")}\n`);
       for (const cycle of stalled) {
         process.stdout.write(`${label}: suspend-resume cycle ${cycle.cycle}: stall-signature: ${JSON.stringify(cycle.stall)}\n`);
+      }
+      for (const cycle of wedged) {
+        process.stdout.write(`${label}: suspend-resume cycle ${cycle.cycle}: wedge: ${JSON.stringify(cycle.wedge)}\n`);
       }
     }
     if (Array.isArray(result.sdkResponse?.renderAllocations)) {
@@ -2130,12 +2415,12 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
         ? event.kind : `${event.kind}@${sample(event)}`)).join(",");
       process.stdout.write(`${label}: sdk-protocol: browser events ${kinds(protocol.browser.events)}; headless events ${kinds(protocol.headless.events)}\n`);
     }
-    process.stdout.write(`${label}: all qualification gates passed (${browser.version()})\n`);
-    const row = normalizedRow(browserName, leg, browser.version(), outcome);
+    process.stdout.write(`${label}: all qualification gates passed (${browsers.current.version()})\n`);
+    const row = normalizedRow(browserName, leg, browsers.current.version(), outcome);
     if (sdkEnabled) row.gates.sdkResponse = "pass";
     return row;
   } finally {
-    await browser.close();
+    await browsers.current.close();
   }
 }
 
@@ -2243,7 +2528,7 @@ async function main() {
     stallSignatureProofs();
     process.stdout.write("observation-unsubscribe: each named check is red past its bound; a dropout fails nothing\n");
     process.stdout.write("stall signature: each missing condition gives full=false\n");
-    process.stdout.write("suspend-resume: each named check is red alone; on WebKit only the setup checks are gated (reported, not gated, owner ruling 2026-11-05), so the skipped-resume mutation is proved on Chromium\n");
+    process.stdout.write("suspend-resume: each named check is red alone; on WebKit only the setup checks are gated (reported, not gated, owner ruling 2026-11-05), so the skipped-resume and wedged-cycle mutations are proved on Chromium and a wedged cycle is held green on WebKit\n");
   }
 
   // Issue #1061: `--check-matrix` holds each browser's floor and outcome, the Playwright version
