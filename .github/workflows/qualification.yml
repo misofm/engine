@@ -780,7 +780,8 @@ jobs:
     # 2 min on a cold 4-core runner, plus #2298's web host lifecycle loom leg, a debug build: 39 s
     # on 32 cores, estimated at 2:30 on a cold 4-core runner, so
     # 1.5 x (15:05 + 3:00 + 2:00 + 2:30) = 33:53. Re-derive from the first `main` run that
-    # includes all three legs.
+    # includes the three loom legs added since the 15:05 run (loudness arming, C ABI handle claim
+    # and web host lifecycle; the job runs six loom legs in all).
     timeout-minutes: 34
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

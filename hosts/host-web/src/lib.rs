@@ -2716,6 +2716,12 @@ impl AudioWorkletEngineHost {
     }
 
     /// Mark an observed browser output-shape mismatch as sticky reprepare-required.
+    ///
+    /// [`RESULT_REPREPARE_REQUIRED`] for the session's first failure. A session that had already
+    /// failed or been disposed (#2298: the control half ended it before the render half's next
+    /// block) keeps its first failure: the call refuses with [`RESULT_WRONG_STATE`] and records
+    /// no failure of its own. The status shell a release leaves refuses with
+    /// [`RESULT_WRONG_STATE`] too.
     pub fn reject_output_quantum(&mut self, actual_frames: u32) -> u32 {
         let code = self.render.reject_output_quantum(actual_frames);
         self.record(code)
@@ -2910,14 +2916,16 @@ impl AudioWorkletEngineHost {
     /// control half's record of `code`. A session that had already failed or been disposed
     /// ([`Ending::AlreadyEnded`], #2298: the render half on another thread failed it after this
     /// call's readiness check) keeps its first failure: nothing is written, the last result
-    /// included.
+    /// included. A host with no control half has no session to end (it was disposed, or never
+    /// booted one): [`Ending::AlreadyEnded`], and nothing is written either.
     fn end_session(&mut self, code: u32, diagnostic: &[u8]) -> Ending {
-        if let Some(control) = self.control.as_mut() {
-            if control.lifecycle.fail() == Ending::AlreadyEnded {
-                return Ending::AlreadyEnded;
-            }
-            control.staging.write_diagnostic(diagnostic);
+        let Some(control) = self.control.as_mut() else {
+            return Ending::AlreadyEnded;
+        };
+        if control.lifecycle.fail() == Ending::AlreadyEnded {
+            return Ending::AlreadyEnded;
         }
+        control.staging.write_diagnostic(diagnostic);
         self.render.silence();
         self.record(code);
         Ending::First
@@ -3481,6 +3489,11 @@ impl RenderHost {
 
     /// Record a sticky failure of this half with its fixed diagnostic (#1332 S6: the instance's
     /// stack canary found overwritten at the release). The lifecycle word tells the control half.
+    ///
+    /// Returns `code` for the session's first failure. A session that had already failed or been
+    /// disposed (#2298: the control half ended it before this half's next block) keeps its first
+    /// failure: the half silences and refuses with [`RESULT_WRONG_STATE`], and keeps no diagnostic
+    /// for the adoption to copy.
     pub fn fail(&mut self, code: u32, diagnostic: &'static [u8]) -> u32 {
         self.half.fail(code, diagnostic)
     }
