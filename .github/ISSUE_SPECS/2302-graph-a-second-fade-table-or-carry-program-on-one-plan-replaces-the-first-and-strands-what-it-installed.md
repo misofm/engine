@@ -22,7 +22,7 @@ A successor graph plan is assembled after bind by a sequence of free functions i
 ## Reachability (verified at `b1fc70c0f`)
 Not reachable from production today. Every production call of every `graph::install_*`,
 `graph::take_*` function is in one function, `host-core::prepare::prepare_or_project`
-(`crates/host-core/src/prepare.rs` 3303-5990), on `plan`, a local moved out of the `bound` plan the
+(`crates/host-core/src/prepare.rs` 3303-5986), on `plan`, a local moved out of the `bound` plan the
 same function binds at ~4836. No function takes an existing plan and installs on it, and no other
 crate (control-plane included) calls an install. So:
 - `install_fade_arms` runs once (~5575), inside `if !fade_arms.is_empty() || ...`.
@@ -126,3 +126,12 @@ second program and a fade carry built for another table become unrepresentable r
 It needs `prepare_or_project`'s install sequence regrouped so no other plan borrow falls between
 the builder's start and its seal, and the direct test callers in `graph`, `graph-compiler`,
 `host-core` and `source` moved onto it.
+The coordinator tracks this follow-up in #2258, where GR-6 is marked partly covered by #2302.
+
+**Verdict (attempt 1): PASS.** Adversarial review of `daabdab98`:
+- The split is justified: the two refusals are a strict subset of what the builder will
+  guarantee, so the builder supersedes them without reversing them.
+- The empty-first-table case is sound: an install that armed nothing holds no table, so accepting
+  a later install strands nothing.
+- Adding the two `GraphCarryInstallError` variants changes no exhaustive match elsewhere.
+- The reachability proof is complete.
