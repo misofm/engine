@@ -67,4 +67,70 @@ both states unrepresentable instead.
 - `bash scripts/check-workspace-policy.sh`.
 
 ## Evidence (attempt 1)
-Pending.
+
+**Verified on `b1fc70c0f`.** Both vectors and their readers are as described in Problem. Neither
+mismatch is reachable (see the proof), so no red-on-base test exists. GR-9's obligations are not
+touched.
+
+**Fix.**
+- `crates/graph-compiler/src/ids.rs`:
+  - `EffectNodeIds` (`of_validated`, `get(slot)`, `iter`) replaces `Vec<Option<EffectNodeId>>` and
+    `prepared_effect_node`.
+  - `EffectPlacement { PerNode, Banked { kept } }` is the only input `into_effects` lowers.
+- `compile.rs`:
+  - `graph_front` builds `EffectNodeIds` once, after validation, and the node loop reads it
+    instead of filling it.
+  - `graph_back<S: ProcessorSupply>` places every entry once, after `bind_planned_banks`.
+    `Vec<Box<..>>` keeps every supplied processor (banked ones as `Banked { kept: Some }`).
+    `Unprepared` prepares only the per-node entries, in entry order, and still prepares them when
+    a `graph.effect.control_layout` diagnostic is already pending, as the base did.
+  - `compile_with_builtins` drops its `.expect`, and `compile_projected` drops its all-`None`
+    vector.
+- `banks.rs`: `rack_chains`' and `uncollected_console_slot`'s unreachable "entry with no node"
+  `graph.internal.invariant` arms are deleted.
+- `GraphProjection::per_node_entries` reads `!banked.contains(node)`. Its public signature is
+  unchanged.
+
+**Test value.** No test is added. The change makes the two states unrepresentable, so no behaviour
+test can tell base from head (see the proof), and the existing gates defend the placement itself
+(mutations below). No test became useless.
+
+**Mutations (each reverted).**
+- `Unprepared::place` prepares banked members too (`if banked && false`): red.
+  `projected_compile::a_projected_compile_prepares_no_banked_members_processor` (`:362`) and
+  `a_banks_bytes_are_within_its_row` (`:435`) fail.
+- `Unprepared::place` with the banked test inverted: red, `a_projected_compile_prepares_no_banked_members_processor` (`:362`).
+- `per_node_entries` inverted: red, the same two tests (`:367`, `:435`).
+- `Vec` supply drops a banked member's supplied processor (`kept: None`): **survives** the whole
+  `cargo test -p graph-compiler`. Nothing in this crate observes that `compile_with_builtins`
+  keeps a banked member's processor beside its bank; see the follow-up.
+
+**No bit moved (one-time, not committed).** A scratch integration test was run in release on base
+`b1fc70c0f` and on head, then removed. It covered every `fixtures/session/v1/*.json`, plain and
+with a `miso.delay` appended to the first track's inserts, at `Simd4` and `Simd8`, through both
+`compile_with_builtins` and `project` + `compile_projected`: 140 configurations, of which 84
+compile and 56 are refused (the same refusals on both). For each it recorded:
+- `GraphCompiler::sha256`;
+- the `graph_resource_estimate` and the full `GraphCompileReport` (`Debug`), which includes the
+  rack cohorts and bank plan;
+- every `effect_bank_members` list (940 bank lines);
+- `per_node_entries` (26 projected plans mix banked and per-node entries);
+- an FNV-1a hash of 32 rendered quanta of PCM from deterministic sources.
+
+The two outputs are byte-identical: sha256 of both files
+`1f453d5d2a8f2a5743fbb544d2d87611ec345370bf540d466e9feb61ff8bac87`. Banking did not change.
+
+**Gates (head).**
+- `cargo test --locked -p graph-compiler`: 23 test binaries, 204 passed, 0 failed, 2 ignored.
+- `cargo clippy --locked -p graph-compiler --all-targets -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p graph-compiler`: clean.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- Realtime policy tool: not run; no render-path code changed (compile-time only, and the PCM above
+  is unchanged).
+
+**Follow-ups (not in this issue).**
+- `compile_with_builtins` keeps a banked member's supplied processor as a per-node
+  `GraphPreparedEffect` beside its bank, and no graph-compiler test observes it (the surviving
+  mutation above). Either a consumer needs it and should have a test, or it is retained dead weight
+  that `#2199`'s "never both for one instance" rule should also cover on this path.
