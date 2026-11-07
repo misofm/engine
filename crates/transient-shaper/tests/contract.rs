@@ -394,6 +394,27 @@ fn state_restore_validates_version_length_envelope_and_parameters() {
         );
         assert_eq!(snapshot(effect.as_ref()), good, "rejection must be atomic");
     }
+
+    // Issue #2368: `-0.0` is normalised before the settled-at-target check, so a settled ramp
+    // holding `-0.0` at its `+0.0` target is accepted and comes back `+0.0`. Delay
+    // (`read_carried_ramp`) and reverb (`state.rs` `read_carried_ramp`) normalise by the same
+    // rule before `LinearRamp::from_words`. Red when the normalisation is dropped or moved after
+    // the phase check: `from_words` compares bits and refuses the pair.
+    assert_eq!(state_u32(&good.0, 2 + 3), 0, "ramp 0 is settled");
+    assert_eq!(state_u32(&good.0, 2 + 1), 0, "ramp 0 is at +0.0");
+    let mut signed = good.0.clone();
+    signed[8..12].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
+    effect
+        .restore_state_payload(
+            1,
+            StatePayloadInput::new(&[], &signed, &good.1, sizes).expect("input"),
+        )
+        .expect("a settled -0.0 at its +0.0 target restores");
+    assert_eq!(
+        snapshot(effect.as_ref()),
+        good,
+        "the -0.0 comes back as +0.0"
+    );
 }
 
 /// Resource validation and the program-key check precede the legal "backend unavailable" fallback,

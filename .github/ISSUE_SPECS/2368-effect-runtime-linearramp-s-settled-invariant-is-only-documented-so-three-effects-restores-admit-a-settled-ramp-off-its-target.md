@@ -75,7 +75,10 @@ word "the engine never holds" (#1411 D1), the class #2310 refused for the gate.
   scatter them back. Their scatters wrote the fields directly. They now call
   `record_advance(current, step, remaining)`, which keeps `target` and, for `remaining == 0`,
   stores the target and `+0.0`. A walk of the law already lands there, so this is a plain store
-  for every real advance: two scalar selects per lane per block, never per sample.
+  for every real advance: two scalar selects per lane per block (the compiler may branch: on
+  x86-64-v3 each is a `testl`/`je` per lane), never per sample. A `debug_assert!` checks that a
+  settled advance already landed on the target, so a lane-law defect that walks off it stays
+  visible in debug builds instead of being masked by the store.
 - **Rebuild from words.** dynamic-eq, de-esser and gate-expander rebuilt a ramp from its lane
   words only to call `set_target`, which reads `current` alone. The rebuild becomes
   `LinearRamp::fixed(current)` plus `set_target`. This gives the same words by construction.
@@ -92,8 +95,11 @@ word "the engine never holds" (#1411 D1), the class #2310 refused for the gate.
 - Unifying `WordRamp` (dynamic band), the builtins' `u32` countdown plus `f32` residue stages
   (fader, matrix, input) and `IndexedRamp` onto one type. These are SIMD lane-word encodings and
   stay branch-free.
-- A stationary hoist for builtin gain retargets. It is cost only, and must exclude mute moves,
-  which would move signed-zero bits (see 2 above).
+- A stationary hoist for builtin gain retargets only. It is cost only, and must exclude mute
+  moves, which would move signed-zero bits (see 2 above).
+- Moving the effects' near-duplicate lane-vector ramp helpers into `effect-runtime`, next to
+  `LinearRamp`: the compressor's `RampVec`, the transient shaper's `LinkRamp` and the limiter's
+  `RampLanes` (gather, advance by the law, scatter through `record_advance`).
 
 ## Gates
 - Red-on-base reproducers: compressor, transient-shaper and soft-clip restores refuse a settled
@@ -175,3 +181,29 @@ are unchanged, so `size_of::<LinearRamp>()` and every plan fixture are unchanged
 - `cargo check --target wasm32-unknown-unknown` with `+simd128` passes for the touched crates.
 - `scripts/check-workspace-policy.sh` is ok.
 - `realtime_policy` is ok (298 marked regions in 48 files).
+
+### Attempt 1 verdict: PASS (minor findings folded)
+
+The adversarial review passed `738256385`. It confirmed four things:
+- No live writer produces the newly refused state.
+- The adjusted tests lost no coverage.
+- The lane-vector arithmetic is unchanged.
+- The three "not a defect" conclusions above are sound.
+
+The three minor findings were folded in after merging `origin/main` (`9949664cb`):
+1. **The `record_advance` doc** said "branch-free". It now says the compiler may branch (see the
+   decision above).
+2. **Restore normalisation is now tested.** `transient-shaper`
+   `state_restore_validates_version_length_envelope_and_parameters` restores a settled ramp 0
+   holding `-0.0` at its `+0.0` target. The restore is accepted, and the snapshot comes back
+   `+0.0`. Mutations, each reverted:
+   - dropping `normalize_zero(current)` before `from_words` turns it RED;
+   - dropping both normalisations turns it RED.
+
+   Delay (`read_carried_ramp`) and reverb (`state.rs` `read_carried_ramp`) normalise by the same
+   rule, in the same order. They are covered by that rule and get no row of their own.
+3. **`record_advance` asserts in debug** that a settled advance is at its target. The release-only
+   store of an off-target settled advance stays in `words_enter_a_ramp_only_in_phase` under
+   `cfg!(not(debug_assertions))`. The new `a_settled_advance_off_its_target_asserts_in_debug` is
+   RED when the assertion is replaced by `true`. The debug test suites of every crate that calls
+   `record_advance` pass, so the assertion never fires on a real advance.

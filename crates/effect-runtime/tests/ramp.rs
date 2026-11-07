@@ -217,12 +217,24 @@ fn words_enter_a_ramp_only_in_phase() {
             5
         ]
     );
-    ramp.record_advance(0.875, 0.125, 0);
+    let settling = ramp;
+    ramp.record_advance(1.0, 0.125, 0);
     assert_eq!(
         bits(ramp),
         bits(LinearRamp::fixed(1.0)),
-        "a settled advance is at its target"
+        "a settled advance carries a +0.0 step"
     );
+    // Off its target, a settled advance is a lane-law defect: a debug build asserts
+    // (`a_settled_advance_off_its_target_asserts_in_debug`), a release build stores the target.
+    if !cfg!(debug_assertions) {
+        let mut ramp = settling;
+        ramp.record_advance(0.875, 0.125, 0);
+        assert_eq!(
+            bits(ramp),
+            bits(LinearRamp::fixed(1.0)),
+            "a settled advance is at its target"
+        );
+    }
 
     let mut held = LinearRamp::holding(0.5, 3);
     assert!(held.is_ramping());
@@ -235,4 +247,18 @@ fn words_enter_a_ramp_only_in_phase() {
         bits(LinearRamp::holding(0.5, 0)),
         bits(LinearRamp::fixed(0.5))
     );
+}
+
+/// Issue #2368: a settled advance off its target is a lane-law defect, and a debug build says so
+/// rather than letting `record_advance`'s store mask it.
+///
+/// Test value: dropping `record_advance`'s `debug_assert!` turns this red; a lane law that walks
+/// off its target would then be invisible in every test build.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a settled advance lands on its target")]
+fn a_settled_advance_off_its_target_asserts_in_debug() {
+    let mut ramp = LinearRamp::fixed(0.0);
+    ramp.set_target(1.0, 8);
+    ramp.record_advance(0.875, 0.125, 0);
 }

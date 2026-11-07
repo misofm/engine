@@ -208,10 +208,17 @@ impl LinearRamp {
     ///
     /// A walk of the law settles exactly on the target with a `+0.0` step, so for it this is a
     /// plain store. A settled `remaining == 0` stores the target and `+0.0` whatever `current` and
-    /// `step` say, so no caller can leave a settled ramp off its target (issue #2368). Branch-free
-    /// selects, once per lane per block, never per sample.
+    /// `step` say, so no caller can leave a settled ramp off its target (issue #2368). Two scalar
+    /// selects per lane per block (the compiler may branch), never per sample.
+    ///
+    /// A debug build asserts that a settled advance already landed on the target, so a lane law
+    /// that walks off its target stays visible there instead of being masked by the store.
     #[inline(always)]
     pub fn record_advance(&mut self, current: f32, step: f32, remaining: u32) {
+        debug_assert!(
+            remaining != 0 || current.to_bits() == self.target.to_bits(),
+            "a settled advance lands on its target"
+        );
         let settled = remaining == 0;
         self.current = if settled { self.target } else { current };
         self.step = if settled { 0.0 } else { step };
