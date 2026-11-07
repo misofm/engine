@@ -180,6 +180,34 @@ give-back (`adopt_persisting` becomes `reclaim_from_withdrawn`) a few lines belo
 **Follow-ups (not in this issue).**
 - `pending_providers` as an `Option` (from #2287). It would make `newest_prime` the only choice
   (M6) and remove the dead two-pending arms of `restore_prime_flags` and `kept_holder`.
-- `fall_back_pending_warm`'s arm for a withdrawn candidate whose epoch is not the newest pending
-  epoch is about the publisher and the pending list agreeing, not about the record. It stays a
-  `debug_assert!(false)` with a republish.
+
+## Verdict (attempt 1)
+**PASS** (Sol's adversarial review). The reviewer confirmed:
+- the change is equivalent on every reachable path;
+- both internal-fault paths now hold the record exactly as long as its candidate;
+- nothing outside control-plane used the changed host-core API;
+- the branch merges cleanly with `main` and with #2313.
+
+Three minors, folded on the branch after merging `origin/main`:
+1. Three doc lines past 100 columns are rewrapped: the `EpochPhase` doc, `promote()`'s doc and
+   `publish_primed`'s doc.
+2. `hold_primed_until`'s rule now has a host-core test, so it is no longer defended only by
+   control-plane's `warm_successor` (M2 survived in host-core and capi). The test is
+   `a_primed_hold_raises_not_before_and_never_lowers_it` in
+   `crates/host-core/tests/warm_successor.rs`. It checks that:
+   - a hold on a `Next` reservation changes nothing, and `PrimedCandidate::of` reads `None`;
+   - a `Primed` reservation's `not_before` rises to the latest hold and is never lowered;
+   - the lead is kept;
+   - `of` reads back the reservation's epoch and schedule.
+
+   Each mutation turns it red: M2 (no raise), M3 (`min`), and a hold that replaces `not_before`
+   outright.
+3. `fall_back_pending_warm`'s defensive arm, for a withdrawn candidate that is not the newest
+   pending epoch, no longer repeats silently. In release it used to answer `NotPending` and run
+   again on every control call. It now republishes the candidate, drops the newest pending
+   epoch's record so the next step does not withdraw again, and returns `Internal` once. The
+   service step reports that as `ServiceFailure::Deadline`; the C ABI reports it as
+   `INTERNAL`/`control.internal`. The arm is unreachable and keeps its `debug_assert!(false)`, so
+   no test drives it.
+
+Gates re-run on the folded head are recorded in the issue's evidence comment.
