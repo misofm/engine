@@ -676,8 +676,14 @@ fn lowers_65_537_tracks_of_builtin_banks() {
         .map(|(nodes, level)| DependencyLevel { level, nodes })
         .collect();
     let plan = hand_built_plan(levels, edges, required, Vec::new());
-    let artifact =
-        builtins.into_graph_artifact_with_banks(plan, (), backend, &dependency_levels, &classes);
+    let artifact = builtins.into_graph_artifact_with_banks(
+        plan,
+        (),
+        &[],
+        backend,
+        &dependency_levels,
+        &classes,
+    );
     assert_eq!(
         artifact.prepared_builtin_bank_count(),
         3 * (TRACKS as usize).div_ceil(lanes),
