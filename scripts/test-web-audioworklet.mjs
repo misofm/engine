@@ -6507,8 +6507,10 @@ async function testControlWorker() {
       fromWorklet({ tag: "miso.unknown.v1" });
       assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: 1, result: 255 });
       assert.equal(tick.cleared, false, "a worklet fault in the dispose window keeps the deadline's tick");
+      const posted = posts.length;
       globalThis.onmessageerror();
-      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: 1, result: 255 });
+      assert.deepEqual(posts.slice(posted), [{ tag: "miso.error.v1", requestId: 1, result: 255 }],
+        "an unreadable page message in the dispose window posts its sticky error");
       assert.equal(tick.cleared, false, "so does an unreadable page message");
       now += RELEASE_TIMEOUT_MS;
       tick.callback();
@@ -6669,6 +6671,16 @@ async function testControlWorker() {
       assert.deepEqual([posts.at(-1), marks().length], [{ tag: "miso.error.v1", requestId: 0, result: 255 }, 2],
         "a record of the wrong size is sticky");
     }
+    // A refused live read after a boot whose baseline read was refused too posts its sticky error
+    // once and no watermark: the record was never written, so nothing after the refusal may be
+    // read from it. Red if the refused read goes on to the record.
+    {
+      await boot({}, 64, (engine) => { engine.calls.watermarkResult = 6; });
+      fake.calls.watermarkResult = 3;
+      intervals.at(-1).callback();
+      assert.deepEqual(posts.slice(1).map(({ tag, requestId, result }) => [tag, requestId, result]),
+        [["miso.error.v1", 0, 3]], "one sticky error and no watermark");
+    }
     // The event drain takes at most 16 frames a lane per pass, and an event with no address is a
     // sticky internal error. Red if the bound moves, or if the fault posts a frame or no error.
     {
@@ -6747,6 +6759,13 @@ async function testControlWorker() {
       send({ tag: "miso.status.v1", requestId: Number.NaN });
       assert.deepEqual([posts.at(-1).tag, Number.isNaN(posts.at(-1).requestId), posts.at(-1).result],
         ["miso.error.v1", true, 1]);
+    }
+    // In `worker` mode the page sends no service message: one is refused like any message with no
+    // request ID, as request 0. Red if the Worker takes it for a tick.
+    {
+      const { send } = await boot();
+      send({ tag: "miso.service.v1" });
+      assert.deepEqual([posts.slice(1), fake.calls.service], [[{ tag: "miso.error.v1", requestId: 0, result: 1 }], []]);
     }
     // The feed port's messages. Red if a message that is no object throws, if an attach whose
     // rings are no list is taken, if a new attach keeps the old list's rings, if a detach drops

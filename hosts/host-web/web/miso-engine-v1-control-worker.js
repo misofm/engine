@@ -243,8 +243,7 @@ class ControlWorker {
       return;
     }
     this.receive(message);
-    const requestId = message?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
-    this.afterControl(requestId);
+    this.afterControl(this.lastRequestId);
   }
 
   /// Whether this Worker holds a host: from the boot's success until the dispose frees it.
@@ -596,8 +595,9 @@ class ControlWorker {
     this.post(message, this.transferList(planes));
   }
 
+  /// A page request. #2306: in `worker` mode the page sends no `miso.service.v1` (this Worker runs
+  /// its own tick), so one is refused like any message with no request ID.
   receive(message) {
-    if (message?.tag === "miso.service.v1" && exactFields(message, ["tag"])) return;
     const returnedPlanes = Array.isArray(message?.planes) ? message.planes : undefined;
     if (!Number.isSafeInteger(message?.requestId) || message.requestId <= this.lastRequestId) {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
