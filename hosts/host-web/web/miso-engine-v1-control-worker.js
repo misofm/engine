@@ -242,6 +242,11 @@ class ControlWorker {
       this.openFeed(message.port);
       return;
     }
+    if (message?.tag === "miso.fail.v1" && exactFields(message, ["tag", "result"])
+        && u32(message.result) && message.result !== RESULT_OK) {
+      this.receiveHostFailure(message.result);
+      return;
+    }
     this.receive(message);
     this.afterControl(this.lastRequestId);
   }
@@ -582,17 +587,37 @@ class ControlWorker {
   /// sticky replies only post their code. #2306: a sticky error stops the service tick at its next
   /// run (`tick`), but never the release deadline of a dispose that is running.
   sticky(result, requestId, planes) {
+    this.failSession(result);
+    const message = { tag: "miso.error.v1", requestId, result };
+    if (planes !== undefined) message.planes = planes;
+    this.post(message, this.transferList(planes));
+  }
+
+  /// The session's failure, for `sticky` and `receiveHostFailure` alike: the first one fails the
+  /// lifecycle word too (#2267); a later one records only its code.
+  failSession(result) {
     if (this.stickyResult === RESULT_OK && this.handle !== 0) {
       try {
         this.exports.miso_engine_web_v1_session_fail(this.handle, result);
       } catch (_) {
-        // A trapped instance: the page still gets the sticky error below.
+        // A trapped instance: the caller still records the failure.
       }
     }
     this.stickyResult = result;
-    const message = { tag: "miso.error.v1", requestId, result };
-    if (planes !== undefined) message.planes = planes;
-    this.post(message, this.transferList(planes));
+  }
+
+  /// Issue #2317: the page host failed on something this Worker did not find (a malformed frame or
+  /// reply, a broken channel, the worklet's own sticky error) and posted `miso.fail.v1 { result }`,
+  /// which is no request: no request ID, no reply. The session fails as for this Worker's own first
+  /// sticky error, `session_fail` included, so the render half silences at its next block. As for
+  /// that error, the tick stops at its next run (`controlLive()` is false), and nothing else runs on
+  /// it. Nothing is posted: the page holds the error. Only a `live` session with no sticky error
+  /// fails (`controlLive()`): a session already failed keeps its first code, and a dispose already
+  /// begun is left to finish, its release deadline still kept by the tick. Its release stops the
+  /// worklet and its dispose frees the host.
+  receiveHostFailure(result) {
+    if (!this.controlLive()) return;
+    this.failSession(result);
   }
 
   /// A page request. #2306: in `worker` mode the page sends no `miso.service.v1` (this Worker runs

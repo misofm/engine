@@ -294,6 +294,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // handler, outside `process()`. The service step follows every message, the main realm's
     // `miso.service.v1` tick included, so a displaced plan is reclaimed here and never in render.
     this.port.onmessage = (event) => {
+      if (this.receiveHostFailure(event.data)) return;
       if (this.workerMode) {
         this.receiveWorkerMode(event.data);
         return;
@@ -571,6 +572,25 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.handle = 0;
     this.enter(PHASE_RELEASED);
     this.controlPort.postMessage({ tag: "miso.released.v1", token });
+  }
+
+  /// Issue #2317: the page host failed, and no one else will tell this instance: in `single` mode
+  /// the page found the failure itself; in `worker` mode the control Worker, which owns the
+  /// session's lifecycle word, is gone. `miso.fail.v1 { result }` is no request: it carries no
+  /// request ID and gets no reply. A `live` phase fails sticky with `result`, which the page already
+  /// holds, so it is never posted (a render check reports nothing). Any other phase stays: a
+  /// failure already recorded keeps its code, and a final phase is final. Whether the message
+  /// was this one; a malformed one is left to the unknown-message path, which is sticky.
+  receiveHostFailure(message) {
+    if (message?.tag !== "miso.fail.v1" || !exactFields(message, ["tag", "result"])
+        || !u32(message.result) || message.result === RESULT_OK) {
+      return false;
+    }
+    if (this.phase === PHASE_LIVE) {
+      this.fail(message.result, false);
+      this.failurePosted = true;
+    }
+    return true;
   }
 
   /// A message on the page's port in `worker` mode: the control Worker's channel port first, then
