@@ -63,7 +63,8 @@ word.
 - A regression test red on `24ea03525`, green after.
 - A one-time no-bit-moved comparison against the base, recorded below, not committed.
 - `spectrum_handoff_loom` (the qualification host-core loom leg), since its render thread reads the
-  one-shot state.
+  one-shot state, and a loom model of a failed block racing the cancel and re-arm of a surviving
+  held window, which reaches the guard's load of the word.
 - `cargo test --locked -p host-core --features test-support`; `cargo clippy --locked -p host-core
   --all-targets -- -D warnings`; `cargo fmt --check`; `cargo doc`; `scripts/check-workspace-policy.sh`;
   the realtime policy tool.
@@ -174,5 +175,38 @@ Results:
   the feature-gated `crate::warm`. CI documents the whole workspace, where the feature is on.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `cargo run --release -p realtime-policy`: `realtime policy: ok (292 marked regions in 46 files)`.
+
+**Verdict: PASS** (Sol's adversarial review of attempt 1). The review independently confirmed:
+- the defect is reachable within the contract;
+- the guard's `Acquire` load is correct and has no ABA risk;
+- its own differential walk diverges exactly at the trigger, on 87 of 4,000 seeds;
+- the merged tree is green.
+
+Two items were folded on the same branch (`3cf27c2a6`):
+- **Loom model.** `spectrum_dead_held_window_loom` is a new test in `spectrum_handoff_loom`, so
+  CI's existing host-core loom leg runs it.
+  - Setup: a generation-1 window is held behind a stale record and has survived its block end.
+  - Race: render runs `invalidate_after_failure` while control runs `cancel`, `arm` (generation
+    2), a release store of an `armed` flag, and `try_read`. Before failing, render loads the flag.
+  - The read is always `Pending` or `Invalid`, never a window.
+  - After join, the word is at generation 2. It is `IDLE` when the read returned `Invalid` (the
+    read parks it); otherwise it is `ARMED` or `INVALID`.
+  - When render saw the flag, its failure ran after the arm. The arm must then be ended: either
+    the read returned `Invalid` or the word is `INVALID`.
+  - Mutation: dropping `word == held.latched` from the guard (M1) turns it red with "a failure
+    after the re-arm left generation 2 armed".
+  - Cost: the model runs in 0.13 s. The whole leg, run exactly as `qualification.yml` runs it,
+    takes 35.5 s for 4 tests, so it stays in budget.
+- **`one_shot_finish`'s let-else.** The impossible non-`Filling` path now has
+  `debug_assert!(false, ...)`. The realtime policy trusts `debug_assert!`.
+
+Gates at `3cf27c2a6`:
+- the loom leg, as CI runs it: 4 pass;
+- `cargo test --locked -p host-core`, with and without `test-support`: all pass;
+- clippy `-D warnings`, with and without `test-support`: clean;
+- `cargo fmt --check`: clean;
+- `cargo doc` (with `control-provider`): clean;
+- workspace policy: ok;
+- realtime policy: `ok (292 marked regions in 46 files)`.
 
 **Open.** None in scope. `SpectrumAnalysis`'s loose fields remain the #2255 follow-up.
