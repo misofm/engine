@@ -517,7 +517,8 @@ pub struct SourceConsumerTelemetry {
     pub native_decoder_sanitized_samples: u64,
     /// Transfer blocks the recycle queue refused, leaked rather than freed on render (#2258
     /// WEB-10). Zero unless a capacity rule broke: the queue holds every block the ring
-    /// allocates, so it never refuses render a push.
+    /// allocates, so it never refuses render a push. Read here like every other field of this
+    /// record; no host plumbs any of them today.
     pub recycle_refusals: u64,
 }
 
@@ -2954,17 +2955,24 @@ impl PcmSourceConsumer {
     /// The queue never refuses it (#2258 WEB-10), for every ring the public configuration can
     /// prepare. The queue's capacity is every block the ring allocates
     /// ([`PreparedShape::allocated_block_count`]), and render, its only pusher, holds `block`
-    /// while it pushes. Render's view of the producer's pops can lag, but never behind a pop of a
-    /// block render holds: such a block was either never pushed (the ring's first retained block)
-    /// or came back to render through the data queue after its last push was popped, and the data
-    /// queue's `Release`/`Acquire` pair orders that pop before the full check's reload of the pop
-    /// cursor. So the pushes render sees as queued are of distinct blocks (a block pushed twice
-    /// came back in between, so its first push is seen popped) that render does not hold: at most
-    /// `allocated - 1`, below the capacity.
+    /// while it pushes, and the retained block beside it. Render's view of the producer's pops
+    /// can lag, but never behind a pop of a block render holds: such a block was either never
+    /// pushed (the ring's first retained block) or came back to render through the data queue
+    /// after its last push was popped, and the data queue's `Release`/`Acquire` pair orders that
+    /// pop before the full check's reload of the pop cursor. So the pushes render sees as queued
+    /// are of distinct blocks (a block pushed twice came back in between, so its first push is
+    /// seen popped) that render does not hold: at most `allocated - 2`, two below the capacity.
+    ///
+    /// The bound has slack beyond the sizing, too. Prepare fills this queue with
+    /// `transfer_block_count = allocated - 1` blocks and fails if any push is refused, so no ring
+    /// with a capacity below `allocated - 1` is ever handed out, and any capacity that could
+    /// refuse a push here (at most `allocated - 2`) is below that.
     ///
     /// A refusal therefore means that capacity rule broke. The block is then leaked and counted
     /// in [`SourceConsumerTelemetry::recycle_refusals`], never freed on render and never parked
-    /// where a later refusal could overwrite it.
+    /// where a later refusal could overwrite it. A leak takes the block out of circulation, so
+    /// refusals are bounded by the blocks in excess of the broken capacity: once they are gone,
+    /// every push fits.
     fn recycle_block(&mut self, block: Box<TransferBlock>) {
         if let Err(QueueFull { value, .. }) = self.recycle_producer.try_push(block) {
             self.recycle_refusals = self.recycle_refusals.saturating_add(1);

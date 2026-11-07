@@ -25,8 +25,9 @@ is counted, not hidden.
 - Both block queues are built with capacity `allocated_block_count` (765, 768). That count is
   `transfer_block_count + RETAINED_TRANSFER_BLOCKS` (912), every block the ring allocates, for
   every config `PreparedShape::validate` accepts. No API resizes a queue or adds a block afterwards.
-- Render is the recycle queue's only pusher, and it holds the block it pushes. The ring's capacity
-  is therefore `allocated`, and at most `allocated - 1` other blocks exist.
+- Render is the recycle queue's only pusher. While it pushes, it holds the block it pushes and,
+  beside it, the retained block. The capacity is `allocated`, and at most `allocated - 2` other
+  blocks exist.
 - Render's view of the producer's pops can be stale (`Producer::is_full_at`, `spsc.rs` 472, reloads
   the pop cursor with `Acquire` only when the cached view says full). That view never lags behind a
   pop of a block render holds. Such a block was either never pushed (the ring's first retained
@@ -34,8 +35,12 @@ is counted, not hidden.
   producer pops recycle, then pushes data with `Release`, and render pops data with `Acquire`, so
   that pop is ordered before render's reload. So each push render sees as still queued is of a
   block render does not hold. A block pushed twice came back to render in between, so its first
-  push is seen popped. Render therefore sees at most `allocated - 1` queued pushes. The push always
-  finds a slot, so `deferred_recycle` is never `Some`.
+  push is seen popped. Render therefore sees at most `allocated - 2` queued pushes. The push always
+  finds a slot, with two to spare, so `deferred_recycle` is never `Some`.
+- There is slack beyond the sizing. Prepare's initial fill pushes `transfer_block_count =
+  allocated - 1` blocks into the recycle queue and fails with `InternalQueueCapacity` on a
+  refusal. Any capacity that could refuse a render push is at most `allocated - 2`, so prepare
+  would already have failed for it.
 - The pairing rule holds today: `play` has one call site (`begin_block_play`). Every entry that
   reaches it (`begin_block_observe`, `prime_block_at`, the set driver's per-consumer observe) calls
   `end_block` first.
@@ -127,5 +132,23 @@ ready `prepare_seek`s. The digest was `fbb419b8d21088fa` on base `875a4c17e` and
 - `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (294 marked regions in
   46 files)`.
 
-**Open.** No host reads `recycle_refusals` yet. Wiring it into host-core telemetry is a follow-up
-outside this issue's file set.
+**Plumbing.** No field of `SourceConsumerTelemetry` reaches a host today, so `recycle_refusals`
+opens no wiring gap of its own. It is read where its siblings are, and plumbing that record is not
+this issue's scope.
+
+## Verdict (attempt 1): PASS
+The adversarial review checked the following:
+- **The proof holds, with slack.** Render holds the retained block beside the one it pushes, so
+  the tight bound is `allocated - 2` queued, two below capacity. Prepare's initial fill of
+  `allocated - 1` blocks already refuses any capacity that could refuse a render push. The
+  `recycle_block` doc now states both points.
+- **Leak-and-count is the right model** for a broken invariant: no free on render, no panic, and
+  no slot a later refusal could overwrite. A leak takes the block out of circulation, so refusals
+  are bounded by the excess of blocks over the broken capacity.
+- **Deleting `flush_deferred_recycle` lost nothing.** The reviewer's mutation that makes `play`
+  skip the recycle push was caught, so recycling is still defended without the flushes.
+- **No bit moved.** The reviewer reproduced the digest `fbb419b8d21088fa` on both trees.
+
+Folded after the verdict:
+- the tight bound and the prepare-fill slack in the `recycle_block` doc and in the proof above;
+- this plumbing note in place of a follow-up claim.
