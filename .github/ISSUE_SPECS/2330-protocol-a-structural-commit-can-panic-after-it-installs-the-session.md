@@ -156,3 +156,16 @@ a leaked cell does not consume.
   without putting it back. The token is then live with no session, and its
   `prospective_session()` accessor panics. The doc says that error cannot happen; the token should
   keep its session either way.
+
+## Verdict (attempt 1)
+**PASS** (Sol's adversarial review). The reviewer confirmed:
+- The commit is atomic for every input: each check, the replay step's own included, runs before
+  the first write.
+- Every write after the replay entry is infallible.
+- Reliable-event accounting and the refusal order are unchanged.
+- No exhaustive match is affected by `AttachObservationEndedError::NoFreeCell`.
+
+The follow-ups are tracked in #2258, not here:
+- The dead multi-hold API in `queue.rs`, and `materialize_prepared` leaving a token without its
+  session.
+- Narrowing `queues_mut()`, under PR-2.
