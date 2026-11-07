@@ -963,7 +963,11 @@ impl<T> BlockWalk<'_, T> {
             // before `at` again, where that pull found no event: the state a block that ended
             // at `at` would leave, whether the pull found an event past it or none.
             replay(cursor, program, &span, mode, at);
-            cursor.consumed = false;
+            // `consumed` is set only inside one offset's merge, which every call completes.
+            debug_assert!(
+                !cursor.consumed,
+                "a cursor consumed outside an offset's merge"
+            );
         }
     }
 }

@@ -324,6 +324,33 @@ main had moved graph's `runtime.rs` (#2302) and touched neither automation nor b
 - `cargo run --locked --release -p realtime-policy`: `ok (295 marked regions in 46 files)`. The
   region count comes from main's merge.
 
+**Verdict (attempt 3, `7f394c659`): PASS, with two items folded.**
+- The reviewer's extended differential made about 205k drops, covering restarted pieces, seek
+  spans, `Fixed` jumps, `After` completion and more cursors. It found 0 mismatches.
+- The review confirmed that no production path drops an unended walk.
+
+Folded on top of a normal merge of `origin/main`:
+- **`self.at = 0;` in `restart` was untested.** Deleting it left every test green.
+  - `a_dropped_block_walk_stops_at_its_last_decided_offset` now also runs a restarted variant
+    for each trial. It draws a random `cut` and walks piece one, `span.window(0, cut)`, to its end.
+    It then `restart`s onto `span.window(cut, frames)` and drops after `k` events.
+  - The reference is a finished walk of piece one plus `window(0, decided)` of piece two. The same
+    state and next-span comparisons apply.
+  - The run makes 4,139 drops in all: 3,431 mid-block and 1,497 in a restarted piece.
+  - Mutation: deleting `self.at = 0;` from `restart` is red (`trial 8, dropped after 0 events of
+    a restarted piece`).
+- **`cursor.consumed = false;` in `abandon` was a dead write.** It is now
+  `debug_assert!(!cursor.consumed, ..)`, because `consumed` is set only inside one offset's merge,
+  which every call completes. Release behaviour is unchanged.
+- **Gates.**
+  - `cargo test --locked -p automation`: 48 passed, 0 failed.
+  - Doctests: both `BlockWalk` twins pass.
+  - `cargo fmt --check`: clean.
+  - clippy `-D warnings`: clean on automation, graph, builtins-compiler and host-core with the
+    test-support features. An `-p automation` run alone also exits 0, but it prints two
+    `clippy.toml` notes: the `math::fast_db` paths are not reachable without math's `lane`
+    feature. The notes come from the workspace configuration.
+
 **Follow-ups (not in this issue).**
 - `cursor_history_valid`'s re-arm at a fader walk's start has no test that reaches it (mutation
   above). Tracked in #2258.

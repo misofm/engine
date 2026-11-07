@@ -729,7 +729,7 @@ fn a_dropped_block_walk_stops_at_its_last_decided_offset() {
         )
     }
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let (mut checked, mut mid_block) = (0_usize, 0_usize);
+    let (mut checked, mut mid_block, mut restarted) = (0_usize, 0_usize, 0_usize);
     for trial in 0..400 {
         let (one, two) = (random_table(&mut rng), random_table(&mut rng));
         let ramps = [(); 2].map(|()| if rng.chance(50) { 64 } else { 128 });
@@ -791,45 +791,76 @@ fn a_dropped_block_walk_stops_at_its_last_decided_offset() {
             }
             output
         };
-        let mut offsets = Vec::new();
-        bind().walk(&program, span, mode, summed, |event| {
-            offsets.push(event.offset);
-        });
-        // Drop after `k` events; `decided` is the first offset the walk has not decided.
-        for k in 0..=offsets.len() {
-            let decided = k.checked_sub(1).map_or(0, |last| offsets[last] + 1);
-            if decided >= frames {
-                continue;
+        // The block walked whole, or as two pieces: the drop then falls in the second piece,
+        // which the walk begins with `restart` after the first ends.
+        let cut = 1 + rng.below(u64::from(frames - 1)) as u32;
+        for first in [None, Some(span.window(0, cut).expect("piece one"))] {
+            let (piece, length) = match first {
+                Some(_) => (span.window(cut, frames).expect("piece two"), frames - cut),
+                None => (span, frames),
+            };
+            let walked = || {
+                let mut output = bind();
+                if let Some(first) = first {
+                    output.walk(&program, first, mode, summed, |_| {});
+                }
+                output
+            };
+            let mut offsets = Vec::new();
+            walked().walk(&program, piece, mode, summed, |event| {
+                offsets.push(event.offset);
+            });
+            // Drop after `k` events; `decided` is the first offset the walk has not decided.
+            for k in 0..=offsets.len() {
+                let decided = k.checked_sub(1).map_or(0, |last| offsets[last] + 1);
+                if decided >= length {
+                    continue;
+                }
+                let mut dropped = bind();
+                let mut walk = match first {
+                    Some(first) => {
+                        let mut walk = dropped.start(&program, first, mode);
+                        while walk.next_event(summed).is_some() {}
+                        walk.restart(summed, piece, mode);
+                        walk
+                    }
+                    None => dropped.start(&program, piece, mode),
+                };
+                for _ in 0..k {
+                    walk.next_event(summed).expect("an event");
+                }
+                drop(walk);
+                let mut finished = walked();
+                if decided > 0 {
+                    let short = piece.window(0, decided).expect("span");
+                    finished.walk(&program, short, mode, summed, |_| {});
+                }
+                checked += 1;
+                mid_block += usize::from(k > 0);
+                restarted += usize::from(first.is_some());
+                let context = alloc::format!(
+                    "trial {trial}, dropped after {k} events{}",
+                    if first.is_some() {
+                        " of a restarted piece"
+                    } else {
+                        ""
+                    }
+                );
+                assert_eq!(snapshot(&dropped), snapshot(&finished), "{context}");
+                let rest = piece.window(decided, length).expect("span");
+                let mut events = [Vec::new(), Vec::new()];
+                for (output, events) in [&mut dropped, &mut finished].into_iter().zip(&mut events) {
+                    output.defer_jump(after);
+                    output.walk(&program, rest, mode, summed, |event| {
+                        events.push(composed_word(&event));
+                    });
+                }
+                assert_eq!(events[0], events[1], "{context}: the rest of the block");
             }
-            let mut dropped = bind();
-            let mut walk = dropped.start(&program, span, mode);
-            for _ in 0..k {
-                walk.next_event(summed).expect("an event");
-            }
-            drop(walk);
-            let mut finished = bind();
-            if decided > 0 {
-                let short = NodeSpan::new(start, None, decided).expect("span");
-                finished.walk(&program, short, mode, summed, |_| {});
-            }
-            checked += 1;
-            mid_block += usize::from(k > 0);
-            let context = alloc::format!("trial {trial}, dropped after {k} events");
-            assert_eq!(snapshot(&dropped), snapshot(&finished), "{context}");
-            let rest =
-                NodeSpan::new(start + i64::from(decided), None, frames - decided).expect("span");
-            let mut events = [Vec::new(), Vec::new()];
-            for (output, events) in [&mut dropped, &mut finished].into_iter().zip(&mut events) {
-                output.defer_jump(after);
-                output.walk(&program, rest, mode, summed, |event| {
-                    events.push(composed_word(&event));
-                });
-            }
-            assert_eq!(events[0], events[1], "{context}: the rest of the block");
         }
     }
     assert!(
-        checked > 2_000 && mid_block > 1_500,
-        "{checked} drops, {mid_block} mid-block"
+        checked > 3_500 && mid_block > 3_000 && restarted > 1_200,
+        "{checked} drops, {mid_block} mid-block, {restarted} in a restarted piece"
     );
 }
