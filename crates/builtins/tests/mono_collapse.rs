@@ -185,14 +185,20 @@ fn the_collapsed_body_publishes_the_dual_bodys_report() {
 /// the session. It is also the gate on the lifetime counters across the boundary, which the strip
 /// does not read.
 ///
+/// The second arm reaches the dual body straight from a collapsed block, with no `desymmetrize`
+/// between (issue #2274): `BankChain::run` always calls it first, but the bank's own surface
+/// does not make a caller do so, so the dual body takes the same copy itself.
+///
 /// Red mutation: `InputStage::desymmetrize` drops the integrator copy. This fails on the first
-/// dual block, on the right plane, for every lane whose high-pass is retaining anything.
+/// dual block, on the right plane, for every lane whose high-pass is retaining anything. Test value
+/// of the second arm: red if a dual block entered collapsed renders the right channel from the
+/// integrators the collapse froze.
 #[test]
 fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     const FRAMES: usize = 32;
     const BLOCKS: usize = 8;
     const SWITCH: usize = 4;
-    for (backend, width) in banks() {
+    for ((backend, width), explicit) in banks().flat_map(|bank| [(bank, true), (bank, false)]) {
         let lanes = width.lanes() as usize;
         let mut mixed = bank(backend, width);
         let mut never = bank(backend, width);
@@ -207,7 +213,7 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
                 // The seam: everything downstream of the input chain reads the duplicated plane.
                 mixed_right.copy_from_slice(&mixed_left);
             } else {
-                if block == SWITCH {
+                if block == SWITCH && explicit {
                     mixed.desymmetrize();
                 }
                 mixed.process(&mut mixed_left, &mut mixed_right, FRAMES as u32);
@@ -218,12 +224,12 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
                 assert_eq!(
                     mixed_left[word].to_bits(),
                     never_left[word].to_bits(),
-                    "width={lanes} block={block} word={word}: left plane"
+                    "width={lanes} explicit={explicit} block={block} word={word}: left plane"
                 );
                 assert_eq!(
                     mixed_right[word].to_bits(),
                     never_right[word].to_bits(),
-                    "width={lanes} block={block} word={word}: right plane"
+                    "width={lanes} explicit={explicit} block={block} word={word}: right plane"
                 );
             }
         }

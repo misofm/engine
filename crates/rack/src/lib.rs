@@ -3587,6 +3587,41 @@ impl<'a> ResidentOutputLane<'a> {
     }
 }
 
+/// A [`BankChain`]'s mono-collapse phase at a block boundary (issue #2274).
+///
+/// Two loose flags carried this before: "the chain rendered its previous block collapsed" and "the
+/// two channels agree at the next dual block". Of their four combinations one is illegal --
+/// collapsed while disagreeing, since a chain only collapses while its channels agree -- and
+/// nothing but a debug assertion refused it. The three that remain are this enum's variants, and
+/// the transitions are [`BankChain`]'s:
+///
+/// * `Agreeing -> Collapsed`: a block whose dispatch collapses (`run`).
+/// * `Collapsed -> Agreeing`: only [`BankChain::disengage_collapse`], which desymmetrizes every
+///   prefix stage first. No other write leaves `Collapsed`, so the chain cannot render dual over
+///   a prefix stage it left collapsed.
+/// * `Agreeing -> Diverged`: a dual block that does not preserve agreement (`run`'s maintenance
+///   step), or a carried lane whose predecessor did not agree
+///   ([`BankChain::inherit_channel_agreement`], [`BankChain::swap_lanes`]).
+/// * `Diverged -> Agreeing`: a proof ([`BankStage::channels_agree`]) inside a recovery window.
+///
+/// Banking and placement read none of this, so no rendered bit depends on the representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CollapseMode {
+    /// The previous block rendered dual and every prefix stage's two channels agree, so a block
+    /// whose witness holds may collapse. A chain is bound in this mode: every prefix stage holds
+    /// the state preparation built it with, and every difference between its channels is a
+    /// designed word the witness sees.
+    Agreeing,
+    /// The previous block rendered dual and the two channels may have been driven apart, so only a
+    /// proof brings the chain back.
+    Diverged,
+    /// The previous block rendered collapsed. Every prefix stage's right channel is frozen until
+    /// the disengage copy, and nothing dual reads it before then. The channels count as agreeing:
+    /// the counterfactual dual run's right state is the left one, which is what the copy writes,
+    /// and that is what lets block `N + 1` collapse after block `N` did.
+    Collapsed,
+}
+
 /// One bank chain: a resident L/R AoSoA block plus its ordered slots.
 ///
 /// Exactly one gather and one scatter per [`run`](BankChain::run), whatever the slot count
@@ -3712,19 +3747,10 @@ pub struct BankChain {
     /// measurement builds both arms in one process and alternates them per observation, so a
     /// process-global switch could not express it.
     collapse_forced_off: bool,
-    /// The chain rendered its previous block collapsed.
-    collapsed: bool,
-    /// The two channels' state agrees at the boundary of the next **dual** block.
-    ///
-    /// The premise the engage direction needs and the witness does not supply. See the type's
-    /// `Coming back` section for the five clauses that maintain it; the awkward "next *dual*
-    /// block" in the sentence above is the one wrinkle and it is deliberate. A collapsed block
-    /// freezes the right channel, so between the block that engages and the block that stops the
-    /// two channels genuinely disagree -- but nothing dual reads them in that window, and
-    /// [`disengage_collapse`](Self::disengage_collapse) puts them back before anything does. The
-    /// flag therefore stays `true` across a collapsed run, which is what lets block `N + 1` collapse
-    /// after block `N` did.
-    collapse_channels_agree: bool,
+    /// How the chain rendered its previous block, and whether its channels agree (issue
+    /// #2274). See [`CollapseMode`]: the one phase the four inputs around it (`collapse_prefix`,
+    /// `collapse_forced_off`, `collapse_source`, `input_symmetric`) are read against.
+    mode: CollapseMode,
     /// The **structural** half of every active lane's witness, joined at bind.
     ///
     /// `false` until [`BankChain::arm_mono_collapse`] says otherwise, and that default is the
@@ -3912,11 +3938,10 @@ impl BankChain {
             fold: Box::default(),
             collapse_prefix,
             collapse_forced_off: false,
-            collapsed: false,
-            // True at bind: nothing has rendered, so every prefix stage's two channels hold the
-            // state preparation gave them, and any way in which they differ is a designed word the
-            // witness compares and declines on.
-            collapse_channels_agree: true,
+            // Agreeing at bind: nothing has rendered, so every prefix stage's two channels hold
+            // the state preparation gave them, and any way in which they differ is a designed word
+            // the witness compares and declines on.
+            mode: CollapseMode::Agreeing,
             collapse_source: false,
             input_symmetric: true,
             collapses: 0,
@@ -4381,24 +4406,28 @@ impl BankChain {
         // prefix slot, and only inside a *recovery window* -- the chain is otherwise ready to
         // collapse and this is the only thing refusing it -- so a session that never disagrees
         // never calls it at all. See `BankStage::channels_agree`.
-        if armed && witness && !self.collapse_channels_agree {
+        if armed && witness && self.mode == CollapseMode::Diverged {
             let proven = self.slots[..self.collapse_prefix]
                 .iter()
                 .all(|slot| slot.stage.channels_agree());
             if proven {
-                self.collapse_channels_agree = true;
+                self.mode = CollapseMode::Agreeing;
                 self.transitions[2] = self.transitions[2].saturating_add(1);
             }
         }
-        let collapse = armed && witness && self.collapse_channels_agree;
-        if self.collapsed && !collapse {
-            self.disengage_collapse();
-        } else if collapse && !self.collapsed && self.transitions[0] > 0 {
-            // A re-engage, and only that: the first engage of a chain that has never disengaged is
-            // not one, and neither is a second collapsed block in a row.
-            self.transitions[1] = self.transitions[1].saturating_add(1);
+        let collapse = armed && witness && self.mode != CollapseMode::Diverged;
+        match (self.mode, collapse) {
+            (CollapseMode::Collapsed, false) => self.disengage_collapse(),
+            (CollapseMode::Agreeing, true) if self.transitions[0] > 0 => {
+                // A re-engage, and only that: the first engage of a chain that has never
+                // disengaged is not one, and neither is a second collapsed block in a row.
+                self.transitions[1] = self.transitions[1].saturating_add(1);
+            }
+            _ => {}
         }
-        self.collapsed = collapse;
+        if collapse {
+            self.mode = CollapseMode::Collapsed;
+        }
         // The invariant, maintained for the block this dispatch just decided, and guarded so that
         // it costs nothing in the steady state of any session -- which is what lets it be an
         // unconditional rule rather than a mode.
@@ -4406,8 +4435,8 @@ impl BankChain {
         // The four guards, in the order they are cheapest to refuse:
         //
         // * a **collapsed** block is skipped. It does freeze the right channel, but the disengage
-        //   copy repairs that before any dual block reads it, which is exactly what the flag's
-        //   "at the next dual block's boundary" wording says;
+        //   copy repairs that before any dual block reads it, which is exactly what
+        //   `CollapseMode::Collapsed` says;
         // * a chain that **can never collapse** is skipped: nothing reads the flag, so nothing is
         //   owed. This is every stereo-source row and every chain with no collapsible prefix, and
         //   it is why the M3 dispatch adds no work at all to the sessions M2 left alone;
@@ -4433,14 +4462,14 @@ impl BankChain {
         // only a proof brings it back.
         if !collapse
             && self.can_collapse()
-            && self.collapse_channels_agree
+            && self.mode == CollapseMode::Agreeing
             && (!self.input_symmetric
                 || (!witness
                     && !self.all_lanes_preserve_agreement(
                         &witnesses.unwrap_or_else(|| self.lane_symmetry_bank(self.collapse_prefix)),
                     )))
         {
-            self.collapse_channels_agree = false;
+            self.mode = CollapseMode::Diverged;
         }
         if collapse {
             self.collapses = self.collapses.saturating_add(1);
@@ -4652,7 +4681,14 @@ impl BankChain {
     /// This is a one-off bounded copy of the prefix state per cohort on the block that stops
     /// collapsing, and it happens at most once per chain per plan. The amount follows each
     /// stage's prepared state rather than a compressor-specific ring layout.
+    ///
+    /// The only way out of [`CollapseMode::Collapsed`] (issue #2274): every write that leaves
+    /// it is this one, after the copy, so the chain never renders dual over a prefix stage it left
+    /// collapsed. A no-op on a chain that is not collapsed.
     fn disengage_collapse(&mut self) {
+        if self.mode != CollapseMode::Collapsed {
+            return;
+        }
         for slot in &mut self.slots[..self.collapse_prefix] {
             slot.stage.desymmetrize();
         }
@@ -4661,21 +4697,10 @@ impl BankChain {
         // holds its left channel's whole state, so the two agree by construction at this boundary.
         // M2 set a one-way latch here instead, because it had no invariant to hand this fact to.
         // The block that takes this branch still renders *dual*, and the maintenance step in `run`
-        // will clear the flag again if that block's witness does not preserve agreement -- which is
-        // precisely the disengage-for-cause case, and precisely the case that must not re-engage.
-        //
-        // The assignment is redundant today and is kept anyway, which is worth being explicit
-        // about rather than quietly relying on: reaching here requires `self.collapsed`, and a
-        // chain only collapses while the flag holds, so the flag is already `true`. What the line
-        // states is the *reason* it stays true across a boundary where the right channel was
-        // frozen, and it is the line a future disengage path -- one reached from somewhere other
-        // than a collapsed block -- would otherwise have to remember to add. The debug assertion
-        // is what keeps the redundancy honest: if it ever stops holding, this becomes mechanism.
-        debug_assert!(
-            self.collapse_channels_agree,
-            "a chain only collapses while its channels agree, so a disengage cannot find them apart"
-        );
-        self.collapse_channels_agree = true;
+        // will move the chain to `Diverged` if that block's witness does not preserve agreement --
+        // which is precisely the disengage-for-cause case, and precisely the case that must not
+        // re-engage.
+        self.mode = CollapseMode::Agreeing;
     }
 
     // REALTIME_POLICY_BEGIN
@@ -4793,7 +4818,8 @@ impl BankChain {
     /// error.
     #[must_use]
     pub fn planes_identical(&self) -> bool {
-        self.resident_zero || (self.collapsed && self.collapse_prefix == self.slots.len())
+        self.resident_zero
+            || (self.mode == CollapseMode::Collapsed && self.collapse_prefix == self.slots.len())
     }
 
     /// Whether this chain can collapse at all: it has an upstream prefix and the join was armed.
@@ -4805,8 +4831,8 @@ impl BankChain {
     /// Force this chain's collapse off (or back on), for the paired measurement's second arm.
     ///
     /// Bind-time. Forcing it off on a chain that is currently collapsed does **not** skip the
-    /// disengage copy: the next `run` sees `collapsed && !collapse` and takes it, which is the
-    /// same boundary a witness going false takes.
+    /// disengage copy: the next `run` is collapsed and declines, and takes it, which is the same
+    /// boundary a witness going false takes.
     pub const fn force_mono_collapse_off(&mut self, forced: bool) {
         self.collapse_forced_off = forced;
     }
@@ -4834,7 +4860,7 @@ impl BankChain {
     /// Whether this chain rendered its last block collapsed. Evidence only.
     #[must_use]
     pub const fn is_collapsed(&self) -> bool {
-        self.collapsed
+        matches!(self.mode, CollapseMode::Collapsed)
     }
 
     /// Whether the two channels' state agrees at the next dual block's boundary.
@@ -4847,7 +4873,7 @@ impl BankChain {
     /// instead. Evidence only.
     #[must_use]
     pub const fn collapse_channels_agree(&self) -> bool {
-        self.collapse_channels_agree
+        !matches!(self.mode, CollapseMode::Diverged)
     }
 
     /// The channel agreement this chain hands a successor chain that takes carried lane state
@@ -4866,7 +4892,7 @@ impl BankChain {
     /// a track whose class changed in the transaction, whose channels really may differ.
     #[must_use]
     pub const fn carried_channel_agreement(&self) -> bool {
-        self.can_collapse() && self.collapse_channels_agree
+        self.can_collapse() && self.collapse_channels_agree()
     }
 
     // REALTIME_POLICY_BEGIN
@@ -4924,10 +4950,7 @@ impl BankChain {
     /// every prefix stage hold real state. The chain renders no more. Allocation-free; a no-op
     /// on a chain that rendered dual.
     pub fn disengage_for_carry(&mut self) {
-        if self.collapsed {
-            self.disengage_collapse();
-            self.collapsed = false;
-        }
+        self.disengage_collapse();
     }
 
     /// Fold in the channel agreement of a chain this one takes carried lane state from (issue
@@ -4936,8 +4959,15 @@ impl BankChain {
     /// agrees, and a lane at rest agrees, so a successor whose lanes came from chains that agreed
     /// may collapse at once; one that took a lane from a chain whose channels had been driven
     /// apart waits for a proof ([`BankStage::channels_agree`]), as that chain would have.
+    ///
+    /// A successor inherits before it renders, so it is never collapsed here. Were it, the
+    /// disengage boundary is taken first, so the chain and its prefix stages leave
+    /// [`CollapseMode::Collapsed`] together.
     pub fn inherit_channel_agreement(&mut self, agree: bool) {
-        self.collapse_channels_agree &= agree;
+        if !agree {
+            self.disengage_collapse();
+            self.mode = CollapseMode::Diverged;
+        }
     }
 
     /// The scratch bytes [`Self::swap_lanes`] needs: the most any slot's swap needs.
@@ -5082,8 +5112,13 @@ impl BankChain {
                 let agree = self.carried_channel_agreement() && other.carried_channel_agreement();
                 self.disengage_for_carry();
                 other.disengage_for_carry();
-                self.collapse_channels_agree = agree;
-                other.collapse_channels_agree = agree;
+                let mode = if agree {
+                    CollapseMode::Agreeing
+                } else {
+                    CollapseMode::Diverged
+                };
+                self.mode = mode;
+                other.mode = mode;
                 let slots = self.slots.len();
                 for index in 0..slots {
                     let (own, theirs) = (&mut self.slots[index], &mut other.slots[index]);

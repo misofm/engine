@@ -1102,7 +1102,7 @@ pub(crate) struct InputStage<L: Lane> {
     /// per block, and the `false` arm is byte-identical work.
     ramping: bool,
     /// Whether the last block this stage rendered was collapsed ([`InputStage::process_mono`])
-    /// and no disengage ([`InputStage::desymmetrize`]) has run since.
+    /// and no disengage ([`InputStage::desymmetrize`]) or reset has run since.
     ///
     /// # The collapsed-stage invariant (#1407)
     ///
@@ -1114,11 +1114,22 @@ pub(crate) struct InputStage<L: Lane> {
     /// [`InputStage::live_state_channel`]: the live filter retarget's rule-3 predicate and the
     /// elision plan. The lane export and `channels_agree` also read channel `1`'s integrators, and
     /// neither is reached collapsed: a carry disengages first (`disengage_for_carry`), and the M3
-    /// proof is asked only of a chain rendering dual. A dual block after a collapsed one without
-    /// the disengage copy is a debug assertion in [`InputStage::process`]. The coefficient,
-    /// target, step and countdown records need no such redirection, because `process_mono`
-    /// mirrors them onto channel `1` at the bottom of every collapsed block, so at a drain they
-    /// are what the dual run would hold.
+    /// proof is asked only of a chain rendering dual. The coefficient, target, step and countdown
+    /// records need no such redirection, because `process_mono` mirrors them onto channel `1` at
+    /// the bottom of every collapsed block, so at a drain they are what the dual run would hold.
+    ///
+    /// # Every way out (issue #2274)
+    ///
+    /// The stage owns this flag's transitions, so no caller's ordering can leave it set under a
+    /// dual body. Only `process_mono` sets it. Three things clear it, and each leaves both
+    /// channels holding the counterfactual dual run's state:
+    ///
+    /// * [`InputStage::desymmetrize`], the disengage copy, which `rack::BankChain` calls on every
+    ///   prefix stage at its documented boundary;
+    /// * [`InputStage::process`] entered collapsed, which takes that same copy before its body
+    ///   (never reached from the chain, which has always copied first; reachable through the
+    ///   bank's own public surface);
+    /// * a reset, which writes one state onto both channels.
     ///
     /// One byte beside `ramping` and `symmetry`, in padding the struct already had: no sealed
     /// size moves.
@@ -1989,10 +2000,13 @@ impl<L: Lane> InputStage<L> {
         // The feature's off gate, and the whole of its steady-state cost: one `bool`. The `false`
         // arm is the call this function has always made, on the prepared coefficient words, with
         // the elision plan Job 1 decided -- byte-identical work.
-        debug_assert!(
-            !self.collapsed,
-            "a dual block after a collapsed one needs the disengage copy first (desymmetrize)"
-        );
+        //
+        // A dual body entered collapsed takes the disengage copy itself, so it never reads the
+        // integrators the collapse froze (issue #2274, `InputStage::collapsed`). The chain
+        // has already copied at its boundary, so from the chain this is one untaken branch.
+        if self.collapsed {
+            self.desymmetrize();
+        }
         let report = if self.filter_ramping {
             let prefix = self.filter_prefix_frames(frames, 0..2);
             if self.ramping {
@@ -2503,6 +2517,9 @@ impl<L: Lane> InputStage<L> {
 
     fn reset_with_kind(&mut self, kind: BuiltinResetKind) {
         self.state = InputChainState::default();
+        // One state on both channels ends a collapse: there is no frozen right channel left to
+        // restore, so the flag would no longer describe the state (issue #2274).
+        self.collapsed = false;
         // Snap every lane to its target and cancel any ramp in flight, exactly as
         // `FaderRampStage::reset` and `MatrixStage::reset` do: a reset is a state reset, and a
         // half-finished ramp is state. The *target* is kept, because `trim_db` and
