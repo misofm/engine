@@ -267,6 +267,9 @@ async function testMainRealm() {
         } else if (received.tag === "miso.seek-report.v1") {
           sourceSeekMessages.push(received);
           response = { tag: "miso.seek-report.v1", ...seekReportReply(received) };
+        } else if (received.tag === "miso.plan-latency.v1") {
+          // A refusal (no plan latency to read) is a valid reply: it settles the read.
+          response = { tag: "miso.plan-latency.v1", requestId: received.requestId, result: 1, latency: null };
         } else {
           if (received.tag === "miso.seek-at.v1") sourceSeekMessages.push(received);
           response = {
@@ -943,6 +946,72 @@ async function testMainRealm() {
     assert.deepEqual(events.slice(0, 2), [
       ["compile", "simd.wasm"], ["addModule", "processor.js"],
     ]);
+    if (process.env.MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST === "2") {
+      // Issue #2279 (this copy starts at MAX_SAFE_INTEGER - 2): a dispose sent after a control
+      // request and before its reply takes the last safe ID, so the held reply's fence gets none.
+      // The control fails the host with its own ID; the dispose was sent and the Worker still
+      // answers it, so it settles cleanly on its own reply. Test value: the fence-exhaustion
+      // failure naming the channel as its source, so it rejects a dispose the Worker answers.
+      await host.dispose().catch(() => undefined);
+      const originalWorker = globalThis.Worker;
+      const originalIsolated = Object.getOwnPropertyDescriptor(globalThis, "crossOriginIsolated");
+      const originalMemory = WebAssembly.Memory;
+      let worker;
+      class HeldWorker {
+        onmessage = null; onerror = null; onmessageerror = null; terminated = false; posts = [];
+        held = [];
+        constructor() { worker = this; }
+        deliver(data) { this.onmessage?.({ data }); }
+        postMessage(message) {
+          this.posts.push(message);
+          if (message.tag === "miso.worker-boot.v1") {
+            queueMicrotask(() => this.deliver({
+              tag: "miso.worker-ready.v1", requestId: 0, result: 0, handle: 5,
+              token: (5n << 32n) | 1n, reservation: 70000, metersAttached: true,
+              backend: "simd128", resources: resourceReport(1, 64), memoryBytes: 1310720,
+              sourceRingFrames: 40 * 64, controlFrameBytes: 16384,
+            }));
+          } else if (message.tag === "miso.control.v1") {
+            this.held.push({ tag: "miso.control.v1", requestId: message.requestId, result: 0,
+              response: new Uint8Array([1]), revision: 3n });
+          } else if (message.tag === "miso.dispose.v1") {
+            this.held.push({ tag: "miso.ack.v1", requestId: message.requestId, result: 0 });
+          }
+        }
+        terminate() { this.terminated = true; }
+      }
+      try {
+        globalThis.Worker = HeldWorker;
+        Object.defineProperty(globalThis, "crossOriginIsolated", { value: true, configurable: true });
+        WebAssembly.Memory = class {
+          constructor(descriptor) { this.descriptor = { ...descriptor }; this.buffer = new SharedArrayBuffer(65536); }
+        };
+        const workerHost = await createMisoAudioWorkletHost({
+          context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "https://example.test/w.js",
+        });
+        assert.equal(workerHost.instanceMode, "worker");
+        const control = workerHost.control(new Uint8Array([1]));
+        control.catch(() => undefined);
+        const disposal = workerHost.dispose();
+        disposal.catch(() => undefined);
+        assert.deepEqual(worker.posts.slice(1).map((m) => [m.tag, m.requestId]),
+          [["miso.control.v1", Number.MAX_SAFE_INTEGER - 1], ["miso.dispose.v1", Number.MAX_SAFE_INTEGER]]);
+        worker.deliver(worker.held.shift()); // the control reply: its fence has no ID
+        assert.equal(await settledState(control), "rejected");
+        assert.equal((await control.catch((e) => e)).result, 255);
+        assert.equal(await settledState(disposal), "pending", "the dispose waits for its own reply");
+        worker.deliver(worker.held.shift()); // the dispose's own ack
+        assert.equal(await settledState(disposal), "resolved", "and settles cleanly on it");
+        assert.equal(worker.terminated, true);
+      } finally {
+        globalThis.Worker = originalWorker;
+        WebAssembly.Memory = originalMemory;
+        if (originalIsolated === undefined) delete globalThis.crossOriginIsolated;
+        else Object.defineProperty(globalThis, "crossOriginIsolated", originalIsolated);
+      }
+      return;
+    }
     if (process.env.MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST === "1") {
       const last = await host.status();
       assert.equal(last.requestId, Number.MAX_SAFE_INTEGER);
@@ -954,6 +1023,75 @@ async function testMainRealm() {
         "safe-integer exhaustion never posts or wraps",
       );
       await host.dispose().catch(() => undefined);
+      // Issue #2279: in `worker` mode a control reply is held for a fence, which needs a request
+      // ID of its own. The first control request takes the last safe ID, so the fence has none:
+      // the host fails with the control request's ID, posts no fence, and its dispose (which has
+      // no ID either) still tears down and terminates the Worker. Test value: a fence posted with
+      // no request ID, or a held reply left pending for ever.
+      const originalWorker = globalThis.Worker;
+      const originalIsolated = Object.getOwnPropertyDescriptor(globalThis, "crossOriginIsolated");
+      const originalMemory = WebAssembly.Memory;
+      let worker;
+      class ExhaustedWorker {
+        onmessage = null;
+        onerror = null;
+        onmessageerror = null;
+        terminated = false;
+        posts = [];
+        constructor() { worker = this; }
+        postMessage(message) {
+          this.posts.push(message);
+          const reply = (data) => queueMicrotask(() => this.onmessage?.({ data }));
+          if (message.tag === "miso.worker-boot.v1") {
+            reply({
+              tag: "miso.worker-ready.v1", requestId: 0, result: 0, handle: 5,
+              token: (5n << 32n) | 1n, reservation: 70000, metersAttached: true,
+              backend: "simd128", resources: resourceReport(1, 64), memoryBytes: 1310720,
+              sourceRingFrames: 40 * 64, controlFrameBytes: 16384,
+            });
+          } else if (message.tag === "miso.control.v1") {
+            reply({
+              tag: "miso.control.v1", requestId: message.requestId, result: 0,
+              response: new Uint8Array([1]), revision: 3n,
+            });
+          }
+        }
+        terminate() { this.terminated = true; }
+      }
+      try {
+        globalThis.Worker = ExhaustedWorker;
+        Object.defineProperty(globalThis, "crossOriginIsolated", { value: true, configurable: true });
+        WebAssembly.Memory = class {
+          constructor(descriptor) {
+            this.descriptor = { ...descriptor };
+            this.buffer = new SharedArrayBuffer(65536);
+          }
+        };
+        const workerHost = await createMisoAudioWorkletHost({
+          context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "https://example.test/w.js",
+        });
+        assert.equal(workerHost.instanceMode, "worker");
+        const node = FakeNode.latest;
+        const before = events.length;
+        const control = workerHost.control(new Uint8Array([1]));
+        assert.equal(await settledState(control), "rejected", "the held reply settles");
+        const failure = await errorResult(control, 255);
+        assert.equal(failure.requestId, Number.MAX_SAFE_INTEGER, "with the control request's ID");
+        assert.equal(events.slice(before).filter((event) => event[1] === "miso.fence.v1").length, 0,
+          "no fence is posted without a request ID");
+        await errorResult(workerHost.status(), 255);
+        const disposal = workerHost.dispose();
+        assert.equal(await settledState(disposal), "rejected", "the dispose settles");
+        await localErrorResult(disposal, 1);
+        assert.equal(worker.terminated, true, "and the Worker is terminated");
+        assert.equal(node.disconnectCount, 1);
+      } finally {
+        globalThis.Worker = originalWorker;
+        WebAssembly.Memory = originalMemory;
+        if (originalIsolated === undefined) delete globalThis.crossOriginIsolated;
+        else Object.defineProperty(globalThis, "crossOriginIsolated", originalIsolated);
+      }
       return;
     }
 
@@ -1189,6 +1327,46 @@ async function testMainRealm() {
       await errorResult(doomed, 255);
       await watermarkHost.dispose().catch(() => undefined);
     }
+    // Issue #2279: a malformed unsolicited frame reaches no listener: the host fails and stops
+    // there. Test value: the frame handed to the meter, telemetry, control-event or watermark
+    // listener after the host failed on it.
+    for (const [tag, subscribe] of [
+      ["miso.meter.v1", (host, listener) => host.meters({ enabled: true, onFrame: listener })],
+      ["miso.telemetry.v1", (host, listener) => host.telemetry({ enabled: true, onFrame: listener })],
+      ["miso.control-event.v1", (host, listener) => host.onControlEvent(listener)],
+      ["miso.watermark.v1", (host, listener) => host.onWatermark(listener)],
+    ]) {
+      const frameHost = await createMisoAudioWorkletHost({
+        context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const heard = [];
+      await subscribe(frameHost, (frame) => heard.push(frame));
+      frameHost.node.port.onmessage({ data: { tag } });
+      await errorResult(frameHost.status(), 255);
+      assert.equal(heard.length, 0, `a malformed ${tag} reaches no listener`);
+      await frameHost.dispose().catch(() => undefined);
+    }
+    // Issue #2279: a malformed telemetry frame and a malformed control event are schema failures
+    // too, sticky for the host. Test value: either schema check dropped, so a broken frame reaches
+    // the app (or is counted as a discarded event) and the host keeps answering.
+    for (const malformed of [
+      {
+        tag: "miso.telemetry.v1", sequence: 0, blocks: 1, cpuPercent: 1, peakBlockMs: 1,
+        meanBlockMs: 1, budgetMs: 1, deadlineMisses: 0, resolutionMs: 1, belowResolution: false,
+      },
+      { tag: "miso.control-event.v1", lane: 2, frame: new Uint8Array([1]) },
+    ]) {
+      const frameHost = await createMisoAudioWorkletHost({
+        context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const doomed = frameHost.status();
+      frameHost.node.port.onmessage({ data: malformed });
+      await errorResult(doomed, 255);
+      assert.equal(frameHost.discardedControlEvents, 0, `${malformed.tag}: a malformed frame is not counted`);
+      await frameHost.dispose().catch(() => undefined);
+    }
 
     // #1536: concurrent status calls share one read and are never refused for being in flight.
     const sharedStatusHost = async () => createMisoAudioWorkletHost({
@@ -1318,6 +1496,24 @@ async function testMainRealm() {
         events.length - from - 1,
         "dispose is the last request posted",
       );
+    }
+    {
+      // Issue #2279: a status read that failed to post is not the shared read. Test value: the
+      // failed read kept as `#statusRead`, so the next call joins its rejection and posts nothing
+      // (or, behind another request, waits for ever on a follow-up nobody sends).
+      const host = await sharedStatusHost();
+      const port = FakeNode.latest.port;
+      const post = port.postMessage.bind(port);
+      port.postMessage = (message, transfer) => {
+        if (message.tag === "miso.status.v1") throw new Error("port closed");
+        return post(message, transfer);
+      };
+      await errorResult(host.status(), 255);
+      port.postMessage = post;
+      const from = events.length;
+      assert.equal((await host.status()).tag, "miso.status.v1", "the next read is sent");
+      assert.equal(requestsSince(from, "miso.status.v1").length, 1);
+      await host.dispose();
     }
     {
       // Gate 4. Test value: dropping or cancelling a read when its first caller stops waiting (the
@@ -1529,15 +1725,10 @@ async function testMainRealm() {
     // A different source has its own budget and is accepted while the first is saturated.
     const other = chunk("other-source", 6);
     assert.equal(other.buffer.byteLength, 0, "the bound is per source, not per host");
-    // One unsettled seek per source: the ring carries a single command slot.
+    // The per-kind bounds themselves are the #2279 table's (below).
     const firstSeek = pipelineHost.seekSource({
       sourceId: "source", generation: 2n, sourceFrame: 0n,
     });
-    const beforeSeekOverflow = events.length;
-    await localErrorResult(pipelineHost.seekSource({
-      sourceId: "source", generation: 3n, sourceFrame: 0n,
-    }), 6);
-    assert.equal(events.length, beforeSeekOverflow, "seek saturation posts no refusal");
     holdAll = false;
     for (const respond of heldAll) respond();
     heldAll.length = 0;
@@ -1557,14 +1748,9 @@ async function testMainRealm() {
     assert.equal((await again.request).requestId, 7, "source saturation does not burn an ID");
 
     // Issue #1644 gate 2, the host half: one session seek message per call, with the plain form's
-    // `-1n` anchor, and one unsettled at a time; a second is refused locally and posts nothing.
+    // `-1n` anchor (its one-at-a-time bound is the #2279 table's).
     holdAll = true;
     const firstSessionSeek = pipelineHost.seekSession({ generation: 2n, frame: 480n });
-    const beforeSessionSeekOverflow = events.length;
-    await localErrorResult(pipelineHost.seekSession({
-      generation: 3n, frame: 0n, anchorSample: 128n,
-    }), 6);
-    assert.equal(events.length, beforeSessionSeekOverflow, "a second session seek posts nothing");
     holdAll = false;
     for (const respond of heldAll) respond();
     heldAll.length = 0;
@@ -1591,8 +1777,8 @@ async function testMainRealm() {
     await pipelineHost.dispose();
 
     {
-      // Issue #1297a, the host half: `seekSourceAt` posts one exact message and shares the
-      // per-source seek bound with `seekSource`; `seekReport` resolves with the record's words
+      // Issue #1297a, the host half: `seekSourceAt` posts one exact message (the per-source seek
+      // bound it shares with `seekSource` is the #2279 table's); `seekReport` resolves with the record's words
       // or, for a refusal, a null report; a reply whose report disagrees with its result fails
       // the host.
       const seekHost = await createMisoAudioWorkletHost({
@@ -1610,11 +1796,6 @@ async function testMainRealm() {
       const firstSeekAt = seekHost.seekSourceAt({
         sourceId: "drums", generation: 2n, sourceFrame: 480n, anchorSample: 128n,
       });
-      const beforeSeekAtOverflow = events.length;
-      await localErrorResult(seekHost.seekSource({
-        sourceId: "drums", generation: 3n, sourceFrame: 0n,
-      }), 6);
-      assert.equal(events.length, beforeSeekAtOverflow, "a second seek of a source posts nothing");
       holdAll = false;
       for (const respond of heldAll) respond();
       heldAll.length = 0;
@@ -1624,13 +1805,15 @@ async function testMainRealm() {
       });
       holdAll = true;
       const firstReport = seekHost.seekReport("drums");
-      const beforeReportOverflow = events.length;
-      await localErrorResult(seekHost.seekReport("drums"), 6);
-      assert.equal(events.length, beforeReportOverflow, "a second report of a source posts nothing");
       holdAll = false;
       for (const respond of heldAll) respond();
       heldAll.length = 0;
       assert.equal((await firstReport).result, 0);
+      // Issue #2279: a source ID that is not a string is refused locally. Test value: the check
+      // dropped, so the read is posted with a number for its source.
+      const beforeBadReport = events.length;
+      await localErrorResult(seekHost.seekReport(5), 1);
+      assert.equal(events.length, beforeBadReport, "a malformed seek report posts nothing");
       await localErrorResult(seekHost.seekSourceAt({
         sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: -1n,
       }), 1);
@@ -1782,35 +1965,6 @@ async function testMainRealm() {
     await liveControlHost.meters({ enabled: true, onFrame: null });
     assert.ok(browserLiveControls.edit.track("kick"),
       "the SDK live controls resolve through the real host after direct meters");
-    // Every bounded response class refuses locally with requestId 0 and leaves the next accepted
-    // request exactly one ID later. Hold each class independently so the fake port cannot answer.
-    const assertBoundedNoBurn = async (label, heldCall, refusedCall, nextCall) => {
-      const before = events.length;
-      holdAll = true;
-      const held = heldCall();
-      await localErrorResult(refusedCall(), 6);
-      assert.equal(events.length, before + 1, `${label}: refusal posted no message`);
-      holdAll = false;
-      for (const respond of heldAll.splice(0)) respond();
-      const first = await held;
-      const next = await nextCall();
-      assert.equal(next.requestId, first.requestId + 1, `${label}: refusal did not burn an ID`);
-      return next;
-    };
-    await assertBoundedNoBurn(
-      "sessionMap", () => liveControlHost.sessionMap(), () => liveControlHost.sessionMap(),
-      () => liveControlHost.sessionMap(),
-    );
-    await assertBoundedNoBurn(
-      "meters", () => liveControlHost.meters({ enabled: false, onFrame: null }),
-      () => liveControlHost.meters({ enabled: true, onFrame: null }),
-      () => liveControlHost.meters({ enabled: false, onFrame: null }),
-    );
-    await assertBoundedNoBurn(
-      "telemetry", () => liveControlHost.telemetry({ enabled: false, onFrame: null }),
-      () => liveControlHost.telemetry({ enabled: true, onFrame: null }),
-      () => liveControlHost.telemetry({ enabled: false, onFrame: null }),
-    );
     // A malformed request never reaches the port.
     const beforeMalformed = events.length;
     const oldShapeBuffer = new ArrayBuffer(256);
@@ -1994,6 +2148,94 @@ async function testMainRealm() {
     }), 3);
     assert.equal(events.length, disposedEvents, "disposed refusals post no messages or consume IDs");
 
+    // Issue #2279 attempt 2: every bounded request kind, one table. A request past its kind's bound
+    // is refused locally with RESULT_BACKPRESSURE, posts nothing and burns no request ID; another
+    // key of the same kind, and every kind with a slot of its own, is still accepted; and settling
+    // one request frees exactly one place. Test value: a kind left unbounded, a bound off by one, two
+    // kinds or two keys sharing one slot (the leases, a seek report and a seek), or a settled
+    // request that frees its whole slot.
+    {
+      const create = () => createMisoAudioWorkletHost({
+        context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const chunk = (host, sourceId) => host.submitSource({
+        sourceId, generation: 1n, startFrame: 0n, sampleRateHz: 48000,
+        planes: [new Float32Array(2)], frames: 2, endOfRegion: false,
+      });
+      // [kind, slot group, bound, call(host, key), keyed]. Kinds in one group share its slot.
+      const kinds = [
+        ["source", "source", 4, chunk, true],
+        ["seek", "seek", 1, (host, sourceId) => host.seekSource({ sourceId, generation: 1n, sourceFrame: 0n }), true],
+        ["seek-at", "seek", 1, (host, sourceId) => host.seekSourceAt({
+          sourceId, generation: 1n, sourceFrame: 0n, anchorSample: 0n,
+        }), true],
+        ["seek report", "seekReport", 1, (host, sourceId) => host.seekReport(sourceId), true],
+        ["session seek", "sessionSeek", 1, (host) => host.seekSession({ generation: 1n, frame: 0n }), false],
+        ["render allocations", "renderAllocations", 1, (host) => host.renderAllocationCount(), false],
+        ["plan latency", "planLatency", 1, (host) => host.planLatency(), false],
+        ["control", "control", 64, (host) => host.control(new Uint8Array([1])), false],
+        ["meters", "meters", 1, (host) => host.meters({ enabled: false, onFrame: null }), false],
+        ["telemetry", "telemetry", 1, (host) => host.telemetry({ enabled: false, onFrame: null }), false],
+        ["session map", "sessionMap", 1, (host) => host.sessionMap(), false],
+      ];
+      seekReportReply = (received) => ({ requestId: received.requestId, result: 1, report: null });
+      const lastPosted = () => events.findLast((event) => event[0] === "request");
+      // A refusal is local: it settles at once, so a request wrongly accepted fails by name here.
+      const refused = async (promise, what) => {
+        assert.equal(await settledState(promise), "rejected", what);
+        await localErrorResult(promise, 6);
+      };
+      for (const [kind, group, bound, call, keyed] of kinds) {
+        const host = await create();
+        const unsettled = [];
+        const send = (makeCall, key) => {
+          const promise = makeCall(host, key);
+          promise.catch(() => undefined);
+          unsettled.push(promise);
+          return promise;
+        };
+        const posts = () => events.filter((event) => event[0] === "request").length;
+        holdAll = true;
+        for (let index = 0; index < bound; index += 1) send(call, "a");
+        assert.equal(lastPosted()[2], bound, `${kind}: ${bound} accepted`);
+        const before = posts();
+        await refused(send(call, "a"), `${kind}: refused past its bound of ${bound}`);
+        assert.equal(posts(), before, `${kind}: the refusal posts nothing`);
+        if (keyed) {
+          send(call, "b");
+          assert.equal(lastPosted()[2], bound + 1, `${kind}: another key is independent, and no ID was burned`);
+        }
+        const touched = new Set();
+        for (const [other, otherGroup, , otherCall] of kinds) {
+          if (other === kind || touched.has(otherGroup)) continue;
+          if (otherGroup !== group) touched.add(otherGroup);
+          const count = posts();
+          const sent = send(otherCall, "a");
+          if (otherGroup === group) {
+            await refused(sent, `${other} shares the ${kind} slot`);
+            assert.equal(posts(), count, `${other} shares the ${kind} slot`);
+          } else {
+            assert.equal(posts(), count + 1, `${other} is accepted while ${kind} is at its bound`);
+            assert.equal(lastPosted()[2], bound + (keyed ? 1 : 0) + touched.size,
+              `${kind}: the refusal burned no request ID`);
+          }
+        }
+        // Settle the first request of the kind: exactly one place is free again.
+        heldAll.shift()();
+        await unsettled[0];
+        const count = posts();
+        send(call, "a");
+        assert.equal(posts(), count + 1, `${kind}: a settled request frees a place`);
+        await refused(send(call, "a"), `${kind}: and only one`);
+        assert.equal(posts(), count + 1, `${kind}: and only one`);
+        holdAll = false;
+        heldAll.length = 0;
+        await host.dispose();
+      }
+      seekReportReply = null;
+    }
+
     // Issue #1381a D6, gate 6: the host's one timer is the single-mode service tick. It starts
     // with the host, once per quantum, and each tick is the bare `miso.service.v1` message: no
     // request ID, so the tick takes no place in the request sequence and never makes a status read
@@ -2102,6 +2344,73 @@ async function testMainRealm() {
       assert.equal(trappedHost.dispose(), trappedDispose, "a later dispose returns the same rejection");
       assert.equal(events.filter((event) => event[1] === "miso.dispose.v1").length, disposesBefore + 1,
         "one dispose is sent");
+
+      // Issue #2279 (WEB-6): a dispose racing a failure. A request sent before the dispose
+      // fails the host while the dispose is in flight; the worklet handles messages in arrival
+      // order and still answers the dispose, so the dispose is settled by its own reply. Test
+      // value: a dispose rejected with the other request's sticky error and left retryable, its
+      // node connected, though the worklet disposed (a retry then waits out the bound for a reply
+      // an ended worklet never sends).
+      const racedHost = await create();
+      const racedNode = FakeNode.latest;
+      holdAll = true;
+      const failing = racedHost.control(new Uint8Array([1]));
+      const racedDispose = racedHost.dispose();
+      holdAll = false;
+      controlMutation = (reply) => ({ tag: "miso.error.v1", requestId: reply.requestId, result: 9 });
+      for (const respond of heldAll.splice(0)) respond();
+      controlMutation = null;
+      await errorResult(failing, 9);
+      await racedDispose;
+      assert.equal(racedNode.disconnectCount, 1, "the dispose's own reply tears down");
+      assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "and restarts no tick");
+
+      // Issue #2279: a reply that matches no request fails a live host, with that reply's ID.
+      // Test value: an unmatched reply ignored on a live host, or read as if it had a request.
+      const strayHost = await create();
+      FakeNode.latest.port.onmessage({ data: { tag: "miso.ack.v1", requestId: 999, result: 0 } });
+      assert.equal((await errorResult(strayHost.status(), 255)).requestId, 999);
+      await strayHost.dispose();
+      // A stray message with no request ID, or one that is not a request ID, fails the host with
+      // request ID 0. Test value: the sticky error echoing a missing ID as 1, or a non-ID as is.
+      for (const stray of [
+        { tag: "miso.nope.v1" },
+        { tag: "miso.ack.v1", requestId: "x", result: 0 },
+        { tag: "miso.ack.v1", requestId: -1, result: 0 },
+        { tag: "miso.ack.v1", requestId: 1.5, result: 0 },
+      ]) {
+        const idHost = await create();
+        FakeNode.latest.port.onmessage({ data: stray });
+        assert.equal((await errorResult(idHost.status(), 255)).requestId, 0, `${JSON.stringify(stray)} fails with ID 0`);
+        await idHost.dispose();
+      }
+      // A channel failure fails the host with the oldest unsettled request's ID, or 0 when none is
+      // unsettled. Test value: the oldest-request lookup always answering 0, or nothing.
+      const oldestHost = await create();
+      holdAll = true;
+      const oldest = oldestHost.control(new Uint8Array([1]));
+      const younger = oldestHost.renderAllocationCount();
+      holdAll = false;
+      FakeNode.latest.onprocessorerror();
+      assert.equal((await errorResult(oldest, 255)).requestId, 1, "the oldest unsettled request's ID");
+      assert.equal((await errorResult(younger, 255)).requestId, 1);
+      heldAll.length = 0;
+      await oldestHost.dispose().catch(() => undefined);
+      const idleHost = await create();
+      FakeNode.latest.onprocessorerror();
+      assert.equal((await errorResult(idleHost.status(), 255)).requestId, 0, "0 when nothing is unsettled");
+      await idleHost.dispose().catch(() => undefined);
+
+      // Issue #2279 (WEB-6): the first failure stands. Test value: a later failure (here
+      // the processor's `processorerror`) replacing the typed sticky error a request already
+      // rejected with, so later calls reject with a different cause.
+      const stuckHost = await create();
+      controlMutation = (reply) => ({ tag: "miso.error.v1", requestId: reply.requestId, result: 9 });
+      await errorResult(stuckHost.control(new Uint8Array([1])), 9);
+      controlMutation = null;
+      FakeNode.latest.onprocessorerror();
+      await errorResult(stuckHost.control(new Uint8Array([1])), 9);
+      await stuckHost.dispose();
     }
 
     // Issue #1332 S7 (D1, D2, D6, D7): `worker` mode on an isolated page. A fake control Worker
@@ -2407,6 +2716,369 @@ async function testMainRealm() {
           await failing.dispose();
         }
 
+        // Issue #2279 (WEB-6), the worker-mode row: a render failure posted while the
+        // dispose is with the Worker fails the host, and the Worker's own reply still settles the
+        // dispose, cleanly. Test value: a dispose rejected with the render failure and the Worker
+        // terminated before it answered.
+        {
+          const raced = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          const racedWorker = workers.at(-1);
+          const disposal = raced.dispose();
+          FakeNode.latest.port.onmessage({ data: { tag: "miso.error.v1", requestId: 0, result: 9 } });
+          await disposal;
+          assert.equal(racedWorker.terminated, true, "the Worker ends after its dispose reply");
+        }
+
+        // Issue #2279 attempt 2: what settles a dispose in flight at once, by the failure's source
+        // (`#fail`'s second argument). A failure brought by another message leaves the dispose to
+        // its own reply (the race rows above); these do not. Test value, per case: a call site that
+        // names the wrong source, so the dispose waits out its 5 s bound for a reply that already
+        // came (its own reply in each malformed shape) or that a broken channel cannot bring
+        // (`messageerror` in both modes, `processorerror`, a fence that cannot be posted); a dispose
+        // that survived a typed failure rejected with that failure instead of the one that ended it;
+        // and a retryable refusal of a failed host restarting the service tick.
+        {
+          const boot = (mode) => createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js", instanceMode: mode,
+          });
+          const inject = (port, data) => port.onmessage({ data });
+          const cases = [
+            { label: "its own typed error", mode: "single", result: 7, tornDown: false,
+              act: ({ node, id }) => inject(node.port, { tag: "miso.error.v1", requestId: id, result: 7 }) },
+            { label: "its own malformed error", mode: "single", result: 255, tornDown: true,
+              act: ({ node, id }) => inject(node.port, { tag: "miso.error.v1", requestId: id, result: 4242 }) },
+            { label: "its own malformed ack", mode: "single", result: 255, tornDown: true,
+              act: ({ node, id }) => inject(node.port, { tag: "miso.ack.v1", requestId: id, result: 0, extra: 1 }) },
+            { label: "its own typed error", mode: "worker", result: 7, tornDown: true,
+              act: ({ worker, id }) => inject(worker, { tag: "miso.error.v1", requestId: id, result: 7 }) },
+            { label: "its own teardown with another reason", mode: "worker", result: 255, tornDown: true,
+              act: ({ worker, id }) => inject(worker, {
+                tag: "miso.teardown.v1", requestId: id, result: 255, reason: "dispose-timeout",
+              }) },
+            { label: "a messageerror", mode: "single", result: 255, tornDown: true,
+              act: ({ node }) => node.port.onmessageerror() },
+            { label: "a messageerror", mode: "worker", result: 255, tornDown: true,
+              act: ({ host, worker }) => {
+                assert.equal(host.openFeedPort(), null, "no feed port while a dispose is in flight");
+                worker.onmessageerror();
+              } },
+            { label: "a processorerror", mode: "single", result: 255, tornDown: true,
+              act: ({ node }) => node.onprocessorerror() },
+            { label: "a fence it cannot post", mode: "worker", result: 255, tornDown: true,
+              before: ({ host, node }) => {
+                const post = node.port.postMessage.bind(node.port);
+                node.port.postMessage = (message, transfer) => {
+                  if (message.tag === "miso.fence.v1") throw new Error("port closed");
+                  return post(message, transfer);
+                };
+                return errorResult(host.control(new Uint8Array([1])), 255);
+              },
+              act: async ({ earlier }) => { await earlier; } },
+            { label: "a processorerror after it survived a typed failure", mode: "single", result: 255,
+              tornDown: true,
+              before: ({ host }) => host.control(new Uint8Array([1])),
+              act: async ({ node, earlier, disposal }) => {
+                controlMutation = (reply) => ({ tag: "miso.error.v1", requestId: reply.requestId, result: 9 });
+                heldAll.shift()();
+                controlMutation = null;
+                await errorResult(earlier, 9);
+                assert.equal(await settledState(disposal), "pending", "the dispose survived the typed failure");
+                node.onprocessorerror();
+              } },
+          ];
+          for (const entry of cases) {
+            const what = `${entry.mode}: ${entry.label}`;
+            const liveBefore = intervals.filter((timer) => !timer.cleared).length;
+            const host = await boot(entry.mode);
+            assert.equal(host.instanceMode, entry.mode);
+            const node = FakeNode.latest;
+            const worker = entry.mode === "worker" ? workers.at(-1) : undefined;
+            holdAll = entry.mode === "single";
+            workerBehaviour = "silent";
+            const earlier = entry.before?.({ host, node });
+            const disposal = host.dispose();
+            const id = entry.mode === "worker"
+              ? worker.posts.at(-1).requestId
+              : events.findLast((event) => event[1] === "miso.dispose.v1")[2];
+            await entry.act({ host, node, worker, id, earlier, disposal });
+            assert.equal(await settledState(disposal), "rejected", `${what} settles the dispose at once`);
+            await errorResult(disposal, entry.result);
+            assert.equal(node.disconnectCount, entry.tornDown ? 1 : 0, `${what}: teardown`);
+            if (worker !== undefined) assert.equal(worker.terminated, entry.tornDown, `${what}: the Worker`);
+            assert.equal(intervals.filter((timer) => !timer.cleared).length, liveBefore,
+              `${what}: no service tick runs`);
+            holdAll = false;
+            workerBehaviour = "ready";
+            for (const respond of heldAll.splice(0)) respond();
+            await host.dispose().catch(() => undefined);
+          }
+
+          // The other half: a failure that a message brought and that is not the dispose's own reply
+          // (an unsolicited frame that fails its schema, or a reply that matches no request) fails
+          // the host but leaves the dispose to its own reply, which the worklet still sends. Test
+          // value: such a call site naming the channel as its source, so the dispose rejects with 255
+          // though the worklet disposed.
+          for (const [label, frame] of [
+            ["a malformed meter frame", { tag: "miso.meter.v1" }],
+            ["a malformed telemetry frame", { tag: "miso.telemetry.v1" }],
+            ["a malformed control event", { tag: "miso.control-event.v1" }],
+            ["a malformed watermark", { tag: "miso.watermark.v1" }],
+            ["a reply that matches no request", { tag: "miso.ack.v1", requestId: 999, result: 0 }],
+          ]) {
+            const host = await boot("single");
+            const node = FakeNode.latest;
+            holdAll = true;
+            const disposal = host.dispose();
+            holdAll = false;
+            inject(node.port, frame);
+            assert.equal(await settledState(disposal), "pending", `${label} leaves the dispose to its reply`);
+            await errorResult(host.status(), 3);
+            for (const respond of heldAll.splice(0)) respond();
+            await disposal;
+            assert.equal(node.disconnectCount, 1, `${label}: the dispose's own reply tears down`);
+          }
+
+          // The same half, for another request's reply that fails the host: a control reply turned
+          // into a malformed `miso.error.v1` or one that fails its shape check (single mode), and a
+          // teardown carrying the control request's ID (worker mode). Test value: those call sites
+          // naming the channel or the Worker as their source, so a reply to an earlier request
+          // rejects the dispose that the peer still answers.
+          for (const [label, mutate] of [
+            ["another request's malformed error", (reply) => ({ tag: "miso.error.v1", requestId: reply.requestId, result: 4242 })],
+            ["another request's malformed reply", (reply) => ({ ...reply, extra: 1 })],
+          ]) {
+            const host = await boot("single");
+            const node = FakeNode.latest;
+            holdAll = true;
+            const earlier = host.control(new Uint8Array([1]));
+            const disposal = host.dispose();
+            holdAll = false;
+            controlMutation = mutate;
+            heldAll.shift()();
+            controlMutation = null;
+            await errorResult(earlier, 255);
+            assert.equal(await settledState(disposal), "pending", `${label} leaves the dispose to its reply`);
+            for (const respond of heldAll.splice(0)) respond();
+            await disposal;
+            assert.equal(node.disconnectCount, 1, `${label}: the dispose's own reply tears down`);
+          }
+          {
+            const host = await boot("worker");
+            const node = FakeNode.latest;
+            const worker = workers.at(-1);
+            workerBehaviour = "controlSilent";
+            const earlier = host.control(new Uint8Array([1]));
+            const controlId = worker.posts.at(-1).requestId;
+            workerBehaviour = "silent";
+            const disposal = host.dispose();
+            const disposeId = worker.posts.at(-1).requestId;
+            inject(worker, { tag: "miso.teardown.v1", requestId: controlId, result: 255, reason: "release-timeout" });
+            await errorResult(earlier, 255);
+            assert.equal(await settledState(disposal), "pending", "another request's teardown leaves the dispose to its reply");
+            inject(worker, { tag: "miso.ack.v1", requestId: disposeId, result: 0 });
+            await disposal;
+            assert.equal(worker.terminated, true);
+            workerBehaviour = "ready";
+          }
+          // A channel failure in worker mode (the worklet's `processorerror` or `messageerror`, the
+          // Worker's `messageerror`, a fence that cannot be posted) leaves the Worker alive: a later
+          // dispose is sent to it, once, and settles on its reply. Test value: such a site naming the
+          // Worker as gone, so the dispose skips the Worker that still holds the control half.
+          for (const [label, fail] of [
+            ["a processorerror", ({ node }) => node.onprocessorerror()],
+            ["a worklet-port messageerror", ({ node }) => node.port.onmessageerror()],
+            ["a Worker messageerror", ({ worker }) => worker.onmessageerror()],
+            ["a fence it cannot post", async ({ host, node }) => {
+              const post = node.port.postMessage.bind(node.port);
+              node.port.postMessage = (message, transfer) => {
+                if (message.tag === "miso.fence.v1") throw new Error("port closed");
+                return post(message, transfer);
+              };
+              await errorResult(host.control(new Uint8Array([1])), 255);
+            }],
+          ]) {
+            const host = await boot("worker");
+            const node = FakeNode.latest;
+            const worker = workers.at(-1);
+            await fail({ host, node, worker });
+            await errorResult(host.status(), 255);
+            const before = worker.posts.filter((m) => m.tag === "miso.dispose.v1").length;
+            const outcome = await host.dispose().then(() => "resolved", () => "rejected");
+            assert.equal(worker.posts.filter((m) => m.tag === "miso.dispose.v1").length, before + 1,
+              `${label}: the dispose is sent to the live Worker, once`);
+            assert.equal(outcome, "resolved", `${label}: and settles on its reply`);
+          }
+          // A duplicate control reply while the first is held for its fence: the second fence finds
+          // the control already settled and frees nothing. Test value: the fence releasing the
+          // control twice, so one settled call frees two places of the 64-call bound. (Whether a
+          // duplicate reply should fail the host is a follow-up; today it is absorbed.)
+          {
+            const host = await boot("worker");
+            const worker = workers.at(-1);
+            workerBehaviour = "controlSilent";
+            const calls = [];
+            for (let i = 0; i < 64; i += 1) calls.push(host.control(new Uint8Array([1])));
+            await errorResult(host.control(new Uint8Array([1])), 6);
+            const firstId = worker.posts.find((m) => m.tag === "miso.control.v1").requestId;
+            holdFences = true;
+            const reply = { tag: "miso.control.v1", requestId: firstId, result: 0, response: new Uint8Array([1]), revision: 3n };
+            inject(worker, reply);
+            inject(worker, { ...reply, response: new Uint8Array([1]) });
+            holdFences = false;
+            await new Promise((resolve) => setImmediate(resolve));
+            for (const respond of heldFences.splice(0)) respond();
+            await calls[0];
+            await new Promise((resolve) => setImmediate(resolve));
+            const next = host.control(new Uint8Array([1]));
+            const over = host.control(new Uint8Array([1]));
+            assert.equal(await settledState(over), "rejected", "the control bound counts one settled call once");
+            await localErrorResult(over, 6);
+            workerBehaviour = "ready";
+            await host.dispose().catch(() => undefined);
+            void next.catch(() => undefined);
+            for (const c of calls) void c.catch(() => undefined);
+          }
+          // A held control reply when the Worker refuses the dispose: the teardown is not clean, so
+          // the reply is refused with the typed disposed outcome. Test value: an unclean teardown
+          // resolving held replies as if their transactions were known to have committed.
+          {
+            const host = await boot("worker");
+            holdFences = true;
+            const held = host.control(new Uint8Array([1]));
+            await new Promise((resolve) => setImmediate(resolve));
+            holdFences = false;
+            workerBehaviour = "dispose255";
+            await errorResult(host.dispose(), 255);
+            workerBehaviour = "ready";
+            heldFences.splice(0);
+            assert.equal(await held.then(() => "resolved", (e) => `rejected ${e?.result}`), "rejected 3",
+              "a held control reply rejects with 3 after an unclean dispose");
+          }
+          // A status follow-up still waiting at teardown rejects with the typed disposed outcome.
+          // Test value: the follow-up resolved (with nothing) or left pending at teardown.
+          {
+            const host = await boot("single");
+            holdAll = true;
+            const first = host.status();
+            const ctl = host.control(new Uint8Array([1]));
+            const second = host.status();
+            const disposal = host.dispose();
+            holdAll = false;
+            heldAll.pop()();
+            await disposal;
+            assert.equal(await second.then(() => "resolved", (e) => `rejected ${e?.result}`), "rejected 3",
+              "a status follow-up rejects with 3 at teardown");
+            heldAll.splice(0);
+            void first.catch(() => undefined); void ctl.catch(() => undefined);
+          }
+          // A late control reply on a failed worker-mode host finds no request and posts no fence.
+          // Test value: `#fail` leaving its rejected requests in `#pending`, so the late reply is
+          // held for a fence on a failed host.
+          {
+            const host = await boot("worker");
+            const node = FakeNode.latest;
+            const worker = workers.at(-1);
+            workerBehaviour = "controlSilent";
+            const call = host.control(new Uint8Array([1]));
+            const id = worker.posts.at(-1).requestId;
+            workerBehaviour = "ready";
+            node.onprocessorerror();
+            await errorResult(call, 255);
+            const fences = [];
+            const post = node.port.postMessage.bind(node.port);
+            node.port.postMessage = (message, transfer) => {
+              if (message.tag === "miso.fence.v1") fences.push(message);
+              return post(message, transfer);
+            };
+            inject(worker, { tag: "miso.control.v1", requestId: id, result: 0, response: new Uint8Array([1]), revision: 3n });
+            assert.equal(fences.length, 0, "a late reply on a failed host posts no fence");
+            await host.dispose().catch(() => undefined);
+          }
+
+          // The Worker's release-timeout teardown ends the dispose; a request it overtook is refused
+          // with the typed disposed outcome, as at any teardown. Test value: the teardown reply
+          // also read as a malformed reply, failing the overtaken request with 255.
+          {
+            const host = await boot("worker");
+            workerBehaviour = "controlSilent";
+            const overtaken = host.control(new Uint8Array([1]));
+            workerBehaviour = "releaseTimeout";
+            const disposal = host.dispose();
+            await assert.rejects(disposal, (error) => error.reason === "release-timeout");
+            await errorResult(overtaken, 3);
+            workerBehaviour = "ready";
+          }
+          // A fence answered with a refusal fails the host: the held control reply is not
+          // delivered. Test value: the fence's result check dropped (or folded into another kind's
+          // check), so a refused fence releases the reply as if every frame before it had arrived.
+          {
+            const host = await boot("worker");
+            holdFences = true;
+            const before = events.length;
+            const call = host.control(new Uint8Array([1]));
+            assert.equal(await settledState(call), "pending");
+            holdFences = false;
+            heldFences.splice(0);
+            const fenceId = events.slice(before).find((event) => event[1] === "miso.fence.v1")[2];
+            inject(FakeNode.latest.port, { tag: "miso.fence.v1", requestId: fenceId, result: 1 });
+            await errorResult(call, 255);
+            await host.dispose().catch(() => undefined);
+          }
+          // A worker-mode control reply that fails its shape check fails the host and posts no
+          // fence. Test value: the malformed reply also held for a fence on the failed host.
+          {
+            const host = await boot("worker");
+            const worker = workers.at(-1);
+            workerBehaviour = "controlSilent";
+            const call = host.control(new Uint8Array([1]));
+            const id = worker.posts.at(-1).requestId;
+            workerBehaviour = "ready";
+            const before = events.length;
+            inject(worker, {
+              tag: "miso.control.v1", requestId: id, result: 0, response: new Uint8Array([1]), revision: 3n, extra: 1,
+            });
+            await errorResult(call, 255);
+            assert.equal(events.slice(before).filter((event) => event[1] === "miso.fence.v1").length, 0,
+              "a malformed control reply posts no fence");
+            await host.dispose().catch(() => undefined);
+          }
+
+          // A host that failed and then lost its Worker disposes at once, sending nothing, with the
+          // first error. Test value: `workerGone` lost when a later failure comes (the dispose is
+          // then sent to a terminated Worker and waits out its bound), or not recorded when the
+          // Worker's error is the second failure; and a feed port opened on a failed host.
+          const dead = [
+            { label: "a typed failure, then the Worker's error", result: 9,
+              fail: ({ host, node, worker }) => {
+                inject(node.port, { tag: "miso.error.v1", requestId: 0, result: 9 });
+                assert.equal(host.openFeedPort(), null, "no feed port on a failed host");
+                worker.onerror({ preventDefault() {} });
+              } },
+            { label: "the Worker's error, then a processorerror", result: 255,
+              fail: ({ node, worker }) => {
+                worker.onerror({ preventDefault() {} });
+                node.onprocessorerror();
+              } },
+          ];
+          for (const entry of dead) {
+            const host = await boot("worker");
+            const node = FakeNode.latest;
+            const worker = workers.at(-1);
+            entry.fail({ host, node, worker });
+            const disposal = host.dispose();
+            assert.equal(await settledState(disposal), "rejected", `${entry.label}: the dispose tears down at once`);
+            await errorResult(disposal, entry.result);
+            assert.equal(worker.posts.filter((message) => message.tag === "miso.dispose.v1").length, 0,
+              `${entry.label}: no dispose is sent`);
+            assert.equal(worker.terminated, true);
+            assert.equal(node.disconnectCount, 1);
+          }
+        }
+
         // #1332 S8: a worklet whose construction failed (perhaps after it adopted the half): the
         // Worker is asked to dispose, and answers, before it is terminated.
         {
@@ -2446,7 +3118,20 @@ async function testMainRealm() {
 
         // S7 verify MINOR 1: a Worker error between its boot reply and the worklet's ready is not
         // lost: the host the factory returns is failed, so a request rejects instead of hanging.
-        {
+        // Issue #2279: a `messageerror` in that window likewise (test value: the early
+        // `messageerror` dropped, so the host starts live on a broken channel).
+        // Both together, in either order: the `error` wins, so the Worker is terminated and the
+        // host knows it is gone (its dispose tears down at once and sends nothing). Test value: an
+        // early `messageerror` that overwrites an earlier `error`, or an `error` that does not
+        // overwrite an earlier `messageerror`, so the host keeps posting to a crashed Worker; and
+        // an early `messageerror` alone taken for a gone Worker, so its dispose skips the live one.
+        const raise = {
+          error: (worker) => worker.onerror?.({ preventDefault() {} }),
+          messageerror: (worker) => worker.onmessageerror?.({}),
+        };
+        for (const order of [["error"], ["messageerror"], ["messageerror", "error"], ["error", "messageerror"]]) {
+          const what = `early ${order.join(" then ")}`;
+          const gone = order.includes("error");
           const gate = snapshotGate();
           readyGate = gate;
           const pending = createMisoAudioWorkletHost({
@@ -2454,10 +3139,21 @@ async function testMainRealm() {
             workletModuleUrl: "https://example.test/w.js",
           });
           await gate.started;
-          workers.at(-1).onerror?.({ preventDefault() {} });
+          const worker = workers.at(-1);
+          for (const name of order) raise[name](worker);
           gate.release();
           const failedHost = await pending;
           await errorResult(failedHost.control(new Uint8Array([1])), 255);
+          assert.equal(worker.terminated, gone, `${what}: the Worker is terminated exactly when it raised error`);
+          const disposal = failedHost.dispose();
+          if (gone) {
+            assert.equal(await settledState(disposal), "rejected", `${what}: the dispose tears down at once`);
+            assert.equal(worker.posts.filter((message) => message.tag === "miso.dispose.v1").length, 0,
+              `${what}: nothing is sent to the terminated Worker`);
+          }
+          await disposal.catch(() => undefined);
+          if (!gone) assert.equal(worker.posts.filter((message) => message.tag === "miso.dispose.v1").length, 1,
+            `${what}: the dispose is sent to the live Worker`);
         }
         // D6: a Worker `error` or `messageerror` before the boot reply rejects with `worker-failed`,
         // no worklet starts and nothing falls back to `single` mode. A refused boot rejects with
@@ -4248,6 +4944,100 @@ async function testProcessor() {
       }
     }
 
+    // Issue #2291: a trap in an export a message handler calls is contained at the handler, as
+    // #2256 contained render's and dispose's. The fake models the shipped module: once any export
+    // trapped, render and dispose refuse with 1, as the `LIVE_HOST` borrow the trap left does. Each
+    // row traps one export through the real `port.onmessage`, at a different place. Inside
+    // `receive` (unanswered), the answer is the request's, with its planes for a source. After a
+    // request's answer (a source acknowledged OK, its planes gone back), it goes to that request's
+    // ID with no planes. In the service step of a tick, it goes to request 0. Red if the throw
+    // escapes the handler, goes unanswered or to the wrong request, re-sends planes already
+    // transferred (the post then throws a `DataCloneError` out of the handler), or leaves the trap
+    // unrecorded: the next block calls render on the trapped instance and the dispose calls its
+    // export, whose refusal the host retries for ever.
+    {
+      const sourcePlane = () => new Float32Array(64).fill(0.5);
+      const rows = [
+        {
+          export: "control_command",
+          message: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1, 2, 3]) },
+          answer: { tag: "miso.error.v1", requestId: 1, result: 255 },
+        },
+        {
+          export: "source_submit",
+          message: {
+            tag: "miso.source.v1", requestId: 1, sourceId: "drums", generation: 1n,
+            startFrame: 0n, sampleRateHz: 48000, frames: 64, endOfRegion: false,
+            planes: [sourcePlane(), sourcePlane()],
+          },
+          answer: {
+            tag: "miso.error.v1", requestId: 1, result: 255, planes: [sourcePlane(), sourcePlane()],
+          },
+        },
+        {
+          name: "service after a source",
+          export: "service",
+          message: {
+            tag: "miso.source.v1", requestId: 1, sourceId: "drums", generation: 1n,
+            startFrame: 0n, sampleRateHz: 48000, frames: 64, endOfRegion: false,
+            planes: [sourcePlane(), sourcePlane()],
+          },
+          answer: { tag: "miso.error.v1", requestId: 1, result: 255 },
+        },
+        {
+          name: "service on a tick",
+          export: "service",
+          // A request answered first: the tick's error is still request 0's, not the last one's.
+          before: { tag: "miso.telemetry.v1", requestId: 1, enabled: true },
+          message: { tag: "miso.service.v1" },
+          answer: { tag: "miso.error.v1", requestId: 0, result: 255 },
+        },
+      ];
+      for (const row of rows) {
+        const label = row.name ?? row.export;
+        const { processor, fake } = makeProcessor();
+        if (row.before !== undefined) processor.port.onmessage({ data: row.before });
+        let trapped = false;
+        fake.exports[`miso_engine_web_v1_${row.export}`] = () => {
+          trapped = true;
+          throw new Error(`synthetic wasm trap from the ${row.export} export`);
+        };
+        const render = fake.exports.miso_engine_web_v1_render;
+        let renderCalls = 0;
+        fake.exports.miso_engine_web_v1_render = (...args) => {
+          renderCalls += 1;
+          return trapped ? 1 : render(...args);
+        };
+        fake.exports.miso_engine_web_v1_dispose = () => {
+          fake.calls.dispose += 1;
+          return trapped ? 1 : 0;
+        };
+        assert.doesNotThrow(() => processor.port.onmessage({ data: row.message }),
+          `a ${label} trap stays inside the handler`);
+        assert.deepEqual(processor.port.posts.at(-1)?.message, row.answer,
+          `a ${label} trap: the typed answer`);
+        assert.equal(processor.stickyResult, 255, `a ${label} trap is sticky 255`);
+        const block = () => processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+        block();
+        assert.equal(renderCalls, 0,
+          `a ${label} trap: no render on the trapped instance`);
+        processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 2 } });
+        assert.deepEqual(processor.port.posts.at(-1).message,
+          { tag: "miso.ack.v1", requestId: 2, result: 255 }, `a ${label} trap: the dispose is final`);
+        assert.equal(fake.calls.dispose, 0, `a ${label} trap: no dispose export runs`);
+        assert.equal(block(), false, `a ${label} trap: the instance ends`);
+      }
+      // The meter-view sync is a step after `receive` too: a fault it finds on a tick is request
+      // 0's, as the other steps' are, never the last answered request's. Red if `syncMeterViews`
+      // reports to `lastRequestId` on a tick.
+      const { processor, fake } = makeProcessor();
+      processor.port.onmessage({ data: { tag: "miso.telemetry.v1", requestId: 1, enabled: true } });
+      fake.exports.miso_engine_web_v1_meter_header_ptr = () => 0;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(processor.port.posts.at(-1).message,
+        { tag: "miso.error.v1", requestId: 0, result: 255 }, "a meter-view fault on a tick is request 0's");
+    }
+
     {
       const { processor } = makeProcessor();
       const storage = new ArrayBuffer(16);
@@ -4625,6 +5415,48 @@ async function testProcessor() {
       const { processor: strict } = constructWorkerMode(createFakeExports(64));
       strict.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
       assert.equal(strict.port.posts.at(-1).message.tag, "miso.error.v1");
+    }
+    // Issue #2291, the `worker`-mode rows: its two ports are handler entries of their own. On the
+    // page's port, a trap inside `receive` (the meter lease export) is answered 255 to its request,
+    // and one after the answer (`meter_header_ptr` in the meter-view sync) is posted as request 0,
+    // which in this mode belongs to no request. On the Worker's port (`meter_header_ptr` under its
+    // meter view), the trap is posted to the page as request 0 even after a page request, as a
+    // render failure is. Each is recorded, so render is not called on the trapped half and its
+    // release answers no token without calling `host_release`. Red if the throw escapes
+    // `receiveWorkerMode` or the control port's handler, or goes to the wrong request.
+    const meters = { tag: "miso.meters.v1", requestId: 1, enabled: true };
+    const workerRows = [
+      { name: "page port, inside receive", trap: "meter_lease", answer: 1 },
+      { name: "page port, after the answer", trap: "meter_header_ptr", answered: true, answer: 0 },
+      { name: "Worker port", before: meters, trap: "meter_header_ptr", worker: true, answer: 0 },
+    ];
+    for (const row of workerRows) {
+      const fake = createFakeExports(64);
+      const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
+      if (row.before !== undefined) processor.port.onmessage({ data: row.before });
+      fake.exports[`miso_engine_web_v1_${row.trap}`] = () => {
+        throw new Error(`synthetic wasm trap from the ${row.trap} export`);
+      };
+      const send = row.worker
+        ? () => fromWorker({
+          tag: "miso.meter-view.v1", header: fake.successorHeader.byteOffset,
+          memoryBytes: fake.memory.buffer.byteLength,
+        })
+        : () => processor.port.onmessage({ data: meters });
+      assert.doesNotThrow(send, `${row.name}: the trap stays inside the handler`);
+      assert.deepEqual(processor.port.posts.at(-1).message,
+        { tag: "miso.error.v1", requestId: row.answer, result: 255 }, `${row.name}: the typed answer`);
+      if (row.answered) {
+        assert.deepEqual(processor.port.posts.at(-2).message,
+          { tag: "miso.ack.v1", requestId: 1, result: 0 }, `${row.name}: the request was answered first`);
+      }
+      const rendered = fake.calls.render.length;
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      assert.equal(fake.calls.render.length, rendered, `${row.name}: no render after the trap`);
+      fromWorker({ tag: "miso.release.v1" });
+      assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: 0n },
+        `${row.name}: the release answers no token`);
+      assert.deepEqual(fake.calls.release, [], `${row.name}: no release export runs`);
     }
     // R-S7-meters (3): `process()` switches to the pre-cut set only when the header render reports,
     // its frame pointer and its strip counts all match; otherwise it skips the frame and counts it.

@@ -92,34 +92,22 @@ pub struct SpectrumMonitor {
     quantum_frames: u32,
 }
 
-/// The spectrum half of one provider epoch (#1593 D5).
-#[derive(Default)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "one per held epoch; boxing would allocate at promotion"
-)]
-pub(crate) enum EpochSpectrum {
-    /// Nothing: the boot epoch, or an epoch whose promotion displaced nothing.
-    #[default]
-    None,
-    /// A candidate's captures (`None` when it was prepared with no configuration), the stream hop
-    /// of the configuration it was prepared with, and that configuration's epoch. Its promotion installs them in the service,
-    /// paired by the candidate's own pairing list
-    /// ([`host_core::PlanStateInventory::spectrum_pairing`]).
-    Candidate {
-        captures: Option<PreparedSpectrumCaptures>,
-        hop: Option<SpectrumHop>,
-        epoch: u64,
-    },
-    /// What the promotion of this epoch's successor displaced: dropped with the parked epoch,
-    /// on the control thread, when its plan is reclaimed.
-    Displaced(
-        #[allow(dead_code, reason = "held only to be dropped with the parked epoch")]
-        SpectrumDisplaced,
-    ),
+/// A pending candidate's spectrum half (#1593 D5): its captures (`None` when it was prepared with
+/// no configuration), the stream hop of the configuration it was prepared with, and that
+/// configuration's epoch. Its promotion installs them in the service ([`SpectrumMonitor::adopt`]),
+/// paired by the candidate's own pairing list
+/// ([`host_core::PlanStateInventory::spectrum_pairing`]), and the epoch it parks keeps what that
+/// displaced ([`SpectrumDisplaced`]). Held only in a pending epoch's phase
+/// (`control::EpochPhase::Pending`), so a running or parked epoch has none (#2258 PR-6).
+pub(crate) struct CandidateSpectrum {
+    pub(crate) captures: Option<PreparedSpectrumCaptures>,
+    pub(crate) hop: Option<SpectrumHop>,
+    pub(crate) epoch: u64,
 }
 
-/// The captures, or the whole service, a promotion displaced (#1593 D6).
+/// The captures, or the whole service, a promotion displaced (#1593 D6): dropped with the parked
+/// epoch that holds it (`control::EpochPhase::Parked`), on the control thread, when its plan is
+/// reclaimed.
 pub(crate) struct SpectrumDisplaced {
     #[allow(dead_code, reason = "held only to be dropped with the parked epoch")]
     captures: Option<PreparedSpectrumCaptures>,

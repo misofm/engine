@@ -4562,6 +4562,12 @@ pub enum GraphCarryInstallError {
     PrimeFillOutOfRange,
     /// A fill's line appears twice (#1355 D5).
     DuplicatePrimeFill,
+    /// The plan already holds a [`GraphCarryProgram`] (#2302): every section installed after it
+    /// was validated for its predecessor, so a plan names one predecessor for its life.
+    CarryProgramInstalled,
+    /// The plan already holds a fade table (#2302): its lanes are armed, and its fade-arm carry
+    /// indexes it, so a plan installs one table for its life.
+    FadeArmsInstalled,
 }
 
 /// Where one builtin bank lane sits in a bound graph plan: its runtime unit, its bank chain slot
@@ -4844,8 +4850,8 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
 }
 
 /// Arm the fade-in of each strip in `arms` and install the table this plan fires them from
-/// (issue #1288 D2, D3), off the render thread, before publication; it replaces any earlier
-/// table. Each lane is armed now, so the plan's first block already renders it muted. A strip
+/// (issue #1288 D2, D3), off the render thread, before publication, once per plan (#2302). Each
+/// lane is armed now, so the plan's first block already renders it muted. A strip
 /// the session mutes, on one channel or both, arms too and gets an entry (#2080): its fire goes
 /// to its prepared mute and ramps nowhere unless a record before the fire unmutes it, as a
 /// muted route's (#2069). Returns, for each arm in order, the index of its entry in the table, or
@@ -4862,9 +4868,11 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
 /// the session mutes arms too and gets an entry (#2069): its fire goes to its prepared mute and
 /// ramps nowhere unless a record before the fire unmutes it.
 ///
-/// Refused, arming nothing, when the plan is not a graph plan, a fader location does not resolve
-/// to a populated lane of a fader bank (through the lookup render fires through, #2257), a route
-/// unit is not a live route's, or a target repeats.
+/// Refused, arming nothing, when the plan is not a graph plan, already holds a table (#2302: its
+/// lanes are armed and its fade-arm carry indexes it, so a replacement would leave a lane muted
+/// for a fire no table holds), a fader location does not resolve to a populated lane of a fader
+/// bank (through the lookup render fires through, #2257), a route unit is not a live route's, or a
+/// target repeats. An install that armed nothing holds no table.
 pub fn install_fade_arms(
     plan: &mut PreparedRenderPlan,
     arms: Vec<GraphFadeArm>,
@@ -4881,6 +4889,9 @@ impl GraphExecutor {
         &mut self,
         arms: Vec<GraphFadeArm>,
     ) -> Result<(Vec<Option<u32>>, GraphFadeArmWatch), GraphCarryInstallError> {
+        if !self.fade_arms.is_empty() {
+            return Err(GraphCarryInstallError::FadeArmsInstalled);
+        }
         for (index, arm) in arms.iter().enumerate() {
             let exists = match arm.target {
                 // #2257: the resolution render fires through ([`FadeFire`]).
@@ -5383,9 +5394,11 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
 
 /// Install the hand-over this graph plan runs when it displaces its predecessor.
 ///
-/// Call it before publication. Refused, leaving any earlier program in place, when the plan is
-/// not a graph plan, has no source set for a program that moves a source or the timeline, or a
-/// successor index is out of range, not vacant or repeated, or a predecessor index is repeated.
+/// Call it before publication, once per plan (#2302). Refused, leaving the plan as it was, when the
+/// plan is not a graph plan, already holds a program (every section installed after it was
+/// validated for that program's predecessor), has no source set for a program that moves a source
+/// or the timeline, or a successor index is out of range, not vacant or repeated, or a predecessor
+/// index is repeated.
 /// Predecessor indices are checked against the predecessor at the swap block, where an
 /// out-of-range index refuses the whole move.
 pub fn install_carry_program(
@@ -5396,6 +5409,9 @@ pub fn install_carry_program(
         .executor_any_mut()
         .and_then(|any| any.downcast_mut::<GraphExecutor>())
         .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
+    if executor.carry.is_some() {
+        return Err(GraphCarryInstallError::CarryProgramInstalled);
+    }
     // A program that moves no source and no timeline needs no source set (issue #1276: a plan
     // may carry only strip state). The timeline lives in the source set (#1641 D1).
     let set = match executor.source_set.as_ref() {
@@ -11774,6 +11790,30 @@ mod tests {
             Err(GraphCarryInstallError::NoSourceSet)
         );
         assert_eq!(install_carry_program(&mut plan, program(false)), Ok(()));
+    }
+
+    /// Issue #2302: a plan's carry program is installed once. A second program, naming another
+    /// predecessor, is refused and the first stays.
+    ///
+    /// Red if a second program replaces the first: every section installed after the first was
+    /// validated for its predecessor, and the swap block would run them against the other one.
+    #[test]
+    fn install_refuses_a_second_carry_program() {
+        let mut plan = sidechain_pdc_plan(false);
+        let program = |predecessor| GraphCarryProgram {
+            predecessor,
+            sources: Box::new([]),
+            timeline: false,
+        };
+        assert_eq!(install_carry_program(&mut plan, program(1)), Ok(()));
+        let second = install_carry_program(&mut plan, program(2));
+        let installed = plan
+            .executor_any_mut()
+            .and_then(|any| any.downcast_mut::<GraphExecutor>())
+            .and_then(|executor| executor.carry.as_ref())
+            .map(|program| program.predecessor);
+        assert_eq!(installed, Some(1), "the first program stays");
+        assert_eq!(second, Err(GraphCarryInstallError::CarryProgramInstalled));
     }
 
     #[test]
