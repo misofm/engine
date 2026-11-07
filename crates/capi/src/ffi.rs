@@ -1379,6 +1379,8 @@ fn canonical_fp_env_in_effect() -> bool {
     if FP_PIN_REFUSED.with(core::cell::Cell::get) {
         return false;
     }
+    // Replacing this readback with `true` survives every test by construction (conforming hardware
+    // always reads back the canonical word); only M-146-2, the guard's removal, defends this arm.
     lane::fpenv::in_canonical_fp_environment()
 }
 

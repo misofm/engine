@@ -74,7 +74,9 @@ cheaply anyway), and no shared state or atomic is introduced, so no loom model a
 - One-time no-bit-moved comparison against base (PR evidence, not a committed test).
 
 ## Evidence (attempt 1)
-**Red on base** (base `8147ab6b8` plus only the test seam and the test):
+**Red on base** (base `8147ab6b8` plus only the test seam and the test; the seam routed the
+base's first-block call through `canonical_fp_env_in_effect`, leaving its `fp_env_attested`
+cache in place):
 ```
 assertion `left == right` failed: a render on a thread whose canonical word did not take was not re-attested
   left: (0, "")
@@ -106,3 +108,13 @@ both print `words=3072 fnv=67a5c0b1a441e4e7 leak=0x0` for both words.
 fmt, doc, workspace policy, lane policy, C ABI check (shared and static) and `realtime_policy`
 (298 marked regions in 48 files): clean. Not run locally: AArch64 targets (not installed); CI's
 cross-target leg covers them.
+
+## Verdict (attempt 1)
+Sol: **PASS**, with two minors, folded in the same branch after a merge of main (`8e76a1ae3`).
+The per-block attestation, its cost and the `#[cfg(test)]` seam are accepted; the ABI and
+rejection order are unchanged.
+- `canonical_fp_env_in_effect` now says that replacing its real readback with `true` survives
+  every test by construction (conforming hardware always reads back the canonical word), so only
+  M-146-2 defends that arm.
+- The evidence above now says the red-on-base reproduction routed the base's first-block call
+  through `canonical_fp_env_in_effect`.
