@@ -17,7 +17,7 @@ This is the bounded successor to #2280 (tracker #2258, GR-1). #2280 stopped unde
    - Regenerate the fixtures with `cargo run -p graph-compiler --bin graph_fixture -- --write` under the pinned AVX2 flags, commit them, and record the per-fixture byte deltas.
 2. **The `Unmuting -> Muted` transition gets a test.**
    - Mutant F5 survives: in `mute_channel`'s no-op check (~3481 on the branch), `phase.muted() == muted` becomes `phase.gain_held() == muted`. A mute during an unmute ramp then returns early, and the strip stays audible while the model says muted.
-   - Add, inside `lane_state`'s existing tests (no sibling test): unmute over 64 frames, then mute with window 0 and with a window. Assert `is_muted == Some(true)` and an exact `+0.0` block once the mute lands. Do the same for a mute during an opening fire's fade-in.
+   - Add, inside `lane_state`'s existing tests (no sibling test): unmute over 64 frames, then mute with window 0 and with a window. Assert `is_muted == Some(true)` and an exact `+0.0` block once the mute lands. A mute during an opening fire's fade-in was tested the same way in attempts 1 and 2. Attempt 3 folds it away under "one test per claim": it goes through the same `Unmuting -> Muted` transition and kills no mutant on its own.
    - F5 must go red.
 3. **The per-channel lane carry gets a test** (added by attempt 1's review).
    - #2280 rewrote `export_lane` and `import_lane`. No test carries a lane whose two channels differ, so four mutants survive:
@@ -126,3 +126,23 @@ Test value: an export or import that takes one channel's phase or countdown for 
 - Realtime policy: ok (298 marked regions in 48 files).
 
 **Spec hygiene.** #2280's spec is deleted. It was never on `main`, and its text is kept at `f82131236`.
+
+**Attempt 2 verdict: PASS** (head `448a9df74`). Only minor findings remained, and they are folded in attempt 3 below.
+
+### Attempt 3 (fold)
+
+- **One test per claim.** I deleted the mute-during-fade-in rows from `an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` and removed their clause from that test's doc comment.
+  - They kill no mutant on their own. F5, P4 and the G-series are red in `an_unmute_holds_the_gain_only_while_its_countdown_runs` and in the carry test.
+  - The `Unmuting -> Muted` claim is now tested once, in the unmute test.
+- **Merge.** `origin/main` had no new commits since `8e76a1ae3`, so the merge was a no-op.
+- **Gates.**
+  - `cargo test --locked -p builtins --features test-support`: 160 passed, 0 failed.
+  - clippy `-D warnings` (builtins, all targets and features): clean.
+  - `cargo fmt --check`: clean.
+  - Workspace policy: ok.
+
+## Follow-ups
+
+These are recorded, not fixed here.
+- **H7 (equivalent mutant):** `import_lane` writes the `ramp[channel].remaining` f32 word, but nothing ever reads it, because `process_plane` rebuilds it from the authoritative `u32` countdown. A later cleanup could drop the write.
+- **H13 (lane-index gap):** a mutant whose export takes `fader_gain` from lane 0 survives the builtins suite, because the carry tests always export from lane 0. This gap predates this issue.
