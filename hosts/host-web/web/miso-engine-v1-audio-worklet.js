@@ -136,6 +136,12 @@ function exactFields(value, fields) {
   return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
 }
 
+/// The planes a refusal of `message` hands back to the page (undefined: none), so a source's
+/// transferred planes are never lost with a refused request.
+function returnedPlanes(message) {
+  return Array.isArray(message?.planes) ? message.planes : undefined;
+}
+
 function u32(value) {
   return Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
 }
@@ -292,21 +298,33 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.receiveWorkerMode(event.data);
         return;
       }
+      const message = event.data;
+      // The request ID the steps after `receive` report an error to; undefined until `receive`
+      // has answered the message.
+      let requestId;
       try {
-        this.receive(event.data);
-        this.rebindMemoryViews();
+        this.receive(message);
         // A service tick is no request: an error it finds belongs to none, never to the last
         // request the page already saw answered.
-        const requestId = event.data?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
+        requestId = message?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
+        this.rebindMemoryViews();
         this.serviceControl(requestId);
         this.rebindMemoryViews();
         this.pushWatermark(requestId);
         this.drainControlEvents(requestId);
-      } finally {
         this.rebindMemoryViews();
         // A command may have committed a replacement plan, whose frame is sized for its strips:
         // its views are cut here, before any quantum can adopt it (#1290d1).
-        this.syncMeterViews();
+        this.syncMeterViews(requestId);
+      } catch (_) {
+        // Issue #2291: a throw inside `receive` is answered to the in-flight request, with its
+        // planes, which no reply has carried away. The throw nearly always comes before that
+        // request's reply. The one exception is the re-cut of the views after `receiveControl`
+        // posted its reply; the page then holds a second answer to an answered request, and it
+        // fails on that too. A throw after `receive` is reported to the steps' request ID, with
+        // no planes: a source's went back with its acknowledgement.
+        if (requestId === undefined) this.trap(this.lastRequestId, returnedPlanes(message));
+        else this.trap(requestId);
       }
     };
     try {
@@ -562,7 +580,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       if (message?.tag === "miso.control-port.v1" && exactFields(message, ["tag", "port"])
           && typeof message.port?.postMessage === "function") {
         this.controlPort = message.port;
-        this.controlPort.onmessage = (event) => this.receiveControlPlane(event.data);
+        // Issue #2291: a throw from the Worker's port answers no page request; the page hears of
+        // it as of a render failure, with request ID 0.
+        this.controlPort.onmessage = (event) => {
+          try {
+            this.receiveControlPlane(event.data);
+          } catch (_) {
+            this.trap(0);
+          }
+        };
         // Issue #1387 (S11): the address of this render half's status record; the Worker's PCM
         // feed drain reads its rendered quanta there as its render clock (shared memory, no call).
         if (this.phase === PHASE_LIVE && this.statusView !== undefined) {
@@ -586,9 +612,17 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0);
       return;
     }
-    this.receive(message);
-    this.rebindMemoryViews();
-    this.syncWorkerMeterViews();
+    // Issue #2291: as in `single` mode, a throw inside `receive` is answered to its request; one
+    // after the answer belongs to no request in this mode (#1332 S8), request ID 0.
+    let answered = false;
+    try {
+      this.receive(message);
+      answered = true;
+      this.rebindMemoryViews();
+      this.syncWorkerMeterViews();
+    } catch (_) {
+      this.trap(answered ? 0 : this.lastRequestId);
+    }
   }
 
   /// A message from the control Worker (D7): the meter view of a committed plan (R-S7-meters 2),
@@ -824,34 +858,37 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// switch for, a lease released across it, is picked up here), and the pending set follows the
   /// header the active one names as its successor: the replacement plan a command just committed,
   /// whose views are cut now so the quantum that adopts it only switches to them. A header or
-  /// frame the module's memory cannot hold is a protocol fault, sticky.
-  syncMeterViews() {
+  /// frame the module's memory cannot hold is a protocol fault, sticky, reported to `requestId`:
+  /// the steps' request ID, so a fault found on a service tick belongs to no request (#2291). Both
+  /// faults (the active header's and the successor's) leave through this one report.
+  syncMeterViews(requestId = this.lastRequestId) {
     if (!this.metersAttached || this.phase !== PHASE_LIVE) return;
+    if (!this.cutLiveMeterSets()) this.sticky(RESULT_INTERNAL, requestId);
+  }
+
+  /// `syncMeterViews`' cut: whether the active and pending sets now follow the host's headers
+  /// (`false`: a header or frame the module's memory cannot hold).
+  cutLiveMeterSets() {
     this.rebindMemoryViews();
     const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0;
     let active = this.meterSet;
     if (active === null || active.headerPointer !== current) {
       active = this.cutMeterSet(current);
-      if (active === null) {
-        this.sticky(RESULT_INTERNAL, this.lastRequestId);
-        return;
-      }
+      if (active === null) return false;
       this.meterSet = active;
       this.pendingMeterSet = null;
     }
     const successor = active.header.getUint32(METER_HEADER_SUCCESSOR_POINTER, true);
     if (successor === 0) {
       this.pendingMeterSet = null;
-      return;
+      return true;
     }
     if (this.pendingMeterSet === null || this.pendingMeterSet.headerPointer !== successor) {
       const pending = this.cutMeterSet(successor);
-      if (pending === null) {
-        this.sticky(RESULT_INTERNAL, this.lastRequestId);
-        return;
-      }
+      if (pending === null) return false;
       this.pendingMeterSet = pending;
     }
+    return true;
   }
 
   /// Bind every live-control view and preallocate every frame the render callback posts.
@@ -1050,6 +1087,22 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.port.postMessage(message, this.transferList(planes));
   }
 
+  /// Issue #2291: contain a throw that escaped a message handler. Each handler entry that reaches
+  /// an export catches here: the page's port in both modes, the control Worker's port, and the SDK
+  /// PCM feed prelude's attach port (its `prepare-seek`, which calls `trap(0)`). No export a
+  /// handler calls can throw past it. `process()` contains its render call itself, and
+  /// `receiveDispose` and the releases contain theirs. A throw is a trap: the handler cannot tell one from its own fault (V8
+  /// reports a Wasm stack overflow as a `RangeError`, and a JavaScript exception thrown through Wasm
+  /// frames is not a `WebAssembly.RuntimeError`), and its own code throws only on a module fault,
+  /// after which it cannot vouch for the instance's memory either. So the instance fails sticky and
+  /// trapped (#2256): no export runs on it again, and its dispose (or release) is answered without
+  /// one. The answer is the typed 255 to `requestId`, with the request's `planes` when it had not
+  /// been answered.
+  trap(requestId, planes) {
+    this.fail(RESULT_INTERNAL, true);
+    this.sticky(RESULT_INTERNAL, requestId, planes);
+  }
+
   /// Issue #1381a D5, D6: one control-plane service step. It commits and acknowledges nothing, so a
   /// success posts nothing; an epoch failure is sticky. Its allocations and frees are the
   /// instance's control allocations, which the status reports.
@@ -1141,9 +1194,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // The main realm's service tick carries no request ID: it is not a request, so it takes no
     // place in the request sequence and gets no reply. The step itself runs after this handler.
     if (message?.tag === "miso.service.v1" && exactFields(message, ["tag"])) return;
-    const returnedPlanes = Array.isArray(message?.planes) ? message.planes : undefined;
+    const planes = returnedPlanes(message);
     if (!Number.isSafeInteger(message?.requestId) || message.requestId <= this.lastRequestId) {
-      this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
+      this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, planes);
       return;
     }
     this.lastRequestId = message.requestId;
@@ -1152,7 +1205,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return;
     }
     if (this.phase === PHASE_FAILED) {
-      this.sticky(this.failureCode, message.requestId, returnedPlanes);
+      this.sticky(this.failureCode, message.requestId, planes);
       return;
     }
     this.rebindMemoryViews();
@@ -1232,7 +1285,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         meterFramesSkipped: this.meterFramesSkipped,
       });
     } else {
-      this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
+      this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, planes);
     }
   }
 
