@@ -227,7 +227,7 @@ than "the gate is an assertion" and the reader should know which one this is.
 
 The compressor's `silent_fixed_point` design (#163 phase 4 item 1) at a kernel whose rest state is
 not all zeros. `LimiterCore::process_block` admits a block when the claim stands, no ramp window is
-open, the bypass flag has not moved and both input planes are exactly `+0.0`; it earns the claim
+open and both input planes are exactly `+0.0`; it earns the claim
 back from a block that *ran* and left both channels at `clear_runtime`'s documented rest state with
 an all-`+0.0` output. A skipped block advances the two cursors and each lane's van Herk phase and
 touches nothing else, which makes it bit-identical to the block that ran rather than merely
@@ -284,14 +284,15 @@ that is about to replace a whole block of rendering, and they make `is_at_silent
 transcription of `clear_runtime` rather than a subset of it that has to be re-derived every time the
 release law changes.
 
-### One leg that is inert today
+### The deleted bypass leg (#2320)
 
-`SilentClaim::bypass_held` (then `self.silent_bypass == self.coefficients.bypass`) turns nothing red, and cannot: `bypass` is fixed at
-preparation and there is no path that changes it, so the recorded bypass is always equal to it. It is
-kept for parity with `compressor` and `parametric-eq`, which carry the same
-leg for the same reason, and because it is the leg that becomes load-bearing the day bypass becomes
-a per-block flag — at which point every standing claim would otherwise silently survive a change of
-kernel arm. One bool compare per block is not where this crate's ceremony budget goes.
+The claim used to record the bypass it was settled under and refuse a block whose bypass differed
+(`SilentClaim::bypass_held`, earlier `self.silent_bypass == self.coefficients.bypass`). No mutation
+could turn it red: `bypass` is fixed at preparation and nothing writes it, so the recorded value
+always equalled it. #2320 deleted the word and the leg, here and in `compressor`. The argument for
+keeping it, that it becomes load-bearing the day bypass becomes a per-block flag, does not hold
+either: at rest both arms of the output `select` write the same `+0.0` (`delayed` is `+0.0`), and
+the rings advance on both, so the rest state is a fixed point under either arm.
 
 `LimiterCore::reset` withdraws the claim and that turns nothing red either, for a different and
 weaker reason: both resets land on `clear_runtime`, which *is* the rest state the claim describes,

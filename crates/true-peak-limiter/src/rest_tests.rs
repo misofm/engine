@@ -541,7 +541,6 @@ pub(super) fn bank_state_words<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
         core.cursors.ring,
         u32::from(core.gain_linked),
         u32::from(core.silent.proved()),
-        u32::from(core.silent.bypass()),
     ]);
     out
 }

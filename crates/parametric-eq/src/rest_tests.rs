@@ -174,7 +174,7 @@ impl<L: Lane, const W: usize> Probe for EqProbe<L, W> {
     fn fork(&self) -> Self {
         let mut eq = copy_bank(&self.eq);
         // Withdrawn: the check's block runs the whole kernel.
-        eq.silent_fixed_point = false;
+        eq.silent.withdraw();
         Self {
             eq,
             frames: self.frames,
@@ -198,7 +198,7 @@ fn copy_bank<L: Lane, const W: usize>(
         left: copy_channel(&eq.left),
         right: copy_channel(&eq.right),
         active: eq.active,
-        silent_fixed_point: eq.silent_fixed_point,
+        silent: eq.silent,
         collapsed: eq.collapsed,
         rest: eq.rest.clone(),
     }
@@ -330,7 +330,7 @@ fn a_lane_the_eq_bank_calls_at_rest_stays_there_on_a_silent_block() {
 /// per channel, the identity flags and dry masks; and the bank's fixed-point witness. The rest
 /// planes are scratch and `initial`, `initial_words` and `active` are prepare-time constants.
 fn bank_words<L: Lane, const W: usize>(eq: &PreparedParametricEq<L, W>) -> Vec<u32> {
-    let mut out = vec![u32::from(eq.silent_fixed_point)];
+    let mut out = vec![u32::from(eq.silent.proved())];
     for channel in [&eq.left, &eq.right] {
         for lane in 0..W {
             let mut words = [0_u32; STATE_LANE_WORDS];
@@ -414,7 +414,7 @@ fn clocks_advance_as_a_zero_block<L: Lane, const W: usize>(label: &str) {
             }
         }
         // Withdrawn, so the first block runs the kernel over these counters.
-        eq.silent_fixed_point = false;
+        eq.silent.withdraw();
         let mut twin = copy_bank(eq);
         zero_blocks_match(&mut rng, eq, &mut twin, 24, &format!("{label} differing"));
         // A lane outside the mask keeps its counters; a lane inside it advances.
@@ -644,5 +644,164 @@ fn a_directly_copied_eq_lane_is_the_payload_round_trip() {
             let seed = 0x2229_0101 + seed * 0x9e37;
             swap_probe::check_copy(&mut EqSwapProbe::<L, W>::new(seed), seed);
         }
+    });
+}
+
+/// Whether `eq`'s silent claim stands.
+#[cfg(debug_assertions)]
+fn claim_stands<L: Lane, const W: usize>(eq: &PreparedParametricEq<L, W>) -> bool {
+    eq.silent.proved()
+}
+
+/// A bank of random members, prepared at rest, whose first `+0.0` block earns its silent claim.
+#[cfg(debug_assertions)]
+fn resting_bank<L: Lane, const W: usize>() -> PreparedParametricEq<L, W> {
+    let mut rng = Rng(0x2320_0002 ^ W as u64);
+    let mut eq = probe::<L, W>(&mut rng, false, 128).eq;
+    let frames = eq.quantum() as usize;
+    let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
+    process(&mut eq, &mut left, &mut right, frames);
+    assert!(claim_stands(&eq), "W{W}: the claim stands");
+    eq
+}
+
+/// Moves lane 0's first integrator of `channel`'s first section off its `+0.0` rest without
+/// withdrawing the claim.
+#[cfg(debug_assertions)]
+fn plant_integrator<L: Lane, const W: usize>(channel: &mut Channel<L, W>) {
+    let mut words = [0.0_f32; MAX_LANES];
+    channel.sections[0].state.ic1.store(&mut words[..L::WIDTH]);
+    words[0] = 0.5;
+    channel.sections[0].state.ic1 = L::load(&words[..L::WIDTH]);
+}
+
+/// Renders one `+0.0` block through the dual (`mono == false`) or the collapsed body and requires
+/// it to panic with the claim-implies-scan assertion.
+#[cfg(debug_assertions)]
+fn refuses_stale_claim<L: Lane, const W: usize>(
+    arm: &str,
+    mut eq: PreparedParametricEq<L, W>,
+    mono: bool,
+) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let frames = eq.quantum() as usize;
+    let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        if mono {
+            let offsets = vec![0_u32; W + 1];
+            let block = EffectBankProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                frames as u32,
+                BankWidth::for_lanes(W).expect("a bank width"),
+                0,
+                &[],
+                &offsets,
+                eq.quantum(),
+            )
+            .expect("a bank block");
+            eq.process_bank_mono(block);
+        } else {
+            process(&mut eq, &mut left, &mut right, frames);
+        }
+    }));
+    let Err(payload) = outcome else {
+        panic!("W{W} {arm}: a stale claim was believed");
+    };
+    let message = payload
+        .downcast::<String>()
+        .map(|message| *message)
+        .unwrap_or_default();
+    assert!(
+        message.contains("a standing silent claim the rest scan refutes"),
+        "W{W} {arm}: {message}"
+    );
+}
+
+/// **A claim the rest scan refutes is caught where it is trusted** (issue #2320).
+///
+/// Each arm brings a bank to rest with its silent claim standing, then moves one integrator of
+/// lane 0 off rest *without* withdrawing the claim, as a future between-block writer that forgot
+/// to withdraw it would, and renders a `+0.0` block: the dual body with the word on the right
+/// channel, the collapsed body with it on the left. The quiet test reads no integrator, so the
+/// fast path would cut the lane's tail and move bits; in debug builds each body must refuse with
+/// the claim-implies-scan assertion instead.
+///
+/// Test value: deleting or weakening the assertion on either body (for instance scanning only the
+/// left channel on the dual one) turns this red; every other test that plants an off-rest word
+/// withdraws the claim by hand, so none exercises a stale claim.
+#[cfg(debug_assertions)]
+#[test]
+fn a_stale_silent_claim_is_refused_where_it_is_trusted() {
+    lane::each_vector_lane!(|L, W| {
+        let mut eq = resting_bank::<L, W>();
+        plant_integrator(&mut eq.right);
+        refuses_stale_claim("dual fast path", eq, false);
+
+        let mut eq = resting_bank::<L, W>();
+        plant_integrator(&mut eq.left);
+        refuses_stale_claim("collapsed fast path", eq, true);
+    });
+}
+
+/// Restores lane 0 of `into` from `from`'s lane 0 payload through the contract's payload calls.
+#[cfg(debug_assertions)]
+fn restore_lane_zero(
+    into: &mut dyn PreparedNativeEffectBank,
+    from: &dyn PreparedNativeEffectBank,
+    sizes: StatePayloadSizes,
+    version: u32,
+) {
+    let total = sizes.total().expect("sizes") as usize;
+    let mut payload = vec![0_u8; total];
+    let (common, rest) = payload.split_at_mut(sizes.common_bytes as usize);
+    let (left, right) = rest.split_at_mut(sizes.left_bytes as usize);
+    from.snapshot_track_state_payload(
+        0,
+        StatePayloadOutput::new(common, left, right, sizes).expect("output"),
+    )
+    .expect("snapshot");
+    let (common, rest) = payload.split_at(sizes.common_bytes as usize);
+    let (left, right) = rest.split_at(sizes.left_bytes as usize);
+    into.restore_track_state_payload(
+        0,
+        version,
+        StatePayloadInput::new(common, left, right, sizes).expect("input"),
+    )
+    .expect("restore");
+}
+
+/// **A restore withdraws a standing claim** (issue #2320): a resting bank whose claim stands takes
+/// an off-rest payload (a donor's lane 0 with one integrator at `0.5`) and renders a `+0.0` block.
+/// The claim must be gone, so the block runs the kernel and the lane's tail rings out; in debug
+/// builds a claim that survived would trip the fast path's claim-implies-scan assertion.
+///
+/// Test value: deleting the withdrawal from the bank's `restore_track_state_payload` turns this
+/// red (#2320 mutation M11, which no other test caught); a stale claim there would cut the
+/// restored tail.
+#[cfg(debug_assertions)]
+#[test]
+fn a_restore_off_rest_withdraws_the_standing_claim() {
+    lane::each_vector_lane!(|L, W| {
+        let mut donor = resting_bank::<L, W>();
+        plant_integrator(&mut donor.left);
+        plant_integrator(&mut donor.right);
+        let mut eq = resting_bank::<L, W>();
+        let sizes = StatePayloadSizes {
+            common_bytes: STATE_SIZES.common as u32,
+            left_bytes: STATE_SIZES.left as u32,
+            right_bytes: STATE_SIZES.right as u32,
+        };
+        restore_lane_zero(&mut eq, &donor, sizes, STATE_LAYOUT_VERSION);
+        assert_eq!(
+            PreparedParametricEq::lanes_at_rest(&eq) & 1,
+            0,
+            "W{W}: the restored lane is off rest"
+        );
+        assert!(!claim_stands(&eq), "W{W}: the restore withdrew the claim");
+        let frames = eq.quantum() as usize;
+        let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
+        process(&mut eq, &mut left, &mut right, frames);
     });
 }

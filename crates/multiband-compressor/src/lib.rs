@@ -54,6 +54,7 @@ use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db, knee_coefficient
 use effect_runtime::envelope::retention_coefficient;
 use effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
 use effect_runtime::ramp::LinearRamp;
+use effect_runtime::silent::SilentClaim;
 use effect_runtime::state_payload::{
     STATE_LENGTH_CODE, STATE_VERSION_CODE, ramp_path_inside, read_f32, read_ramp, read_u32,
     write_f32, write_ramp, write_u32,
@@ -2398,7 +2399,8 @@ struct PreparedMultibandCompressorBank<L: Lane, const W: usize> {
     /// The prepared state payload sizes, read by `snapshot_track_state_payload`.
     state_sizes: StatePayloadSizes,
     instance: Instance<L, W>,
-    /// Issue #893: the bank is at a silent fixed point. Earned at the end of a rendered block
+    /// Issue #893: the bank is at a silent fixed point ([`SilentClaim`], #2320, checked against
+    /// the scan where the fast path trusts it in debug builds). Earned at the end of a rendered block
     /// whose input was exact `+0.0` with no ramp in flight, when every lane is at rest
     /// ([`Side::rest_lanes`]) on both channels, or by [`advance_clocks`] over the whole bank;
     /// withdrawn by every automation block, reset and restore. While it stands, the next quiet
@@ -2408,7 +2410,7 @@ struct PreparedMultibandCompressorBank<L: Lane, const W: usize> {
     /// reaches this kernel, #1340), so the claim never spans two kernel paths.
     ///
     /// [`advance_clocks`]: PreparedNativeEffectBank::advance_clocks
-    silent_fixed_point: bool,
+    silent: SilentClaim,
 }
 
 /// The mask with every lane of a `W`-lane bank set.
@@ -2670,7 +2672,7 @@ fn prepare_bank<L: Lane, const W: usize>(
             automation_capacity: metadata.automation_capacity,
             state_sizes: metadata.state_sizes,
             instance,
-            silent_fixed_point: false,
+            silent: SilentClaim::new(),
         }),
         metadata: PreparedBankMetadata {
             width: request.width,
@@ -2833,7 +2835,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         if lane >= W {
             return;
         }
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         self.instance.reset_lane(lane, kind);
     }
     // REALTIME_POLICY_END
@@ -2854,7 +2856,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         self.instance.reset(kind);
     }
 
@@ -2868,7 +2870,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     /// ([`Side::rest_lanes`]). A masked lane takes `min(run + frames, 2^24)` on both channels (on
     /// the left alone on a collapsed bank, #1894), which is what a rendered `+0.0` block leaves; a
     /// prepared bypass freezes the counters, so it advances nothing. A rendered quiet block after
-    /// which every lane is at rest earns `silent_fixed_point`, so a mask that covers the whole bank
+    /// which every lane is at rest earns the silent claim, so a mask that covers the whole bank
     /// earns it too.
     fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
         let bank = all_lanes::<W>();
@@ -2880,9 +2882,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
             "a lane not at rest"
         );
         self.instance.advance_silence(bits, frames as usize);
-        if bits == bank {
-            self.silent_fixed_point = true;
-        }
+        self.silent.settle_skipped(bits == bank);
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
@@ -2900,7 +2900,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
         let accepted = self.instance.retarget_link(track, mode, samples);
         if accepted {
-            self.silent_fixed_point = false;
+            self.silent.withdraw();
         }
         accepted
     }
@@ -2939,7 +2939,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, W, self.instance.active)?;
         // A restore can write any state word, so the claim goes whatever the result.
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         self.instance.restore(track, state_layout_version, input)
     }
     // REALTIME_POLICY_END
@@ -2975,7 +2975,7 @@ impl<L: Lane, const W: usize> PreparedMultibandCompressorBank<L, W> {
         // An automation span can start a ramp or move a word; the next settled quiet block
         // re-earns the claim.
         if !block.automation.is_empty() {
-            self.silent_fixed_point = false;
+            self.silent.withdraw();
         }
         for track in 0..W {
             // The planner gives a padded lane no span; one that arrives is not its to apply.
@@ -3003,7 +3003,16 @@ impl<L: Lane, const W: usize> PreparedMultibandCompressorBank<L, W> {
             && block_is_positive_zero(&block.left[..words])
             && (MONO || block_is_positive_zero(&block.right[..words]));
         let sides = if MONO { 1 } else { 2 };
-        if quiet && self.silent_fixed_point {
+        // #2320: the claim is trusted here, so a stale one is caught here, on the sides the claim
+        // was earned on: the left alone while collapsed.
+        let scan = || {
+            if MONO {
+                self.instance.sides[0].rest_lanes()
+            } else {
+                self.instance.lanes_at_rest()
+            }
+        };
+        if quiet && self.silent.trusted(scan, all_lanes::<W>()) {
             // Every lane is at rest and the planes already hold the `+0.0` the kernel would
             // write; the kernel would move no word but the silence counters, and no lane fails
             // the boundary check on `+0.0`.
@@ -3023,7 +3032,7 @@ impl<L: Lane, const W: usize> PreparedMultibandCompressorBank<L, W> {
         } else {
             self.instance.lanes_at_rest()
         };
-        self.silent_fixed_point = quiet && at_rest == all_lanes::<W>();
+        self.silent = SilentClaim::settled(quiet, || at_rest, all_lanes::<W>());
         report
     }
 }

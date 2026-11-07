@@ -59,6 +59,7 @@ use effect_contract::{
 };
 use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
+use effect_runtime::silent::SilentClaim;
 use lane::{Backend, Lane};
 
 use crate::design::{COEF_COUNT, MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS, RAMP_COUNT};
@@ -655,21 +656,19 @@ struct Instance<L: Lane> {
     state_sizes: StatePayloadSizes,
     left: Channel<L>,
     right: Channel<L>,
-    /// Issue #163 phase 4 item 1: the instance is at a silent fixed point. Earned at the end of a
-    /// quiet block in [`render`](Self::render) when every lane is at exact rest
-    /// ([`lanes_at_rest`](Self::lanes_at_rest), issue #1745), never assumed, and withdrawn by
-    /// every target, automation, reset and restore. See the matching field on `parametric-eq`
-    /// for the induction it licenses.
-    silent_fixed_point: bool,
+    /// Issue #163 phase 4 item 1: the instance is at a silent fixed point ([`SilentClaim`],
+    /// #2320). Earned at the end of a quiet block in [`render`](Self::render) when every lane is
+    /// at exact rest ([`lanes_at_rest`](Self::lanes_at_rest), issue #1745), never assumed, and
+    /// withdrawn by every target, automation, reset and restore. See the matching field on
+    /// `parametric-eq` for the induction it licenses. The prepared bypass is fixed at preparation,
+    /// so a claim never spans two kernel paths.
+    silent: SilentClaim,
     /// Whether a collapsed block ([`render_mono`](Self::render_mono)) has rendered since the last
     /// disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894). While
     /// it is set the right channel is frozen and stale, so [`lanes_at_rest`](Self::lanes_at_rest)
     /// reads the left channel alone: the effect contract's collapsed-bank rule. The compressor has
     /// no clocks, so nothing else reads it.
     collapsed: bool,
-    /// The bypass flag in force when the claim above was earned. Bypass selects a different path
-    /// through the kernel, so a claim earned on one side of it says nothing about the other.
-    silent_bypass: bool,
 }
 
 impl<L: Lane> Instance<L> {
@@ -690,9 +689,8 @@ impl<L: Lane> Instance<L> {
             state_sizes: metadata.state_sizes,
             left: Channel::new(left_defaults, metadata.sample_rate),
             right: Channel::new(right_defaults, metadata.sample_rate),
-            silent_fixed_point: false,
+            silent: SilentClaim::new(),
             collapsed: false,
-            silent_bypass: metadata.bypass,
         };
         instance.rest_links();
         instance
@@ -727,14 +725,14 @@ impl<L: Lane> Instance<L> {
         self.left.retarget_link(lane, mode, samples);
         self.right.retarget_link(lane, mode, samples);
         // A glide moves the detector, so a silent claim earned under the old law goes.
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         true
     }
     // REALTIME_POLICY_END
 
     fn reset(&mut self, kind: ResetKind) {
         // A reset changes the recursive word and ramps, so any silent fixed-point claim goes.
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         let rate = self.sample_rate;
         match kind {
             ResetKind::FullToDefaults => {
@@ -760,7 +758,7 @@ impl<L: Lane> Instance<L> {
         if lane >= L::WIDTH {
             return;
         }
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         let rate = self.sample_rate;
         match kind {
             ResetKind::FullToDefaults => {
@@ -797,17 +795,19 @@ impl<L: Lane> Instance<L> {
         //   observed block used;
         // * the detector is the main input rather than a connected sidechain, so there is no
         //   second buffer whose contents could differ from the block that was observed;
-        // * the bypass flag is the one that was in force when the claim was earned, since it
-        //   selects a different path through the kernel;
         // * both input planes are exactly `+0.0`, which is the only input for which a settled
         //   causal compressor can skip the kernel while preserving output and state bits.
+        //
+        // The bypass flag is fixed at preparation, so it cannot differ from the block that earned
+        // the claim (#2320 deleted the record of it, which was always equal).
         let quiet = self.left.max_remaining() == 0
             && self.right.max_remaining() == 0
             && matches!(detector, Detector::Main | Detector::Silent)
-            && self.silent_bypass == self.bypass
             && block_is_positive_zero(&left[..words])
             && block_is_positive_zero(&right[..words]);
-        if quiet && self.silent_fixed_point {
+        // #2320: the claim is trusted here, so a stale one is caught here.
+        let every = all_lanes::<L>();
+        if quiet && self.silent.trusted(|| self.lanes_at_rest(), every) {
             // Every lane is at its exact rest and the buffers already hold the `+0.0` the
             // current-sample kernel would write, so the whole block is bit-identical to the slow
             // path. There is no history cursor to advance.
@@ -825,12 +825,11 @@ impl<L: Lane> Instance<L> {
             self.sample_rate,
             (&mut self.left, &mut self.right),
         );
-        self.silent_bypass = self.bypass;
         let left_mask = finish_lanes::<L>(left, &mut self.left);
         let right_mask = finish_lanes::<L>(right, &mut self.right);
         // Earn or lose the claim from the state the block left (issue #1745): every lane of both
         // channels at its exact rest.
-        self.silent_fixed_point = quiet && self.lanes_at_rest() == all_lanes::<L>();
+        self.silent = SilentClaim::settled(quiet, || self.lanes_at_rest(), every);
         if left_mask | right_mask == 0 {
             return;
         }
@@ -862,9 +861,9 @@ impl<L: Lane> Instance<L> {
         let words = frames * L::WIDTH;
         let quiet = self.left.max_remaining() == 0
             && matches!(detector, Detector::Main | Detector::Silent)
-            && self.silent_bypass == self.bypass
             && block_is_positive_zero(&left[..words]);
-        if quiet && self.silent_fixed_point {
+        let every = all_lanes::<L>();
+        if quiet && self.silent.trusted(|| self.left.rest_lanes(), every) {
             #[cfg(test)]
             admitted_silent();
             return;
@@ -878,11 +877,10 @@ impl<L: Lane> Instance<L> {
             self.sample_rate,
             &mut self.left,
         );
-        self.silent_bypass = self.bypass;
         let left_mask = finish_lanes::<L>(left, &mut self.left);
         // The collapsed claim reads the left channel only: the right one is frozen at the
         // collapse, and the counterfactual right channel is the left one.
-        self.silent_fixed_point = quiet && self.left.rest_lanes() == all_lanes::<L>();
+        self.silent = SilentClaim::settled(quiet, || self.left.rest_lanes(), every);
         if left_mask == 0 {
             return;
         }
@@ -969,7 +967,7 @@ impl<L: Lane> Instance<L> {
         // rendered, so any standing claim is void. Withdrawn only here, after the commit: a
         // refused restore returns above without writing a word, so the claim it leaves is as
         // true as it was (a write-free refusal, #1747).
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         Ok(())
     }
 
@@ -996,7 +994,7 @@ impl<L: Lane> Instance<L> {
             self.left.rest_link(lane, own);
             self.right.rest_link(lane, own);
         }
-        self.silent_fixed_point = false;
+        self.silent.withdraw();
         debug_assert!(
             state::words_are_designed(&self.left, lane, self.sample_rate)
                 && state::words_are_designed(&self.right, lane, self.sample_rate),
@@ -1152,8 +1150,7 @@ const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4 + 4;
 /// * `defaults[l][p]` -- the control-plane reset values. They are not read by the kernel; a
 ///   `FullToDefaults` reset that made the channels disagree would show up in `words` and `ramps`
 ///   immediately, which is where the witness sees it.
-/// * `links`, `bypass`, `sample_rate`, `silent_fixed_point`,
-///   `silent_bypass` -- whole-instance or per-channel-shared (a lane's link law is the same on
+/// * `links`, `bypass`, `sample_rate`, `silent` -- whole-instance or per-channel-shared (a lane's link law is the same on
 ///   both channels), so they cannot be asymmetric. The link is the reason the seam sits where it does, not a thing that breaks it:
 ///   on identical planes the collapsed kernel computes the link on the one plane read twice, in
 ///   the original operation order.
@@ -1488,7 +1485,7 @@ impl PreparedNativeEffect for PreparedCompressor {
             return Err(ParameterAccessError::InvalidValue);
         }
         let value = normalize_zero(value);
-        self.instance.silent_fixed_point = false;
+        self.instance.silent.withdraw();
         let channel = if lane == 0 {
             &mut self.instance.left
         } else {
@@ -1539,7 +1536,7 @@ impl PreparedNativeEffect for PreparedCompressor {
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         // #163 phase 4 item 1, as in `process_bank`.
         if !block.automation.is_empty() {
-            self.instance.silent_fixed_point = false;
+            self.instance.silent.withdraw();
         }
         let mut report = ProcessReport::default();
         apply_automation(
@@ -1632,13 +1629,13 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
 
     /// The compressor has no clocks (issue #1747; see `kernel::Channel::rest_lanes`), so a
     /// skipped block moves no state word or payload word. It overrides the default only for the
-    /// bank flag `silent_fixed_point`: a rendered `+0.0` block after which every lane, padded
-    /// lanes included, is at rest earns it (the bank always detects on the main input, and the
-    /// prepared bypass is the one the claim records), so a mask that covers the whole bank sets
-    /// it too, as the EQ's does. The contract's caller skips a bank whole; a partial mask leaves
-    /// the flag to the render of the other lanes. No output bit and no payload word reads the
-    /// flag: it only lets a later `+0.0` block take the fast path, which renders the same bits as
-    /// the kernel would, so no test reads it either.
+    /// bank's silent claim ([`SilentClaim`]): a rendered `+0.0` block after which every lane,
+    /// padded lanes included, is at rest earns it (the bank always detects on the main input, and
+    /// the bypass is fixed at preparation), so a mask that covers the whole bank earns it too, as
+    /// the EQ's does. The contract's caller skips a bank whole; a partial mask leaves the claim to
+    /// the render of the other lanes. No output bit and no payload word reads the claim: it only
+    /// lets a later `+0.0` block take the fast path, which renders the same bits as the kernel
+    /// would.
     fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
         let bank = all_lanes::<L>();
         debug_assert_eq!(lanes_mask & !bank, 0, "a lane past the bank");
@@ -1648,9 +1645,9 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
             0,
             "a lane not at rest"
         );
-        if lanes_mask & bank == bank {
-            self.instance.silent_fixed_point = true;
-        }
+        self.instance
+            .silent
+            .settle_skipped(lanes_mask & bank == bank);
     }
 
     /// One `store` per channel fills every lane: the bank's reduction is one vector.
@@ -1841,7 +1838,7 @@ impl<L: Lane> PreparedCompressorBank<L> {
         // zero -- so the ramp test alone would not notice it. Withdraw the claim whenever this
         // block carries automation at all; the next settled silent block re-earns it.
         if !block.automation.is_empty() {
-            self.instance.silent_fixed_point = false;
+            self.instance.silent.withdraw();
         }
         let active = self.active;
         for track in 0..lanes {
