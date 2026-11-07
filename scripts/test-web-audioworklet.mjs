@@ -2583,6 +2583,8 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     // and the successor header the control half names.
     initTls: [], reserve: [], bind: [], release: [], adopt: [], adoptResult: 0,
     stackPointer: { value: 1048576 }, successorHeader: 0,
+    // Issue #2267: every `session_fail` call, `[handle, result]`.
+    sessionFail: [],
   };
   const watermarkPointer = 66000;
   const seekReportPointer = 66200;
@@ -2809,6 +2811,14 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     miso_engine_web_v1_service: (handle) => {
       calls.service.push(handle);
       return calls.serviceResult;
+    },
+    // Issue #2267: the shared lifecycle word, here the status's state word: `READY` to `FAILED`,
+    // and refused `WRONG_STATE` when it is not ready.
+    miso_engine_web_v1_session_fail: (handle, result) => {
+      calls.sessionFail.push([handle, result]);
+      if (status.getUint32(8, true) !== 2) return 3;
+      status.setUint32(8, 3, true);
+      return 0;
     },
     miso_engine_web_v1_watermark_ptr: () => watermarkPointer,
     miso_engine_web_v1_watermark_read: () => {
@@ -5014,6 +5024,35 @@ async function testControlWorker() {
       tick.callback();
       assert.deepEqual(workletPosts.filter((message) => message.tag === "miso.render-check.v1"),
         [{ tag: "miso.render-check.v1" }], "once per 50 ms");
+    }
+    // Issue #2267: a sticky error this Worker finds in JavaScript fails the session in Rust too:
+    // the first one calls `session_fail`, which stores `STATE_FAILED` in the lifecycle word the
+    // worklet's render half reads before every block, so the worklet stops rendering. Red if a
+    // JavaScript-only sticky error (an out-of-order request ID, an unknown tag, a session map the
+    // engine cannot have written) leaves the word ready; no other row reads the word after one.
+    // A trapped `session_fail` still lets the sticky reply reach the page.
+    for (const [name, prepare, message, result] of [
+      ["an out-of-order request ID", () => {}, { tag: "miso.sessionmap.v1", requestId: 1 }, 1],
+      ["an unknown tag", () => {}, { tag: "miso.unknown.v1", requestId: 2 }, 1],
+      ["an unreadable session map", (fake) => {
+        fake.exports.miso_engine_web_v1_source_count = () => -1;
+      }, { tag: "miso.sessionmap.v1", requestId: 2 }, 255],
+      ["a trapped session_fail", (fake) => {
+        fake.exports.miso_engine_web_v1_session_fail = (...args) => {
+          fake.calls.sessionFail.push(args);
+          throw new Error("trap");
+        };
+      }, { tag: "miso.unknown.v1", requestId: 2 }, 1],
+    ]) {
+      const { send } = await boot();
+      prepare(fake);
+      send({ tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([5]) });
+      assert.deepEqual(fake.calls.sessionFail, [], `${name}: a well-formed request fails nothing`);
+      send(message);
+      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: message.requestId, result },
+        `${name}: the page gets the sticky error`);
+      assert.deepEqual(fake.calls.sessionFail, [[1, result]],
+        `${name}: the session's lifecycle word is failed with the same code`);
     }
     // Issue #1387 (S11): the MSB1 feed drain of `worker` mode runs here, on the service tick and
     // after every message. Red if the tick does not drain, if the block accounting counts ticks

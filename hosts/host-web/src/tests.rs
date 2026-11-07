@@ -1761,6 +1761,65 @@ fn output_mismatch_and_disposal_are_sticky_and_idempotent() {
     assert!(host.output_pcm().is_none());
 }
 
+/// Issue #2267: a failure the control Worker finds in JavaScript reaches the render half on the
+/// other thread through the lifecycle word, and fails nothing a failure or a dispose already ended.
+///
+/// Test value: red if `fail_session` records the failure only in this host's own status (the
+/// shell a release leaves), so the released half keeps rendering; or if it overwrites a recorded
+/// failure's code or a disposed session's state. No other test fails a session from outside the
+/// engine.
+#[test]
+fn a_host_found_failure_silences_the_released_render_half_and_overwrites_nothing() {
+    let mut host = prepared_host(128);
+    let mut render = host.release_render().expect("the render half");
+    assert_eq!(render.render_next(), RESULT_OK);
+    assert_eq!(host.fail_session(RESULT_OK), RESULT_INVALID_ARGUMENT);
+    assert_eq!(
+        host.status().state,
+        STATE_READY,
+        "a zero code fails nothing"
+    );
+
+    assert_eq!(host.fail_session(RESULT_INVALID_ARGUMENT), RESULT_OK);
+    assert_eq!(
+        (host.status().state, host.status().last_result),
+        (STATE_FAILED, RESULT_INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        host.service(),
+        RESULT_WRONG_STATE,
+        "control calls are refused"
+    );
+    render
+        .half
+        .buffers
+        .as_mut()
+        .expect("prepared buffers")
+        .output_pcm
+        .fill(-1.0);
+    assert_eq!(render.render_next(), RESULT_WRONG_STATE);
+    assert_eq!(render.status().state, STATE_FAILED);
+    assert!(
+        render
+            .output_pcm()
+            .expect("prepared output")
+            .iter()
+            .all(|sample| sample.to_bits() == 0),
+        "the released half silences at its next block"
+    );
+
+    assert_eq!(host.fail_session(RESULT_INTERNAL), RESULT_WRONG_STATE);
+    assert_eq!(
+        host.status().last_result,
+        RESULT_INVALID_ARGUMENT,
+        "the first failure keeps its code"
+    );
+    assert!(host.adopt_render(render).is_ok());
+    assert_eq!(host.dispose(), RESULT_OK);
+    assert_eq!(host.fail_session(RESULT_INTERNAL), RESULT_WRONG_STATE);
+    assert_eq!(host.status().state, STATE_DISPOSED);
+}
+
 /// #106 F2. A render failure is sticky, silent, and keeps every allocation alive.
 ///
 /// `PreparedRenderPlan::render` has exactly one failure mode reachable with valid buffers: the

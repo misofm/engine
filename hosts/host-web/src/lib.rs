@@ -2744,6 +2744,29 @@ impl AudioWorkletEngineHost {
         self.record(RESULT_OK)
     }
 
+    /// Fail the session sticky with `code`, for a failure the host found outside the engine
+    /// (#2267): a protocol fault the control Worker detects in JavaScript, such as an
+    /// out-of-order request ID. It is the control half's [`Self::fail`]: the lifecycle word goes
+    /// to [`STATE_FAILED`], so a render half on another thread silences from its next block and
+    /// every later control call is refused [`RESULT_WRONG_STATE`]; the status's last result is
+    /// `code`, and the diagnostic is `web.host.failed`.
+    ///
+    /// Control path. [`RESULT_OK`] once failed; [`RESULT_INVALID_ARGUMENT`] for a zero `code`;
+    /// [`RESULT_WRONG_STATE`] when the session is not ready (failed already, disposed, or no
+    /// control half here). A refusal changes nothing, the last result included, so a failure
+    /// either half recorded first keeps its code and diagnostic, and a disposed session stays
+    /// [`STATE_DISPOSED`].
+    pub fn fail_session(&mut self, code: u32) -> u32 {
+        if code == RESULT_OK {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        if !self.control_ready() {
+            return RESULT_WRONG_STATE;
+        }
+        self.fail(code, b"web.host.failed\t$\n");
+        RESULT_OK
+    }
+
     /// Release the render half to the thread that will render it (#1332 S5, the Rust form of
     /// S6's `host_release`): the plan owner, the meter delivery, the output buffer and the status
     /// it keeps. This host keeps the control half, whose calls from here on touch nothing of the
