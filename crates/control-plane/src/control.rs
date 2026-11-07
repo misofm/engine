@@ -6732,13 +6732,13 @@ where
             });
         }
         if let Some((donor_plan, mut donor)) = superseded {
-            // #1310 D5 step 5: P0 still renders until B is adopted, so every producer A still
-            // holds that P0 holds vacant (a source B removed or redeclared) goes back to P0's
-            // epoch before A drops. Infallible and allocation-free; keyed by source ID.
+            // #1310 D5 step 5: P0 still renders until B is adopted, so every producer P0 handed
+            // A that A still holds (a source B removed or redeclared) goes back to P0's epoch
+            // before A drops. Infallible and allocation-free; keyed by source ID.
             let holder = self
                 .kept_holder_mut()
                 .expect("B succeeds the epoch A succeeded");
-            holder.sources.adopt_persisting(&mut donor.sources);
+            holder.sources.reclaim_from_withdrawn(&mut donor.sources);
             // Step 6: A's plan, provider epoch (with its gate handle) and credit drop here, on the
             // control thread. The credit went back when the plan was taken out.
             drop(ObservedCandidatePlan::returned(donor_plan));

@@ -32,9 +32,8 @@ pub(crate) struct ControlSource {
     channel_count: u32,
     region_start: u64,
     region_end: u64,
-    /// `None` while vacant: the plan was prepared to carry this source's ring from its
-    /// predecessor, and the producer arrives through [`SourceControlSet::adopt_persisting`].
-    provider: Option<HostChunkProvider>,
+    /// Where the ring's producer is (#2258 HC-5).
+    provider: Producer<HostChunkProvider>,
     /// Whether the plan was prepared to carry this source's ring from its predecessor (#2273):
     /// fixed at preparation, whichever producer moves have happened since.
     carried: bool,
@@ -51,6 +50,61 @@ pub(crate) enum PreparedProducer {
     Projected,
     /// A ring of the plan's own, with its producer.
     Fresh(HostChunkProvider),
+}
+
+/// Where one entry's producer is: one source's [`HostChunkProvider`], or the session timeline's
+/// [`TimelineProducer`] (#2258 HC-5).
+///
+/// An entry is *vacant* in every state but [`Self::Owned`], and every call that feeds or reads the
+/// producer refuses a vacant entry with [`SourceControlError::Vacated`]. The states differ in what
+/// may fill the entry: [`SourceControlSet::adopt_persisting`] fills [`Self::Awaiting`] alone, and
+/// [`SourceControlSet::reclaim_from_withdrawn`] fills [`Self::Handed`] alone; nothing fills the
+/// others. Control-thread state: render reads the ring the producer feeds, never this.
+pub(crate) enum Producer<P> {
+    /// The plan carries the ring of the plan before it, and the ring's producer has not arrived:
+    /// the predecessor's set still holds it, or never held one.
+    Awaiting,
+    /// This set holds the producer.
+    Owned(P),
+    /// The producer moved to another set of the session: to a successor's, by its
+    /// [`SourceControlSet::adopt_persisting`], or back from a withdrawn successor's to the set it
+    /// came from, by [`SourceControlSet::reclaim_from_withdrawn`].
+    Handed,
+    /// The producer moved into a successor's fresh entry by a donation ([`apply_donation`]): this
+    /// set belongs to a withdrawn plan and drops with it, so nothing fills the entry again.
+    Donated,
+    /// A projection (#2199): the plan charges the ring without allocating it, so there is no
+    /// producer. A projection's set never leaves its preparation. Sources only: a projection's
+    /// timeline is never prepared and stays [`Self::Awaiting`].
+    Projected,
+}
+
+impl<P> Producer<P> {
+    fn owned(&self) -> Option<&P> {
+        match self {
+            Self::Owned(producer) => Some(producer),
+            _ => None,
+        }
+    }
+
+    fn owned_mut(&mut self) -> Option<&mut P> {
+        match self {
+            Self::Owned(producer) => Some(producer),
+            _ => None,
+        }
+    }
+
+    /// Move the producer out of an [`Self::Owned`] entry, leaving it `left`; any other entry is
+    /// left as it is and gives `None`.
+    fn take_leaving(&mut self, left: Self) -> Option<P> {
+        if !matches!(self, Self::Owned(_)) {
+            return None;
+        }
+        match core::mem::replace(self, left) {
+            Self::Owned(producer) => Some(producer),
+            _ => None,
+        }
+    }
 }
 
 impl ControlSource {
@@ -78,7 +132,7 @@ fn session_refusal(error: SourceSeekError) -> SourceControlError {
 /// with the set's word.
 fn check_session_producers(
     seek: &SessionSeek<'_>,
-    timeline: Option<&TimelineProducer>,
+    timeline: &Producer<TimelineProducer>,
     sources: &[ControlSource],
     timeline_sample: u64,
 ) -> Result<(), SourceControlError> {
@@ -89,16 +143,13 @@ fn check_session_producers(
         }
     };
     seek.check_timeline(
-        timeline.ok_or(SourceControlError::Vacated)?,
+        timeline.owned().ok_or(SourceControlError::Vacated)?,
         timeline_sample,
     )
     .map_err(refused)?;
     for source in sources {
         seek.check_source(
-            source
-                .provider
-                .as_ref()
-                .ok_or(SourceControlError::Vacated)?,
+            source.provider.owned().ok_or(SourceControlError::Vacated)?,
             source.session_frame(timeline_sample),
         )
         .map_err(refused)?;
@@ -152,8 +203,8 @@ pub enum SourceControlError {
     InvalidId,
     /// The source exists but this set holds no producer for it: the set belongs to a successor
     /// plan whose producer has not been handed over yet ([`SourceControlSet::adopt_persisting`]),
-    /// or to a predecessor whose producer has already moved to its successor. Neither
-    /// backpressure nor an engine invariant: the caller feeds the newest set.
+    /// or to a predecessor whose producer has already moved to its successor, by an adoption or a
+    /// donation. Neither backpressure nor an engine invariant: the caller feeds the newest set.
     Vacated,
     /// Every bounded attempt to read the source's seek report landed inside render's publication
     /// of it (#1316 D6): backpressure, the caller reads again.
@@ -236,9 +287,10 @@ impl SourceControlError {
 pub struct SourceControlSet {
     ids: Box<[u8]>,
     sources: Box<[ControlSource]>,
-    /// The session timeline's producer (#1641 D2). `None` while vacant: a successor's, until
-    /// [`Self::adopt_persisting`] moves its predecessor's in, or a predecessor's once moved.
-    timeline: Option<TimelineProducer>,
+    /// The session timeline's producer (#1641 D2). Every successor carries the timeline, so a
+    /// successor's starts [`Producer::Awaiting`] and [`Self::adopt_persisting`] moves its
+    /// predecessor's in; a first plan's is [`Producer::Owned`] from preparation.
+    timeline: Producer<TimelineProducer>,
     /// The session's published seek generation (#1642 B16-R2), which every producer here
     /// publishes to and every plan of the session loads at block entry: the same word in every
     /// set of the session.
@@ -254,21 +306,21 @@ impl SourceControlSet {
         Self {
             ids,
             sources,
-            timeline: None,
+            timeline: Producer::Awaiting,
             published,
         }
     }
 
     /// Give the set its plan's fresh timeline producer (#1641 D2). Preparation only.
     pub(crate) fn set_timeline(&mut self, producer: TimelineProducer) {
-        self.timeline = Some(producer);
+        self.timeline = Producer::Owned(producer);
     }
 
     /// The session timeline's producer, for a test that seeks the timeline directly (#1641
     /// gates). `None` while vacant. A host seeks the timeline with [`Self::seek_session`].
     #[cfg(feature = "test-support")]
     pub fn test_only_timeline_producer(&mut self) -> Option<&mut TimelineProducer> {
-        self.timeline.as_mut()
+        self.timeline.owned_mut()
     }
 
     /// Whether the set's plan carries source `id`'s ring from the plan before it (#1272 D3): fixed
@@ -286,7 +338,7 @@ impl SourceControlSet {
     /// flag is reached through the set that holds the producer. Control thread only; no allocation.
     pub fn set_prime_flags(&self, mut required: impl FnMut(&[u8]) -> bool) {
         for source in &self.sources {
-            if let Some(provider) = source.provider.as_ref() {
+            if let Some(provider) = source.provider.owned() {
                 provider.prime_flag().set(required(self.id(source)));
             }
         }
@@ -323,7 +375,7 @@ impl SourceControlSet {
         let source = &mut self.sources[index];
         let provider = source
             .provider
-            .as_mut()
+            .owned_mut()
             .ok_or(SourceControlError::Vacated)?;
         let end = submission
             .start_frame
@@ -470,23 +522,18 @@ impl SourceControlSet {
         if at_once {
             seek.land_at_once();
         }
-        check_session_producers(
-            &seek,
-            self.timeline.as_ref(),
-            &self.sources,
-            timeline_sample,
-        )?;
+        check_session_producers(&seek, &self.timeline, &self.sources, timeline_sample)?;
         // The source crate pushes unpublished and publishes once, when `seek` drops, whatever
         // the pushes return: a pushed command never stays held in its slot.
         let mut pushed = self
             .timeline
-            .as_mut()
+            .owned_mut()
             .is_some_and(|timeline| seek.push_timeline(timeline, timeline_sample).is_ok());
         for source in &mut self.sources {
             let frame = source.session_frame(timeline_sample);
             pushed &= source
                 .provider
-                .as_mut()
+                .owned_mut()
                 .is_some_and(|provider| seek.push_source(provider, frame).is_ok());
         }
         seek.publish();
@@ -510,12 +557,7 @@ impl SourceControlSet {
             .published
             .session_seek(generation, anchor_sample)
             .map_err(session_refusal)?;
-        check_session_producers(
-            &seek,
-            self.timeline.as_ref(),
-            &self.sources,
-            timeline_sample,
-        )
+        check_session_producers(&seek, &self.timeline, &self.sources, timeline_sample)
     }
 
     /// The session's published seek generation (#1642 B16-R2): the largest generation any seek of
@@ -551,7 +593,7 @@ impl SourceControlSet {
         if id == TIMELINE_SEEK_REPORT_ID {
             return self
                 .timeline
-                .as_ref()
+                .owned()
                 .ok_or(SourceControlError::Vacated)?
                 .seek_report()
                 .map_err(|_| SourceControlError::ReportBusy);
@@ -559,7 +601,7 @@ impl SourceControlSet {
         let index = self.source_index(id)?;
         self.sources[index]
             .provider
-            .as_ref()
+            .owned()
             .ok_or(SourceControlError::Vacated)?
             .seek_report()
             .map_err(|_| SourceControlError::ReportBusy)
@@ -573,7 +615,7 @@ impl SourceControlSet {
         let index = self.source_index(id)?;
         Ok(self.sources[index]
             .provider
-            .as_ref()
+            .owned()
             .ok_or(SourceControlError::Vacated)?
             .admission())
     }
@@ -589,7 +631,7 @@ impl SourceControlSet {
         let source = &mut self.sources[index];
         let provider = source
             .provider
-            .as_mut()
+            .owned_mut()
             .ok_or(SourceControlError::Vacated)?;
         if !(source.region_start..=source.region_end).contains(&frame) {
             return Err(SourceControlError::OutsideRegion);
@@ -618,15 +660,17 @@ impl SourceControlSet {
         Some(source.region_start..source.region_end)
     }
 
-    /// Move into this set the producer of every source it holds vacant, from `predecessor`'s
-    /// entry with the same ID, leaving that entry vacant. Returns how many source producers
-    /// moved. A vacant timeline producer moves by the same rule (#1641 D2) and is not counted:
-    /// every successor carries the timeline.
+    /// Move into this set the producer of every source it awaits (its plan carries the ring and
+    /// the producer has not arrived), from `predecessor`'s entry with the same ID, which is left
+    /// handed on. Returns how many source producers moved. An awaited timeline producer moves by
+    /// the same rule (#1641 D2) and is not counted: every successor carries the timeline. No
+    /// other entry is filled (#2258 HC-5): this set's own producers, and an entry that handed or
+    /// donated its producer on, stay as they are.
     ///
     /// A host calls this after preparing a successor with
     /// [`crate::prepare_host_runtime_successor`] (or its live-control form) and after its last
-    /// fallible step, so the move is never undone. Infallible and allocation-free: a vacant
-    /// entry whose ID the predecessor does not hold, or holds vacant itself, stays vacant and
+    /// fallible step, so the move is never undone. Infallible and allocation-free: an awaiting
+    /// entry whose ID the predecessor does not hold, or holds vacant itself, stays awaiting and
     /// refuses PCM with [`SourceControlError::Vacated`]. Keyed by source ID, never by index.
     ///
     /// The producers move before the plan swap that moves their consumers. Should that swap's
@@ -640,23 +684,70 @@ impl SourceControlSet {
     pub fn adopt_persisting(&mut self, predecessor: &mut SourceControlSet) -> usize {
         let mut moved = 0;
         for index in 0..self.sources.len() {
-            if self.sources[index].provider.is_some() {
+            if !matches!(self.sources[index].provider, Producer::Awaiting) {
                 continue;
             }
             let Some(from) = predecessor.index_of(self.id(&self.sources[index])) else {
                 continue;
             };
-            if let Some(provider) = predecessor.sources[from].provider.take() {
-                self.sources[index].provider = Some(provider);
+            if let Some(provider) = predecessor.sources[from]
+                .provider
+                .take_leaving(Producer::Handed)
+            {
+                self.sources[index].provider = Producer::Owned(provider);
                 moved += 1;
             }
         }
-        if self.timeline.is_none() {
-            self.timeline = predecessor.timeline.take();
+        if matches!(self.timeline, Producer::Awaiting)
+            && let Some(timeline) = predecessor.timeline.take_leaving(Producer::Handed)
+        {
+            self.timeline = Producer::Owned(timeline);
         }
         debug_assert!(
             self.published.is_shared_with(&predecessor.published),
             "a successor's set shares its predecessor's published generation (#1642 B16-R2)"
+        );
+        moved
+    }
+
+    /// Take back from `withdrawn`, a successor of this set's plan withdrawn before render adopted
+    /// it (#1310 D5 step 5), every producer this set handed it ([`Self::adopt_persisting`]) that
+    /// it still holds, because this plan renders their rings until the plan that replaces it is
+    /// adopted. Returns how many source producers moved; the timeline moves by the same rule and is
+    /// not counted.
+    ///
+    /// Only an entry here that handed its producer on is filled, and only from an entry of
+    /// `withdrawn` with the same ID that carries this plan's ring ([`Self::carries`]) and holds its
+    /// producer (#2258 HC-5). So an entry that awaits its own predecessor's producer, or handed its
+    /// producer to another set, never takes a producer of `withdrawn`'s own, whose ring drops with
+    /// `withdrawn`. Every producer `withdrawn` holds of a ring it carries came from this set, so
+    /// nothing is left behind. Infallible, allocation-free and keyed by source ID.
+    pub fn reclaim_from_withdrawn(&mut self, withdrawn: &mut SourceControlSet) -> usize {
+        let mut moved = 0;
+        for index in 0..self.sources.len() {
+            if !matches!(self.sources[index].provider, Producer::Handed) {
+                continue;
+            }
+            let Some(from) = withdrawn.index_of(self.id(&self.sources[index])) else {
+                continue;
+            };
+            let entry = &mut withdrawn.sources[from];
+            if !entry.carried {
+                continue;
+            }
+            if let Some(provider) = entry.provider.take_leaving(Producer::Handed) {
+                self.sources[index].provider = Producer::Owned(provider);
+                moved += 1;
+            }
+        }
+        if matches!(self.timeline, Producer::Handed)
+            && let Some(timeline) = withdrawn.timeline.take_leaving(Producer::Handed)
+        {
+            self.timeline = Producer::Owned(timeline);
+        }
+        debug_assert!(
+            self.published.is_shared_with(&withdrawn.published),
+            "a withdrawn successor's set shares this set's published generation (#1642 B16-R2)"
         );
         moved
     }
@@ -748,12 +839,12 @@ impl ControlSourceBuilder {
         producer: PreparedProducer,
     ) {
         let (carried, provider) = match producer {
-            PreparedProducer::Carried => (true, None),
-            PreparedProducer::Projected => (false, None),
+            PreparedProducer::Carried => (true, Producer::Awaiting),
+            PreparedProducer::Projected => (false, Producer::Projected),
             PreparedProducer::Fresh(mut provider) => {
                 // #2205: a live plain seek to the region's end has no PCM to wait for.
                 provider.set_region_end(SourceFrame(region_end));
-                (false, Some(provider))
+                (false, Producer::Owned(provider))
             }
         };
         let id_offset = self.ids.len();
@@ -915,8 +1006,8 @@ pub fn check_donation(
             return Err(DonationError::Unswappable);
         };
         let (Some(fresh_producer), Some(_)) = (
-            successor.sources.sources[into].provider.as_ref(),
-            donor.sources.sources[from].provider.as_ref(),
+            successor.sources.sources[into].provider.owned(),
+            donor.sources.sources[from].provider.owned(),
         ) else {
             return Err(DonationError::Unswappable);
         };
@@ -977,7 +1068,7 @@ pub fn drops_acked_fresh_source(donor: DonationSide<'_>, donation: &DonationPlan
             && donor
                 .sources
                 .index_of(row.id.as_bytes())
-                .and_then(|index| donor.sources.sources[index].provider.as_ref())
+                .and_then(|index| donor.sources.sources[index].provider.owned())
                 .is_some_and(|provider| !unfed(provider))
     })
 }
@@ -1005,17 +1096,18 @@ fn producers_resolve(
         successor
             .sources
             .get(into)
-            .is_some_and(|source| source.provider.as_ref().is_some_and(unfed))
+            .is_some_and(|source| source.provider.owned().is_some_and(unfed))
             && donor
                 .sources
                 .get(from)
-                .is_some_and(|source| source.provider.is_some())
+                .is_some_and(|source| source.provider.owned().is_some())
     })
 }
 
 /// The producer half of [`apply_donation`] (#1344 D3): move each checked pair's donor producer
 /// into the successor's entry, so the successor feeds the donated ring. The donor's entry is left
-/// vacant, so a later submit or seek to the donor is refused with [`SourceControlError::Vacated`]
+/// [`Producer::Donated`], so a later submit or seek to the donor is refused with
+/// [`SourceControlError::Vacated`]
 /// and never acked into a ring nobody plays. The successor's own fresh producer, which
 /// [`check_donation`] proved unfed, is dropped; its ring moves to the donor with
 /// [`donate_consumers`] and drops with it. Infallible on a plan [`check_donation`] returned for
@@ -1030,13 +1122,13 @@ pub(crate) fn donate_producers(
     for &(into, from) in &producers.0 {
         if let (Some(into), Some(from)) =
             (successor.sources.get_mut(into), donor.sources.get_mut(from))
-            && let Some(provider) = from.provider.take()
+            && let Some(provider) = from.provider.take_leaving(Producer::Donated)
         {
             debug_assert!(
-                into.provider.as_ref().is_some_and(unfed),
+                into.provider.owned().is_some_and(unfed),
                 "a checked successor producer is unfed"
             );
-            into.provider = Some(provider);
+            into.provider = Producer::Owned(provider);
             moved += 1;
         }
     }
@@ -1206,12 +1298,12 @@ mod tests {
             };
             self.set
                 .timeline
-                .as_ref()
+                .owned()
                 .is_some_and(|timeline| timeline.check_seek(command).is_ok())
                 && self.set.sources.iter().all(|source| {
                     source
                         .provider
-                        .as_ref()
+                        .owned()
                         .is_some_and(|provider| provider.check_seek(command).is_ok())
                 })
         }
@@ -1347,13 +1439,13 @@ mod tests {
     #[test]
     fn a_vacant_entry_refuses_the_whole_seek() {
         let mut rig = Rig::new();
-        let timeline = rig.set.timeline.take();
+        let timeline = core::mem::replace(&mut rig.set.timeline, Producer::Handed);
         assert_eq!(
             rig.set.seek_session(2, 0, None),
             Err(SourceControlError::Vacated)
         );
         rig.set.timeline = timeline;
-        let provider = rig.set.sources[1].provider.take();
+        let provider = core::mem::replace(&mut rig.set.sources[1].provider, Producer::Awaiting);
         assert_eq!(
             rig.set.seek_session(2, 0, None),
             Err(SourceControlError::Vacated)
@@ -1364,6 +1456,91 @@ mod tests {
         rig.set
             .seek_session(2, 0, None)
             .expect("every entry occupied");
+    }
+
+    /// A set of mono sources `0..1_000` frames long, each prepared as `entries` names it, on
+    /// `word`. The fresh rings' consumers are dropped: these tests move producers, never render.
+    fn hand_built(word: &PublishedGeneration, entries: &[(&str, bool)]) -> SourceControlSet {
+        let ring = PcmSourceRingConfig {
+            channel_count: 1,
+            quantum_frames: QuantumFrames(Q),
+            frame_capacity: 16,
+            initial_generation: SourceGeneration(1),
+            seek_runway_blocks: 0,
+        };
+        let id_bytes = entries.iter().map(|(id, _)| id.len()).sum();
+        let mut builder =
+            ControlSourceBuilder::with_capacity(id_bytes, entries.len()).expect("builder");
+        for &(id, carried) in entries {
+            let producer = if carried {
+                PreparedProducer::Carried
+            } else {
+                let (producer, _, _) =
+                    PcmSourceRing::prepare_host_region(ring, SourceFrame(0), word.clone())
+                        .expect("ring");
+                PreparedProducer::Fresh(producer.into_host_chunk_provider(SampleRateHz(48_000)))
+            };
+            builder.push(id, 48_000, 1, 0, 1_000, producer);
+        }
+        builder.finish(word.clone())
+    }
+
+    /// Test value: red if the give-back of a withdrawn candidate's producers fills a running
+    /// entry by vacancy alone, so an entry that never handed its producer to the withdrawn plan
+    /// (one still awaiting its own predecessor's, or one whose producer went elsewhere) takes a
+    /// producer of the withdrawn plan's that is not its own: a fresh one, whose ring drops with
+    /// that plan, so the running set would ack PCM into a ring nobody renders. Each of the two
+    /// give-back rules (the entry handed its producer on; the withdrawn entry carries the ring) is
+    /// needed by one case. An adoption, which fills awaited entries alone, does not refill a
+    /// handed-on one either.
+    #[test]
+    fn a_give_back_returns_only_the_producers_the_withdrawn_set_took() {
+        let word = PublishedGeneration::new(SourceGeneration(1));
+        // P0 renders `x` from its own ring and carries `y`, whose producer never arrived.
+        let mut running = hand_built(&word, &[("x", false), ("y", true)]);
+        // A carries `x` from P0 and redeclared `y`: its ring and producer are A's own.
+        let mut withdrawn = hand_built(&word, &[("x", true), ("y", false)]);
+        assert_eq!(withdrawn.adopt_persisting(&mut running), 1, "A takes x");
+        assert_eq!(running.admission(b"x"), Err(SourceControlError::Vacated));
+        // A is withdrawn: P0 takes back what it handed on, and only that.
+        assert_eq!(
+            running.reclaim_from_withdrawn(&mut withdrawn),
+            1,
+            "only x returns"
+        );
+        assert!(running.admission(b"x").is_ok());
+        assert_eq!(running.admission(b"y"), Err(SourceControlError::Vacated));
+        assert!(withdrawn.admission(b"y").is_ok(), "A keeps its own y");
+
+        // P0 handed `x` to another set; the withdrawn A redeclared `x`, so its producer is A's own.
+        let mut running = hand_built(&word, &[("x", false)]);
+        let mut other = hand_built(&word, &[("x", true)]);
+        let mut withdrawn = hand_built(&word, &[("x", false)]);
+        assert_eq!(other.adopt_persisting(&mut running), 1);
+        assert_eq!(
+            running.reclaim_from_withdrawn(&mut withdrawn),
+            0,
+            "A's x stays"
+        );
+        assert_eq!(
+            running.adopt_persisting(&mut withdrawn),
+            0,
+            "x is not awaited"
+        );
+        assert_eq!(running.admission(b"x"), Err(SourceControlError::Vacated));
+        assert!(withdrawn.admission(b"x").is_ok());
+
+        // P0 awaits `y`; A carries a `y` whose producer did not come from P0.
+        let mut running = hand_built(&word, &[("y", true)]);
+        let mut withdrawn = hand_built(&word, &[("y", true)]);
+        let mut other = hand_built(&word, &[("y", false)]);
+        assert_eq!(withdrawn.adopt_persisting(&mut other), 1);
+        assert_eq!(
+            running.reclaim_from_withdrawn(&mut withdrawn),
+            0,
+            "P0 handed no y"
+        );
+        assert!(withdrawn.admission(b"y").is_ok());
     }
 
     /// #1644 D2: the browser feed drain tells a stale-generation refusal from every other
