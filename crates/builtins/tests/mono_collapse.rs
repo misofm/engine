@@ -478,9 +478,16 @@ fn a_collapsed_bank_exports_the_dual_runs_state() {
         let lanes = width.lanes() as usize;
         let mut collapsed = bank(backend, width);
         let mut never = bank(backend, width);
-        for block in 0..4 {
+        // Signal, then `+0.0` so the left silence counter runs while the right one is frozen.
+        for block in 0..6 {
             let plane: Vec<f32> = (0..FRAMES * lanes)
-                .map(|word| 0.1 + ((word + block) % 7) as f32 / 50.0)
+                .map(|word| {
+                    if block < 4 {
+                        0.1 + ((word + block) % 7) as f32 / 50.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect();
             collapsed.process_mono(&mut plane.clone(), FRAMES as u32);
             never.process(&mut plane.clone(), &mut plane.clone(), FRAMES as u32);
@@ -489,6 +496,12 @@ fn a_collapsed_bank_exports_the_dual_runs_state() {
             test_support::bank_lane_state_words(&collapsed, 1),
             test_support::bank_lane_state_words(&never, 1),
             "width={lanes}: the collapsed bank's right integrators are frozen, or this is vacuous"
+        );
+        assert_ne!(
+            test_support::bank_lane_silence_words(&collapsed, 1)[1],
+            test_support::bank_lane_silence_words(&never, 1)[1],
+            "width={lanes}: the collapsed bank's right silence counter is frozen, or the export \
+             check below cannot see it"
         );
         assert!(
             never.channels_agree(),
