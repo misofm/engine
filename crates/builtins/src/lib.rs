@@ -7707,6 +7707,30 @@ mod lane_state {
                     "{backend:?}: {how} retargets"
                 );
             }
+            // The same live fader move with no window (a `fader_ms` of 0): it ends the unmute
+            // ramp's hold too, and leaves no countdown to end it later.
+            bank.set_mute(3, BuiltinLaneSelector::Both, true, 0)
+                .expect("lane");
+            bank.set_mute(3, BuiltinLaneSelector::Both, false, 64)
+                .expect("lane");
+            bank.set_fader_db(3, BuiltinLaneSelector::Both, -6.0, 0)
+                .expect("lane");
+            assert_eq!(
+                bank.gain_held(3, 0),
+                Some(false),
+                "{backend:?}: a live fader move with no window"
+            );
+            bank.apply_fader_operation(
+                3,
+                BuiltinLaneSelector::Both,
+                FaderOperation::SetGain { gain: 0.25 },
+            )
+            .expect("lane");
+            assert_eq!(
+                bank.ramp_target(3, 1),
+                Some(0.25),
+                "{backend:?}: a live fader move with no window retargets"
+            );
             // An unmute ramp longer than a block still holds after the block: only the block
             // that ends its countdown ends it.
             bank.set_mute(0, BuiltinLaneSelector::Both, true, 0)
@@ -7724,9 +7748,13 @@ mod lane_state {
 
     /// Issue #2280: an armed lane (issue #1288 D2, #2080 R1) holds its gain at `+0.0` until its
     /// fire, keeps its arm across a plan swap's carry and a reset, and a fire ends the arm whether
-    /// it opens the lane or not; one that does not open it leaves it muted. Red if a timed fader
-    /// move retargets an armed lane (the fire's fade-in then starts from the move, a step), if an
-    /// import or a reset ends an unfired arm (the lane, muted with no fire left to open it, then
+    /// it opens the lane or not; one that opens it holds the gain while its fade-in runs, and one
+    /// that does not open it leaves it muted. An armed lane is at exact rest. Red if the rest
+    /// claim declines an armed lane (a strip waiting for its source is then rendered on every
+    /// silent block instead of skipped), if an opening fire leaves the gain free during
+    /// the fade-in (a timed move then fights it), if a timed fader move retargets an armed lane
+    /// (the fire's fade-in then starts from the move, a step), if an import or a reset ends an
+    /// unfired arm (the lane, muted with no fire left to open it, then
     /// stays silent for good), if a fire that stays muted keeps the arm (a later unmute then only
     /// retargets a fire that never comes, and the lane stays silent), or if it leaves the lane
     /// anything but muted (the readback then reports a muted strip unmuted, and the next mute mask
@@ -7739,6 +7767,12 @@ mod lane_state {
                 BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false); 3])
                     .expect("bank");
             bank.arm_fade_in(0).expect("lane");
+            // An armed lane waits as a settled mute: at exact rest, so a silent block may skip it.
+            assert_ne!(
+                bank.lanes_at_rest() & 1,
+                0,
+                "{backend:?}: an armed lane is at rest"
+            );
             bank.apply_fader_operation(0, both, FaderOperation::SetGain { gain: 0.5 })
                 .expect("lane");
             assert_eq!(
@@ -7761,6 +7795,13 @@ mod lane_state {
                 bank.is_armed(0, 0),
                 Some(true),
                 "{backend:?}: a reset keeps the arm"
+            );
+            // A fire that opens the lane is an unmute ramp: the gain stays held while it runs.
+            bank.fire_fade_in(0, 64);
+            assert_eq!(
+                bank.gain_held(0, 0),
+                Some(true),
+                "{backend:?}: an opening fire holds the gain while its fade-in runs"
             );
             // A lane armed muted, whose fire stays muted: the fire ends the arm, so a later
             // unmute opens the lane.

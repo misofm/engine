@@ -433,3 +433,160 @@ attempt-1 values.
 - `bash scripts/check-workspace-policy.sh`: ok.
 - `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (298 marked regions in
   48 files)`. The count rose with `origin/main`.
+
+## Verdict (attempt 4)
+**FAIL**, on one MAJOR test gap. The code is still correct and no bit moved.
+- *MAJOR, Y8.* `live_gain` ending `Unmuting` only for a windowed move survived all four crates.
+  Attempt 4 had changed lane 3's live move from a window of `0` to `16`, which dropped the only
+  zero-window case. With `fader_ms` of `0`, a live move during an unmute then leaves the lane
+  `Unmuting` with `remaining == 0`. That holds the gain for good, which is this issue's headline
+  defect.
+- *MINOR, Y2.* An opening fire that writes `Open` after its unmute survived: no test checked the
+  hold while the fade-in runs.
+- *MINOR, Y5.* `arm_fade_in`'s `opens: matches!(phase, FaderPhase::Open)` survived. This is
+  equivalent in product (below).
+
+## Evidence (attempt 5)
+`origin/main` at `900c3d24c` (the merge's second parent) was merged first, as `d78603dc6`; then
+one commit.
+
+**Changes (tests only).**
+- `an_unmute_holds_the_gain_only_while_its_countdown_runs` restores the zero-window case that
+  attempt 4 dropped, and keeps the windowed one. After the lane loop, lane 3 is muted, unmuted
+  over 64 frames, and moved live with `set_fader_db(3, Both, -6.0, 0)`. The test then asserts
+  `gain_held == Some(false)` and that a timed `SetGain` retargets it. This kills Y8; N24 and M2
+  stay killed by the windowed case.
+- `an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset`: after the reset, armed lane 0
+  fires open over 64 frames, and `gain_held(0, 0) == Some(true)` while the fade-in runs. This
+  kills Y2. The same test also asserts that a freshly armed lane is at exact rest
+  (`lanes_at_rest() & 1 != 0`). That kills N10, a rest claim that declines armed lanes, which
+  survived the full builtins suite before the assertion was added.
+
+**Accepted survivors.**
+
+| Id | Mutation | Why it survives |
+|---|---|---|
+| R1 | a re-arm overwrites the arm | Unreachable from a plan: `graph::install_fade_arms` arms each lane once per plan and refuses a repeated target. |
+| R9 | `muted()` dropped from `lanes_at_rest`'s `zero_out` | Equivalent: a settled muted lane's gain is exactly `+0.0` (its target is the literal `0.0`, and a settle assigns `current = target`), so `!gain.is_sign_negative()` already holds. |
+| Y5 | `opens: matches!(phase, FaderPhase::Open)` in `arm_fade_in` | Equivalent in product: `install_fade_arms` arms only lanes of a freshly prepared successor plan, before publication and before any render or record. Such a lane is `Open` or `Muted`, never `Unmuting` (an unmute ramp needs a record) or `Armed` (refused repeat). For `Open` and `Muted`, `!phase.muted()` and `matches!(phase, Open)` agree. |
+
+**Follow-up, not part of this issue.** The wrapper channel-index mutants N12, N15 and N16
+survive because no dual-mono test arms or holds only one channel; that code predates #2280. Y3
+and Y6 (fire or arm on the left channel only) are killed by `fader_ramp`, so they are not part of
+that gap.
+
+**Mutant table, attempt 5.** Every mutant from the attempt-3 and attempt-4 reviews' tables
+(`review-2280d/scripts/muts.py`, which includes `review-2280c`'s and its earlier set): 66 in all.
+Each was applied alone to the merged tree and reverted. Each ran first against
+`-p builtins --lib`. A survivor escalated to the full `-p builtins --features
+builtins/test-support` suite, then to `builtins-compiler` (test-support) and `graph`, one
+crate at a time. This branch's own attempt-3 and attempt-4 mutants (`gr1/mutants.py`) were all
+killed at attempt 4, and attempt 5 only adds assertions, so they stay killed.
+
+| Mutant | Result |
+|---|---|
+| A_import_verbatim | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| B_end_no_settle | killed (builtins): `gain_moves_during_a_mute_ramp_are_remembered_and_never_restart_it` |
+| C_reset_no_settle | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| D_instant_unmute_unmuting | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| F_fire_no_end | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| M2_live_gain_no_open | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| N10_rest_settled_phase | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| N11_scalar_fire_noop | killed (builtins): `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` |
+| N12_scalar_is_armed_ch0 | survives builtins, builtins-compiler and graph: follow-up (predates #2280): no dual-mono test arms or holds only one channel |
+| N13_scalar_gain_held_ch0 | killed (builtins): `the_scalar_fader_refuses_a_lane_out_of_range` |
+| N14_scalar_arm_noop | killed (builtins): `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` |
+| N15_bank_is_armed_ch0 | survives builtins, builtins-compiler and graph: follow-up (predates #2280): no dual-mono test arms or holds only one channel |
+| N16_bank_gain_held_ch0 | survives builtins, builtins-compiler and graph: follow-up (predates #2280): no dual-mono test arms or holds only one channel |
+| N17_bank_fire_noop | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| N18_ts_bank_words_ch_swap | survives builtins, builtins-compiler and graph: test-support evidence reader, not product code (see below) |
+| N19_ts_bank_words_held | survives builtins, builtins-compiler and graph: test-support evidence reader, not product code (see below) |
+| N1_fire_order | killed (builtins): `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` |
+| N20_ts_scalar_words_ch_swap | survives builtins, builtins-compiler and graph: test-support evidence reader, not product code (see below) |
+| N21_import_settled_always | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| N22_reset_phase_untouched_but_arm | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| N24_live_gain_sets_unmuting | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| N25_import_sync_mute_dropped | killed (lib): `ls::a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders` |
+| N26_fire_settled_open_when_closed | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| N2_fire_instant | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| N3_arm_ramped_mute | killed (builtins): `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` |
+| N4_arm_no_mute | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| N5_arm_opens_true | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| N6_arm_returns_false | killed (builtins): `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` |
+| N7_end_windows_no_skip | survives builtins, builtins-compiler and graph: equivalent: on the channel whose window is `0`, only lanes with a zero countdown take the settle branch, and every such lane already has `current == target`, `step == 0` and a settled phase (a zero countdown is reached only by a zero-window retarget, the countdown's end, `reset`, `new` or an import of an export, each of which assigns them) |
+| N8_window_both | killed (builtins): `a_cross_block_ramp_is_partition_invariant`, `a_windowed_move_is_monotone_and_lands_exactly_on_its_target`, others |
+| N9_rest_gain_held | survives builtins, builtins-compiler and graph: equivalent: under `settled` the countdown is `0`, so the phase is not `Unmuting` (an unmute ramp never outlives its countdown), and there `gain_held() == muted()` |
+| P4_at_countdown_always_settles | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| R1_rearm_overwrites | survives builtins, builtins-compiler and graph: unreachable: `install_fade_arms` arms each lane once per plan and refuses a repeated target |
+| R9_rest_drop_muted | survives builtins, builtins-compiler and graph: equivalent: a settled muted lane's gain is exactly `+0.0`, so `!gain.is_sign_negative()` already holds |
+| TS_words_from_held | survives builtins, builtins-compiler and graph: test-support evidence reader, not product code (see below) |
+| X10_arm_opens_after_mute | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| X11_padding_lanes_muted | survives builtins, builtins-compiler and graph: equivalent in product: it changes only padding lanes' mute bits, so only padding lanes' output words (rest bits agree: a muted lane and a unit-gain lane both write `+0.0` for `+0.0`); every lane API refuses a padding lane and no consumer reads a padding lane's output |
+| X12_live_gain_gated_on_held | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| X13_ramped_mute_enters_unmuting | killed (builtins): `a_repeated_mute_leaves_the_stage_as_it_was`, `a_settled_banked_mute_is_exactly_positive_zero`, others |
+| X14_export_settles | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| X15_reset_opens_all | survives builtins, builtins-compiler and graph: equivalent: the replacement maps `Unmuting` to `Open` and keeps `Open`, `Muted` and `Armed`, which is `at_countdown(0)` exactly |
+| X16_armed_record_falls_through | killed (builtins): `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` |
+| X1_fire_sets_open | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| X2_closed_fire_keeps_arm | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| X3_end_settles_every_lane | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| X4_reset_ends_arm | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| X5_settled_ends_arm | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| X6_armed_gain_not_held | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| X7_muted_gain_not_held | killed (builtins): `gain_moves_during_a_mute_ramp_are_remembered_and_never_restart_it`, `the_scalar_fader_refuses_a_lane_out_of_range` |
+| X8_unmuting_is_muted | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| X9_import_at_countdown_zero | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| Y10_armed_record_inverted | killed (builtins): `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` |
+| Y11_mute_no_sync | killed (lib): `ls::a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders` |
+| Y12_end_writes_open | killed (builtins): `at_one_offset_the_gain_applies_before_the_mute`, `gain_moves_during_a_mute_ramp_are_remembered_and_never_restart_it`, others |
+| Y13_import_sync_before_phase | killed (lib): `ls::a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders` |
+| Y14_reset_prepared | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| Y15_closed_fire_no_phase_write_but_disarm_opens | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| Y1_fire_writes_unmuting | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| Y2_fire_open_after_unmute | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| Y3_fire_left_only | killed (builtins): `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` |
+| Y4_fire_always_opens | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset` |
+| Y5_arm_opens_only_from_open | survives builtins, builtins-compiler and graph: equivalent in product: `install_fade_arms` arms only lanes of a freshly prepared successor plan, which are `Open` or `Muted`; for those `!muted()` and `matches!(_, Open)` agree |
+| Y6_arm_left_only | killed (builtins): `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` |
+| Y7_live_open_before_guard | killed (lib): `ls::a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders` |
+| Y8_live_open_only_windowed | killed (lib): `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+| Y9_unmute_ramp_not_held | killed (lib): `ls::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset`, `ls::an_unmute_holds_the_gain_only_while_its_countdown_runs` |
+
+52 of 66 killed.
+
+The 14 survivors are those that survive the full builtins suite. Each then ran on its own against
+`builtins-compiler` (test-support) and `graph`, where all 14 survive. `rack` does not depend on
+`builtins` (`cargo tree -p rack` has no `builtins`), so no fader mutant can reach its tests; it ran
+once, as a gate, at head.
+
+**The four test-support survivors.** N18, N19, N20 and `TS_words_from_held` mutate
+`test_support::fader_bank_lane_words` and `scalar_fader_words`. These are evidence readers in the
+`#[doc(hidden)]` `test_support` module, not product code, and no render or control path reads
+them. `scalar_fader_words` has no caller in the workspace; only the uncommitted no-bit-moved
+harness uses it. The builtins-compiler callers of `fader_bank_lane_words` only compare whole
+readings for equality, and the other 12 words (ramp words, countdown and remembered gain) already
+decide those comparisons. #2280 changed only the source of the two mute words, from `muted[..]`
+to `phase[..].muted()`. This is a named reason, not an equivalence proof; the reviewer rules on
+it.
+
+**No bit moved, on the merged tree.** `gr1_bits.rs` (scratch, never committed) gives simd4
+`c50ab7ba3c148cb5`, simd8 `c632900598d806ce` and scalar `1d4ee1dfcd9290db`. That holds at head,
+and also with `900c3d24c`'s `crates/builtins/src/lib.rs` and `rest_tests.rs` in their place. These
+are the attempt-1 values.
+
+**Gates (head).** Each crate run on its own:
+- `cargo test --locked -p builtins --features builtins/test-support`: 18 binaries ok.
+- `cargo test --locked -p builtins-compiler --features builtins-compiler/test-support`: 8 ok.
+- `cargo test --locked -p graph`: 9 ok.
+- `cargo test --locked -p rack`: 1 failure, not from this branch. In `tests/bypass_skip.rs`,
+  `settle_edges_follow_live_switches_and_lane_moves_not_the_sessions_own_bypass` panics at
+  `crates/rack/src/lib.rs:5243` (`debug_assert!(false, "a checked slot swaps its lanes")`).
+  `rack` does not depend on `builtins`, and this branch differs from `900c3d24c` only in
+  `crates/builtins` and this spec, so the result is `origin/main`'s. The code came with #2324
+  (`733671222`, merged as `900c3d24c`). At attempt 4, on `de3263034`, `rack` passed with 7 binaries.
+- `cargo clippy --locked -p builtins --all-targets --all-features -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p builtins`: clean.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (298 marked regions in
+  48 files)`.
