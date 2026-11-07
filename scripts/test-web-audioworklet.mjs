@@ -6544,8 +6544,10 @@ async function testControlWorker() {
       send({ tag: "miso.status.v1", requestId: 1 });
       fromWorklet({
         tag: "miso.render-status.v1", requestId: 1,
-        status: { state: 2, lastResult: 0, renderedQuanta: 9n, blockingRebuilds: 0, meterFramesSkipped: 0 },
+        status: { state: 3, lastResult: 7, renderedQuanta: 9n, blockingRebuilds: 0, meterFramesSkipped: 0 },
       });
+      assert.deepEqual([posts.at(-1).state, posts.at(-1).lastResult], [3, 7],
+        "a ready control half reports the render half's state and last result");
       send({ tag: "miso.dispose.v1", requestId: 2 });
       fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
       assert.equal(posts.filter((message) => message.tag === "miso.status.v1" && message.requestId === 1).length, 1,
@@ -6579,6 +6581,8 @@ async function testControlWorker() {
         workletPort: { onmessage: null, postMessage() {} },
       } });
       assert.deepEqual([posts.length, fake.calls.boot], [1, []], "and a boot after it runs nothing");
+      globalThis.onmessage({ data: { tag: "miso.dispose.v1", requestId: 1 } });
+      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 1, result: 255 }, "and a dispose is answered 255");
     }
     {
       await boot({ sampleRateHz: 44100 });
@@ -6634,14 +6638,156 @@ async function testControlWorker() {
       }
       assert.deepEqual([fake.calls.adopt, fake.calls.dispose], [[], 0]);
     }
-    // A boot whose watermark read is refused keeps the zero counts, and the first watermark after
-    // it is posted against them. Red if the initial counts are lost (the tick then throws).
+    // The watermark the stages post. A boot whose watermark read is refused keeps the zero
+    // counts, and the first watermark is posted against them; an unchanged one is not posted
+    // again, a new sample is; a backpressured read posts nothing and is no error; a record of the
+    // wrong size is a sticky internal error. Red if the initial counts are lost, if the dedupe
+    // or a count flag is wrong, or if a read result is taken for another.
     {
       await boot({}, 64, (engine) => { engine.calls.watermarkResult = 6; });
+      const tick = intervals.at(-1);
       fake.calls.watermarkResult = 0;
+      fake.calls.watermark = {
+        revision: 4n, sample: 64n, outcome: 0n, exactCount: 3n, transitionFallbackCount: 0n, supersededCount: 0n,
+      };
+      const marks = () => posts.filter((message) => message.tag === "miso.watermark.v1")
+        .map(({ revision, sample, outcome, exactCount }) => [revision, sample, outcome, exactCount]);
+      tick.callback();
+      tick.callback();
+      fake.calls.watermark = { ...fake.calls.watermark, sample: 128n, outcome: 2n };
+      tick.callback();
+      assert.deepEqual(marks(), [[4n, 64n, 1n, 3n], [4n, 128n, 2n, 3n]],
+        "the count flag against the boot's zero counts, then once per change");
+      fake.calls.watermark = { ...fake.calls.watermark, sample: 192n };
+      fake.calls.watermarkResult = 6;
+      tick.callback();
+      assert.deepEqual([marks().length, posts.some((message) => message.tag === "miso.error.v1")], [2, false],
+        "a backpressured read posts nothing");
+      fake.calls.watermarkResult = 0;
+      fake.calls.watermarkBytes = 80;
+      tick.callback();
+      assert.deepEqual([posts.at(-1), marks().length], [{ tag: "miso.error.v1", requestId: 0, result: 255 }, 2],
+        "a record of the wrong size is sticky");
+    }
+    // The event drain takes at most 16 frames a lane per pass, and an event with no address is a
+    // sticky internal error. Red if the bound moves, or if the fault posts a frame or no error.
+    {
+      await boot();
+      const tick = intervals.at(-1);
+      for (let index = 0; index < 17; index += 1) fake.calls.events[0].push(new Uint8Array([index + 1]));
+      tick.callback();
+      assert.equal(posts.filter((message) => message.tag === "miso.control-event.v1").length, 16);
+      fake.exports.miso_engine_web_v1_control_response_ptr = () => 0;
+      const before = posts.length;
+      tick.callback();
+      assert.deepEqual(posts.slice(before), [{ tag: "miso.error.v1", requestId: 0, result: 255 }]);
+    }
+    // A reservation that ends exactly at the memory's end is the worklet's. Red if the bound
+    // refuses it.
+    {
+      await boot({}, 64, (engine) => {
+        const at = engine.memory.buffer.byteLength - 16;
+        new DataView(engine.memory.buffer, at, 16).setUint32(0, 16, true);
+        engine.exports.miso_engine_web_v1_instance_reserve = () => at;
+      });
+      assert.equal(posts[0].tag, "miso.worker-ready.v1");
+    }
+    // A refused chunk's planes go back by transfer, and a plane on shared memory is cloned, never
+    // transferred. Red if the planes are cloned, or a shared buffer is put in the transfer list.
+    {
+      const { send } = await boot();
+      send({ tag: "miso.unknown.v1", requestId: 1 });
+      const plane = new Float32Array(64);
+      const shared = new Float32Array(new SharedArrayBuffer(256));
+      send({
+        tag: "miso.source.v1", requestId: 2, sourceId: "drums", generation: 1n, startFrame: 0n,
+        sampleRateHz: 48000, planes: [plane, shared], frames: 64, endOfRegion: false,
+      });
+      assert.deepEqual([posts.at(-1).tag, posts.at(-1).planes.length, plane.buffer.byteLength],
+        ["miso.error.v1", 2, 0], "the planes come back, the private one transferred");
+    }
+    // A live request reaches its own export, and the same tag with an extra field is a sticky
+    // error that runs nothing. Red if a branch of `receive`'s dispatch is dropped, or takes a
+    // message by its tag or its fields alone.
+    for (const [name, message, ran] of [
+      ["a source chunk", {
+        tag: "miso.source.v1", sourceId: "drums", generation: 1n, startFrame: 0n, sampleRateHz: 48000,
+        planes: [new Float32Array(64)], frames: 64, endOfRegion: false,
+      }, (engine) => engine.calls.source.length],
+      ["a seek", { tag: "miso.seek.v1", sourceId: "drums", generation: 2n, sourceFrame: 0n },
+        (engine) => engine.calls.seek.length],
+      ["a session seek", { tag: "miso.session-seek.v1", generation: 2n, sourceFrame: 0n, anchorSample: -1n, atOnce: false },
+        (engine) => engine.calls.sessionSeek.length],
+      ["an anchored seek", { tag: "miso.seek-at.v1", sourceId: "drums", generation: 2n, sourceFrame: 0n, anchorSample: 64n },
+        (engine) => engine.calls.seekAt.length],
+      ["a seek report", { tag: "miso.seek-report.v1", sourceId: "drums" }, (engine) => engine.calls.seekReport.length],
+      ["a plan latency read", { tag: "miso.plan-latency.v1" }, (engine) => engine.calls.planLatencyReads],
+      ["a control call", { tag: "miso.control.v1", frame: new Uint8Array([5]) }, (engine) => engine.calls.control.length],
+    ]) {
+      const { send } = await boot();
+      fake.calls.planLatencyReads = 0;
+      fake.exports.miso_engine_web_v1_plan_latency_read = () => { fake.calls.planLatencyReads += 1; return 6; };
+      const copy = (requestId, extra) => ({
+        ...message, requestId, ...extra,
+        ...(message.planes ? { planes: [new Float32Array(64)] } : {}),
+      });
+      send(copy(1, {}));
+      assert.deepEqual([ran(fake), posts.at(-1).tag, posts.some((reply) => reply.tag === "miso.error.v1")],
+        [1, message.tag === "miso.seek.v1" || message.tag === "miso.seek-at.v1" || message.tag === "miso.source.v1"
+          ? "miso.ack.v1" : message.tag, false], `${name}: runs its export and answers in its own shape`);
+      send(copy(2, { extra: 0 }));
+      assert.deepEqual([ran(fake), posts.at(-1)], [1, { tag: "miso.error.v1", requestId: 2, result: 1, ...(message.planes ? { planes: posts.at(-1).planes } : {}) }],
+        `${name}: with an extra field it is a sticky error and runs nothing`);
+    }
+    // A request whose ID is not a safe integer gets its sticky error under the ID it was sent
+    // with. Red if a falsy one (NaN) is posted as 0, which the page reads as the typed failure
+    // of no request.
+    {
+      const { send } = await boot();
+      send({ tag: "miso.status.v1", requestId: Number.NaN });
+      assert.deepEqual([posts.at(-1).tag, Number.isNaN(posts.at(-1).requestId), posts.at(-1).result],
+        ["miso.error.v1", true, 1]);
+    }
+    // The feed port's messages. Red if a message that is no object throws, if an attach whose
+    // rings are no list is taken, if a new attach keeps the old list's rings, if a detach drops
+    // the other feeds (whose ports the dispose then leaves open), if a detach-source takes an
+    // index that is no integer, if an unknown op is answered, or if a ring whose drain throws is
+    // not counted.
+    {
+      const { send, fromWorklet } = await boot();
+      fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
+      const replies = [];
+      const port = { onmessage: null, postMessage: (data) => replies.push(data), close() {} };
+      const other = { onmessage: null, postMessage: () => {}, close() {} };
+      const gone = { onmessage: null, postMessage: () => {}, close() {} };
+      send({ tag: "miso.feed-port.v1", port });
+      send({ tag: "miso.feed-port.v1", port: other });
+      send({ tag: "miso.feed-port.v1", port: gone });
+      const make = () => createMsb1Ring({ sourceId: "drums", channels: 2, frameCapacity: 64, capacity: 4 });
+      const attached = (ring) => new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4)[MSB1_CONTROL.ATTACHED];
+      const [first, second] = [make(), make()];
+      port.onmessage({ data: null });
+      port.onmessage({ data: { op: "attach", rings: 5 } });
+      port.onmessage({ data: { op: "attach", rings: [first] } });
+      port.onmessage({ data: { op: "attach", rings: [second] } });
+      assert.deepEqual([attached(first), attached(second)], [0, 1], "a new attach replaces the old list");
+      port.onmessage({ data: { op: "detach-source", requestId: 1, index: "0" } });
+      assert.deepEqual([replies.at(-1), attached(second)],
+        [{ op: "source-detached", requestId: 1, detached: false }, 1], "an index that is no integer names no ring");
+      const answered = replies.length;
+      port.onmessage({ data: { op: "unknown", requestId: 2 } });
+      assert.equal(replies.length, answered, "an unknown op is not answered");
+      const writer = new Msb1RingWriter(second);
+      writer.engage(1n);
+      writer.reserve(64);
+      writer.commit({ generation: 1n, startFrame: 0n, frames: 64, endOfRegion: false });
+      fake.exports.miso_engine_web_v1_source_submit = () => { throw new Error("trap"); };
       intervals.at(-1).callback();
-      const mark = posts.find((message) => message.tag === "miso.watermark.v1");
-      assert.deepEqual([mark?.revision, mark?.outcome], [3n, 1n]);
+      assert.equal(new Int32Array(second, 0, MSB1_CONTROL_BYTES / 4)[MSB1_CONTROL.ERRORS], 1, "a drain that throws is counted");
+      gone.onmessage({ data: { op: "detach" } });
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      assert.deepEqual([port.onmessage, other.onmessage], [null, null], "a detach leaves the other feeds to the dispose");
     }
   } finally {
     WebAssembly.Instance = original.Instance;
