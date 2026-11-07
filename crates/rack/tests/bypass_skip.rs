@@ -24,7 +24,10 @@ use effect_contract::{
 use engine::realtime::{
     GatePin, LiveValuesSuperseded, ObservationReader, RevisionGate, observation_slot,
 };
-use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, LiveControlEffectBankStage};
+use rack::{
+    AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, ChainLanePeer,
+    LiveControlEffectBankStage,
+};
 
 const LANES: usize = 4;
 const QUANTUM: u32 = 8;
@@ -94,6 +97,15 @@ impl PreparedNativeEffectBank for Recorder {
         log.calls.push(Call::Target);
         *log.gain.get_mut(lane).ok_or(EffectTargetError::Shape)? = f32::from_bits(target.words[0]);
         Ok(())
+    }
+
+    /// No per-lane defaults, so a lane swap may move a lane (issue #1747).
+    fn lane_default_bytes(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        lane < LANES && bytes.is_empty()
     }
 
     fn observe_resident_bank(&self, _tap_index: u32, out: &mut [ObservationSample]) -> bool {
@@ -526,4 +538,103 @@ fn a_lane_leaving_settled_bypass_is_reset_alone_keeping_parameters() {
         "a reversal before settling resets nothing"
     );
     assert_eq!(world.skips(), 0);
+}
+
+/// Issue #2135's settle record, read through the chain (tracker #2258 GR-5, issue #2326): which
+/// lanes a stage reports settled at bypass, and which its drain reports as having changed.
+///
+/// * before the first drain the stage answers from its lanes, and the first drain reports no
+///   edge, so a session's own bypass is no settle;
+/// * a live step into bypass, and back out, is one edge each, at the drain that reads it, and a
+///   drain that skips its walk (no new publication) reports none;
+/// * a drained stage that takes a lane from a chain that has not drained, by a lane swap, records
+///   the moved lane's own settled state, so the next drain reports no edge for a lane that did not
+///   change, whichever of the two chains calls the swap.
+///
+/// Test value: red if the first drain reports the session's bypass as an edge, if a skipped walk
+/// reports one, or if a drained stage takes an undrained peer's lane as unsettled (base
+/// `d11fed9b4` swapped in the peer's never-written bit, `0`: it reported the bypassed lane
+/// unsettled until its next drain, and that drain reported a settle the lane never made); no
+/// other test reads a stage's settle record.
+#[test]
+fn settle_edges_follow_live_switches_and_lane_moves_not_the_sessions_own_bypass() {
+    let mut world = World::new([true, false, false, false]);
+    assert_eq!(
+        world.chain.slot_settled_bypassed_lanes(0),
+        0b0001,
+        "undrained"
+    );
+    let _ = world.step();
+    assert_eq!(
+        world.chain.settle_edges(),
+        0,
+        "the session's bypass is no settle"
+    );
+    assert_eq!(world.chain.slot_settled_bypassed_lanes(0), 0b0001);
+    world.push(1, bypass(true, 0));
+    let _ = world.step();
+    assert_eq!(
+        world.chain.settle_edges(),
+        0b0010,
+        "a live step into bypass"
+    );
+    assert_eq!(world.chain.slot_settled_bypassed_lanes(0), 0b0011);
+    let _ = world.step();
+    assert_eq!(
+        world.chain.settle_edges(),
+        0,
+        "a skipped walk changes nothing"
+    );
+    world.push(1, bypass(false, 0));
+    let _ = world.step();
+    assert_eq!(world.chain.settle_edges(), 0b0010, "and back out");
+    assert_eq!(world.chain.slot_settled_bypassed_lanes(0), 0b0001);
+
+    // Lane 3 (wet, drained) trades places with an undrained chain's lane 2 (bypassed at bind).
+    let mut peer = World::new([false, false, true, false]);
+    let mut scratch = vec![0_u8; world.chain.lane_swap_scratch_bytes()];
+    world
+        .chain
+        .swap_lanes(3, ChainLanePeer::Other(&mut peer.chain, 2), &mut scratch)
+        .expect("a cross-chain swap");
+    assert_eq!(
+        world.chain.slot_settled_bypassed_lanes(0),
+        0b1001,
+        "the moved lane is settled at bypass"
+    );
+    assert_eq!(
+        peer.chain.slot_settled_bypassed_lanes(0),
+        0,
+        "and left the peer"
+    );
+    let _ = world.step();
+    assert_eq!(
+        world.chain.settle_edges(),
+        0,
+        "the moved lane did not change"
+    );
+    assert_eq!(world.chain.slot_settled_bypassed_lanes(0), 0b1001);
+
+    // The mirrored arm: the undrained chain calls the swap, and its wet lane 2 goes back into the
+    // drained chain's lane 3.
+    peer.chain
+        .swap_lanes(2, ChainLanePeer::Other(&mut world.chain, 3), &mut scratch)
+        .expect("a cross-chain swap");
+    assert_eq!(
+        world.chain.slot_settled_bypassed_lanes(0),
+        0b0001,
+        "the lane moved in from the undrained caller is wet"
+    );
+    assert_eq!(
+        peer.chain.slot_settled_bypassed_lanes(0),
+        0b0100,
+        "and the caller holds the bypass"
+    );
+    let _ = world.step();
+    assert_eq!(
+        world.chain.settle_edges(),
+        0,
+        "the lane moved back did not change"
+    );
+    assert_eq!(world.chain.slot_settled_bypassed_lanes(0), 0b0001);
 }

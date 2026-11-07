@@ -1453,6 +1453,113 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
     ));
 }
 
+/// #2330: a structural commit that cannot finish fails before it writes anything. An
+/// attached `OBSERVATION_ENDED` event needs one of the controller's prepared cells as well as its
+/// queue slot; here every cell is taken, because each earlier end event left the controller
+/// through the public fixture accessor (`queues_mut().try_dequeue_event()`) instead of the
+/// controller's egress, which alone frees a cell. The attachment is then refused with nothing
+/// changed.
+///
+/// Red if the commit looks for its cell only after it installed the session and queued the
+/// `SESSION_COMMITTED`: it then panics with the revision committed and the event queued, and a
+/// host that catches the panic (the C ABI does) republishes the candidate it withdrew for a commit
+/// that happened.
+#[test]
+fn a_commit_without_a_free_end_cell_is_refused_before_it_writes() {
+    // Two slots: three cells, one more than the queue holds.
+    let mut endpoint = controller_with_event_slots(
+        parse_session_json(EXAMPLE).expect("fixture"),
+        8,
+        SampleTime(0),
+        2,
+    );
+    let prepare = |endpoint: &mut ProtocolController<MockProvider>, request: u64, revision: u64| {
+        let transaction = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse(&format!("ending-{request}")).expect("ID"),
+        }];
+        let input = full_command(
+            request,
+            ExpectedRevision::Exact(SessionRevision(revision)),
+            crate::CommandPayload::SessionTransactionApply(&transaction),
+        );
+        match endpoint
+            .prepare_command_frame(
+                &input,
+                &[],
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                2048,
+            )
+            .expect("prepare")
+        {
+            PreparedCommandFrame::Structural(prepared) => *prepared,
+            PreparedCommandFrame::Immediate(_)
+            | PreparedCommandFrame::Session(_)
+            | PreparedCommandFrame::ObservationRead(_) => {
+                panic!("valid transaction was immediate")
+            }
+        }
+    };
+    for request in 1..=3_u64 {
+        let mut token = prepare(&mut endpoint, request, 6 + request);
+        endpoint
+            .attach_observation_ended(&mut token, vec![ended_key("a", 1)])
+            .expect("a free cell and room");
+        endpoint
+            .commit_prepared_structural(token, EditPath::Rebuild)
+            .expect("commit");
+        // Both events leave by the fixture accessor: the end event's cell stays taken.
+        for _ in 0..2 {
+            endpoint
+                .queues_mut()
+                .try_dequeue_event()
+                .expect("a queued event");
+        }
+    }
+    assert_eq!(endpoint.session().revision(), SessionRevision(10));
+    let mut token = prepare(&mut endpoint, 4, 10);
+    let refusal = match endpoint.attach_observation_ended(&mut token, vec![ended_key("a", 1)]) {
+        Err(refusal) => {
+            // The host drops a refused token, which returns its own slot.
+            drop(token);
+            Some(refusal)
+        }
+        Ok(_) => {
+            let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                endpoint.commit_prepared_structural(token, EditPath::Rebuild)
+            }));
+            assert!(
+                committed.is_err(),
+                "no cell is free, so the commit cannot finish"
+            );
+            None
+        }
+    };
+    assert_eq!(
+        endpoint.session().revision(),
+        SessionRevision(10),
+        "a commit that cannot finish installs nothing"
+    );
+    assert_eq!(
+        endpoint
+            .queues()
+            .reliable_event_admission_report()
+            .occupancy,
+        0,
+        "and queues nothing, holding no slot"
+    );
+    assert!(
+        endpoint.replay().is_new_request(id(4)),
+        "and records no reply"
+    );
+    assert!(
+        matches!(
+            refusal,
+            Some(crate::AttachObservationEndedError::NoFreeCell)
+        ),
+        "the attachment is refused: {refusal:?}"
+    );
+}
+
 fn prepare_at(
     endpoint: &mut ProtocolController<MockProvider>,
     revision: u64,

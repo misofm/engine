@@ -1973,47 +1973,55 @@ impl FollowCursors {
 /// ([`automation::Composed::max_events`]); allocation-, lock- and panic-free.
 fn walk_columns(
     program: &automation::Program,
-    mut columns: [Option<(&mut automation::Composed<ColumnTarget>, ColumnRoles)>; 2],
+    columns: [Option<(&mut automation::Composed<ColumnTarget>, ColumnRoles)>; 2],
     spans: [Option<automation::NodeSpan>; 2],
     composition: Composition<'_>,
     mut change: impl FnMut(usize, automation::ComposedEvent<ColumnTarget>),
 ) {
-    for (column, span) in columns.iter_mut().zip(spans) {
-        match (column.as_mut(), span) {
-            (Some((walk, _)), Some(span)) => {
-                walk.start(program, span, automation::SeekMode::Exact);
-            }
-            _ => *column = None,
-        }
-    }
+    let [zero, one] = columns;
+    let [zero_span, one_span] = spans;
+    let mut walks = [
+        start_column(program, zero, zero_span),
+        start_column(program, one, one_span),
+    ];
     let mut next = [None; 2];
-    for (index, (slot, column)) in next.iter_mut().zip(&mut columns).enumerate() {
-        *slot = next_column_event(index, column, program, composition);
+    for (index, (slot, column)) in next.iter_mut().zip(&mut walks).enumerate() {
+        *slot = next_column_event(index, column, composition);
     }
     // Each pass consumes at least one event, so the loop ends with the walks.
     while let Some(offset) = next.iter().flatten().map(|event| event.offset).min() {
-        for (index, (slot, column)) in next.iter_mut().zip(&mut columns).enumerate() {
+        for (index, (slot, column)) in next.iter_mut().zip(&mut walks).enumerate() {
             let Some(event) = slot.filter(|event| event.offset == offset) else {
                 continue;
             };
             change(index, event);
-            *slot = next_column_event(index, column, program, composition);
+            *slot = next_column_event(index, column, composition);
         }
     }
+}
+
+/// A column's block walk, if it walks this block (it has a walk and a span).
+fn start_column<'a>(
+    program: &'a automation::Program,
+    column: Option<(&'a mut automation::Composed<ColumnTarget>, ColumnRoles)>,
+    span: Option<automation::NodeSpan>,
+) -> Option<(automation::BlockWalk<'a, ColumnTarget>, ColumnRoles)> {
+    let ((walk, roles), span) = (column?, span?);
+    Some((
+        walk.start(program, span, automation::SeekMode::Exact),
+        roles,
+    ))
 }
 
 /// Column `index`'s next event, if it walks this block.
 fn next_column_event(
     index: usize,
-    column: &mut Option<(&mut automation::Composed<ColumnTarget>, ColumnRoles)>,
-    program: &automation::Program,
+    column: &mut Option<(automation::BlockWalk<'_, ColumnTarget>, ColumnRoles)>,
     composition: Composition<'_>,
 ) -> Option<automation::ComposedEvent<ColumnTarget>> {
     let (walk, roles) = column.as_mut()?;
     let roles = *roles;
-    walk.next_event(program, |heard| {
-        column_target(index, roles, composition, |cursor| heard.value(cursor))
-    })
+    walk.next_event(|heard| column_target(index, roles, composition, |cursor| heard.value(cursor)))
 }
 
 impl LiveFollowRoute {

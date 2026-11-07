@@ -962,10 +962,19 @@ fn carry_cursors<T: automation::Composable>(
     true
 }
 
-impl FaderComposite {
+/// What a composed fader channel composes its heard values with, besides `S` (#1655 D2, D3):
+/// whether cursor 0 is its own curve, and the member's static fader dB when it is not. Fixed
+/// through a block: only an offsets record between blocks moves `own_db`.
+#[derive(Clone, Copy)]
+struct FaderComposition {
+    own_curve: bool,
+    own_db: f32,
+}
+
+impl FaderComposition {
     /// The composition of the heard values with `S = offsets_sum`.
-    fn composition(&self, offsets_sum: f64) -> impl FnMut(automation::Heard<'_>) -> f32 + use<> {
-        let (own_curve, own_db) = (self.own_curve, self.own_db);
+    fn compose(self, offsets_sum: f64) -> impl FnMut(automation::Heard<'_>) -> f32 + use<> {
+        let Self { own_curve, own_db } = self;
         move |heard| {
             let first = usize::from(own_curve);
             let own = if own_curve { heard.value(0) } else { own_db };
@@ -975,6 +984,43 @@ impl FaderComposite {
                 (first..heard.len()).map(|index| heard.value(index)),
             )
         }
+    }
+}
+
+/// A composed fader channel's output event as a cell event whose value is the composed fader dB.
+const fn fader_event(event: automation::ComposedEvent<f32>) -> automation::Event {
+    automation::Event {
+        offset: event.offset,
+        value: event.value,
+        ramp: event.ramp,
+        kind: event.kind,
+        held: event.held,
+    }
+}
+
+/// Apply `apply` to every cursor's state of `walk`: the single cell's rule on each of a lane's
+/// curves. Between blocks (or a fader channel's pieces).
+fn each_cursor_state<T: automation::Composable>(
+    walk: &mut automation::Composed<T>,
+    mut apply: impl FnMut(&mut automation::CellState),
+) {
+    for cursor in walk.cursors_mut() {
+        apply(cursor.state_mut());
+    }
+}
+
+impl FaderComposite {
+    /// What the channel composes with besides `S`.
+    const fn fader_composition(&self) -> FaderComposition {
+        FaderComposition {
+            own_curve: self.own_curve,
+            own_db: self.own_db,
+        }
+    }
+
+    /// The composition of the heard values with `S = offsets_sum`.
+    fn composition(&self, offsets_sum: f64) -> impl FnMut(automation::Heard<'_>) -> f32 + use<> {
+        self.fader_composition().compose(offsets_sum)
     }
 
     /// The lane's value with every curve read by `read(cell)` (a cell the program does not hold
@@ -1012,31 +1058,9 @@ impl FaderComposite {
         })
     }
 
-    /// The output's next event of the block begun on the walk, as a cell event whose value is
-    /// the composed fader dB.
-    fn next_event(
-        &mut self,
-        program: &automation::Program,
-        offsets_sum: f64,
-    ) -> Option<automation::Event> {
-        let compose = self.composition(offsets_sum);
-        self.cursor_history_valid = true;
-        self.walk
-            .next_event(program, compose)
-            .map(|event| automation::Event {
-                offset: event.offset,
-                value: event.value,
-                ramp: event.ramp,
-                kind: event.kind,
-                held: event.held,
-            })
-    }
-
     /// Apply `apply` to every cursor's state: the single cell's rule on each of the lane's curves.
-    fn each_state(&mut self, mut apply: impl FnMut(&mut automation::CellState)) {
-        for cursor in self.walk.cursors_mut() {
-            apply(cursor.state_mut());
-        }
+    fn each_state(&mut self, apply: impl FnMut(&mut automation::CellState)) {
+        each_cursor_state(&mut self.walk, apply);
     }
 
     /// Set each cursor's jump length for the block: the fader row's for the own cursor, the VCA
@@ -1976,7 +2000,7 @@ struct FaderCellCursor<'a> {
 }
 
 /// One fader channel's events in a block (#1655 V2): a lone cell's, piece by piece, or a composed
-/// curve's, whose walk is begun on each piece.
+/// curve's, whose block walk is begun on each piece and ended before the next.
 enum ChannelEvents<'a> {
     Cell {
         /// The cell's program.
@@ -1986,10 +2010,11 @@ enum ChannelEvents<'a> {
         events: Option<automation::CellEvents<'a, 'a>>,
     },
     Composed {
-        /// The plan's program.
-        program: &'a automation::Program,
-        /// The composed curve; its walk holds every cursor's state for the next piece.
-        curve: &'a mut FaderComposite,
+        /// What the curve composes with besides `S`.
+        composition: FaderComposition,
+        /// The current piece's walk, spent or not: its output holds every cursor's state for the
+        /// next piece, which [`automation::BlockWalk::restart`] begins.
+        walk: automation::BlockWalk<'a, f32>,
     },
 }
 
@@ -2000,7 +2025,9 @@ impl FaderCellCursor<'_> {
         let sum = self.offsets_sum;
         let next = match &mut self.walk {
             ChannelEvents::Cell { events, .. } => events.as_mut().and_then(Iterator::next),
-            ChannelEvents::Composed { program, curve } => curve.next_event(program, sum),
+            ChannelEvents::Composed { composition, walk } => {
+                walk.next_event(composition.compose(sum)).map(fader_event)
+            }
         };
         self.next = next.map(|event| automation::Event {
             offset: event.offset.saturating_add(base),
@@ -2064,13 +2091,13 @@ impl FaderCellCursor<'_> {
                 *events = Some(landing_events);
                 landing
             }
-            ChannelEvents::Composed { program, curve } => {
+            ChannelEvents::Composed { composition, walk } => {
                 // Every cursor lands (R17-9 on each curve), and the output lands over the longest
                 // of their jumps (R19-4).
-                curve.walk.start(program, span, automation::SeekMode::Ramp);
-                let landing = curve.next_event(program, sum);
+                walk.restart(composition.compose(sum), span, automation::SeekMode::Ramp);
+                let landing = walk.next_event(composition.compose(sum)).map(fader_event);
                 // The one-sample span holds no other offset: the walk ends here.
-                while curve.next_event(program, sum).is_some() {}
+                while walk.next_event(composition.compose(sum)).is_some() {}
                 landing
             }
         }
@@ -2085,6 +2112,7 @@ impl FaderCellCursor<'_> {
     /// piece is left (an unmute on the block's last sample): the next block's events start from
     /// that state.
     fn open(&mut self, from: u32) -> bool {
+        let sum = self.offsets_sum;
         if from >= self.frames {
             // The block is spent: no later piece reads the events, and the cell's state lives
             // in its lane slot.
@@ -2095,8 +2123,10 @@ impl FaderCellCursor<'_> {
                             release_lane_hold(events.into_state(), release);
                         }
                     }
-                    ChannelEvents::Composed { curve, .. } => {
-                        curve.each_state(|state| release_lane_hold(state, release));
+                    ChannelEvents::Composed { composition, walk } => {
+                        walk.finish(composition.compose(sum), |output| {
+                            each_cursor_state(output, |state| release_lane_hold(state, release));
+                        });
                     }
                 }
             }
@@ -2125,13 +2155,17 @@ impl FaderCellCursor<'_> {
                     self.jump,
                 ));
             }
-            ChannelEvents::Composed { program, curve } => {
+            ChannelEvents::Composed { composition, walk } => {
                 if let Some(release) = release {
-                    curve.each_state(|state| release_lane_hold(state, release));
+                    walk.finish(composition.compose(sum), |output| {
+                        each_cursor_state(output, |state| release_lane_hold(state, release));
+                    });
                 }
-                curve
-                    .walk
-                    .start(program, span, controls::FADER_CELL_RULE.seek);
+                walk.restart(
+                    composition.compose(sum),
+                    span,
+                    controls::FADER_CELL_RULE.seek,
+                );
             }
         }
         self.base = from;
@@ -2310,14 +2344,11 @@ struct MuteCellCursor<'a> {
     pushed: Option<(bool, u32)>,
 }
 
-/// One mute channel's events in a block (#1655 V2): a lone cell's or a composed curve's, whose
-/// value is `1.0` when the curves mute.
+/// One mute channel's events in a block (#1655 V2): a lone cell's or a composed curve's block
+/// walk, whose value is `1.0` when the curves mute.
 enum MuteEvents<'a> {
     Cell(automation::CellEvents<'a, 'a>),
-    Composed {
-        program: &'a automation::Program,
-        curve: &'a mut MuteComposite,
-    },
+    Composed(automation::BlockWalk<'a, bool>),
 }
 
 impl MuteCellCursor<'_> {
@@ -2325,16 +2356,16 @@ impl MuteCellCursor<'_> {
     fn pull(&mut self) {
         self.next = match &mut self.events {
             MuteEvents::Cell(events) => events.next(),
-            MuteEvents::Composed { program, curve } => curve
-                .walk
-                .next_event(program, MuteComposite::composition)
-                .map(|event| automation::Event {
-                    offset: event.offset,
-                    value: f32::from(u8::from(event.value)),
-                    ramp: event.ramp,
-                    kind: event.kind,
-                    held: event.held,
-                }),
+            MuteEvents::Composed(walk) => {
+                walk.next_event(MuteComposite::composition)
+                    .map(|event| automation::Event {
+                        offset: event.offset,
+                        value: f32::from(u8::from(event.value)),
+                        ramp: event.ramp,
+                        kind: event.kind,
+                        held: event.held,
+                    })
+            }
         };
     }
 }
@@ -2476,8 +2507,7 @@ impl<'a> FaderEventDriver<'a> {
                             refused();
                             continue;
                         };
-                        curve.walk.start(program, node, mode);
-                        MuteEvents::Composed { program, curve }
+                        MuteEvents::Composed(curve.walk.start(program, node, mode))
                     }
                 };
                 // Unreachable refusal: the graph's step lies inside the block, and at most
@@ -2624,8 +2654,13 @@ impl<'a> FaderEventDriver<'a> {
                         )),
                     },
                     Placed::Composed(curve) => {
-                        curve.walk.start(program, node, mode);
-                        ChannelEvents::Composed { program, curve }
+                        // The walk pulls the channel's events from here on (the cursor's first
+                        // pull is below), so its cursors' history is this plan's.
+                        curve.cursor_history_valid = true;
+                        ChannelEvents::Composed {
+                            composition: curve.fader_composition(),
+                            walk: curve.walk.start(program, node, mode),
+                        }
                     }
                 };
                 let mut cursor = FaderCellCursor {

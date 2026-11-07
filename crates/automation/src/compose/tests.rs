@@ -689,3 +689,178 @@ fn a_step_replaces_a_hold_the_lane_put_on_every_cursor_as_one_cell_does() {
         assert_eq!(actual, expected, "{defer:?}");
     }
 }
+
+/// #2297: a block walk dropped after any number of its events stops at its last decided offset.
+/// Over random pairs of cells (restartable and `no_restart`, value and gate, both hold rules,
+/// both seek modes), positioned by a block and given random between-block calls, the walk is
+/// dropped after `k` events (`k = 0` too). The dropped output's cursor states, heard values,
+/// output state and target must equal those of an output that walked the block only up to that
+/// offset and finished. Then both take a deferral (a between-block call after the drop) and walk
+/// the rest of the block, and their events must be equal.
+///
+/// Red if a dropped walk leaves a cursor anywhere but where a block ending at its last decided
+/// offset would leave it: past an event it pulled and never decided (the event is lost), at the
+/// start of a pull that began before the last decided offset (a re-deferred jump comes back
+/// stale), or at the block's end after a pull that found nothing. Also red if the restore waits
+/// for the next `start`, which would overwrite the deferral made after the drop. No caller drops
+/// a walk mid-block today, so no other test reaches it.
+#[test]
+fn a_dropped_block_walk_stops_at_its_last_decided_offset() {
+    fn cell(segments: &[Segment], ramp: u32) -> CellDescription<'_> {
+        CellDescription {
+            segments,
+            grid_ramp: ramp,
+            grid: ramp,
+            jump: JumpLength::Block,
+            completion: Completion::End,
+            no_restart: ramp == 128,
+        }
+    }
+    fn snapshot(output: &Composed<f32>) -> alloc::string::String {
+        let cursors: Vec<_> = output
+            .cursors()
+            .iter()
+            .map(|cursor| (cursor.heard().to_bits(), *cursor.state()))
+            .collect();
+        alloc::format!(
+            "{cursors:?} {:?} {:?}",
+            output.output_state(),
+            output.target()
+        )
+    }
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let (mut checked, mut mid_block, mut restarted) = (0_usize, 0_usize, 0_usize);
+    for trial in 0..400 {
+        let (one, two) = (random_table(&mut rng), random_table(&mut rng));
+        let ramps = [(); 2].map(|()| if rng.chance(50) { 64 } else { 128 });
+        let Ok(program) = ProgramBuilder::build(&[cell(&one, ramps[0]), cell(&two, ramps[1])])
+        else {
+            continue;
+        };
+        let (held, release) = (rng.chance(50), rng.chance(50));
+        let defer = rng.chance(40).then(|| rng.below(1_500) as i64);
+        let hold = rng.chance(40).then(|| rng.below(1_500) as i64);
+        let retarget = rng.chance(40).then(|| {
+            (
+                rng.value(false),
+                rng.below(1_000) as i64,
+                64 * rng.below(6) as u32,
+            )
+        });
+        let kind = if rng.chance(30) {
+            CursorKind::Gate
+        } else {
+            CursorKind::Value
+        };
+        let start = rng.below(3_000) as i64;
+        let frames = 128 + rng.below(1_024) as u32;
+        let mode = if rng.chance(30) {
+            SeekMode::Ramp
+        } else {
+            SeekMode::Exact
+        };
+        let after = start + rng.below(1_500) as i64;
+        let pre = NodeSpan::new(start - 64, None, 64).expect("span");
+        let span = NodeSpan::new(start, None, frames).expect("span");
+        // An output positioned by one block, then given the trial's between-block calls.
+        let bind = || {
+            let mut output = Composed::<f32>::new(
+                &program,
+                &[(0, CursorKind::Value), (1, kind)],
+                Completion::End,
+            )
+            .expect("bind");
+            if held {
+                output = output.with_held_grid();
+            }
+            if release {
+                output = output.with_jump_release();
+            }
+            output.seed(summed);
+            output.walk(&program, pre, mode, summed, |_| {});
+            if let Some(at) = defer {
+                output.defer_jump(start + at);
+            }
+            if let Some(at) = hold {
+                for cursor in output.cursors_mut() {
+                    cursor.state_mut().hold_until(start + at);
+                }
+            }
+            if let Some((value, at, n)) = retarget {
+                output.retarget(value, start + at - 500, n);
+            }
+            output
+        };
+        // The block walked whole, or as two pieces: the drop then falls in the second piece,
+        // which the walk begins with `restart` after the first ends.
+        let cut = 1 + rng.below(u64::from(frames - 1)) as u32;
+        for first in [None, Some(span.window(0, cut).expect("piece one"))] {
+            let (piece, length) = match first {
+                Some(_) => (span.window(cut, frames).expect("piece two"), frames - cut),
+                None => (span, frames),
+            };
+            let walked = || {
+                let mut output = bind();
+                if let Some(first) = first {
+                    output.walk(&program, first, mode, summed, |_| {});
+                }
+                output
+            };
+            let mut offsets = Vec::new();
+            walked().walk(&program, piece, mode, summed, |event| {
+                offsets.push(event.offset);
+            });
+            // Drop after `k` events; `decided` is the first offset the walk has not decided.
+            for k in 0..=offsets.len() {
+                let decided = k.checked_sub(1).map_or(0, |last| offsets[last] + 1);
+                if decided >= length {
+                    continue;
+                }
+                let mut dropped = bind();
+                let mut walk = match first {
+                    Some(first) => {
+                        let mut walk = dropped.start(&program, first, mode);
+                        while walk.next_event(summed).is_some() {}
+                        walk.restart(summed, piece, mode);
+                        walk
+                    }
+                    None => dropped.start(&program, piece, mode),
+                };
+                for _ in 0..k {
+                    walk.next_event(summed).expect("an event");
+                }
+                drop(walk);
+                let mut finished = walked();
+                if decided > 0 {
+                    let short = piece.window(0, decided).expect("span");
+                    finished.walk(&program, short, mode, summed, |_| {});
+                }
+                checked += 1;
+                mid_block += usize::from(k > 0);
+                restarted += usize::from(first.is_some());
+                let context = alloc::format!(
+                    "trial {trial}, dropped after {k} events{}",
+                    if first.is_some() {
+                        " of a restarted piece"
+                    } else {
+                        ""
+                    }
+                );
+                assert_eq!(snapshot(&dropped), snapshot(&finished), "{context}");
+                let rest = piece.window(decided, length).expect("span");
+                let mut events = [Vec::new(), Vec::new()];
+                for (output, events) in [&mut dropped, &mut finished].into_iter().zip(&mut events) {
+                    output.defer_jump(after);
+                    output.walk(&program, rest, mode, summed, |event| {
+                        events.push(composed_word(&event));
+                    });
+                }
+                assert_eq!(events[0], events[1], "{context}: the rest of the block");
+            }
+        }
+    }
+    assert!(
+        checked > 3_500 && mid_block > 3_000 && restarted > 1_200,
+        "{checked} drops, {mid_block} mid-block, {restarted} in a restarted piece"
+    );
+}
