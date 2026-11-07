@@ -217,6 +217,15 @@ blocks and 12,903 swap block hashes.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `./target/release/realtime_policy`: `realtime policy: ok (292 marked regions in 46 files)`.
 
+**Gates (after the attempt-2 MINOR fold).**
+- `cargo test --locked` for the same five crates with the test-support features: 100 binaries,
+  all pass. The new `process_mono` `debug_assert!` holds on every collapsed block in them.
+- clippy `-D warnings` with and without the features, `cargo fmt --check`, rustdoc `-D warnings`,
+  workspace policy and `realtime_policy`: clean.
+- The reset test is red on base and with the reset clear reverted: `width=4 lane=0: the retained
+  silence counters`.
+- The two rack mutation counts were re-run with `--no-fail-fast` and match the table.
+
 ## Attempt record
 - **Attempt 1** (`d1f31d4c5`): FAIL, two MAJORs.
   - The self-heal in `process` silently dropped an imported lane's right channel when an import
