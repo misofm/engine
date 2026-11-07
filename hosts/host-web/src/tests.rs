@@ -1765,9 +1765,10 @@ fn output_mismatch_and_disposal_are_sticky_and_idempotent() {
 /// other thread through the lifecycle word, and fails nothing a failure or a dispose already ended.
 ///
 /// Test value: red if `fail_session` records the failure only in this host's own status (the
-/// shell a release leaves), so the released half keeps rendering; or if it overwrites a recorded
-/// failure's code or a disposed session's state. No other test fails a session from outside the
-/// engine.
+/// shell a release leaves), so the released half keeps rendering; if it overwrites a recorded
+/// failure's code or a disposed session's state; or if the `web.host.failed` diagnostic it
+/// promises is not the one the session keeps across the adoption back. No other test fails a
+/// session from outside the engine.
 #[test]
 fn a_host_found_failure_silences_the_released_render_half_and_overwrites_nothing() {
     let mut host = prepared_host(128);
@@ -1785,6 +1786,7 @@ fn a_host_found_failure_silences_the_released_render_half_and_overwrites_nothing
         (host.status().state, host.status().last_result),
         (STATE_FAILED, RESULT_INVALID_ARGUMENT)
     );
+    assert_eq!(host.diagnostic(), b"web.host.failed\t$\n");
     assert_eq!(
         host.service(),
         RESULT_WRONG_STATE,
@@ -1815,6 +1817,11 @@ fn a_host_found_failure_silences_the_released_render_half_and_overwrites_nothing
         "the first failure keeps its code"
     );
     assert!(host.adopt_render(render).is_ok());
+    assert_eq!(
+        host.diagnostic(),
+        b"web.host.failed\t$\n",
+        "the adoption keeps the session's diagnostic"
+    );
     assert_eq!(host.dispose(), RESULT_OK);
     assert_eq!(host.fail_session(RESULT_INTERNAL), RESULT_WRONG_STATE);
     assert_eq!(host.status().state, STATE_DISPOSED);

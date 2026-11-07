@@ -16,13 +16,13 @@ The control Worker also finds sticky errors in JavaScript, with no engine call f
 `sticky` sets `ready = false` and `stickyResult` and posts `miso.error.v1` to the page. Nothing reaches the lifecycle word, so the render half in the worklet keeps rendering the session after the page has been told that the host failed. The Worker's own tick stops (line 515), so the render check never runs again either. The page's `#fail` only rejects requests; it does not touch the node. The result is audible: the transport keeps playing until the app disposes the host.
 
 ## Decision
-There is one owner of "the session failed": the Rust lifecycle word. The Worker's `sticky` is already the single funnel for its sticky errors (`fatal` calls it, and nothing else writes `stickyResult`). The first time it runs, it now also fails the session in Rust through a new control-path export:
+While the control Worker is alive, the Rust lifecycle word is the one owner of "the session failed". It cannot be the owner once the Worker is gone (trapped or terminated): nothing is left to store into it, so the page-side follow-up must fail the worklet's phase by message instead. The Worker's `sticky` is already the single funnel for its sticky errors (`fatal` calls it, and nothing else writes `stickyResult`). The first time it runs, it now also fails the session in Rust through a new control-path export:
 
 - `miso_engine_web_v1_session_fail(handle, result) -> u32` calls `AudioWorkletEngineHost::fail_session(code)`. That is the existing control-half `fail`: the lifecycle word goes to `STATE_FAILED`, the status's last result becomes `code`, and the diagnostic becomes `web.host.failed\t$\n`. It returns `RESULT_OK`. The refusals:
   - `RESULT_INVALID_ARGUMENT` for a wrong handle or a zero code;
   - `RESULT_WRONG_STATE` for a session that is not ready. That covers one already failed by either half, one disposed, or no control half here.
 
-  A refusal changes nothing, the last result included. A failure recorded first keeps its code and diagnostic, and the export never overwrites `STATE_DISPOSED`. That ordering is the only part of WEB-9 this fix needs. The render half's own `fail` and `reject_output_quantum` still store plainly; WEB-9 owns them.
+  A refusal changes nothing, the last result included. A failure recorded first keeps its code and diagnostic, and the export never overwrites `STATE_DISPOSED`. That ordering is the only part of WEB-9 this fix needs. The refusal is a check-then-store (`control_ready()`, then the store), not a compare-and-swap. That is benign: the only other writer on another thread is the render half, which stores only `STATE_FAILED`, and `STATE_DISPOSED` is stored on this same control thread. WEB-9 owns making that ordering structural, together with the render half's own `fail` and `reject_output_quantum`, which still store plainly.
 - The released render half then silences from its next block and returns `RESULT_WRONG_STATE`. The worklet's `process()` takes its existing failure path (#2256: phase `failed`, silence). No render code changes.
 - The call is wrapped in `try/catch`, so a trapped or mismatched instance still posts the sticky error to the page.
 - The export is a V1 in-place amendment of the web ABI surface, added to every list that freezes it:
@@ -34,15 +34,19 @@ There is one owner of "the session failed": the Rust lifecycle word. The Worker'
   The ABI version is unchanged. The release digest pin is not re-pinned per change (#1061).
 
 ## Non-goals
-- **Page-side failures.** A Worker `error`, a malformed reply, `processorerror` or `messageerror` fails only the page's `#fail`, and the Worker and the worklet do not hear of it. This is a follow-up.
-- **The reverse direction.** A worklet-side JavaScript sticky error in `worker` mode stops the worklet but not the Worker.
+- **Page-side failures.** A Worker `error`, a malformed reply, `processorerror` or `messageerror` fails only the page's `#fail`, and the Worker and the worklet do not hear of it. This is a separate product outcome, and a separate issue. With the Worker gone, it must fail the worklet's phase by message.
+- **The reverse direction.** A worklet-side JavaScript sticky error in `worker` mode stops the worklet but not the Worker. This is a separate issue.
 - **Single mode.** It needs nothing: its worklet's `sticky` already sets the phase that gates `process()`.
 - **Neighbouring tracker items.** WEB-5 (the ring seek consumer), WEB-7 (the Worker's phases), WEB-9 beyond the refusal above, and `web/stem-store/`.
+
+## Release note
+If this merges before release #2253 (0.10.5), that release's "Upgrading from 0.10.4" section in `sdk/README.md` must list the added export `miso_engine_web_v1_session_fail`. The SDK's `exportsOf` refuses an engine asset that lacks any export the layout lists, so the SDK needs an engine artifact rebuilt from this change.
 
 ## Gates
 - The hermetic control-Worker row (`scripts/test-web-audioworklet.mjs`, "Issue #2267") must be red on base. It covers an out-of-order request ID, an unknown tag, an unreadable session map, and a trapped `session_fail`. In each case the page gets the sticky error, and the Worker calls `session_fail` once with the same code.
 - A Rust unit test (`hosts/host-web/src/tests.rs`, `a_host_found_failure_silences_the_released_render_half_and_overwrites_nothing`) checks four things:
   - `fail_session` silences a released render half at its next block, with positive-zero output;
+  - the control diagnostic is `web.host.failed\t$\n`, and the adoption back keeps it;
   - later control calls are refused;
   - a second failure keeps the first code;
   - a disposed session stays disposed.
@@ -72,6 +76,8 @@ The earlier assertion in the same row passed: the page did get `{ tag: "miso.err
 | Worker drops the `try/catch` | JS row red: the trap escapes the handler |
 | `fail_session` writes only this host's status (`render.silence(); record(code)`) and not the lifecycle word | Rust test red: `(2, 1)` vs `(3, 1)` |
 | `fail_session` drops its not-ready refusal | Rust test red: the second failure is accepted (`0` vs `3`), so it would overwrite the first code |
+| The diagnostic string becomes `web.host.fail` (MINOR 3) | Rust test red at the diagnostic assertion |
+| `adopt_render` clears the control diagnostic (MINOR 3) | Rust test red: "the adoption keeps the session's diagnostic" |
 | Worker never calls the export (= base) | JS row red, as recorded above |
 
 **Render path.** No render code changed: `render_next`, `process()` and every `REALTIME_POLICY` region are untouched, and the new export is control path (`with_host_mut`, never render-locked). So no bit-for-bit comparison applies. No new cross-thread protocol was added. The control thread stores into the existing lifecycle word with `Release`, the same store every engine-recorded control failure already makes, and the render thread's `Acquire` load is unchanged. So no loom model was added.
@@ -92,9 +98,21 @@ The generated layout still equals the self-test fixture byte for byte.
 
 **Test value.**
 - JS row: red if the Worker reports a sticky error found only in JavaScript to the page but leaves the session's lifecycle word ready, so the worklet keeps rendering. It is also red if the code differs or a trap escapes. No existing row reads the lifecycle after a Worker-side sticky error.
-- Rust test: red if `fail_session` fails only the status shell a release leaves, and not the shared word the released half reads. It is also red if it overwrites an earlier failure's code or a disposed state. No existing test fails a session from outside the engine.
+- Rust test: red if `fail_session` fails only the status shell a release leaves, and not the shared word the released half reads. It is also red if it overwrites an earlier failure's code or a disposed state, or if the promised `web.host.failed` diagnostic is not the one the session keeps across the adoption back. No existing test fails a session from outside the engine.
 
-**Follow-ups (not in this issue):**
-- Page-side failures should reach the Worker and the worklet: a Worker `error`, a malformed reply, `processorerror` and `messageerror`.
+**Follow-ups (not in this issue).** The coordinator files the first two as stateless issues.
+- Page-side failures should reach the Worker and the worklet: a Worker `error`, a malformed reply, `processorerror` and `messageerror`. With the Worker gone, the worklet's phase must be failed by message.
 - A worklet-side JavaScript sticky error in `worker` mode should reach the Worker.
-- WEB-9: monotone lifecycle transitions for the remaining plain stores.
+- WEB-9: monotone lifecycle transitions for the remaining plain stores, including `fail_session`'s check-then-store.
+
+**Verdict on attempt 1 (Sol): PASS with four MINORs.** All four are folded in the commit after `0431623a7`.
+1. The Decision no longer claims one owner when the Worker is gone; it names the page-side follow-up.
+2. The follow-ups stay in prose; the coordinator files them.
+3. The `web.host.failed` diagnostic was untested. The Rust test now reads it after `fail_session` and after `adopt_render`; both mutations are in the table above.
+4. The release note above was added.
+
+The reviewer's answers:
+- The ABI export is the right model. Failing the session through `dispose` or through a worklet message would leave the two owners (the lifecycle word and the worklet's phase) disagreeing.
+- The page-side cases are a separate product outcome.
+- CI's artifact job builds fresh. A pinned-nightly `--module-only` build exports exactly the 61 layout calls, `session_fail` included.
+- `fail_session` is a check-then-store rather than a compare-and-swap. This is benign today and is recorded under WEB-9.
