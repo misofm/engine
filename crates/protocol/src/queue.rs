@@ -452,7 +452,7 @@ impl ProtocolQueues {
             Ok(()) => Ok(()),
             Err(full) => Err(ReliableEnqueueError {
                 value: full.value,
-                report: self.report(QueueKind::ReliableEvent),
+                report: self.reliable_event_admission_report(),
             }),
         }
     }
@@ -472,11 +472,7 @@ impl ProtocolQueues {
     /// The queue's report when it has less room, its `occupancy` counting the held slots with
     /// the queued events, so `capacity - occupancy` is the room the refusal saw.
     pub fn check_reliable_event_room(&self, count: usize) -> Result<(), QueueReport> {
-        let mut report = self.report(QueueKind::ReliableEvent);
-        let held = self.reliable_event_reservations.load(Ordering::Acquire);
-        report.occupancy = report
-            .occupancy
-            .saturating_add(u64::try_from(held).unwrap_or(u64::MAX));
+        let report = self.reliable_event_admission_report();
         let room = report
             .capacity
             .saturating_sub(usize::try_from(report.occupancy).unwrap_or(usize::MAX));
@@ -484,6 +480,19 @@ impl ProtocolQueues {
             return Err(report);
         }
         Ok(())
+    }
+
+    /// The reliable event queue as admission sees it: [`Self::report`] with `occupancy` counting
+    /// the slots outstanding reservations hold with the queued events. Every reliable-event
+    /// refusal reports this view, so each reports the same number.
+    #[must_use]
+    pub fn reliable_event_admission_report(&self) -> QueueReport {
+        let mut report = self.report(QueueKind::ReliableEvent);
+        let held = self.reliable_event_reservations.load(Ordering::Acquire);
+        report.occupancy = report
+            .occupancy
+            .saturating_add(u64::try_from(held).unwrap_or(u64::MAX));
+        report
     }
 
     /// Reserve one reliable event slot before an atomic session replacement. A full queue leaves

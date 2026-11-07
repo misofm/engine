@@ -1650,7 +1650,9 @@ pub enum EventEgressError {
     /// The endpoint's one `RESPONSE_READY` cell holds an event whose frame has not reached caller
     /// output yet (#1578 D4).
     ResponseReadyOccupied,
-    /// A reliable queue rejected the original event without dropping or coalescing it.
+    /// A reliable queue rejected the original event without dropping or coalescing it. The report
+    /// is [`ProtocolQueues::reliable_event_admission_report`]: its occupancy counts held slots,
+    /// an outstanding structural token's own included.
     ReliableQueueFull(QueueReport),
     /// The typed caller-buffer encoder rejected the requested event/output.
     Encode(EncodeError),
@@ -3916,7 +3918,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
             return Err(EventEgressError::ReliableQueueFull(
-                self.queues.report(crate::QueueKind::ReliableEvent),
+                self.queues.reliable_event_admission_report(),
             ));
         }
         if !self.config.provider_features.meters
@@ -3966,7 +3968,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
             return Err(EventEgressError::ReliableQueueFull(
-                self.queues.report(crate::QueueKind::ReliableEvent),
+                self.queues.reliable_event_admission_report(),
             ));
         }
         if !self.config.provider_features.counters
@@ -4010,7 +4012,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
             return Err(EventEgressError::ReliableQueueFull(
-                self.queues.report(crate::QueueKind::ReliableEvent),
+                self.queues.reliable_event_admission_report(),
             ));
         }
         if !self.config.provider_features.diagnostics
@@ -4071,7 +4073,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<(), ResponseReadyEnqueueError> {
         let refuse = |reason, event| Err(ResponseReadyEnqueueError { reason, event });
         if self.structural_outstanding() {
-            let report = self.queues.report(crate::QueueKind::ReliableEvent);
+            let report = self.queues.reliable_event_admission_report();
             return refuse(EventEgressError::ReliableQueueFull(report), event);
         }
         if !self.config.provider_features.response {

@@ -43,6 +43,12 @@ AGENTS.md requires for queue saturation.
   a release (a drop on any thread) can change the count, and a release only adds room. So the
   prepared path's `Internal` mapping and the one-call `expect` stay as defect reports and cannot be
   reached. Their comments say so.
+- Every reliable-event refusal reports one view, `ProtocolQueues::reliable_event_admission_report()`:
+  `report()` with the held slots added to `occupancy`. The check refuses with it. So do the four
+  egress refusals (`stage_meter_batch_event`, `stage_counter_snapshot_event`,
+  `enqueue_diagnostic_event`, `enqueue_response_ready_event`), whose `ReliableQueueFull` therefore
+  counts an outstanding token's own hold, and `try_enqueue_event`'s push fallback. The doc of
+  `EventEgressError::ReliableQueueFull` says so.
 - `ProtocolQueues::report` is unchanged: it still counts queued events only. The control plane's
   FIFO barrier (`protocol_events_before`) and #2268's `reliable_backlog()` read it as queued events.
 - Docs: one sentence in `docs/CONTROL_PROTOCOL_SEMANTICS.md` (the queue-saturation paragraph). A held
@@ -129,3 +135,36 @@ prechecked. No test is made useless.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p protocol`: clean.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `./target/release/realtime_policy`: `realtime policy: ok (292 marked regions in 46 files)`.
+
+**Intended wire change.** The legacy `TransportSet` and legacy `SessionTransactionApply` refusals,
+and `attach_observation_ended`'s `NoRoom` report (which the control plane maps to
+`CommandError::Backpressure` without reading it), already refused a held slot, but reported it as
+free. On a one-slot queue with the slot held they now report occupancy 1 of
+capacity 1, where they reported 0 of 1. Every reliable-event refusal's occupancy now satisfies
+`occupancy + requested > capacity`. The wire field's meaning, "pre-attempt occupancy", now counts
+held slots, as `docs/CONTROL_PROTOCOL_SEMANTICS.md` states. The registry is unchanged.
+
+## Verdict (attempt 1)
+**PASS**, with two minor findings folded on the branch. The reviewer merged origin/main, #2268's
+branch and this one, with no conflicts. On the combined tree, protocol and control-plane ran
+318 tests and capi and host-web ran 356; all passed. The reviewer's answers:
+- No consumer depends on queued-only occupancy in a refusal, and the registry is unchanged.
+- There are no other reliable-event admission sites.
+- The unreachable defect reports (the prepared path's `Internal`, the one-call `expect`) should
+  stay as they are, typed defect reports.
+- No control-plane parity test is needed, under one test per claim.
+
+Folded:
+- *The four egress refusals reported raw occupancy* (`stage_meter_batch_event`,
+  `stage_counter_snapshot_event`, `enqueue_diagnostic_event`, `enqueue_response_ready_event`), so
+  their `ReliableQueueFull` left out an outstanding token's own hold. No wire frame carries these
+  reports. Folded: `ProtocolQueues::reliable_event_admission_report()` is the one held-inclusive
+  view. `check_reliable_event_room` refuses with it, the four egress refusals and
+  `try_enqueue_event`'s push fallback report it, and `EventEgressError::ReliableQueueFull`'s doc
+  names it.
+- *The intended wire change was not recorded.* Folded: the paragraph above.
+
+Gates after the fold: `cargo test --locked -p protocol` (216 passed), `cargo test --locked -p
+control-plane --features test-support` (11 binaries, 99 passed), clippy on protocol (`--all-targets --all-features -D
+warnings`), `cargo fmt --check`, rustdoc on protocol with `-D warnings`, and
+`bash scripts/check-workspace-policy.sh` (`workspace policy: ok`).
