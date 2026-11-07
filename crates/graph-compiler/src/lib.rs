@@ -652,9 +652,10 @@ mod tests {
     fn indexed_effect_ids(
         prepared: &EffectPreparedSession,
     ) -> (PreparedEffectIndex<'_>, EffectNodeIds) {
-        let entries = || prepared.entries.iter().map(|entry| &entry.projected);
-        let (index, _) = PreparedEffectIndex::from_entries(entries());
-        (index, EffectNodeIds::of_validated(entries()))
+        let indexed = PreparedEffectIndex::from_entries(
+            prepared.entries.iter().map(|entry| &entry.projected),
+        );
+        (indexed.index, indexed.ids.expect("stable effect IDs"))
     }
 
     /// Track stages the builtins compiler banks, one bank each per cohort.

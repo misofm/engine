@@ -233,14 +233,11 @@ pub(crate) fn rack_chains<E: AsProjected>(
                 let Some(slot) = prepared.get(key.0, key.1, key.2) else {
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };
-                let Some(entry) = effects.entry(slot.index()) else {
-                    return Err(diag("graph.internal.invariant", "$.effects"));
-                };
                 nodes.push(ids.get(slot).clone());
                 // Issue #1087: a lowered session bypass is not in this key -- preparation turned
                 // it into shunt state -- so a bypassed track keeps its cohort. A bypass that stays
                 // prepared (the multiband's, issue #1100, and the delay's) is in the key.
-                slots.push(entry.metadata.program_key());
+                slots.push(effects.at(slot).metadata.program_key());
             }
             programs.insert(chain.clone(), RackProgram::new(location, slots));
             chains.insert(chain, nodes);

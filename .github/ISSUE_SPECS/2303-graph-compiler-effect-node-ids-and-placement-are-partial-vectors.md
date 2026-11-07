@@ -33,9 +33,18 @@ both states unrepresentable instead.
 
 ## Contract
 - `ids::EffectNodeIds` is one total vector, one `EffectNodeId` per entry, derived from the entry's
-  own key and built once in `graph_front` straight after validation. Every reader takes it; no
-  reader has a `None` arm, and no reader can run before it exists. `prepared_effect_node` is
-  deleted, and the test helper `indexed_effect_ids` uses the same constructor.
+  own key. Every reader takes it; no reader has a `None` arm, and no reader can run before it
+  exists. `prepared_effect_node` is deleted.
+- One constructor owns the slot space: `PreparedEffectIndex::from_entries` returns the key index,
+  the `EffectNodeIds` and the duplicate count together (`IndexedEffects`), so the index and the
+  nodes cannot number different entries. The nodes are `None` as a whole only when some entry's ID
+  is not a stable ID, which the front's validation always refuses first; past validation the front
+  reads them with one `graph.internal.invariant` arm. The test helper `indexed_effect_ids` uses the
+  same constructor.
+- `graph_back` refuses with `graph.internal.invariant`, handing every input back, when the
+  entries' nodes are not the front's, entry for entry. `GraphProjection::effects_mut` exposes the
+  public `entries` `Vec`, so a caller can add, remove, reorder or re-key entries between `project`
+  and `compile_projected`; the zips would otherwise drop or mispair them silently.
 - `graph_back` places every entry once, after binding the planned banks, as
   `ids::EffectPlacement`:
   - `PerNode(processor)`;
@@ -46,8 +55,9 @@ both states unrepresentable instead.
 - The caller's processors are a typed `ProcessorSupply`: every entry's (`Vec<Box<..>>`,
   `compile_with_builtins`) or none (`Unprepared`, `compile_projected`). It is handed back unchanged
   on a failure, so `compile_with_builtins` loses its `.expect`.
-- Nothing observable moves. Diagnostics, their order and the preparation calls are the base's, and
-  so are the plan shape, banking and rendered bits.
+- For every input that compiled or was refused on base, nothing observable moves: diagnostics,
+  their order and the preparation calls are the base's, and so are the plan shape, banking and
+  rendered bits. The only new refusal is the misaligned-entries one above.
 
 ## Non-goals
 - GR-9 (automation obligations in `builtins-compiler` and `compile.rs`).

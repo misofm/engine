@@ -64,34 +64,64 @@ impl<E: AsProjected> EffectInputs<'_, E> {
         self.entries.get(index).map(AsProjected::projected)
     }
 
+    /// The projection of the entry at `slot`, an index of these same entries.
+    pub(crate) fn at(&self, slot: PreparedEffectSlot) -> &EffectProjectedEntry {
+        self.entries[slot.index()].projected()
+    }
+
     /// Every entry's projection, in entry order.
     pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = &EffectProjectedEntry> + Clone {
         self.entries.iter().map(AsProjected::projected)
     }
 }
 
+/// One slot space over a session's effect entries (issue #2303): the key index the front
+/// validates by, the nodes every later pass reads, and how many keys repeat, from one walk of the
+/// entries, so the index and the nodes can never number different entries.
+pub(crate) struct IndexedEffects<'a> {
+    pub(crate) index: PreparedEffectIndex<'a>,
+    /// Every entry's node, or `None` when some entry's track or effect ID is not a stable ID.
+    /// Such an entry's key matches no declared session key, so the front's validation always
+    /// refuses it (`graph.effect.unexpected_prepared`) before it reads the nodes.
+    pub(crate) ids: Option<EffectNodeIds>,
+    pub(crate) duplicates: usize,
+}
+
 impl<'a> PreparedEffectIndex<'a> {
     pub(crate) fn from_entries(
-        entries: impl Iterator<Item = &'a EffectProjectedEntry>,
-    ) -> (Self, usize) {
+        entries: impl ExactSizeIterator<Item = &'a EffectProjectedEntry>,
+    ) -> IndexedEffects<'a> {
         let mut by_key = BTreeMap::new();
+        let mut ids = Some(Vec::with_capacity(entries.len()));
         let mut duplicates = 0;
         for (index, entry) in entries.enumerate() {
+            let rack = rack_id(entry.rack);
             if by_key
                 .insert(
-                    (
-                        entry.track_id.as_str(),
-                        rack_id(entry.rack),
-                        entry.effect_id.as_str(),
-                    ),
+                    (entry.track_id.as_str(), rack, entry.effect_id.as_str()),
                     PreparedEffectSlot(index),
                 )
                 .is_some()
             {
                 duplicates += 1;
             }
+            let node = StableGraphId::parse(&entry.track_id)
+                .zip(StableGraphId::parse(&entry.effect_id))
+                .map(|(track_id, effect_id)| EffectNodeId {
+                    track_id,
+                    rack,
+                    effect_id,
+                });
+            ids = ids.zip(node).map(|(mut ids, node)| {
+                ids.push(node);
+                ids
+            });
         }
-        (Self { by_key }, duplicates)
+        IndexedEffects {
+            index: Self { by_key },
+            ids: ids.map(EffectNodeIds),
+            duplicates,
+        }
     }
 
     pub(crate) fn get(
@@ -110,29 +140,15 @@ impl<'a> PreparedEffectIndex<'a> {
 
 /// Every entry's effect node, in entry order: one per entry, never absent (issue #2303).
 ///
-/// Built only from entries the graph front has validated against the session (no duplicate,
-/// missing or unexpected entry), so each entry's `(track, rack, effect)` key is a declared session
-/// key and its node is that key's. It replaced a vector of `Option`s that the front's node loop
-/// filled in place, whose readers each read an unfilled slot differently.
+/// Built only by [`PreparedEffectIndex::from_entries`], beside the key index over the same
+/// entries, and read by the front only once its validation (no duplicate, missing or unexpected
+/// entry) has passed, so each entry's `(track, rack, effect)` key is a declared session key and
+/// its node is that key's. It replaced a vector of `Option`s that the front's node loop filled in
+/// place, whose readers each read an unfilled slot differently.
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct EffectNodeIds(Vec<EffectNodeId>);
 
 impl EffectNodeIds {
-    /// The node of every entry, in entry order. `entries` must have passed the front's
-    /// validation: an entry whose IDs are not accepted stable IDs panics in [`gid`].
-    pub(crate) fn of_validated<'a>(
-        entries: impl Iterator<Item = &'a EffectProjectedEntry>,
-    ) -> Self {
-        Self(
-            entries
-                .map(|entry| EffectNodeId {
-                    track_id: gid(&entry.track_id),
-                    rack: rack_id(entry.rack),
-                    effect_id: gid(&entry.effect_id),
-                })
-                .collect(),
-        )
-    }
-
     /// The node of the entry at `slot`, which indexes the same entries.
     pub(crate) fn get(&self, slot: PreparedEffectSlot) -> &EffectNodeId {
         &self.0[slot.0]

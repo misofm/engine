@@ -21,10 +21,10 @@ use crate::canonical::{
 };
 use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_estimate};
 use crate::ids::{
-    AsProjected, EffectInputs, EffectNodeIds, EffectPlacement, NodeTable, PreparedEffectIndex,
-    add_main_edge, add_node, add_route_destination_edge, add_route_source_edge, diag, effect_path,
-    gid, into_effects, port, ports_for, route_destination_node, route_source_node, route_values,
-    sidechain_matches, stages, track_node,
+    AsProjected, EffectInputs, EffectNodeIds, EffectPlacement, IndexedEffects, NodeTable,
+    PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
+    add_route_source_edge, diag, effect_path, gid, into_effects, port, ports_for,
+    route_destination_node, route_source_node, route_values, sidechain_matches, stages, track_node,
 };
 use crate::pdc::{TimingResult, timings};
 use crate::schedule::{Topo, buffer_assignments, cycle_primary_path, cycle_witnesses, topo};
@@ -258,7 +258,11 @@ impl GraphCompiler {
             return Err(diagnostics);
         }
 
-        let (prepared, duplicate_prepared) = PreparedEffectIndex::from_entries(effects.iter());
+        let IndexedEffects {
+            index: prepared,
+            ids: effect_ids,
+            duplicates: duplicate_prepared,
+        } = PreparedEffectIndex::from_entries(effects.iter());
         for _ in 0..duplicate_prepared {
             diagnostics.push(diag("graph.effect.duplicate_prepared", "$.effects"));
         }
@@ -312,9 +316,12 @@ impl GraphCompiler {
             return Err(diagnostics);
         }
 
-        // Issue #2303: validated above, so every entry is a declared session effect and has the
-        // node of its own key. Every pass below reads this one total vector.
-        let effect_ids = EffectNodeIds::of_validated(effects.iter());
+        // Issue #2303: validated above, so every entry is a declared session effect, its IDs are
+        // stable IDs and it has the node of its own key. Every pass below reads this one total
+        // vector.
+        let Some(effect_ids) = effect_ids else {
+            return Err(vec![diag("graph.internal.invariant", "$.effects")]);
+        };
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
         let mut route_transforms = Vec::new();
@@ -1004,7 +1011,23 @@ impl GraphCompiler {
             session,
             entries: &entries,
         };
-        let (prepared, _) = PreparedEffectIndex::from_entries(inputs.iter());
+        let IndexedEffects {
+            index: prepared,
+            ids,
+            ..
+        } = PreparedEffectIndex::from_entries(inputs.iter());
+        // Issue #2303: the entries must be the ones the front planned, entry for entry. A caller
+        // can change them between `project` and `compile_projected` through
+        // `GraphProjection::effects_mut`; one added, removed, reordered or re-keyed there would
+        // otherwise pair entries with another entry's node, bank and placement.
+        if ids.as_ref() != Some(&effect_ids) {
+            drop(prepared);
+            return Err((
+                entries,
+                supply,
+                GraphDiagnosticSet::sorted(vec![diag("graph.internal.invariant", "$.effects")]),
+            ));
+        }
         let banks = match bind_planned_banks(banks, &inputs, &prepared, dispatch) {
             Ok(banks) => banks,
             Err(diagnostic) => {
