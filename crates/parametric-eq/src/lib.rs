@@ -9242,9 +9242,12 @@ mod padded_banks {
                         ProcessReport::default(),
                         "{context}: bank {index}, padded lane {lane} was reported"
                     );
+                    // A collapsed bank's right section is not the track's state (#2352): it is
+                    // what the collapse froze, or the left one once a writer took the copy. The
+                    // members are judged on `..sections` above for the same reason.
                     assert!(
-                        without_silence(&lane_payload(bank.as_ref(), lane))
-                            == without_silence(&at_bind[index][slot]),
+                        without_silence(&lane_payload(bank.as_ref(), lane))[..sections]
+                            == without_silence(&at_bind[index][slot])[..sections],
                         "{context}: bank {index}, padded lane {lane}: the state moved"
                     );
                 }
