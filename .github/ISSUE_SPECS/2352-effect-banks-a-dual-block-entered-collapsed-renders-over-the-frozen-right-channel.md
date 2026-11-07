@@ -104,7 +104,15 @@ copy.
   writer's entry turns that row red" was not met. Minor findings: the `Maximum` rows' comment
   claimed to cover the limiter's `link.restate(true)`, but removing it left the row green; and the
   chain-path cost was not recorded.
-- **Attempt 3**: below.
+- **Attempt 3** (`fc4829655`): **FAIL**, one MAJOR finding. `reset_lane` was wrongly listed as an
+  equivalent mutant. It accepts any `ResetKind`, and with `reset_lane(0, FullToDefaults)` on a
+  collapsed bank whose lane holds asymmetric defaults, deleting its copy turned the reviewer's
+  temporary row red on the compressor, the EQ and the soft clip. Minor findings: the multiband's
+  reset row skipped silently (no lane defaults); the direct-lane rows skipped by a hardcoded list
+  with no check that other banks decline; and the spec did not say that `RightSpan` subsumes
+  `Dual`. Every row added in attempt 3 was confirmed by mutation, and dropping the `Maximum` rows
+  was judged justified.
+- **Attempt 4**: below. The writer-by-argument table there replaces attempt 3's.
 
 ## Evidence (attempt 1)
 
@@ -305,3 +313,69 @@ counterfactual right section, the left channel's, instead of the frozen one. Tha
 `&self` exception in the contract and make a collapsed bank's snapshot independent of placement, so
 the parametric EQ's `collapsed_view` would no longer be needed. It needs a per-effect check that the
 payload's right section holds only words the copy covers.
+
+## Evidence (attempt 4)
+
+`origin/main` had not moved since attempt 3 (the merge was a no-op). No effect source changed;
+only `crates/effect-compiler/tests/collapse_dual_entry.rs` and this spec did.
+
+**What changed in the test**
+- **The reset rows use prepared asymmetric defaults**, no longer `exchange_lane_defaults`.
+  - Lane 0 is prepared with one right-channel slot moved, so its two channels' defaults differ.
+  - A three-block dual prelude moves that slot back: a span for the eight effects that admit bank
+    spans, the prepared target for the EQ. The designed words then agree, and the collapse is
+    lawful.
+  - The reset rows now reach every bank. The multiband has no lane defaults, so it skipped the old
+    exchange-based row; it no longer skips.
+- **New row `ResetLaneToDefaults`** (`reset_lane(0, FullToDefaults)`), with the same setup as
+  `ResetToDefaults`.
+- **The collapse is asserted lawful.** When the collapsed run starts, every lane's
+  `lane_channel_symmetry` must hold. A temporary `DiscontinuityKeepParameters` variant first caught
+  this: the EQ admits no bank span, so its prelude span changed nothing and its collapse was
+  unlawful. That is why the EQ's prelude now uses a prepared target.
+- **Rows can no longer skip silently.**
+  - The reset rows must apply on every bank.
+  - `RightTarget` applies exactly when the effect prepares targets.
+  - A bank outside `DIRECT_LANE_PATHS` must answer `None` to `copy_lane_from` and `false` to
+    `swap_lanes_direct`.
+- **`RightSpan` subsumes `Dual`.** Any defect `Dual` catches also turns `RightSpan` red. `Dual`
+  stays for a clearer failure message: it names a plain dual entry, not a span.
+
+**Every `&mut self` entry of the nine `PreparedNativeEffectBank` impls, and every argument kind.**
+"Mutated" lists the banks whose entry copy was deleted, one at a time (tree restored and touched
+after each), with every one going red on the named row. Attempt numbers are in brackets.
+
+| entry, argument | row that turns red, or why the copy is an equivalent mutant | mutated |
+|---|---|---|
+| `process_bank`, no spans | `Dual` | compressor, gate, limiter, EQ (attempts 1-2) |
+| `process_bank`, a `Right` (or `Left`) span | `RightSpan`. A copy after the automation writes the left channel's words over the right channel's. | compressor (2); 7 of 7 on attempt 1's code |
+| `process_bank`, a `Both` span | equivalent: it writes both channels alike | -- |
+| `process_bank_mono` | engages the record; it is not a writer that needs the copy | -- |
+| `reset(FullToDefaults)` | `ResetToDefaults` | all nine: compressor, gate, limiter (3); EQ, de-esser, dynamic EQ, soft clip, transient shaper, multiband (4) |
+| `reset(DiscontinuityKeepParameters)` | equivalent on a lawful collapse: it rewrites both channels from parameters the witness made equal | compressor, EQ, multiband, soft clip: green (4) |
+| `reset_lane(FullToDefaults)` | `ResetLaneToDefaults` | all nine (4) |
+| `reset_lane(DiscontinuityKeepParameters)` | equivalent on a lawful collapse, for the same reason | compressor, EQ, multiband, soft clip: green (4) |
+| `restore_track_state_payload` | `Restore` | all nine: compressor, gate, limiter, EQ (2-3); de-esser, dynamic EQ, multiband, soft clip, transient shaper (4) |
+| `copy_lane_from` | `CopyLane` (compressor, EQ); every other bank must decline | compressor, EQ (3) |
+| `swap_lanes_direct`, own bank | `Swap` (compressor, EQ); every other bank must decline | compressor, EQ (3) |
+| `swap_lanes_direct`, peer | `SwapAsPeer` | compressor, EQ (3) |
+| `apply_prepared_target_lane`, a `Right` (or `Left`) target | `RightTarget` (the EQ, the one bank with targets; the others refuse with no write) | EQ (3, 4) |
+| `apply_prepared_target_lane`, a `Both` target | equivalent: it writes both channels alike | -- |
+| `retarget_link`, every `LinkMode` | equivalent: it moves both channels' link weights alike | compressor: green (3) |
+| `exchange_lane_defaults` | equivalent: by contract it changes no state word and no payload word | compressor, EQ: green (3) |
+| `advance_clocks` | no copy, by design. On an engaged bank it advances the left channel's clocks alone, which is the collapsed-bank rule for a skipped collapsed block. | -- |
+| `desymmetrize_channels` | it is the copy (`MonoCollapse::disengage`) | -- |
+| `as_any_mut` | writes nothing | -- |
+
+Where the attempt-3 table called `reset_lane` an equivalent mutant, it was wrong for
+`FullToDefaults`; this table replaces it. The attempt-3 review also suggested treating the
+multiband `reset` as equivalent. It is not: with defaults prepared apart, it is red on
+`ResetToDefaults` and `ResetLaneToDefaults`.
+
+**Gates** (local, AVX2):
+- `cargo test --locked --no-fail-fast -p effect-compiler`: green.
+- clippy `-D warnings` and rustdoc `-D warnings` on effect-compiler: green.
+- `cargo fmt --check`: green.
+- `scripts/check-workspace-policy.sh`: ok.
+- `realtime_policy`: ok.
+- No effect crate was touched, so their lib tests stand from attempt 2.

@@ -27,6 +27,8 @@ const SAMPLE_RATE: u32 = 48_000;
 const QUANTUM: u32 = 128;
 /// Collapsed blocks before the first dual one.
 const COLLAPSED: usize = 8;
+/// Of those, the dual blocks a reset row renders first, so its prelude span's ramp lands.
+const PRELUDE: usize = 3;
 /// Dual blocks of signal after them, then dual blocks of exact silence.
 const LOUD: usize = 8;
 const SILENT: usize = 64;
@@ -216,9 +218,17 @@ enum Boundary {
     Swap,
     /// The same swap called on the donor, with this bank as its peer: the peer's copy.
     SwapAsPeer,
-    /// Lane 0 took prepared defaults whose channels differ (`exchange_lane_defaults`) at bind, and
-    /// the whole bank resets to its defaults (`reset(FullToDefaults)`).
+    /// Lane 0 is prepared with defaults whose channels differ, and a right-channel write in the
+    /// prelude (a span, or the EQ's prepared target) brings its designed words back together, so
+    /// the collapse is lawful; at the boundary the whole bank resets to its defaults
+    /// (`reset(FullToDefaults)`).
     ResetToDefaults,
+    /// The same, with lane 0 alone reset to its defaults (`reset_lane(0, FullToDefaults)`).
+    ///
+    /// A reset that keeps parameters (`DiscontinuityKeepParameters`) has no row: on a lawful
+    /// collapse it writes both channels alike, so the copy before it moves no bit (the spec
+    /// records the mutation).
+    ResetLaneToDefaults,
     /// Lane 0 takes a prepared target on one right-channel parameter
     /// (`apply_prepared_target_lane`).
     RightTarget,
@@ -256,10 +266,20 @@ fn right_targets(
     factory: &dyn NativeEffectFactory,
     values: &[InitialParameterValue],
 ) -> Vec<PreparedEffectTarget> {
-    let (Some(preparation), Some((index, value))) = (
-        factory.target_preparation(),
-        moved_right(factory.descriptor(), values),
-    ) else {
+    moved_right(factory.descriptor(), values).map_or_else(Vec::new, |(index, value)| {
+        targets_moving(factory, values, index, value)
+    })
+}
+
+/// The prepared targets that move the right-channel slot `index` of `values` to `value`, or none
+/// when the effect prepares no targets or refuses the design.
+fn targets_moving(
+    factory: &dyn NativeEffectFactory,
+    values: &[InitialParameterValue],
+    index: u32,
+    value: f32,
+) -> Vec<PreparedEffectTarget> {
+    let Some(preparation) = factory.target_preparation() else {
         return Vec::new();
     };
     let mut next = values.to_vec();
@@ -348,6 +368,7 @@ fn check(effect: &str) {
         Boundary::Swap,
         Boundary::SwapAsPeer,
         Boundary::ResetToDefaults,
+        Boundary::ResetLaneToDefaults,
         Boundary::RightTarget,
     ] {
         check_case(factory, width, lanes, boundary);
@@ -433,41 +454,93 @@ fn check_case(
         bank
     };
     let donor = payload(&*donor_bank(), 0, sizes);
-    // Lane 0's defaults with one right-channel slot moved, read out of a bank bound with them.
-    let asymmetric_defaults = moved_right(descriptor, &initial[0]).and_then(|(index, value)| {
-        let mut lanes_values = initial.clone();
-        for slot in &mut lanes_values[0] {
+    // The reset rows: lane 0 prepared with one right-channel slot moved, so its two channels'
+    // defaults differ, and a prelude of dual blocks whose first carries a span moving that slot
+    // back, so the designed words agree again before the collapse. Defaults are no designed word,
+    // so the collapse that follows is lawful; the reset at the boundary is what writes them into
+    // the right channel.
+    let reset_row = matches!(
+        boundary,
+        Boundary::ResetToDefaults | Boundary::ResetLaneToDefaults
+    );
+    let asymmetric = moved_right(descriptor, &initial[0]).and_then(|(index, value)| {
+        let original = initial[0]
+            .iter()
+            .find(|slot| slot.parameter_index == index && slot.channel == ParameterChannel::Right)?
+            .value;
+        let mut values = initial.clone();
+        for slot in &mut values[0] {
             if slot.parameter_index == index && slot.channel == ParameterChannel::Right {
                 slot.value = value;
             }
         }
-        factory
-            .prepare(request(descriptor, &lanes_values[0]))
-            .ok()?;
-        let mut bank = bind(factory, width, &lanes_values);
-        let mut bytes = vec![0_u8; bank.lane_default_bytes()?];
-        bank.exchange_lane_defaults(0, &mut bytes).then_some(bytes)
+        factory.prepare(request(descriptor, &values[0])).ok()?;
+        let span = PreparedAutomationSpan {
+            channel: ParameterChannel::Right,
+            parameter_index: index,
+            sample: 0,
+            value: original,
+        };
+        // The EQ admits no bank span: its prelude write is the prepared target of the same move.
+        let back = targets_moving(factory, &values[0], index, original);
+        Some((values, span, back))
     });
+    let mut prelude_offsets = vec![1_u32; lanes + 1];
+    prelude_offsets[0] = 0;
+    let prelude = if reset_row { PRELUDE } else { 0 };
     let targets = right_targets(factory, &initial[0]);
     // Whether the boundary's writer did anything: a bank that declines a direct lane path, or an
-    // effect with no prepared targets or no lane defaults, makes its row vacuous, and the rows the
-    // effect is known to implement must not be.
+    // effect that prepares no targets, makes its row vacuous, and the rows the effect is known to
+    // implement must not be.
     let applies = match boundary {
         Boundary::CopyLane | Boundary::Swap | Boundary::SwapAsPeer => {
             DIRECT_LANE_PATHS.contains(&effect)
         }
-        Boundary::ResetToDefaults => asymmetric_defaults.is_some(),
+        Boundary::ResetToDefaults | Boundary::ResetLaneToDefaults => asymmetric.is_some(),
         Boundary::RightTarget => !targets.is_empty(),
         Boundary::Dual | Boundary::RightSpan | Boundary::Restore => true,
     };
-    if effect == "miso.parametric-eq" && matches!(boundary, Boundary::RightTarget) {
-        assert!(applies, "{case}: the EQ designs a right-channel target");
+    if matches!(boundary, Boundary::RightTarget) {
+        assert_eq!(
+            applies,
+            factory.target_preparation().is_some(),
+            "{case}: an effect that prepares targets designs a right-channel one"
+        );
+    }
+    // A row that skips must say why: every launch bank prepares asymmetric defaults, and a bank
+    // outside the direct-lane list must decline both direct paths, so a new implementer cannot
+    // skip its rows silently.
+    if reset_row {
+        assert!(
+            applies,
+            "{case}: no movable right-channel parameter prepares"
+        );
+    }
+    if matches!(
+        boundary,
+        Boundary::CopyLane | Boundary::Swap | Boundary::SwapAsPeer
+    ) && !applies
+    {
+        let mut bank = bind(factory, width, &initial);
+        let mut peer = donor_bank();
+        assert!(
+            bank.copy_lane_from(0, &*peer, 0).is_none(),
+            "{case}: a bank outside DIRECT_LANE_PATHS copies a lane directly"
+        );
+        assert!(
+            !bank.swap_lanes_direct(0, Some(&mut *peer), 0),
+            "{case}: a bank outside DIRECT_LANE_PATHS swaps a lane directly"
+        );
     }
     if !applies {
         return;
     }
     let run = |collapse: bool| -> (Vec<Observed>, Vec<Vec<u8>>) {
-        let mut bank = bind(factory, width, &initial);
+        let bound = asymmetric
+            .as_ref()
+            .filter(|_| reset_row)
+            .map_or(&initial, |(values, _, _)| values);
+        let mut bank = bind(factory, width, bound);
         let mut peer = donor_bank();
         assert!(
             bank.supports_mono_collapse(),
@@ -477,14 +550,28 @@ fn check_case(
         let mut frozen = Vec::new();
         for (index, plane) in planes.iter().enumerate() {
             let mut automation: (&[PreparedAutomationSpan], &[u32]) = (&[], &empty);
-            // Defaults are no state word, so a bank holding asymmetric ones still collapses
-            // lawfully; the reset at the boundary is what writes them into the right channel.
-            if index == 0 && matches!(boundary, Boundary::ResetToDefaults) {
-                let mut bytes = asymmetric_defaults.clone().expect("lane defaults");
-                assert!(
-                    bank.exchange_lane_defaults(0, &mut bytes),
-                    "{case}: exchange"
-                );
+            let prelude_span;
+            if index == 0 && reset_row {
+                let (_, span, back) = asymmetric.as_ref().expect("a reset row applies");
+                if back.is_empty() {
+                    prelude_span = [*span; 1];
+                    automation = (&prelude_span, &prelude_offsets[..]);
+                } else {
+                    for target in back {
+                        bank.apply_prepared_target_lane(0, target)
+                            .unwrap_or_else(|failure| panic!("{case}: prelude: {failure:?}"));
+                    }
+                }
+            }
+            // The collapse must be lawful, or the copy is not the counterfactual and no row
+            // means anything: every lane's designed words agree when the collapsed run starts.
+            if collapse && index == prelude {
+                for lane in 0..lanes {
+                    assert!(
+                        bank.lane_channel_symmetry(lane),
+                        "{case}: lane {lane} collapses with its designed words apart"
+                    );
+                }
             }
             if index == COLLAPSED {
                 frozen = payloads(&*bank, lanes, sizes);
@@ -520,6 +607,7 @@ fn check_case(
                         );
                     }
                     Boundary::ResetToDefaults => bank.reset(ResetKind::FullToDefaults),
+                    Boundary::ResetLaneToDefaults => bank.reset_lane(0, ResetKind::FullToDefaults),
                     Boundary::RightTarget => {
                         for target in &targets {
                             bank.apply_prepared_target_lane(0, target)
@@ -544,7 +632,7 @@ fn check_case(
             .expect("block shape");
             // The collapsed run never calls `desymmetrize_channels`: the boundary's entries meet
             // it collapsed.
-            let mono = collapse && index < COLLAPSED;
+            let mono = collapse && (prelude..COLLAPSED).contains(&index);
             let report = if mono {
                 bank.process_bank_mono(block)
             } else {
