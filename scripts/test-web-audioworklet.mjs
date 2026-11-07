@@ -4251,11 +4251,14 @@ async function testProcessor() {
     // Issue #2291: a trap in an export a message handler calls is contained at the handler, as
     // #2256 contained render's and dispose's. The fake models the shipped module: once any export
     // trapped, render and dispose refuse with 1, as the `LIVE_HOST` borrow the trap left does. Each
-    // row traps one export through the real `port.onmessage`, at a different place: inside
-    // `receive` (unanswered: the answer is the request's, with its planes for a source), and after
-    // the answer, in the service step of a tick (request 0). Red if the throw escapes the handler,
-    // goes unanswered, or leaves the trap unrecorded: the next block calls render on the trapped
-    // instance and the dispose calls its export, whose refusal the host retries for ever.
+    // row traps one export through the real `port.onmessage`, at a different place. Inside
+    // `receive` (unanswered), the answer is the request's, with its planes for a source. After a
+    // request's answer (a source acknowledged OK, its planes gone back), it goes to that request's
+    // ID with no planes. In the service step of a tick, it goes to request 0. Red if the throw
+    // escapes the handler, goes unanswered or to the wrong request, re-sends planes already
+    // transferred (the post then throws a `DataCloneError` out of the handler), or leaves the trap
+    // unrecorded: the next block calls render on the trapped instance and the dispose calls its
+    // export, whose refusal the host retries for ever.
     {
       const sourcePlane = () => new Float32Array(64).fill(0.5);
       const rows = [
@@ -4276,14 +4279,17 @@ async function testProcessor() {
           },
         },
         {
-          export: "session_seek",
+          name: "service after a source",
+          export: "service",
           message: {
-            tag: "miso.session-seek.v1", requestId: 1, generation: 2n, sourceFrame: 0n,
-            anchorSample: -1n, atOnce: false,
+            tag: "miso.source.v1", requestId: 1, sourceId: "drums", generation: 1n,
+            startFrame: 0n, sampleRateHz: 48000, frames: 64, endOfRegion: false,
+            planes: [sourcePlane(), sourcePlane()],
           },
           answer: { tag: "miso.error.v1", requestId: 1, result: 255 },
         },
         {
+          name: "service on a tick",
           export: "service",
           // A request answered first: the tick's error is still request 0's, not the last one's.
           before: { tag: "miso.telemetry.v1", requestId: 1, enabled: true },
@@ -4292,6 +4298,7 @@ async function testProcessor() {
         },
       ];
       for (const row of rows) {
+        const label = row.name ?? row.export;
         const { processor, fake } = makeProcessor();
         if (row.before !== undefined) processor.port.onmessage({ data: row.before });
         let trapped = false;
@@ -4310,20 +4317,29 @@ async function testProcessor() {
           return trapped ? 1 : 0;
         };
         assert.doesNotThrow(() => processor.port.onmessage({ data: row.message }),
-          `a ${row.export} trap stays inside the handler`);
+          `a ${label} trap stays inside the handler`);
         assert.deepEqual(processor.port.posts.at(-1)?.message, row.answer,
-          `a ${row.export} trap: the typed answer`);
-        assert.equal(processor.stickyResult, 255, `a ${row.export} trap is sticky 255`);
+          `a ${label} trap: the typed answer`);
+        assert.equal(processor.stickyResult, 255, `a ${label} trap is sticky 255`);
         const block = () => processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
         block();
         assert.equal(renderCalls, 0,
-          `a ${row.export} trap: no render on the trapped instance`);
+          `a ${label} trap: no render on the trapped instance`);
         processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 2 } });
         assert.deepEqual(processor.port.posts.at(-1).message,
-          { tag: "miso.ack.v1", requestId: 2, result: 255 }, `a ${row.export} trap: the dispose is final`);
-        assert.equal(fake.calls.dispose, 0, `a ${row.export} trap: no dispose export runs`);
-        assert.equal(block(), false, `a ${row.export} trap: the instance ends`);
+          { tag: "miso.ack.v1", requestId: 2, result: 255 }, `a ${label} trap: the dispose is final`);
+        assert.equal(fake.calls.dispose, 0, `a ${label} trap: no dispose export runs`);
+        assert.equal(block(), false, `a ${label} trap: the instance ends`);
       }
+      // The meter-view sync is a step after `receive` too: a fault it finds on a tick is request
+      // 0's, as the other steps' are, never the last answered request's. Red if `syncMeterViews`
+      // reports to `lastRequestId` on a tick.
+      const { processor, fake } = makeProcessor();
+      processor.port.onmessage({ data: { tag: "miso.telemetry.v1", requestId: 1, enabled: true } });
+      fake.exports.miso_engine_web_v1_meter_header_ptr = () => 0;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(processor.port.posts.at(-1).message,
+        { tag: "miso.error.v1", requestId: 0, result: 255 }, "a meter-view fault on a tick is request 0's");
     }
 
     {
@@ -4704,38 +4720,47 @@ async function testProcessor() {
       strict.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
       assert.equal(strict.port.posts.at(-1).message.tag, "miso.error.v1");
     }
-    // Issue #2291, the `worker`-mode rows: its two ports are handler entries of their own. A trap
-    // in the meter lease export (the page's port) is answered 255 to its request; one in
-    // `meter_header_ptr` under the Worker's meter view (the Worker's port) is posted to the page as
-    // request 0, as a render failure is. Either is recorded, so render is not called on the
-    // trapped half and its release answers no token without calling `host_release`. Red if the
-    // throw escapes `receiveWorkerMode` or the control port's handler.
-    for (const port of ["page", "worker"]) {
+    // Issue #2291, the `worker`-mode rows: its two ports are handler entries of their own. On the
+    // page's port, a trap inside `receive` (the meter lease export) is answered 255 to its request,
+    // and one after the answer (`meter_header_ptr` in the meter-view sync) is posted as request 0,
+    // which in this mode belongs to no request. On the Worker's port (`meter_header_ptr` under its
+    // meter view), the trap is posted to the page as request 0 even after a page request, as a
+    // render failure is. Each is recorded, so render is not called on the trapped half and its
+    // release answers no token without calling `host_release`. Red if the throw escapes
+    // `receiveWorkerMode` or the control port's handler, or goes to the wrong request.
+    const meters = { tag: "miso.meters.v1", requestId: 1, enabled: true };
+    const workerRows = [
+      { name: "page port, inside receive", trap: "meter_lease", answer: 1 },
+      { name: "page port, after the answer", trap: "meter_header_ptr", answered: true, answer: 0 },
+      { name: "Worker port", before: meters, trap: "meter_header_ptr", worker: true, answer: 0 },
+    ];
+    for (const row of workerRows) {
       const fake = createFakeExports(64);
       const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
-      const name = port === "page" ? "meter_lease" : "meter_header_ptr";
-      fake.exports[`miso_engine_web_v1_${name}`] = () => {
-        throw new Error(`synthetic wasm trap from the ${name} export`);
+      if (row.before !== undefined) processor.port.onmessage({ data: row.before });
+      fake.exports[`miso_engine_web_v1_${row.trap}`] = () => {
+        throw new Error(`synthetic wasm trap from the ${row.trap} export`);
       };
-      const send = port === "page"
-        ? () => processor.port.onmessage({
-          data: { tag: "miso.meters.v1", requestId: 1, enabled: true },
-        })
-        : () => fromWorker({
+      const send = row.worker
+        ? () => fromWorker({
           tag: "miso.meter-view.v1", header: fake.successorHeader.byteOffset,
           memoryBytes: fake.memory.buffer.byteLength,
-        });
-      assert.doesNotThrow(send, `a ${port}-port trap stays inside the handler`);
+        })
+        : () => processor.port.onmessage({ data: meters });
+      assert.doesNotThrow(send, `${row.name}: the trap stays inside the handler`);
       assert.deepEqual(processor.port.posts.at(-1).message,
-        { tag: "miso.error.v1", requestId: port === "page" ? 1 : 0, result: 255 },
-        `a ${port}-port trap: the typed answer`);
+        { tag: "miso.error.v1", requestId: row.answer, result: 255 }, `${row.name}: the typed answer`);
+      if (row.answered) {
+        assert.deepEqual(processor.port.posts.at(-2).message,
+          { tag: "miso.ack.v1", requestId: 1, result: 0 }, `${row.name}: the request was answered first`);
+      }
       const rendered = fake.calls.render.length;
       processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
-      assert.equal(fake.calls.render.length, rendered, `a ${port}-port trap: no render after it`);
+      assert.equal(fake.calls.render.length, rendered, `${row.name}: no render after the trap`);
       fromWorker({ tag: "miso.release.v1" });
       assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: 0n },
-        `a ${port}-port trap: the release answers no token`);
-      assert.deepEqual(fake.calls.release, [], `a ${port}-port trap: no release export runs`);
+        `${row.name}: the release answers no token`);
+      assert.deepEqual(fake.calls.release, [], `${row.name}: no release export runs`);
     }
     // R-S7-meters (3): `process()` switches to the pre-cut set only when the header render reports,
     // its frame pointer and its strip counts all match; otherwise it skips the frame and counts it.

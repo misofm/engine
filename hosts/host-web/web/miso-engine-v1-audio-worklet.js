@@ -315,10 +315,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.rebindMemoryViews();
         // A command may have committed a replacement plan, whose frame is sized for its strips:
         // its views are cut here, before any quantum can adopt it (#1290d1).
-        this.syncMeterViews();
+        this.syncMeterViews(requestId);
       } catch (_) {
-        // Issue #2291: a throw inside `receive` is the in-flight request's, which it has not
-        // answered yet: its planes go back with the answer.
+        // Issue #2291: a throw inside `receive` is answered to the in-flight request, with its
+        // planes, which no reply has carried away. The throw nearly always comes before that
+        // request's reply. The one exception is the re-cut of the views after `receiveControl`
+        // posted its reply; the page then holds a second answer to an answered request, and it
+        // fails on that too. A throw after `receive` is reported to the steps' request ID, with
+        // no planes: a source's went back with its acknowledgement.
         if (requestId === undefined) this.trap(this.lastRequestId, returnedPlanes(message));
         else this.trap(requestId);
       }
@@ -854,8 +858,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// switch for, a lease released across it, is picked up here), and the pending set follows the
   /// header the active one names as its successor: the replacement plan a command just committed,
   /// whose views are cut now so the quantum that adopts it only switches to them. A header or
-  /// frame the module's memory cannot hold is a protocol fault, sticky.
-  syncMeterViews() {
+  /// frame the module's memory cannot hold is a protocol fault, sticky, reported to `requestId`:
+  /// the steps' request ID, so a fault found on a service tick belongs to no request (#2291).
+  syncMeterViews(requestId = this.lastRequestId) {
     if (!this.metersAttached || this.phase !== PHASE_LIVE) return;
     this.rebindMemoryViews();
     const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0;
@@ -863,7 +868,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (active === null || active.headerPointer !== current) {
       active = this.cutMeterSet(current);
       if (active === null) {
-        this.sticky(RESULT_INTERNAL, this.lastRequestId);
+        this.sticky(RESULT_INTERNAL, requestId);
         return;
       }
       this.meterSet = active;
@@ -877,7 +882,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (this.pendingMeterSet === null || this.pendingMeterSet.headerPointer !== successor) {
       const pending = this.cutMeterSet(successor);
       if (pending === null) {
-        this.sticky(RESULT_INTERNAL, this.lastRequestId);
+        this.sticky(RESULT_INTERNAL, requestId);
         return;
       }
       this.pendingMeterSet = pending;
@@ -1080,10 +1085,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.port.postMessage(message, this.transferList(planes));
   }
 
-  /// Issue #2291: contain a throw that escaped a message handler. Each handler entry (the page's
-  /// port in both modes and the control Worker's) catches here, so no export a handler calls can
-  /// throw past it; `process()` contains its render call itself, and `receiveDispose` and the
-  /// releases contain theirs. A throw is a trap: the handler cannot tell one from its own fault (V8
+  /// Issue #2291: contain a throw that escaped a message handler. Each handler entry that reaches
+  /// an export catches here: the page's port in both modes, the control Worker's port, and the SDK
+  /// PCM feed prelude's attach port (its `prepare-seek`, which calls `trap(0)`). No export a
+  /// handler calls can throw past it. `process()` contains its render call itself, and
+  /// `receiveDispose` and the releases contain theirs. A throw is a trap: the handler cannot tell one from its own fault (V8
   /// reports a Wasm stack overflow as a `RangeError`, and a JavaScript exception thrown through Wasm
   /// frames is not a `WebAssembly.RuntimeError`), and its own code throws only on a module fault,
   /// after which it cannot vouch for the instance's memory either. So the instance fails sticky and

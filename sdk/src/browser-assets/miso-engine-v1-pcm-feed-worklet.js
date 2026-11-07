@@ -155,6 +155,7 @@ const RESULT_OK = 0
 const RESULT_INVALID_ARGUMENT = 1
 const RESULT_BACKPRESSURE = 6
 const RESULT_WRONG_STATE = 3
+const RESULT_INTERNAL = 255
 // The core's code for a seek at a generation the source already has (issue
 // #1644 D2), as the bytes a refusal writes at the start of the session
 // diagnostic. Built once at load: the worklet scope has no TextEncoder.
@@ -836,7 +837,19 @@ class MisoSabFeedAttachProcessor extends AudioWorkletProcessor {
         }
         this.port.postMessage({ op: "source-detached", requestId: data.requestId, detached: ring != null })
       } else if (data.op === "prepare-seek") {
-        const result = registry.engine === null ? { kind: "refused", result: RESULT_WRONG_STATE } : registry.engine.prepareSharedSeeks(this.delivered.filter((ring) => ring !== null), data.seeks)
+        let result = { kind: "refused", result: RESULT_WRONG_STATE }
+        if (registry.engine !== null) {
+          try {
+            result = registry.engine.prepareSharedSeeks(this.delivered.filter((ring) => ring !== null), data.seeks)
+          } catch (_) {
+            // Issue #2291: this port is the one handler outside the engine's that reaches an engine
+            // export (`source_prepare_seek`). A throw from it is a trap. The engine fails sticky and
+            // trapped, which the page hears of as request 0 (its dispose then runs no export), and
+            // the seek is refused 255.
+            registry.engine.trap(0)
+            result = { kind: "refused", result: RESULT_INTERNAL }
+          }
+        }
         registry.engine?.rebindMemoryViews()
         this.port.postMessage({ op: "seek-prepared", requestId: data.requestId, ...result })
       }
