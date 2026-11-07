@@ -237,9 +237,12 @@ export class CanonicalPcmPump {
     return this.#states.every((state) => state.finished)
   }
 
-  /** Fill every ring until it is full or its source reaches end-of-region. */
+  /**
+   * Fill every ring until it is full or its source reaches end-of-region. A stopped pump refuses
+   * (issue #2263): its zero-chunk answer would read exactly like a full ring.
+   */
   async pumpUntilFull() {
-    if (this.#stopped) return { chunks: 0, frames: 0, finished: this.finished }
+    this.#refuseIfStopped()
     const totals = { chunks: 0, frames: 0 }
     try {
       await Promise.all(this.#states.map((state) => this.#fill(state, totals)))
@@ -255,9 +258,11 @@ export class CanonicalPcmPump {
    * Reposition every stem to `frame`, clamped to its region, under a new generation. With
    * `generation` (issue #1644 D3) the pump uses that one, which must be above its own: pass the
    * generation of a session seek the engine accepted, and only after it did. Without one it uses
-   * its own next generation. A window read still in flight is superseded and never installed.
+   * its own next generation. A window read still in flight is superseded and never installed. A
+   * stopped pump refuses and publishes nothing (issue #2263): its rings are released.
    */
   async seek(frame, generation) {
+    this.#refuseIfStopped()
     const target = positiveOrZeroInteger(frame, "frame")
     if (generation !== undefined) {
       if (typeof generation !== "bigint" || generation <= this.#generation) {
@@ -281,6 +286,12 @@ export class CanonicalPcmPump {
     if (this.#stopped) return
     this.#stopped = true
     for (const state of this.#states) state.ring.release()
+  }
+
+  #refuseIfStopped() {
+    if (this.#stopped) {
+      throw new CanonicalPcmPumpError("stem.pump.stopped", "The PCM pump is stopped")
+    }
   }
 
   /** One source's share of a pass: write chunks while the window covers them, else await one. */

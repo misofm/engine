@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import {
   CanonicalPcmPump,
+  CanonicalPcmPumpError,
   Msb1RingWriter,
   createFixtureMsb1Ring,
   deinterleaveCanonicalPcm,
@@ -466,6 +467,41 @@ async function readFailureHardStops() {
   assert.match(surfaced.message, /disk read died/)
 }
 
+// --- Issue #2263: a stopped pump refuses work ----------------------------------------------------
+
+const SEEK_EPOCH = 11
+const GENERATION_TAG = 10
+
+async function stoppedPumpRefusesSeekAndPump() {
+  // A stopped pump has released its rings. A seek that still succeeded would re-tag and re-seek a
+  // ring no writer owns, and every later pass would report zero chunks and `finished: false`, which
+  // is exactly what a full ring reports: the caller cannot tell a dead pump from a busy one.
+  const shared = createFixtureMsb1Ring({ channels: 1, frameCapacity: 2, capacity: 2 })
+  const control = new Int32Array(shared, 0, 128 / 4)
+  const pump = new CanonicalPcmPump({
+    lease: { async read() { throw new Error("unreachable: the pump never reads") } },
+    windowFrames: 2,
+    sources: [{
+      sourceId: "stopped",
+      identity: `blake3:${"3".repeat(64)}`,
+      channels: 1,
+      bitDepth: 16,
+      frames: 8,
+      ring: new Msb1RingWriter(shared),
+    }],
+  })
+  pump.stop()
+  const epoch = Atomics.load(control, SEEK_EPOCH)
+  const tag = Atomics.load(control, GENERATION_TAG)
+  const stopped = (error) =>
+    error instanceof CanonicalPcmPumpError && error.code === "stem.pump.stopped"
+  await assert.rejects(pump.seek(0), stopped, "a stopped pump accepted a seek")
+  await assert.rejects(pump.seek(0, 9n), stopped, "a stopped pump accepted a session seek")
+  await assert.rejects(pump.pumpUntilFull(), stopped, "a stopped pump reported a pass")
+  assert.equal(Atomics.load(control, SEEK_EPOCH), epoch, "a refused seek published nothing")
+  assert.equal(Atomics.load(control, GENERATION_TAG), tag, "a refused seek re-tagged the ring")
+}
+
 async function resumeInsideGestureGate() {
   const bytes = pcm16([0, 1, -1, 32767], 1)
   const stemIdentity = identity(bytes)
@@ -851,6 +887,96 @@ async function seekReArmsAFinishedLoop() {
   await lease.close()
 }
 
+// --- Issue #2263: a failed Worker session drives nothing and refuses seek and pump ---------------
+
+/** The reply that answers `requestId`, whatever its type. */
+function answer(worker, requestId) {
+  return worker.posted.find((message) => message.requestId === requestId)
+}
+
+function idleTimers() {
+  return process.getActiveResourcesInfo().filter((resource) => resource === "Timeout").length
+}
+
+async function failedSessionRefusesSeekAndPump() {
+  // The source declares nine frames but the stored stem holds five, so the cadence's second window
+  // comes back truncated and the session fails on the drive path. A `seek` after that used to be
+  // answered `sought` and re-arm the loop against the stopped pump: zero chunks and
+  // `finished: false` on every pass, a 1 ms sleep, forever, with nothing reported.
+  const fixture = { ...cadenceFixture(), frames: 9 }
+  const { identity: stemIdentity, lease } = await stagedStore(fixture.bytes, "failed-session")
+  const shared = createFixtureMsb1Ring(fixture.ring)
+  const control = new Int32Array(shared, 0, 128 / 4)
+  const worker = await mountWorker("failed-session")
+  worker.send(
+    initializeMessage({
+      identity: stemIdentity,
+      shared,
+      fixture,
+      folderName: "failed-session",
+      selfDriving: { idleMs: 1 },
+    })
+  )
+  await worker.until(() => worker.reply("session-error") !== undefined, "the truncation to fail the session")
+  assert.match(worker.reply("session-error").error.message, /PCM window is truncated/)
+  assert.equal(Atomics.load(control, WRITER_STATE), 0, "the failure released the ring")
+  const epoch = Atomics.load(control, SEEK_EPOCH)
+
+  const refused = (requestId) => {
+    const reply = answer(worker, requestId)
+    assert.equal(reply?.type, "session-error", `a failed session answered \`${requestId}\` with ${reply?.type}`)
+    assert.equal(
+      reply.error.code,
+      "stem.pump.session_failed",
+      "the refusal must come from the failed session, not from a pump it still held"
+    )
+  }
+  worker.send({ type: "seek", requestId: "seek", frame: 0 })
+  await worker.until(() => answer(worker, "seek") !== undefined, "the seek answer")
+  refused("seek")
+  worker.send({ type: "pump", requestId: "pump" })
+  await worker.until(() => answer(worker, "pump") !== undefined, "the pump answer")
+  refused("pump")
+  assert.equal(Atomics.load(control, SEEK_EPOCH), epoch, "a refused seek published nothing")
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(idleTimers(), 0, "a failed session left the cadence sleeping")
+
+  worker.send({ type: "stop", requestId: "stop" })
+  await worker.until(() => worker.reply("stopped") !== undefined, "the stop reply")
+  await lease.close()
+}
+
+async function messagePathFailureStopsTheCadence() {
+  // A one-slot ring fills at once and the loop sleeps for 30 s. A `seek` the pump refuses fails the
+  // session on the message path; the loop must end with it rather than wake against a stopped pump
+  // and keep sleeping on it for as long as the Worker lives.
+  const fixture = cadenceFixture()
+  const { identity: stemIdentity, lease } = await stagedStore(fixture.bytes, "message-failure")
+  const shared = createFixtureMsb1Ring({ channels: 2, frameCapacity: 3, capacity: 1 })
+  const control = new Int32Array(shared, 0, 128 / 4)
+  const worker = await mountWorker("message-failure")
+  worker.send(
+    initializeMessage({
+      identity: stemIdentity,
+      shared,
+      fixture,
+      folderName: "message-failure",
+      selfDriving: { idleMs: 30_000 },
+    })
+  )
+  await worker.until(() => control[WROTE] === 1, "the one-slot ring to fill")
+  worker.send({ type: "seek", requestId: "bad-seek", frame: -1 })
+  await worker.until(() => answer(worker, "bad-seek") !== undefined, "the bad seek answer")
+  assert.equal(answer(worker, "bad-seek").type, "session-error")
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(idleTimers(), 0, "a message-path failure left the cadence sleeping")
+  assert.equal(Atomics.load(control, WRITER_STATE), 0, "a message-path failure released the ring")
+
+  worker.send({ type: "stop", requestId: "stop" })
+  await worker.until(() => worker.reply("stopped") !== undefined, "the stop reply")
+  await lease.close()
+}
+
 await transformContract()
 await workerPumpContract()
 await unalignedSeekKeepsChunksQuantumShaped()
@@ -859,6 +985,7 @@ await seekDuringReadCommitsNoStaleWindow()
 await truncatedReadAheadStopsOnce()
 await rejectsWindowSmallerThanRingBeforeEngaging()
 await readFailureHardStops()
+await stoppedPumpRefusesSeekAndPump()
 await resumeInsideGestureGate()
 await sameSessionReplacementReleasesPredecessorPin()
 await refusedGateNeverBecomesInteractive()
@@ -866,4 +993,6 @@ await rejectedResumeDoesNotLeakPins()
 await selfDrivingFillsWithoutPumpMessages()
 await stopInterruptsTheIdleLoop()
 await seekReArmsAFinishedLoop()
+await failedSessionRefusesSeekAndPump()
+await messagePathFailureStopsTheCadence()
 process.stdout.write("stem-pump-v1: PASS\n")
