@@ -52,6 +52,7 @@ use effect_contract::{
 use effect_runtime::bank::{
     BLOCK_LIMIT, block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
 };
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
@@ -3447,7 +3448,7 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// it is set the right channel is frozen and stale, so the rest mask reads the left channel
     /// alone and a skipped block advances the left silence counter alone: the effect contract's
     /// collapsed-bank rule (`PreparedNativeEffectBank::lanes_at_rest`). A reset leaves it alone.
-    collapsed: bool,
+    collapse: MonoCollapse,
     /// The two channels' rest planes ([`silence_block`], issue #1328 amendment A9): one threshold
     /// word per lane per frame of the prepared quantum, allocated once at preparation. Written from
     /// the input before any section runs and read by every section of that channel. Held here
@@ -3501,11 +3502,26 @@ const fn all_lanes<const W: usize>() -> u32 {
     if W >= 32 { u32::MAX } else { (1 << W) - 1 }
 }
 
+impl<L: Lane, const W: usize> CollapsibleChannels for PreparedParametricEq<L, W> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// [`PreparedParametricEq::desymmetrize`]'s copy.
+    fn copy_left_channel_onto_right(&mut self) {
+        self.right.sections = self.left.sections;
+        self.right.remaining = self.left.remaining;
+        self.right.identity = self.left.identity;
+        self.right.dry = self.left.dry;
+        self.right.silence = self.left.silence;
+    }
+}
+
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// The rest mask of both channels ([`Channel::rest_lanes`], issue #1745): `left & right`, or
-    /// the left channel's alone while [`collapsed`](Self::collapsed) (#1894).
+    /// the left channel's alone while [`collapse`](Self::collapse) is engaged (#1894).
     fn lanes_at_rest(&self) -> u32 {
-        if self.collapsed {
+        if self.collapse.engaged() {
             self.left.rest_lanes()
         } else {
             self.left.rest_lanes() & self.right.rest_lanes()
@@ -3576,6 +3592,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         right: &mut [f32],
         frames: usize,
     ) -> [[bool; MAX_LANES]; 2] {
+        // Entered collapsed, the block takes the disengage copy first (#2352).
+        MonoCollapse::enter::<false>(self);
         let mut failures = [[false; MAX_LANES]; 2];
         let words = frames * W;
         // Issue #163 phase 4 item 1. `quiet` is the whole precondition, evaluated whole-bank:
@@ -3683,7 +3701,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     fn render_mono(&mut self, left: &mut [f32], frames: usize) -> [[bool; MAX_LANES]; 2] {
         let mut failures = [[false; MAX_LANES]; 2];
         // From here until the disengage copy the right channel is frozen and stale.
-        self.collapsed = true;
+        MonoCollapse::enter::<true>(self);
         let words = frames * W;
         let stationary = self.left.no_ramp_in_flight();
         let quiet = stationary && block_is_positive_zero(&left[..words]);
@@ -3749,12 +3767,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// re-derives both from the copied `coef` and `remaining`, on the first dual block of a debug
     /// build.
     fn desymmetrize(&mut self) {
-        self.right.sections = self.left.sections;
-        self.right.remaining = self.left.remaining;
-        self.right.identity = self.left.identity;
-        self.right.dry = self.left.dry;
-        self.right.silence = self.left.silence;
-        self.collapsed = false;
+        MonoCollapse::disengage(self);
     }
 
     fn reset_state(&mut self, kind: ResetKind) {
@@ -3930,7 +3943,7 @@ fn prepare_width<L: Lane, const W: usize>(
         active: core::array::from_fn(|lane| active_mask.get(lane).copied().unwrap_or(false)),
         // Nothing has been observed yet, so nothing is claimed.
         silent: SilentClaim::new(),
-        collapsed: false,
+        collapse: MonoCollapse::new(),
         rest: [
             vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
             vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
@@ -4523,7 +4536,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
             return;
         }
         let mask = lanes_mask::<L>(bits);
-        let live = if self.collapsed { 1 } else { 2 };
+        let live = if self.collapse.engaged() { 1 } else { 2 };
         for channel in [&mut self.left, &mut self.right].into_iter().take(live) {
             let mut advanced = channel.silence;
             silence_advance(&mut advanced, frames as usize);

@@ -54,6 +54,7 @@ use effect_contract::{
     StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::envelope::attack_release_coefficient;
 use effect_runtime::params::{
     ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
@@ -523,7 +524,7 @@ struct PreparedGate<L: Lane, const CONNECTED: bool> {
     /// frozen and stale, so [`rest_lanes`](Self::rest_lanes) reads the left channel alone: the
     /// effect contract's collapsed-bank rule. The gate's one clock is bank-level, so nothing else
     /// reads it.
-    collapsed: bool,
+    collapse: MonoCollapse,
     /// Bit `l` is set when lane `l` carries a member (issue #1092). A padded lane's bit is clear:
     /// it takes no automation, and D7 recovers it without reporting it (the padding contract on
     /// `PrepareEffectBankRequest`). Every lane of a scalar instance and of a full bank is active.
@@ -612,7 +613,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             state: [GateState::default(); 2],
             timing: [[LaneTiming::default(); 2]; MAX_WIDTH],
             ramp_frames_left: 0,
-            collapsed: false,
+            collapse: MonoCollapse::new(),
             active: all_lanes(width),
         };
         for channel in 0..2 {
@@ -999,10 +1000,9 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         reports: &mut [ProcessReport; MAX_WIDTH],
     ) {
         let width = L::WIDTH;
-        if MONO {
-            // From here until the disengage copy the right channel is frozen and stale.
-            self.collapsed = true;
-        }
+        // A collapsed block freezes the right channel until the disengage copy; a dual
+        // block entered collapsed takes that copy first (#2352).
+        MonoCollapse::enter::<MONO>(self);
         let smoothed = (self.ramp_frames_left as usize).min(frames);
         if self.silent_block::<MONO>(left, right, sidechain) {
             // Every lane of both channels is at its exact rest and every input word is `+0.0`,
@@ -1089,13 +1089,13 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// channels, so one block of exact `+0.0` on every input of the lane leaves every one of its
     /// state words bit-identical and writes `+0.0` on both output planes. See that function for
     /// the words pinned and why the list is complete. A padded lane is answered by the same rule.
-    /// While [`collapsed`](Self::collapsed) the left channel answers alone (#1894).
+    /// While [`collapse`](Self::collapse) is engaged the left channel answers alone (#1894).
     ///
     /// The gate has one clock, and it is bank-level: `ramp_frames_left`, the countdown that
     /// selects the ramping segment, advances by the block length alone once every ramp is
     /// settled. It has no per-lane clock. From state only, no allocation, bounded by the width.
     fn rest_lanes(&self) -> u32 {
-        if self.collapsed {
+        if self.collapse.engaged() {
             self.channel_rest_lanes(0)
         } else {
             self.channel_rest_lanes(0) & self.channel_rest_lanes(1)
@@ -1591,6 +1591,18 @@ const RATE_MIN: f32 = 5.0e-6;
 const RATE_MAX: f32 = 0.203;
 
 /// One validated channel section, held on the stack until both channels have been accepted.
+impl<L: Lane, const CONNECTED: bool> CollapsibleChannels for PreparedGate<L, CONNECTED> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// [`PreparedGate::desymmetrize`]'s copy: the [`GateState`] and the [`GateCoef`].
+    fn copy_left_channel_onto_right(&mut self) {
+        self.state[1] = self.state[0];
+        self.coef[1] = self.coef[0];
+    }
+}
+
 struct LaneRestore {
     gain_db: f32,
     open: f32,
@@ -1864,9 +1876,7 @@ impl<L: Lane> PreparedGate<L, false> {
     /// `defaults` and `timing` are not copied: they are each channel's own committed values,
     /// which a collapsed block's automation updates on both channels as a dual block would.
     fn desymmetrize(&mut self) {
-        self.state[1] = self.state[0];
-        self.coef[1] = self.coef[0];
-        self.collapsed = false;
+        MonoCollapse::disengage(self);
     }
 
     /// [`PreparedNativeEffectBank::channels_agree`] (issue #973): every word

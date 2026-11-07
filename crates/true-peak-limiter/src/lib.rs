@@ -106,6 +106,7 @@ use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask,
     positive_zero_lanes_of,
 };
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::params::{
     ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
 };
@@ -4279,7 +4280,7 @@ struct LimiterCore<L: Lane> {
     /// [`lanes_at_rest`](Self::lanes_at_rest) reads the left channel alone (its scan and the
     /// claim's ramp legs) and [`advance_clocks`](Self::advance_clocks) advances the left channel's
     /// phase alone, as the collapsed silent path does: the effect contract's collapsed-bank rule.
-    collapsed: bool,
+    collapse: MonoCollapse,
     /// Issue #990: the linked-agreement record, with its issue #1370 D5 re-derivation
     /// ([`LinkRecord`], #2285). While it is linked, every lane's two channels hold bit-equal gain
     /// words, which licenses [`limiter_block_uniform`] to compute a linked pair's gain path once.
@@ -4288,6 +4289,20 @@ struct LimiterCore<L: Lane> {
     /// [`nonfinite_report`](Self::nonfinite_report): instrumentation is not render state.
     #[cfg(test)]
     silent_engagements: u32,
+}
+
+impl<L: Lane> CollapsibleChannels for LimiterCore<L> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// See [`ChannelState::copy_state_from`] for the word-by-word list and why it is exhaustive.
+    fn copy_left_channel_onto_right(&mut self) {
+        self.right.copy_state_from(&self.left);
+        // #990: every word of the right channel is now the left's, the gain words included. The
+        // D5 countdown is kept: a glide the copy lands inside still needs it.
+        self.link.restate(true);
+    }
 }
 
 impl<L: Lane> LimiterCore<L> {
@@ -4315,7 +4330,7 @@ impl<L: Lane> LimiterCore<L> {
                 report: NonFiniteReport::new(),
                 active: every_lane(width),
                 silent: SilentClaim::new(),
-                collapsed: false,
+                collapse: MonoCollapse::new(),
                 link,
                 #[cfg(test)]
                 silent_engagements: 0,
@@ -4409,7 +4424,7 @@ impl<L: Lane> LimiterCore<L> {
     /// a dual path re-derives the #990 record from the words, once.
     fn tick_relink(&mut self, frames: usize) {
         self.link
-            .tick(frames, !self.collapsed, &self.left, &self.right);
+            .tick(frames, !self.collapse.engaged(), &self.left, &self.right);
     }
 
     /// D5's watch, at a dual block's end: while every lane is `Maximum`, the designed words agree
@@ -4560,6 +4575,8 @@ impl<L: Lane> LimiterCore<L> {
         right_io: &mut [f32],
         frames: usize,
     ) -> [u32; 2] {
+        // Entered collapsed, the block takes the disengage copy first (#2352).
+        MonoCollapse::enter::<false>(self);
         let words = frames * L::WIDTH;
         // Issue #1370: the frames of this block a link glide is in flight for. Such a block is
         // never quiet: the glide moves its weights every frame.
@@ -4758,6 +4775,7 @@ impl<L: Lane> LimiterCore<L> {
         right_io: &mut [f32],
         frames: usize,
     ) {
+        MonoCollapse::enter::<false>(self);
         // The oracle never links, and keeps the record honest for a core it drives.
         let link_all = self.coefficients.link_all;
         let (left, right) = (&self.left, &self.right);
@@ -4792,7 +4810,7 @@ impl<L: Lane> LimiterCore<L> {
         // #1370 D5: and the watch ends; `desymmetrize` re-establishes the record.
         self.link.unlink();
         // #1894: and so does every right word the rest predicate reads.
-        self.collapsed = true;
+        MonoCollapse::enter::<true>(self);
         let words = frames * L::WIDTH;
         let glide = self.glide_frames(frames, true);
         let quiet = self.block_is_quiet(glide, &left_io[..words], None);
@@ -4860,7 +4878,7 @@ impl<L: Lane> LimiterCore<L> {
     #[cfg(test)]
     fn process_block_mono_runtime_oracle(&mut self, left_io: &mut [f32], frames: usize) {
         self.link.unlink();
-        self.collapsed = true;
+        MonoCollapse::enter::<true>(self);
         limiter_block_mono_runtime_oracle::<L>(
             left_io,
             frames,
@@ -4875,11 +4893,7 @@ impl<L: Lane> LimiterCore<L> {
     ///
     /// See [`ChannelState::copy_state_from`] for the word-by-word list and why it is exhaustive.
     fn desymmetrize(&mut self) {
-        self.right.copy_state_from(&self.left);
-        // #990: every word of the right channel is now the left's, the gain words included. The
-        // D5 countdown is kept: a glide the copy lands inside still needs it.
-        self.link.restate(true);
-        self.collapsed = false;
+        MonoCollapse::disengage(self);
     }
 
     /// The boundary-check record, for the gates.
@@ -4896,8 +4910,8 @@ impl<L: Lane> LimiterCore<L> {
 
     /// The bank's rest mask (issue #1745): both channels' per-lane predicates ANDed
     /// ([`ChannelState::lanes_at_silent_rest`]), or the left channel's alone while
-    /// [`collapsed`](Self::collapsed) (#1894). Clocks excluded: the shared [`Cursors`] and each
-    /// lane's van Herk `phase`.
+    /// [`collapse`](Self::collapse) is engaged (#1894). Clocks excluded: the shared [`Cursors`]
+    /// and each lane's van Herk `phase`.
     ///
     /// # The standing claim (issue #1107)
     ///
@@ -4930,13 +4944,13 @@ impl<L: Lane> LimiterCore<L> {
     }
 
     /// The #182 S2 claim, with the fast path's own state legs (the input leg excluded): every ramp
-    /// stationary, the left channel's alone while [`collapsed`](Self::collapsed), as the
+    /// stationary, the left channel's alone while [`collapse`](Self::collapse) is engaged, as the
     /// collapsed fast path reads them.
     fn silent_claim_stands(&self) -> bool {
         self.silent.proved()
-            && self.ramps_settled(self.collapsed)
+            && self.ramps_settled(self.collapse.engaged())
             && self.left.glide_frames() == 0
-            && (self.collapsed || self.right.glide_frames() == 0)
+            && (self.collapse.engaged() || self.right.glide_frames() == 0)
     }
 
     /// Every limit and release ramp of the rendered channels is stationary: the left channel's
@@ -4979,7 +4993,7 @@ impl<L: Lane> LimiterCore<L> {
     /// not stand.
     fn scan_lanes_at_rest(&self) -> u32 {
         let left = self.left.lanes_at_silent_rest::<L>();
-        if self.collapsed {
+        if self.collapse.engaged() {
             left
         } else {
             left & self.right.lanes_at_silent_rest::<L>()
@@ -5015,7 +5029,7 @@ impl<L: Lane> LimiterCore<L> {
     fn advance_clocks(&mut self, lanes: u32, frames: usize) {
         let lanes = lanes & every_lane(L::WIDTH);
         self.left.advance_rest_phase(lanes, frames);
-        if !self.collapsed {
+        if !self.collapse.engaged() {
             self.right.advance_rest_phase(lanes, frames);
         }
         self.cursors.advance(frames, &self.shape);

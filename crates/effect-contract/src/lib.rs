@@ -2780,7 +2780,10 @@ pub trait PreparedNativeEffectBank: Send {
     ///   original operation order, because `link(p, p)` is not in general the same expression as
     ///   `link(p, q)` simplified;
     /// * the right-channel state is left exactly as it was. It is restored by
-    ///   [`desymmetrize_channels`](Self::desymmetrize_channels) before any dual block runs;
+    ///   [`desymmetrize_channels`](Self::desymmetrize_channels) before any dual block runs: the
+    ///   caller's copy, or, when a [`process_bank`](Self::process_bank) is entered collapsed, the
+    ///   dual body's own, taken first (#2352, `effect_runtime::collapse::MonoCollapse`), so a dual
+    ///   block never reads the frozen right channel;
     /// * every **report** this call produces is the report the dual run would have produced, not
     ///   the half of it this call happened to compute. Per-lane right-channel counters are
     ///   duplicated from the left, because the right plane the seam is about to write carries
@@ -2811,7 +2814,8 @@ pub trait PreparedNativeEffectBank: Send {
     /// unsound; the transition oracle in the gates is what proves it did not.
     ///
     /// Off the render thread's hot path but *on* the render thread, at a block boundary, before
-    /// the first dual block. It allocates nothing.
+    /// the first dual block. It allocates nothing. A dual block entered collapsed takes this copy
+    /// itself (#2352), so a caller that skips it gets the dual run's render, never the frozen one.
     ///
     /// # Snapshotting a collapsed bank
     ///

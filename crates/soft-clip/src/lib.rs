@@ -37,6 +37,7 @@ use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask,
     positive_zero_lanes_of,
 };
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::params::{ParameterSpec, is_negative_zero, normalize_zero};
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
@@ -1225,7 +1226,7 @@ struct SoftClip<L: Lane> {
     /// right channel is frozen and stale, so [`lanes_at_rest`](Self::lanes_at_rest) reads the left
     /// channel alone and a skipped block advances the left cursor alone, as the collapsed silent
     /// path does: the effect contract's collapsed-bank rule.
-    collapsed: bool,
+    collapse: MonoCollapse,
 }
 
 impl<L: Lane> SoftClip<L> {
@@ -1246,7 +1247,7 @@ impl<L: Lane> SoftClip<L> {
             right,
             nonfinite: NonFiniteReport::new(),
             active: (1 << L::WIDTH) - 1,
-            collapsed: false,
+            collapse: MonoCollapse::new(),
         }
     }
 
@@ -1326,10 +1327,9 @@ impl<L: Lane> SoftClip<L> {
         let allowed = !silent_forbidden();
         #[cfg(not(test))]
         let allowed = true;
-        if MONO {
-            // From here until the disengage copy the right channel is frozen and stale.
-            self.collapsed = true;
-        }
+        // A collapsed block freezes the right channel until the disengage copy; a dual
+        // block entered collapsed takes that copy first (#2352).
+        MonoCollapse::enter::<MONO>(self);
         let silent = if MONO {
             block_is_positive_zero(left) && self.left.rest_lanes() == all_lanes::<L>()
         } else {
@@ -1368,10 +1368,10 @@ impl<L: Lane> SoftClip<L> {
     }
 
     /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`), or
-    /// on the left channel alone while [`collapsed`](Self::collapsed) (#1894): see
+    /// on the left channel alone while [`collapse`](Self::collapse) is engaged (#1894): see
     /// [`Channel::rest_lanes`] for the words pinned, why the list is complete, and the one clock.
     fn lanes_at_rest(&self) -> u32 {
-        if self.collapsed {
+        if self.collapse.engaged() {
             self.left.rest_lanes()
         } else {
             self.left.rest_lanes() & self.right.rest_lanes()
@@ -1423,14 +1423,7 @@ impl<L: Lane> SoftClip<L> {
     /// `left_defaults` and `right_defaults` are not copied: they are each channel's own prepared
     /// values, which the kernel never reads (a full reset, preparation-side, re-seeds from them).
     fn desymmetrize(&mut self) {
-        let (left, right) = (&self.left, &mut self.right);
-        right.state = left.state;
-        right.history.pos = left.history.pos;
-        right.history.x.copy_from_slice(&left.history.x);
-        right.history.e.copy_from_slice(&left.history.e);
-        right.history.dry.copy_from_slice(&left.history.dry);
-        right.ramps.copy_from_slice(&left.ramps);
-        self.collapsed = false;
+        MonoCollapse::disengage(self);
     }
 
     /// `PreparedNativeEffectBank::channels_agree` (issue #1872): every word
@@ -1507,6 +1500,23 @@ fn same_state_lane<L: Lane>(left: &Channel<L>, right: &Channel<L>, lane: usize) 
     })
 }
 
+impl<L: Lane> CollapsibleChannels for SoftClip<L> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// [`SoftClip::desymmetrize`]'s copy.
+    fn copy_left_channel_onto_right(&mut self) {
+        let (left, right) = (&self.left, &mut self.right);
+        right.state = left.state;
+        right.history.pos = left.history.pos;
+        right.history.x.copy_from_slice(&left.history.x);
+        right.history.e.copy_from_slice(&left.history.e);
+        right.history.dry.copy_from_slice(&left.history.dry);
+        right.ramps.copy_from_slice(&left.ramps);
+    }
+}
+
 impl<L: Lane> SoftClip<L> {
     /// The heap this cohort owns (#1074): both default tables, and per channel its ramp table and
     /// its three histories. Every other field is inline.
@@ -1569,7 +1579,7 @@ impl<L: Lane> PreparedSoftClipBank<L> {
             "a lane not at rest"
         );
         self.inner.left.advance_cursor(frames as usize);
-        if !self.inner.collapsed {
+        if !self.inner.collapse.engaged() {
             self.inner.right.advance_cursor(frames as usize);
         }
     }

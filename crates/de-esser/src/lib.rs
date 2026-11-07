@@ -44,6 +44,7 @@ use effect_contract::{
 use effect_runtime::bank::{
     block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
 };
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::dynamic_band::WordRamp;
 use effect_runtime::envelope::attack_release_coefficient;
 use effect_runtime::params::{
@@ -517,7 +518,7 @@ struct DeEsser<L: Lane, const CONNECTED: bool> {
     /// is frozen and stale, so [`rest_lanes`](Self::rest_lanes) reads the left channel alone and a
     /// skipped block advances the left channel's silence clocks alone, as the collapsed silent
     /// path does: the effect contract's collapsed-bank rule.
-    collapsed: bool,
+    collapse: MonoCollapse,
 }
 
 fn lane_get<L: Lane>(value: L, lane: usize) -> f32 {
@@ -614,6 +615,18 @@ const fn all_lanes(width: usize) -> u32 {
     (1 << width) - 1
 }
 
+impl<L: Lane, const CONNECTED: bool> CollapsibleChannels for DeEsser<L, CONNECTED> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// The left channel's whole per-channel render state onto the right, every lane.
+    fn copy_left_channel_onto_right(&mut self) {
+        self.state[1] = self.state[0];
+        self.coef[1] = self.coef[0];
+    }
+}
+
 impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     fn layout(&self) -> payload::StateLayout {
         payload::StateLayout {
@@ -649,7 +662,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             }; 2],
             state: [Chan::default(); 2],
             active: all_lanes(L::WIDTH),
-            collapsed: false,
+            collapse: MonoCollapse::new(),
         };
         for channel in 0..2 {
             for lane in 0..L::WIDTH {
@@ -965,10 +978,9 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         frames: usize,
         reports: &mut [ProcessReport; MAX_WIDTH],
     ) {
-        if MONO {
-            // From here until the disengage copy the right channel is frozen and stale.
-            self.collapsed = true;
-        }
+        // A collapsed block freezes the right channel until the disengage copy; a dual
+        // block entered collapsed takes that copy first (#2352).
+        MonoCollapse::enter::<MONO>(self);
         if self.silent_block::<MONO>(left, right, sidechain) {
             // Every lane rests and every input word is `+0.0`: the kernel would write the `+0.0`
             // the planes hold and move only the clocks, which advance here as it would.
@@ -1106,9 +1118,9 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     }
 
     /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`), or
-    /// on the left channel alone while [`collapsed`](Self::collapsed) (#1894).
+    /// on the left channel alone while [`collapse`](Self::collapse) is engaged (#1894).
     fn rest_lanes(&self) -> u32 {
-        if self.collapsed {
+        if self.collapse.engaged() {
             self.channel_rest_lanes(0)
         } else {
             self.channel_rest_lanes(0) & self.channel_rest_lanes(1)
@@ -1650,9 +1662,7 @@ macro_rules! bank_impl {
 
             /// The left channel's whole per-channel render state onto the right, every lane.
             fn desymmetrize_channels(&mut self) {
-                self.state[1] = self.state[0];
-                self.coef[1] = self.coef[0];
-                self.collapsed = false;
+                MonoCollapse::disengage(self);
             }
 
             fn channels_agree(&self) -> bool {
@@ -1695,7 +1705,7 @@ macro_rules! bank_impl {
             fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
                 debug_assert_eq!(lanes_mask & !self.rest_lanes(), 0, "a lane not at rest");
                 // A collapsed bank's right clocks are frozen, as the collapsed block leaves them.
-                let channels = if self.collapsed { 1 } else { 2 };
+                let channels = if self.collapse.engaged() { 1 } else { 2 };
                 self.advance_clocks_masked(lanes_mask, frames as usize, channels);
             }
             // REALTIME_POLICY_END

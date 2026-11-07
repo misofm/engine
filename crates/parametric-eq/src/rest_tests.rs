@@ -199,7 +199,7 @@ fn copy_bank<L: Lane, const W: usize>(
         right: copy_channel(&eq.right),
         active: eq.active,
         silent: eq.silent,
-        collapsed: eq.collapsed,
+        collapse: eq.collapse,
         rest: eq.rest.clone(),
     }
 }

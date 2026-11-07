@@ -67,6 +67,7 @@ use effect_contract::{
 use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
 };
+use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::envelope::{ArCoef, ar_one_pole_step};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as spec_value_valid,
@@ -905,7 +906,21 @@ struct Shaper<L: Lane, const W: usize> {
     /// the right channel is frozen and stale, so [`lanes_at_rest`](Self::lanes_at_rest) reads the
     /// left channel alone: the effect contract's collapsed-bank rule. The shaper has no clocks, so
     /// nothing else reads it.
-    collapsed: bool,
+    collapse: MonoCollapse,
+}
+
+impl<L: Lane, const W: usize> CollapsibleChannels for Shaper<L, W> {
+    fn mono_collapse(&mut self) -> &mut MonoCollapse {
+        &mut self.collapse
+    }
+
+    /// [`Shaper::desymmetrize`]'s copy.
+    fn copy_left_channel_onto_right(&mut self) {
+        self.right_env = self.left_env;
+        self.right.ramps = self.left.ramps;
+        // Issue #1370: the link weights are per-channel render state too.
+        self.right.links = self.left.links;
+    }
 }
 
 impl<L: Lane, const W: usize> Shaper<L, W> {
@@ -929,7 +944,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             state_sizes: metadata.state_sizes,
             nonfinite: NonFiniteReport::new(),
             active: (1 << W) - 1,
-            collapsed: false,
+            collapse: MonoCollapse::new(),
         }
         .with_links_at_rest()
     }
@@ -1076,10 +1091,9 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         frames: usize,
     ) -> [u32; 2] {
         debug_assert_eq!(W, L::WIDTH);
-        if MONO {
-            // From here until the disengage copy the right channel is frozen and stale.
-            self.collapsed = true;
-        }
+        // A collapsed block freezes the right channel until the disengage copy; a dual
+        // block entered collapsed takes that copy first (#2352).
+        MonoCollapse::enter::<MONO>(self);
         let silent = if MONO {
             block_is_positive_zero(left)
                 && silent_allowed()
@@ -1171,12 +1185,12 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// nothing else; the boundary check passes on a `+0.0` block, so [`recover_lanes`](Self::recover_lanes) and the D7
     /// record are not reached. The shaper has **no clocks**.
     ///
-    /// While [`collapsed`](Self::collapsed) the left channel answers alone (#1894).
+    /// While [`collapse`](Self::collapse) is engaged the left channel answers alone (#1894).
     ///
     /// No allocation, bounded time, `&self`: four bit masks and `6 * W` integer compares.
     fn lanes_at_rest(&self) -> u32 {
         let left = channel_rest_lanes(&self.left_env, &self.left);
-        if self.collapsed {
+        if self.collapse.engaged() {
             left
         } else {
             left & channel_rest_lanes(&self.right_env, &self.right)
@@ -1404,11 +1418,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// per channel). The link modes and masks, the coefficients and the bypass are whole-lane or
     /// whole-instance: one word serves both channels.
     fn desymmetrize(&mut self) {
-        self.right_env = self.left_env;
-        self.right.ramps = self.left.ramps;
-        // Issue #1370: the link weights are per-channel render state too.
-        self.right.links = self.left.links;
-        self.collapsed = false;
+        MonoCollapse::disengage(self);
     }
 
     /// `PreparedNativeEffectBank::channels_agree` (issue #1873): every word
