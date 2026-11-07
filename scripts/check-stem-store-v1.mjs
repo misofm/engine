@@ -261,6 +261,23 @@ async function runMutationLedger() {
       expectedFailure: "same-session replacement waited on its own predecessor pin lock",
     },
     {
+      name: "commit a superseded open after its predecessor close",
+      file: "web/stem-store/session-gate.js",
+      search:
+        "        await displaced.close()\n        opening.signal.throwIfAborted()\n",
+      replace: "        await displaced.close()\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a superseded open committed its lease over the newer open",
+    },
+    {
+      name: "omit AbortSignal from the session pin lock wait",
+      file: "web/stem-store/opfs-store.js",
+      search: '      { mode: "exclusive", signal },\n      async () => {\n        acquired()',
+      replace: '      { mode: "exclusive" },\n      async () => {\n        acquired()',
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "an aborted open kept waiting on a held session pin",
+    },
+    {
       name: "treat missing index as an empty authoritative index",
       file: "web/stem-store/opfs-store.js",
       search:

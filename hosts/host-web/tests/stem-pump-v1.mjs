@@ -540,6 +540,114 @@ async function sameSessionReplacementReleasesPredecessorPin() {
   assert.deepEqual(index.stems[stemIdentity].pins, [])
 }
 
+const LOCKS = "miso:stem-store:v1:miso-stems-blake3-v1"
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+// Clears its timer, so a later test that counts live timers sees none of these.
+async function settledWithin(promise, milliseconds) {
+  let timer
+  try {
+    return await Promise.race([
+      promise.then(
+        (value) => ({ value }),
+        (error) => ({ error })
+      ),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve("timed-out"), milliseconds)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function untilPending(locks, name) {
+  while (!(await locks.query()).pending.some((lock) => lock.name === name)) await tick()
+}
+
+// Issue #2266: an open superseded while it closes its predecessor lease must not commit. Opening
+// "same" while "previous" is current reaches `await previous.close()` holding the new lease, and
+// so its session pin lock; a second open of "same" started inside that close queues on the pin.
+async function supersededOpenNeverCommits() {
+  const bytes = pcm16([0, 1, -1, 32767], 1)
+  const stemIdentity = identity(bytes)
+  const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
+  const backend = new FakeOpfsBackend()
+  const locks = new FakeLockManager()
+  const gate = new StemSessionGate(
+    new OpfsStemStore({ storage: backend.storage(), locks, tabId: "superseded" }),
+    new MemoryStemResolver({ [stemIdentity]: bytes })
+  )
+  await gate.open({ sessionId: "previous", stems, resume() {} })
+  const indexLock = `${LOCKS}:index`
+  let unstall
+  let stall
+  const first = gate.open({
+    sessionId: "same",
+    stems,
+    resume() {},
+    onProgress(event) {
+      // The store has granted the first lease; hold the index so the predecessor's close,
+      // which rewrites the index, waits inside the gate's commit window.
+      if (event.stage !== "ready") return
+      stall = locks.request(indexLock, {}, () => new Promise((resolve) => (unstall = resolve)))
+    },
+  })
+  await untilPending(locks, indexLock)
+  const second = gate.open({ sessionId: "same", stems, resume() {} })
+  unstall()
+  await stall
+  const [firstOutcome, secondOutcome] = await Promise.all([
+    settledWithin(first, 500),
+    settledWithin(second, 500),
+  ])
+  assert.equal(
+    firstOutcome.error?.name,
+    "AbortError",
+    "a superseded open committed its lease over the newer open"
+  )
+  assert.notEqual(
+    secondOutcome,
+    "timed-out",
+    "the newer open deadlocked on the superseded open's session pin"
+  )
+  assert.equal(secondOutcome.error, undefined)
+  assert.equal(gate.state, "interactive")
+  assert.equal((await secondOutcome.value.read(stemIdentity)).size, bytes.byteLength)
+  const pins = () =>
+    JSON.parse(new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json")))
+      .stems[stemIdentity].pins
+  assert.deepEqual(pins(), ["session:superseded:same"])
+  await gate.close()
+  assert.deepEqual(pins(), [], "the gate's close released every pin it took")
+}
+
+// Issue #2266: the session pin lock is the one wait in an open that did not take the opening's
+// signal. Another holder of the same pin (here a direct store lease) kept an aborted open waiting.
+async function pinLockWaitObeysAbort() {
+  const bytes = pcm16([3, 2, 1, 0], 1)
+  const stemIdentity = identity(bytes)
+  const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
+  const backend = new FakeOpfsBackend()
+  const locks = new FakeLockManager()
+  const store = new OpfsStemStore({ storage: backend.storage(), locks, tabId: "pin-wait" })
+  const resolver = new MemoryStemResolver({ [stemIdentity]: bytes })
+  const holder = await store.openSession({ sessionId: "held", stems, resolver })
+  const gate = new StemSessionGate(store, resolver)
+  const abort = new AbortController()
+  const opening = gate.open({ sessionId: "held", stems, resume() {}, signal: abort.signal })
+  await untilPending(locks, `${LOCKS}:pin:session:pin-wait:held`)
+  abort.abort(new DOMException("Mix switched", "AbortError"))
+  const outcome = await settledWithin(opening, 500)
+  assert.notEqual(outcome, "timed-out", "an aborted open kept waiting on a held session pin")
+  assert.equal(outcome.error?.name, "AbortError")
+  assert.equal(gate.state, "refused")
+  await holder.close()
+  const lease = await gate.open({ sessionId: "held", stems, resume() {} })
+  assert.equal((await lease.read(stemIdentity)).size, bytes.byteLength)
+  await gate.close()
+}
+
 async function refusedGateNeverBecomesInteractive() {
   const events = []
   let resumed = false
@@ -861,6 +969,8 @@ await rejectsWindowSmallerThanRingBeforeEngaging()
 await readFailureHardStops()
 await resumeInsideGestureGate()
 await sameSessionReplacementReleasesPredecessorPin()
+await supersededOpenNeverCommits()
+await pinLockWaitObeysAbort()
 await refusedGateNeverBecomesInteractive()
 await rejectedResumeDoesNotLeakPins()
 await selfDrivingFillsWithoutPumpMessages()

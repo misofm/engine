@@ -4,6 +4,13 @@ import { StemStoreError } from "./opfs-store.js"
  * Session-open orchestration. `resume()` is invoked synchronously, before the
  * first await, so a browser counts it inside the user's gesture; interaction
  * remains closed until the store lease proves every stem at this open.
+ *
+ * Each open owns one AbortController, `opening`, and it owns the gate only
+ * while that controller is unaborted: a newer open, `close()` and the caller's
+ * own signal all abort it. An open writes `#lease` and `#state` only after
+ * `opening.signal.throwIfAborted()` with no await in between, so a superseded
+ * open can never commit, and its store lease (with its session pin lock) is
+ * closed on the way out instead of blocking a newer open of the same session.
  */
 export class StemSessionGate {
   #store
@@ -88,11 +95,13 @@ export class StemSessionGate {
       ])
       if (!resumed.ok) throw resumed.error
       lease = opened
-      if (this.#opening !== opening) {
-        await lease.close()
-        throw new DOMException("Superseded by another session open", "AbortError")
+      opening.signal.throwIfAborted()
+      const displaced = this.#lease
+      if (displaced !== undefined) {
+        this.#lease = undefined
+        await displaced.close()
+        opening.signal.throwIfAborted()
       }
-      await this.#lease?.close()
       this.#lease = lease
       this.#state = "interactive"
       options.onProgress?.({
