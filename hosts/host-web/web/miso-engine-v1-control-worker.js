@@ -1008,31 +1008,31 @@ class ControlWorker {
       planes,
       capacity,
       channels,
-      seenEpoch: Atomics.load(control, RING.SEEK_EPOCH),
-      // #2184: the last whole seek publication `readSharedSeek` read.
-      seekEpoch: 0,
-      seekTag: 0,
-      publishedGeneration: 0n,
-      publishedGenerationHigh: 0,
-      publishedGenerationLow: 0,
-      seekFrame: 0n,
-      seekAnchor: NO_ANCHOR,
-      seekWrite: 0,
-      anchoredGeneration: 0n,
-      anchoredFrame: 0n,
-      anchoredSample: NO_ANCHOR,
+      // #2282: the ring's seek, exactly one of
+      //   { phase: "settled", epoch }                      `epoch` is the last seek epoch this
+      //       drain applied (at attach, the epoch the ring already had), and it is in effect;
+      //   { phase: "landing", epoch, generation, admit }   `epoch` is applied and render does not
+      //       report its `generation` (u64) in effect yet; `admit`: a plain seek's new
+      //       generation may fill the headroom meanwhile (root ruling 1).
+      // A ring whose publication is newer than `epoch` and cannot be applied yet waits: that is
+      // decided anew every pass (`drainSharedRing`), so it is not stored here.
+      seek: { phase: "settled", epoch: Atomics.load(control, RING.SEEK_EPOCH) },
+      // #2184: the last whole seek publication `readSharedSeek` read: its even epoch, the tag,
+      // the write index, the tuple and the generation's two unsigned 32-bit halves.
+      publication: {
+        epoch: 0, tag: 0, write: 0, generation: 0n, generationHigh: 0, generationLow: 0,
+        frame: 0n, anchor: NO_ANCHOR,
+      },
+      // #1297b: the anchored seek `(generation, frame, sample)` this Worker's `source_seek_at`
+      // answered OK for this ring's source and the drain has not consumed yet, or null.
+      anchoredSeek: null,
       // The block accounting: the engine's cumulative underrun frames at the last read (null
-      // until read), the frames counted and excluded since (a finished region, an idle writer),
-      // the quanta counted, and the rendered quanta not yet accounted.
+      // until read, and again after a pass that waited), the frames counted since, the quanta
+      // counted, and the rendered quanta not yet accounted.
       reportUnderrun: null,
       countedFrames: 0n,
-      excludedFrames: 0n,
       countedQuanta: 0,
       pendingElapsed: 0,
-      // A consumed seek render has not shown in effect yet: its generation (u64), or null, and
-      // whether its new generation may fill the headroom (a plain seek's).
-      seekGeneration: null,
-      seekAdmit: false,
       finished: false,
       // The render clock this ring's accounting has reached; null until the clock is known.
       renderedSeen: this.renderedQuanta(),
@@ -1122,17 +1122,14 @@ class ControlWorker {
     // The quanta render took since the last pass: what the prelude counts once per block.
     const elapsed = rendered === null || ring.renderedSeen === null ? 0 : (rendered - ring.renderedSeen) >>> 0;
     if (rendered !== null) ring.renderedSeen = rendered;
-    // As in the prelude, a ring waiting for its seek (an anchored start before `seek-at`)
-    // counts no drain block and no underrun: the quanta pass uncounted.
-    // #2184: a pass reads the seek publication whole or not at all; one in flight waits a tick.
-    if (!this.readSharedSeek(ring)) {
-      ring.pendingElapsed = 0;
-      return;
-    }
-    // #2205: a live plain seek applies at once; the engine keeps the old generation playing until
-    // the new one has its runway in the engine's ring, so this pass submits it.
-    if (this.applySharedSeek(ring) !== RESULT_OK) {
-      ring.pendingElapsed = 0;
+    // A pass waits for the ring's seek, reading no slot, when the publication is in flight
+    // (#2184: a pass reads it whole or not at all) or is newer than the applied epoch and cannot
+    // be applied: an anchored seek before its `seek-at` OK, or a plain seek the engine pushed
+    // back or refused. #2205: otherwise a live plain seek applies at once; the engine keeps the
+    // old generation playing until the new one has its runway in the engine's ring, so this pass
+    // submits it.
+    if (!this.readSharedSeek(ring) || this.applySharedSeek(ring) !== RESULT_OK) {
+      this.waitBlocks(ring);
       return;
     }
     const report = this.readSourceReport(ring);
@@ -1141,9 +1138,9 @@ class ControlWorker {
     // Root ruling 1: the headroom stays free, except for the chunks of a plain seek's new
     // generation, admitted until render shows that seek in effect.
     let allowed = before === null ? ring.capacity
-      : ring.seekAdmit ? before.room : before.room - this.feedHeadroom;
+      : ring.seek.phase === "landing" && ring.seek.admit ? before.room : before.room - this.feedHeadroom;
     let queued = before === null ? 0 : before.queued;
-    const write = ring.seekWrite;
+    const write = ring.publication.write;
     const capacityMask = ring.capacity - 1;
     const staging = this.view(Float32Array, this.sourcePcmPointer, this.maximumSourceChannels * this.quantumFrames);
     let read = control[RING.READ_INDEX];
@@ -1211,7 +1208,7 @@ class ControlWorker {
   /// missing) while a live writer feeds the ring and its region has not ended, in quanta. The
   /// quanta come from the cumulative counted frames, never rounded per pass, so a region's end
   /// counts as the prelude counts it. A pass whose reads are refused carries its quanta to the
-  /// next. It also ends a consumed seek's transition: render reports that seek's generation.
+  /// next. It also lands a consumed seek: render reports that seek's generation.
   accountBlocks(ring, elapsed, report, before) {
     const control = ring.control;
     if (report === null || before === null) {
@@ -1220,15 +1217,14 @@ class ControlWorker {
     }
     const quanta = ring.pendingElapsed + elapsed;
     ring.pendingElapsed = 0;
-    if (ring.seekGeneration !== null && report.generation >= ring.seekGeneration) {
+    if (ring.seek.phase === "landing" && report.generation >= ring.seek.generation) {
       // Evidence that the seek took effect: render reports its generation. Never room alone.
-      ring.seekGeneration = null;
-      ring.seekAdmit = false;
+      ring.seek = { phase: "settled", epoch: ring.seek.epoch };
     }
     if (ring.reportUnderrun !== null) {
+      // A finished region's and an idle writer's missing frames are not underruns.
       const missing = report.underrun - ring.reportUnderrun;
-      if (ring.finished || Atomics.load(control, RING.WRITER_STATE) !== 1) ring.excludedFrames += missing;
-      else ring.countedFrames += missing;
+      if (!ring.finished && Atomics.load(control, RING.WRITER_STATE) === 1) ring.countedFrames += missing;
       const counted = Number((ring.countedFrames + BigInt(this.quantumFrames) - 1n) / BigInt(this.quantumFrames));
       control[RING.UNDERRUNS] += counted - ring.countedQuanta;
       ring.countedQuanta = counted;
@@ -1237,9 +1233,17 @@ class ControlWorker {
     control[RING.DRAIN_BLOCKS] += quanta;
   }
 
+  /// #2282: a pass that waits for the ring's seek counts what the prelude counts for a block that
+  /// skipped its drain: nothing. The quanta rendered since the last pass are no drain blocks, and
+  /// the frames the engine missed since the last report read, or misses before the next one, are
+  /// not this ring's underruns: the baseline is dropped, so the next read starts a new one. Quanta a
+  /// refused read carried into the wait were rendered before it, and still count.
+  waitBlocks(ring) {
+    ring.reportUnderrun = null;
+  }
 
-  /// The prelude's `readSharedSeek` (#2184): the seek publication through its seqlock into the
-  /// ring's fields, or false when the epoch is odd or moved during the reads.
+  /// The prelude's `readSharedSeek` (#2184): the seek publication through its seqlock into
+  /// `ring.publication`, or false when the epoch is odd or moved during the reads.
   readSharedSeek(ring) {
     const control = ring.control;
     const epoch = Atomics.load(control, RING.SEEK_EPOCH);
@@ -1247,24 +1251,25 @@ class ControlWorker {
     // #2185 attempt 2: the write index inside the window, and no `i64` load for a cached epoch.
     const tag = Atomics.load(control, RING.GENERATION_TAG);
     const write = Atomics.load(control, RING.WRITE_INDEX);
-    if (epoch === ring.seekEpoch) {
+    const publication = ring.publication;
+    if (epoch === publication.epoch) {
       if (Atomics.load(control, RING.SEEK_EPOCH) !== epoch) return false;
-      ring.seekTag = tag;
-      ring.seekWrite = write;
+      publication.tag = tag;
+      publication.write = write;
       return true;
     }
     const generation = Atomics.load(ring.controlI64, 0);
     const frame = Atomics.load(ring.controlI64, 1);
     const anchor = Atomics.load(ring.controlI64, 2);
     if (Atomics.load(control, RING.SEEK_EPOCH) !== epoch) return false;
-    ring.seekEpoch = epoch;
-    ring.seekTag = tag;
-    ring.seekWrite = write;
-    ring.publishedGeneration = generation;
-    ring.publishedGenerationHigh = Number(BigInt.asUintN(32, generation >> 32n));
-    ring.publishedGenerationLow = Number(BigInt.asUintN(32, generation));
-    ring.seekFrame = frame;
-    ring.seekAnchor = anchor;
+    publication.epoch = epoch;
+    publication.tag = tag;
+    publication.write = write;
+    publication.generation = generation;
+    publication.generationHigh = Number(BigInt.asUintN(32, generation >> 32n));
+    publication.generationLow = Number(BigInt.asUintN(32, generation));
+    publication.frame = frame;
+    publication.anchor = anchor;
     return true;
   }
 
@@ -1272,11 +1277,12 @@ class ControlWorker {
   /// generation (stale), 0 equal (current), 1 above it (a newer seek's: neither freed nor
   /// submitted); before any seek (epoch 0) the engaged tag decides, as before.
   sharedSlotAge(ring, word) {
-    if (ring.seekEpoch === 0) return ring.headers[word + 1] === ring.seekTag ? 0 : -1;
+    const publication = ring.publication;
+    if (publication.epoch === 0) return ring.headers[word + 1] === publication.tag ? 0 : -1;
     const high = ring.headers[word + 5] >>> 0;
-    if (high !== ring.publishedGenerationHigh) return high < ring.publishedGenerationHigh ? -1 : 1;
+    if (high !== publication.generationHigh) return high < publication.generationHigh ? -1 : 1;
     const low = ring.headers[word + 4] >>> 0;
-    if (low !== ring.publishedGenerationLow) return low < ring.publishedGenerationLow ? -1 : 1;
+    if (low !== publication.generationLow) return low < publication.generationLow ? -1 : 1;
     return 0;
   }
 
@@ -1285,18 +1291,19 @@ class ControlWorker {
   /// defaults are the publication `readSharedSeek` read last. #2205: `prepare` (the suspended
   /// `prepare-seek`) asks `source_prepare_seek`, as the prelude does; this control instance holds
   /// no render half, so the engine treats it exactly as `source_seek`.
-  applySharedSeek(ring, epoch = ring.seekEpoch, generation = ring.publishedGeneration, frame = ring.seekFrame,
-    anchor = ring.seekAnchor, prepare = false) {
+  applySharedSeek(ring, epoch = ring.publication.epoch, generation = ring.publication.generation,
+    frame = ring.publication.frame, anchor = ring.publication.anchor, prepare = false) {
     const control = ring.control;
-    if (epoch === ring.seenEpoch) return RESULT_OK;
+    if (epoch === ring.seek.epoch) return RESULT_OK;
     const requested = generation;
     const requestedFrame = frame;
     if (anchor !== NO_ANCHOR) {
-      if (ring.anchoredSample !== anchor || ring.anchoredGeneration !== requested
-          || ring.anchoredFrame !== requestedFrame) {
+      const recorded = ring.anchoredSeek;
+      if (recorded === null || recorded.sample !== anchor || recorded.generation !== requested
+          || recorded.frame !== requestedFrame) {
         return RESULT_BACKPRESSURE;
       }
-      ring.anchoredSample = NO_ANCHOR;
+      ring.anchoredSeek = null;
       return this.consumeSharedSeek(ring, epoch, requested, false);
     }
     this.stageRingId(ring);
@@ -1322,12 +1329,11 @@ class ControlWorker {
   /// anchor, so its new chunks queue behind it within the headroom rule.
   consumeSharedSeek(ring, epoch, generation, plain) {
     const control = ring.control;
-    ring.seenEpoch = epoch;
     control[RING.SEEKS_APPLIED] += 1;
     // Root ruling 1: a plain seek's new generation may fill the headroom until render reports
-    // this generation in effect (`accountBlocks`).
-    ring.seekGeneration = BigInt.asUintN(64, generation);
-    ring.seekAdmit = plain;
+    // this generation in effect (`accountBlocks`). A landing this seek supersedes is moot: no
+    // slot of its generation is submitted any more.
+    ring.seek = { phase: "landing", epoch, generation: BigInt.asUintN(64, generation), admit: plain };
     ring.finished = false;
     control[RING.FINISHED] = 0;
     return RESULT_OK;
@@ -1346,9 +1352,11 @@ class ControlWorker {
     const id = new TextEncoder().encode(message.sourceId);
     for (const ring of this.rings) {
       if (ring.idLength !== id.length || !id.every((byte, index) => ring.idBytes[index] === byte)) continue;
-      ring.anchoredGeneration = BigInt.asIntN(64, message.generation);
-      ring.anchoredFrame = BigInt.asIntN(64, message.sourceFrame);
-      ring.anchoredSample = BigInt.asIntN(64, message.anchorSample);
+      ring.anchoredSeek = {
+        generation: BigInt.asIntN(64, message.generation),
+        frame: BigInt.asIntN(64, message.sourceFrame),
+        sample: BigInt.asIntN(64, message.anchorSample),
+      };
     }
   }
 
@@ -1363,14 +1371,14 @@ class ControlWorker {
     if (rings.some((ring) => ring === undefined)) return { kind: "refused", result: RESULT_WRONG_STATE };
     // #2184: the live publication is read whole, so the anchor the apply reads is the seek's own.
     const matches = (ring, seek) => seek && seek.epoch !== 0 && this.readSharedSeek(ring)
-      && ring.seekEpoch === seek.epoch && ring.publishedGeneration === seek.generation
-      && ring.seekFrame === seek.frame;
+      && ring.publication.epoch === seek.epoch && ring.publication.generation === seek.generation
+      && ring.publication.frame === seek.frame;
     if (!rings.every((ring, index) => matches(ring, seeks[index]))) return { kind: "superseded" };
     for (let index = 0; index < rings.length; index += 1) {
       const ring = rings[index];
       if (!matches(ring, seeks[index])) return { kind: "superseded" };
       const result = this.applySharedSeek(ring, seeks[index].epoch, seeks[index].generation, seeks[index].frame,
-        ring.seekAnchor, true);
+        ring.publication.anchor, true);
       if (result !== RESULT_OK) return { kind: "refused", result };
       if (!this.releaseStaleSharedSlots(ring, seeks[index].generation)) return { kind: "refused", result: RESULT_INVALID_ARGUMENT };
     }

@@ -5131,17 +5131,23 @@ async function testControlWorker() {
       assert.deepEqual([control[MSB1_CONTROL.STALE], control[MSB1_CONTROL.SEEKS_APPLIED]], [1, 1]);
       // An anchored seek waits for this Worker's own `source_seek_at`, and is then consumed with no
       // `source_seek` (#1297b). Red if the Worker does not record the applied tuple: the ring stalls.
+      // #2282: the quanta a refused report read carried are rendered before the wait, so they
+      // still count once it ends; only the wait's own quanta pass uncounted (the shared case table
+      // holds that rule). Red if the wait drops the carried quanta too.
+      const drained = control[MSB1_CONTROL.DRAIN_BLOCKS];
+      fake.calls.seekReportResult = 6;
+      rendered(6n);
+      tick.callback();
+      fake.calls.seekReportResult = 0;
       writer.seek(3n, 0n, 6400n);
       write(3n, 0n, 0.5);
       const seeks = fake.calls.seek.length;
-      // As in the prelude, a ring waiting for its seek-at counts no drain block (#1387 MINOR 1).
-      const drained = control[MSB1_CONTROL.DRAIN_BLOCKS];
-      rendered(6n);
+      rendered(9n);
       tick.callback();
-      assert.equal(control[MSB1_CONTROL.DRAIN_BLOCKS], drained, "the quanta of the wait pass uncounted");
       assert.equal(fake.calls.source.length, submitted + 4, "nothing of the anchored ring is read before the handler");
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: 6400n });
       assert.deepEqual(fake.calls.source.at(-1), [1, 5, 3n, 0n, 2, 64, 0], "the drain after the message resumes it");
+      assert.equal(control[MSB1_CONTROL.DRAIN_BLOCKS], drained + 2, "the two carried quanta count, the wait's three do not");
       assert.equal(fake.calls.seek.length, seeks, "with no second seek of the source");
       // `detach` (the feed's close) withdraws the ring and closes the port from this end.
       port.onmessage({ data: { op: "detach" } });

@@ -363,6 +363,27 @@ export const MSB1_CONSUMER_CASES = [
     },
   },
   {
+    // #2282: red when a consumer counts the engine running dry during the wait as this ring's
+    // underruns once the wait ends (the control Worker on base counted all three blocks late).
+    name: "a ring waiting for its seek counts no drain block and no underrun, though the engine runs dry meanwhile",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      await consumer.pass();
+      assert.deepEqual([count(fed.shared, "UNDERRUNS"), count(fed.shared, "DRAIN_BLOCKS")], [0, 1]);
+      fed.writer.seek(9n, 40n, 2_048n);
+      fed.write(9n, 40n);
+      for (let pass = 0; pass < 3; pass += 1) await consumer.pass();
+      assert.deepEqual([count(fed.shared, "UNDERRUNS"), count(fed.shared, "DRAIN_BLOCKS")], [0, 1], "the wait counts nothing");
+      await consumer.seekAt({ sourceId: "fed", generation: 9n, sourceFrame: 40n, anchorSample: 2_048n });
+      await consumer.pass();
+      assert.deepEqual(starts(consumer), [[1n, 0n], [9n, 40n]]);
+      assert.deepEqual([count(fed.shared, "UNDERRUNS"), count(fed.shared, "DRAIN_BLOCKS")], [0, 2],
+        "nor once it ends: the blocks the engine ran dry in were the wait's");
+    },
+  },
+  {
     name: "prepare-seek: confirmed frees the stale slots and keeps current ones; refused and superseded answer so; future slots survive",
     async run(consumer) {
       const fed = ring("fed");
