@@ -5,8 +5,9 @@
 //! [`PlanAdoption::Primed`]: render adopts it at the first block at or past `not_before` at which
 //! the running plan reports itself ready for the prime (#1311, #1355). Readiness asks the
 //! `prime_required` flag of each ring the running plan renders (#1320 D4), so the publication
-//! writes those flags first. [`publish_primed`] is that step, and [`PrimedCandidate`] is the record
-//! the control plane keeps of the candidate until it is adopted, superseded or withdrawn.
+//! writes those flags first. [`publish_primed`] is that step, [`hold_primed_until`] raises its
+//! `not_before`, and [`PrimedCandidate`] is the record the control plane keeps of the candidate,
+//! read from its reservation, until it is adopted, superseded or withdrawn.
 //! [`check_prime_deadline`] decides, per control call, whether that record's deadline
 //! ([`prime_deadline_samples`]) has passed.
 
@@ -42,41 +43,77 @@ pub const fn production_config(sample_rate_hz: u32, quantum_frames: u32) -> Warm
 }
 
 /// The record of the one warm candidate published [`PlanAdoption::Primed`] and not yet adopted,
-/// superseded or withdrawn (#1403 D4). Every step that reads it compares [`Self::epoch`] with the
-/// candidate it acts on, so a step never acts on a candidate the record does not name.
+/// superseded or withdrawn (#1403 D4).
+///
+/// It is read from the candidate's own reservation ([`Self::of`]) once its schedule is final, and
+/// nothing else makes one, so a record always names the epoch and the schedule its reservation
+/// publishes (#2258 PR-7). The control plane keeps it on the candidate's pending epoch, which
+/// drops it when render adopts the candidate or a supersession drops the candidate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrimedCandidate {
-    /// The candidate's plan epoch.
-    pub epoch: u64,
-    /// The earliest block start that may adopt it: the render clock read at publication, or the
-    /// duck's `S` when the transaction ducks strips ([`Self::hold_until`]).
-    pub not_before: u64,
-    /// The prime its adopting block runs, in blocks: `P / q`.
-    pub lead_blocks: u32,
+    epoch: u64,
+    not_before: u64,
+    lead_blocks: u32,
 }
 
 impl PrimedCandidate {
-    /// Hold the candidate until the block that starts at `not_before` too (#1397 D1): a warm
-    /// candidate whose transaction ducks strips is adopted at the first ready block at or after
-    /// the duck's `S` (#1325 D3), so every ducked strip and every route line out of it holds only
-    /// `+0.0` when render adopts it. Raises [`Self::not_before`] to `not_before` (never lowers it)
-    /// and sets the reservation's adoption to `Primed` with the result. Call it after
-    /// [`publish_primed`], on the same reservation, before the commit. Control thread only;
-    /// allocation-free.
-    pub fn hold_until(
-        &mut self,
-        reservation: &mut PlanReplacementReservation<'_>,
-        not_before: u64,
-    ) {
-        debug_assert_eq!(
-            reservation.epoch().0,
-            self.epoch,
-            "the record names this candidate"
-        );
-        self.not_before = self.not_before.max(not_before);
+    /// The record of the candidate `reservation` publishes, or `None` unless its adoption is
+    /// [`PlanAdoption::Primed`]. Read it after the last schedule write ([`publish_primed`], then
+    /// [`hold_primed_until`]) and before the commit, so it is what the commit publishes. Control
+    /// thread only; allocation-free.
+    #[must_use]
+    pub const fn of(reservation: &PlanReplacementReservation<'_>) -> Option<Self> {
+        match reservation.adoption() {
+            PlanAdoption::Primed {
+                not_before,
+                lead_blocks,
+            } => Some(Self {
+                epoch: reservation.epoch().0,
+                not_before,
+                lead_blocks,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The candidate's plan epoch.
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The earliest block start that may adopt it: the render clock read at publication, or the
+    /// duck's `S` when the transaction ducks strips ([`hold_primed_until`]).
+    #[must_use]
+    pub const fn not_before(&self) -> u64 {
+        self.not_before
+    }
+
+    /// The prime its adopting block runs, in blocks: `P / q`.
+    #[must_use]
+    pub const fn lead_blocks(&self) -> u32 {
+        self.lead_blocks
+    }
+}
+
+/// Hold the warm candidate `reservation` publishes until the block that starts at `not_before` too
+/// (#1397 D1): a warm candidate whose transaction ducks strips is adopted at the first ready block
+/// at or after the duck's `S` (#1325 D3), so every ducked strip and every route line out of it
+/// holds only `+0.0` when render adopts it. Raises the `not_before` of the reservation's
+/// [`PlanAdoption::Primed`] adoption to `not_before` (never lowers it) and keeps its lead. It acts
+/// on the reservation alone, so it cannot meet another candidate's record (#2258 PR-7); a
+/// reservation that is not `Primed` is not a warm candidate and is left as it is. Call it after
+/// [`publish_primed`], on the same reservation, before the commit. Control thread only;
+/// allocation-free.
+pub fn hold_primed_until(reservation: &mut PlanReplacementReservation<'_>, not_before: u64) {
+    if let PlanAdoption::Primed {
+        not_before: published,
+        lead_blocks,
+    } = reservation.adoption()
+    {
         reservation.set_adoption(PlanAdoption::Primed {
-            not_before: self.not_before,
-            lead_blocks: self.lead_blocks,
+            not_before: published.max(not_before),
+            lead_blocks,
         });
     }
 }
@@ -99,7 +136,7 @@ impl PrimedCandidate {
 ///    `true`; every ring W created reads `false`.
 ///
 /// It then reads `not_before` from the render clock and sets the reservation's adoption to
-/// `Primed { not_before, lead_blocks }`. The caller publishes only into an `Empty` cell (#1343 D3),
+/// `Primed { not_before, lead_blocks }`, which [`PrimedCandidate::of`] reads back. The caller publishes only into an `Empty` cell (#1343 D3),
 /// so no `Primed` candidate is `Full` while the flags are written, and render reads them only
 /// for a `Full` `Primed` cell after its `Acquire` of the mailbox, which the commit's `Release`
 /// orders after these stores. Control thread only; allocation-free.
@@ -109,7 +146,7 @@ pub fn publish_primed(
     candidate_sources: &SourceControlSet,
     withdrawn_sources: Option<&SourceControlSet>,
     lead_blocks: u32,
-) -> PrimedCandidate {
+) {
     let carried = |id: &[u8]| candidate_sources.carries(id);
     running_sources.set_prime_flags(carried);
     if let Some(withdrawn) = withdrawn_sources {
@@ -121,11 +158,6 @@ pub fn publish_primed(
         not_before,
         lead_blocks,
     });
-    PrimedCandidate {
-        epoch: reservation.epoch().0,
-        not_before,
-        lead_blocks,
-    }
 }
 
 /// The transition fallback's re-preparation (#1397 D2 step 1): the one host-core entry a host
@@ -194,18 +226,18 @@ pub enum DeadlineStep {
     /// The render clock has not reached `not_before + prime_deadline_samples`: do nothing. A
     /// render clock that does not move (a paused host) never passes it.
     Pending,
-    /// The record does not name the newest epoch published: drop it and do nothing else, so a
-    /// stale record never withdraws another candidate.
-    Stale,
     /// The deadline has passed: withdraw the candidate once and take the transition if render
     /// has not adopted it.
     Due,
 }
 
-/// The deadline step's decision for the record `pending` (#1358 D3): [`DeadlineStep::Stale`] when
-/// `newest_epoch` (the newest epoch the control plane published) is not the record's,
-/// [`DeadlineStep::Pending`] while `publisher.render_clock()` is below `pending.not_before +
+/// The deadline step's decision for the record `pending` (#1358 D3): [`DeadlineStep::Pending`]
+/// while `publisher.render_clock()` is below `pending.not_before() +
 /// prime_deadline_samples(sample_rate_hz, quantum_frames)`, else [`DeadlineStep::Due`].
+///
+/// The caller passes the record its newest pending candidate holds, so the record always names
+/// the candidate a `Due` step withdraws (#2258 PR-7: the record lives on that candidate's epoch,
+/// and a record of any other epoch cannot be held).
 ///
 /// It reads one clock and acts on nothing: the caller runs the one withdrawal of a `Due` step
 /// through its own withdrawal path, which also promotes a candidate render took (`Taken`), and
@@ -214,14 +246,10 @@ pub enum DeadlineStep {
 #[must_use]
 pub fn check_prime_deadline(
     publisher: &PlanPublisher,
-    newest_epoch: u64,
     pending: &PrimedCandidate,
     sample_rate_hz: u32,
     quantum_frames: u32,
 ) -> DeadlineStep {
-    if pending.epoch != newest_epoch {
-        return DeadlineStep::Stale;
-    }
     let deadline = pending
         .not_before
         .saturating_add(prime_deadline_samples(sample_rate_hz, quantum_frames));
