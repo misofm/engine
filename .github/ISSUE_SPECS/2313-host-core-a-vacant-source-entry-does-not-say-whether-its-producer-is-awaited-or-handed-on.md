@@ -140,7 +140,11 @@ the new one, asserting equality. It passed over:
 - `cargo test -p capi` with the test-support features: 1,306 adoptions and 115 give-backs.
 
 The counts are approximate, because parallel test threads interleaved some log lines. The check
-was then reverted. Render reads none of this state, and no producer moves differently in any
+was then reverted. Coverage is thinner than the give-back count suggests: the reviewer's own
+equivalence check (3,011 adoptions, 192 give-backs) found that only 3 give-backs actually move a
+producer; the rest have nothing to return. The timeline branch of `reclaim_from_withdrawn` moves
+nothing in any production flow (every successor takes the timeline), so only the unit test
+reaches it. Render reads none of this state, and no producer moves differently in any
 existing flow, so no rendered bit moves.
 
 **Gates (head).** Listed in the issue's evidence comment. Summary:
@@ -161,3 +165,21 @@ existing flow, so no rendered bit moves.
 - `SourceControlError::Vacated` still names all four vacant states with one diagnostic. Splitting
   it would be a host-visible change and needs its own decision.
 - host-core `cargo doc` with no features fails on the `prepare.rs:262` intra-doc link.
+
+## Verdict (attempt 1)
+**PASS** (Sol's adversarial review). The reviewer re-derived the unreachability proof, ran their
+own base-vs-new equivalence check (3,011 adoptions, 192 give-backs, all equal) and agreed that the
+#2273 guard as worded would have broken the give-back. Four minors, folded on the same branch
+after merging `origin/main`:
+1. The `rebuild` doc in `control.rs` no longer says "every producer A still holds that P0
+   holds vacant"; it says "every producer P0 handed A that A still holds" and names
+   `reclaim_from_withdrawn`.
+2. The timeline branches are pinned: the regression test gains a timeline case (A takes it; a
+   forward adoption does not refill a handed-on timeline; a give-back does not fill an awaited
+   one; the give-back returns it). Mutations: `adopt_persisting`'s timeline rule also filling
+   `Handed` goes red ("a handed-on timeline is not awaited"); `reclaim_from_withdrawn`'s timeline
+   rule also filling `Awaiting` goes red ("an awaited timeline was handed nothing"); its timeline
+   branch removed goes red ("the timeline returns").
+3. `Producer::Donated`'s doc says no fill reads it, so it behaves as `Handed` does in a set dropped
+   before any reclaim, and is kept only to document how the producer left.
+4. The evidence states that only 3 of the give-backs move a producer.

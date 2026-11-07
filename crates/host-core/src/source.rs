@@ -71,7 +71,10 @@ pub(crate) enum Producer<P> {
     /// came from, by [`SourceControlSet::reclaim_from_withdrawn`].
     Handed,
     /// The producer moved into a successor's fresh entry by a donation ([`apply_donation`]): this
-    /// set belongs to a withdrawn plan and drops with it, so nothing fills the entry again.
+    /// set belongs to a withdrawn plan and drops with it, so nothing fills the entry again. No
+    /// fill reads it, so it behaves as [`Self::Handed`] does (vacant, refused
+    /// [`SourceControlError::Vacated`]) in a set that is dropped before any reclaim; it is kept
+    /// apart only to document how the producer left.
     Donated,
     /// A projection (#2199): the plan charges the ring without allocating it, so there is no
     /// producer. A projection's set never leaves its preparation. Sources only: a projection's
@@ -1492,7 +1495,8 @@ mod tests {
     /// that plan, so the running set would ack PCM into a ring nobody renders. Each of the two
     /// give-back rules (the entry handed its producer on; the withdrawn entry carries the ring) is
     /// needed by one case. An adoption, which fills awaited entries alone, does not refill a
-    /// handed-on one either.
+    /// handed-on one either. The timeline's own branches follow the same rules; production never
+    /// gives one back (every successor takes the timeline), so only this case reaches them.
     #[test]
     fn a_give_back_returns_only_the_producers_the_withdrawn_set_took() {
         let word = PublishedGeneration::new(SourceGeneration(1));
@@ -1541,6 +1545,37 @@ mod tests {
             "P0 handed no y"
         );
         assert!(withdrawn.admission(b"y").is_ok());
+
+        // The timeline, by the same rules (every successor carries it, so no `carried` flag).
+        let owning = |word: &PublishedGeneration| {
+            let mut set = hand_built(word, &[]);
+            let (producer, _, _) =
+                SourceTimeline::prepare(QuantumFrames(Q), NonZeroUsize::MIN, word.clone())
+                    .expect("timeline");
+            set.set_timeline(producer);
+            set
+        };
+        let holds = |set: &SourceControlSet| {
+            set.seek_report(TIMELINE_SEEK_REPORT_ID) != Err(SourceControlError::Vacated)
+        };
+        let mut running = owning(&word);
+        let mut withdrawn = hand_built(&word, &[]);
+        withdrawn.adopt_persisting(&mut running);
+        assert!(
+            holds(&withdrawn) && !holds(&running),
+            "A takes the timeline"
+        );
+        let mut other = owning(&word);
+        running.adopt_persisting(&mut other);
+        assert!(!holds(&running), "a handed-on timeline is not awaited");
+        let mut awaiting = hand_built(&word, &[]);
+        awaiting.reclaim_from_withdrawn(&mut other);
+        assert!(!holds(&awaiting), "an awaited timeline was handed nothing");
+        running.reclaim_from_withdrawn(&mut withdrawn);
+        assert!(
+            holds(&running) && !holds(&withdrawn),
+            "the timeline returns"
+        );
     }
 
     /// #1644 D2: the browser feed drain tells a stale-generation refusal from every other

@@ -5873,8 +5873,8 @@ where
     /// on B (root ruling B15-Q4), then the protocol's commit predicate. A refusal returns with
     /// `withdrawn` untouched, and the caller republishes A. After the commit, infallibly and in
     /// order (D5): the donation and the producer moves, B's `superseded` word and revision, B's
-    /// publication, the return to P0's epoch of every producer A still holds that P0 holds
-    /// vacant, and A's drop.
+    /// publication, the return to P0's epoch of every producer P0 handed A that A still holds
+    /// ([`host_core::SourceControlSet::reclaim_from_withdrawn`]), and A's drop.
     ///
     /// **Acked-batch question (D8): can an ack ever precede a drop? No.** A's revisions stay
     /// committed: their edits are in the model B is compiled from, A's host-fed rings move into
