@@ -62,6 +62,22 @@ function ring(sourceId, channels = 1, capacity = 8) {
 async function drain(consumer, passes = 6) {
   for (let pass = 0; pass < passes; pass += 1) await consumer.pass();
 }
+/** Run `publish` once, right after the next `Atomics.load` of the ring's SEEK_EPOCH word, and
+ *  return the function that restores `Atomics.load` (#2282: a writer between the seqlock's loads). */
+function publishAfterEpochLoad(fed, publish) {
+  const original = Atomics.load;
+  let armed = true;
+  Atomics.load = function (view, index) {
+    const value = original.call(Atomics, view, index);
+    if (armed && view.buffer.byteLength === fed.shared.byteLength && view instanceof Int32Array && view.byteOffset === 0
+        && index === MSB1_CONTROL.SEEK_EPOCH) {
+      armed = false;
+      publish();
+    }
+    return value;
+  };
+  return () => { Atomics.load = original; };
+}
 const starts = (consumer) => consumer.submissions.map(({ generation, start }) => [generation, start]);
 
 export const MSB1_CONSUMER_CASES = [
@@ -218,6 +234,62 @@ export const MSB1_CONSUMER_CASES = [
       assert.deepEqual(consumer.seeks, [[2n, 40n], [3n, 80n]]);
       assert.deepEqual(after(2n), [[2n, 40n], [3n, 80n], [3n, 84n]], "the newer seek's first chunk survives the drain");
       assert.equal(count(fed.shared, "REFUSED"), 0);
+    },
+  },
+  {
+    // #2282 (attempt 2 review): the first seek's twin of the #2185 case. Red on a pass that reads
+    // the write index outside its snapshot: before any seek the engaged tag decides a slot's
+    // age, so the first seek's first chunk is freed as stale.
+    name: "a ring's first seek published after a pass's snapshot keeps its first chunk",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      consumer.onSnapshot = () => { consumer.onSnapshot = null; fed.writer.seek(3n, 80n); fed.write(3n, 80n); };
+      await consumer.pass();
+      fed.write(3n, 84n);
+      await drain(consumer);
+      assert.deepEqual(consumer.seeks, [[3n, 80n]]);
+      assert.deepEqual(starts(consumer).filter(([g]) => g === 3n), [[3n, 80n], [3n, 84n]], "the first seek's first chunk survives");
+      assert.equal(count(fed.shared, "REFUSED"), 0);
+    },
+  },
+  {
+    // #2282 (attempt 2 review): the seqlock's recheck on the cached-epoch path. The writer
+    // publishes right after the consumer's first SEEK_EPOCH load (both harnesses share this realm's
+    // `Atomics`). Red when the recheck is dropped: the pass reads the new tag and write index
+    // under the old epoch and submits the new generation's chunk before its seek.
+    name: "a seek published between the epoch load and its recheck (cached path) is not read as the old one",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      const restore = publishAfterEpochLoad(fed, () => { fed.writer.seek(3n, 80n); fed.write(3n, 80n); });
+      let before = null;
+      consumer.onSeek = () => { before ??= consumer.submissions.length; };
+      try { await consumer.pass(); } finally { restore(); }
+      await drain(consumer);
+      assert.deepEqual(consumer.seeks, [[3n, 80n]]);
+      assert.equal(before, 0, "the g3 chunk is not submitted before its seek");
+    },
+  },
+  {
+    // #2282 (attempt 2 review): the same race on the full path, a new epoch's tuple. Red when the
+    // recheck is dropped: the pass applies the tuple it read under the old epoch, then the newer
+    // seek as well.
+    name: "a seek published between the epoch load and its recheck (full path) is applied once",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      await consumer.pass();
+      fed.writer.seek(2n, 40n);
+      fed.write(2n, 40n);
+      const restore = publishAfterEpochLoad(fed, () => { fed.writer.seek(3n, 80n); fed.write(3n, 80n); });
+      try { await consumer.pass(); } finally { restore(); }
+      await drain(consumer);
+      assert.deepEqual(consumer.seeks, [[3n, 80n]], "the newer seek, applied once");
+      assert.equal(count(fed.shared, "SEEKS_APPLIED"), 1);
     },
   },
   {

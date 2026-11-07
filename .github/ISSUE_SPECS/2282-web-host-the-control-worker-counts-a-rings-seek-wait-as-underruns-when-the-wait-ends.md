@@ -45,7 +45,7 @@ Nothing stops `seekAdmit` being true while no seek is landing. `excludedFrames` 
   - The quanta rendered since the last pass are dropped: they are not drain blocks.
   - `pendingElapsed` is kept, because it was rendered before the wait.
   - The underrun baseline is dropped (`reportUnderrun = null`). The next report read starts a new baseline, so the frames the engine missed during the wait are never this ring's underruns.
-  - The carried quanta keep their drain blocks but lose their underruns. The engine's count is cumulative. The frames missed in the carried interval and in the first waiting pass's interval cannot be told apart. Closing the baseline on the wait's first pass would count the second as underruns, and #1387's rule gives that interval to the wait. A carry needs a refused report or fill read just before a wait, so it is rare, and the rule errs toward not counting. `waitBlocks`' comment records this (attempt 2, review MINOR 2).
+  - The carried quanta keep their drain blocks but lose their underruns. When the report read was refused, the engine's cumulative count cannot tell the frames missed in the carried interval from those missed in the first waiting pass's interval. Closing the baseline on the wait's first pass would count the second as underruns, and #1387's rule gives that interval to the wait. When only the fill read was refused, the report was available and the two could have been split there. `accountBlocks` reads neither on a refused pass: that is pre-existing #1387 behaviour, and it is noted rather than changed (attempt 2 review). A carry needs a refused read just before a wait, so it is rare, and the rule errs toward not counting. `waitBlocks`' comment records this.
 
   At the wait's edges this is accurate to one Worker tick, the granularity the Worker's accounting already has (#1387 attempt 3).
 - **`ring.publication`** is one record for the seqlock snapshot (`epoch`, `tag`, `write`, `generation`, `generationHigh`, `generationLow`, `frame`, `anchor`). `readSharedSeek` updates it in place.
@@ -187,8 +187,8 @@ The optional refused-read-before-a-torn-wait row was not added. Both arms of the
 | `!ring.finished` dropped | Worker #1387 row: "a finished region's missing frames are no underrun" |
 | `WRITER_STATE === 1` dropped | Shared "a ring whose writer is not live counts no underrun" |
 | The odd-epoch refusal dropped | Shared #2184 case: "a publication in flight asks no seek and reads no slot" |
-| The cached-epoch recheck dropped | **Green: follow-up.** A writer must publish between the reads. That needs a hook inside `readSharedSeek`, and `onSnapshot` runs only after it returns. |
-| The tuple recheck dropped | **Green: follow-up**, for the same reason. |
+| The cached-epoch recheck dropped | Shared "a seek published between the epoch load and its recheck (cached path)…": "the g3 chunk is not submitted before its seek" (attempt 2 fold) |
+| The tuple recheck dropped | Shared "…(full path) is applied once": "the newer seek, applied once" (attempt 2 fold) |
 | `epoch === seek.epoch` dropped | Worker #1387 row (every pass applies the seek again) |
 | `recorded === null` dropped (`recorded?.sample`) | **Green: equivalent.** `undefined !== anchor` holds for every anchor (an `i64` bigint), so the null case still waits. |
 | `recorded.sample` compare dropped | Shared anchored case: "a mismatched tuple is not this ring's seek: anchorSample" |
@@ -203,6 +203,10 @@ The optional refused-read-before-a-torn-wait row was not added. Both arms of the
 | `matches`: the generation compare dropped | Shared prepare case: the right epoch, another generation |
 | `matches`: the frame compare dropped | Shared prepare case: the right epoch, another frame |
 | `prepareSharedSeeks` passes `NO_ANCHOR` for `publication.anchor` | Shared prepare case: the anchored publication is refused with 6 and prepares nothing |
+| `drainSharedRing` reads the write index live, not `publication.write` | Shared "a ring's first seek published after a pass's snapshot keeps its first chunk" (attempt 2 fold) |
+| The attach initialiser `seek.epoch = SEEK_EPOCH` replaced by 0 | **Green: equivalent for every SDK ring.** The SDK attaches only rings it has just created (`createMsb1Ring`, `pcm-feed.ts:467`), at epoch 0, and publishes a ring's first seek only after `ready()` saw it attached. Only a raw ring that was sought before its attach could tell the two apart. Raw rings are attached only through the SDK feed's port, so that is outside the contract. |
+| `sharedSlotAge`'s high-half compare dropped | **Green: equivalent below 2^32 generations.** The SDK reserves one generation per seek from 1, so the high half is 0 on every slot and in every publication. |
+| `accountBlocks` settles on `>=`, mutated to `===` | **Green: no test.** It is reachable when render reports a generation past the landing seek's before the drain reads the report. A session seek, or a `miso.seek.v1`, at a later generation moves the source on while a plain ring seek lands. With `===` that landing would keep `admit` for good, and the headroom would stay open. Only the Worker-only headroom rig observes the headroom, and it has no session seek. |
 
 **Gates run (all green):**
 - `bash scripts/test-web-audioworklet.sh`;
@@ -213,4 +217,19 @@ The optional refused-read-before-a-torn-wait row was not added. Both arms of the
 - Shared torn case: red when a consumer counts the engine running dry while a publication is in flight. The anchored-wait case does not reach the torn arm.
 - The added guard assertions: each is red only when its guard is deleted (the table), and no earlier test caught that deletion.
 
-**Follow-up.** An interleaving hook inside `readSharedSeek`, so that the two epoch rechecks can be tested: a writer that publishes between the epoch load and the recheck.
+**Follow-up (withdrawn in the attempt 2 fold).** No hook is needed: both harnesses share the test realm's `Atomics`.
+
+**Verdict on attempt 2 (Sol): PASS, with three MINORs.** They are folded in the next commit:
+1. **The seqlock rechecks.** The follow-up rested on a false premise. Both harnesses share the test realm's `Atomics`, so a case can wrap `Atomics.load` and publish right after the consumer's first `SEEK_EPOCH` load. There are now two shared cases, one for the cached path and one for the full path, with a helper `publishAfterEpochLoad` that matches the ring by its buffer. Dropping either recheck turns its case red: in the Worker (`MISO_ENGINE_WEB_CONTROL_WORKER_TEST_MODULE`) and in the prelude (each recheck dropped in turn, then restored). The follow-up is withdrawn.
+2. **`const write = ring.publication.write;` had no red test.** There is a new shared case, "a ring's first seek published after a pass's snapshot keeps its first chunk". It is red in the Worker when the write index is read live.
+3. **Three guards were missing from the table.** It now has rows for:
+   - the attach initialiser: equivalent for every SDK ring;
+   - `sharedSlotAge`'s high half: equivalent below 2^32 generations;
+   - the settle `>=`: its reachability is given.
+
+The carried-quanta wording now says that when only the fill read was refused, the report was available and the intervals could have been split. That is pre-existing #1387 behaviour, and it is noted rather than changed.
+
+**Gates (fold):**
+- `bash scripts/test-web-audioworklet.sh`;
+- `sdk` `node --test --test-name-pattern="MSB1 consumer" test/browser-pcm-evals.mjs`: 20/20;
+- `bash scripts/check-workspace-policy.sh`.

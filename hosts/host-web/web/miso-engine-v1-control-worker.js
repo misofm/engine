@@ -1238,10 +1238,13 @@ class ControlWorker {
   /// the frames the engine missed since the last report read, or misses before the next one, are
   /// not this ring's underruns: the baseline is dropped, so the next read starts a new one. Quanta a
   /// refused read carried into the wait were rendered before it, and still count as drain blocks;
-  /// their missing frames do not. The engine's count is cumulative, so the frames missed in the
-  /// carried interval and in this pass's interval cannot be told apart. Closing the baseline here
-  /// would count the second as underruns, which is the wait's to drop. A carry needs a report or
-  /// fill read refused just before a wait, so it is rare, and this errs toward not counting.
+  /// their missing frames do not. When the report read was refused, the engine's cumulative
+  /// count cannot tell the frames missed in the carried interval from those missed in this pass's
+  /// interval, and closing the baseline here would count the second, which is the wait's to drop.
+  /// When only the fill read was refused, the report was read and the two could have been split
+  /// there; `accountBlocks` reads neither in that case. That is #1387's rule for a refused pass,
+  /// and it is kept. A carry needs a read refused just before a wait, so it is rare, and this
+  /// errs toward not counting.
   waitBlocks(ring) {
     ring.reportUnderrun = null;
   }
