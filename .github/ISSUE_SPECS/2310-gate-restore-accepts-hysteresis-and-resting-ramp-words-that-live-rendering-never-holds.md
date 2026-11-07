@@ -134,9 +134,28 @@ state`):
 | M3: drop the parameter ramp at-target clause | red: `a_settled_ramp…` at `threshold` |
 | M4: drop the link weight at-target clause | red: `a_settled_ramp…` at `link weight` |
 
-**Follow-ups (not in scope).** Other effects' restore validators may accept a settled parameter
-ramp or a resting link weight off its target. A quick grep finds an at-target clause in
-de-esser, dynamic EQ, multiband, limiter and transient shaper, but none in the compressor's
-`state.rs`/`lib.rs`. Each needs the same reachability check. Moving the at-target rule into
-`effect_runtime::state_payload::ramp_path_inside` would cover every effect at once, but that is
-a cross-cutting change.
+**Follow-ups (not in scope).** Other effects' restore validators accept a settled ramp off its
+target at these sites. Each needs its own reachability check before it is tightened. Line numbers
+are at `d441cd408`:
+- Transient shaper, parameter ramps (`crates/transient-shaper/src/lib.rs` ~1603-1606): these have
+  no at-target clause. Only its link site (~1624) has one.
+- Compressor, all three sites (`crates/compressor/src/state.rs`): parameter ramps (~141),
+  coefficient ramps (~158) and link weights (~172). None has an at-target clause.
+
+The at-target rule could instead move into `effect_runtime::state_payload::ramp_path_inside` and
+cover every effect at once. That is a cross-cutting change with two known caveats:
+- It would break the compressor's `randomized` fixture (`crates/compressor/src/kernel.rs`
+  ~3358-3376). That fixture deliberately restores `remaining = 0, current != target` (#1006).
+- Reverb (`crates/reverb/src/state.rs` ~132) and delay (`crates/delay/src/lib.rs` ~2000) compare
+  `current != target` as floats. A bitwise shared rule would also refuse a settled `+0.0`/`-0.0`
+  pair, which those validators accept today.
+
+## Verdict (attempt 1): PASS
+
+An adversarial review passed attempt 1 at `693aad5f7`. The reviewer's evidence:
+- 5.5M snapshot/self-restore round trips over 2000 seeds × 400 blocks. They covered NaN recovery,
+  collapse, swaps, link glides and mid-ramp retargets. None was refused, and no invariant was
+  violated.
+- `-0.0` was independently confirmed unreachable in the hold countdown.
+
+The follow-up sites and the `ramp_path_inside` caveats above were corrected from that review.
