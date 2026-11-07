@@ -4228,6 +4228,11 @@ where
         // Fold 2, M-1: each parked epoch keeps the row the admissions charge until its plan is
         // reclaimed. Every row is read before anything moves, so a missing one moves nothing.
         let mut parked = [None; 1 + PENDING_PROVIDERS];
+        // Room for a row per epoch the loop below parks, so the fill leaves no slot it takes
+        // empty.
+        if index + 1 > parked.len() {
+            return Err(CommandError::Internal);
+        }
         {
             let reports = self
                 .shared
@@ -4256,7 +4261,13 @@ where
                 });
             }
         }
-        for row in parked.into_iter().take(index + 1).flatten() {
+        for row in parked.into_iter().take(index + 1) {
+            // Every slot taken here was filled above, or the call returned before it moved
+            // anything.
+            let Some(row) = row else {
+                debug_assert!(false, "a row for every epoch the promotion parks");
+                return Err(CommandError::Internal);
+            };
             let mut next = self.pending_providers.remove(0);
             // #1768: render adopted `next`'s plan, so the strips it starts at rest restarted.
             let restarted =
