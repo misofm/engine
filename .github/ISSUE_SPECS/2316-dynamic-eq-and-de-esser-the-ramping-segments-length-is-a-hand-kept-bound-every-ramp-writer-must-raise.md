@@ -97,11 +97,13 @@ It is the compressor's `max_remaining` shape (`crates/compressor/src/kernel.rs`)
   exercised exactly those blocks.
 
 **Test.** `ramp_tests::a_ramp_no_writer_announced_still_arrives`, one in each crate, on a `Simd4`
-bank built directly. The plant: band 0's threshold ramp (the de-esser's threshold ramp) on lane 2's
-right channel, pointed 10 dB down over 64 frames, written straight into the lane words with no
-announcement. One 64-frame block must land it exactly on its target, with `step` and `remaining`
-at `0`.
-- On base `5d403acd8` (test file added; it compiles unchanged there), both crates are red:
+bank built directly. It makes two plants, each on a fresh bank, so each is that bank's only
+ramp. Each plant is band 0's threshold ramp (the de-esser's threshold ramp), pointed 10 dB down
+over 64 frames and written straight into the lane words with no announcement: first on lane 2's
+right channel, then on lane 1's left channel. One 64-frame block must land each plant exactly on
+its target, with `step` and `remaining` at `0`.
+- On base `5d403acd8` (the attempt-1 one-plant test, added; it compiles unchanged there), both
+  crates are red:
   ```
   assertion `left == right` failed: the right channel's threshold ramp froze in flight
     left: [3248488448, 3253731328, 3189768192, 1115684864]
@@ -112,8 +114,8 @@ at `0`.
 - At head: passes in both crates.
 - Test value: the test turns red if the ramping prefix is sized by anything but the words in force:
   - a cached bound that some writer did not raise (the old shape);
-  - a derivation that reads the left channel alone on a dual block. No existing test catches this
-    one (mutation M1).
+  - a derivation that reads one channel alone on a dual block, either one. No existing test
+    catches either (mutations M1 and M1b).
 
   An attempt-1 draft also planted a link glide on lane 1. It was dropped, because the existing
   `glide_tests` already catch a derivation that skips the link weights or every lane but the first
@@ -121,8 +123,13 @@ at `0`.
 
 **Mutations (head).** Each mutant was applied to both crates. Each run is that crate's whole test
 suite (lib and every integration target), with the scratch harness skipped.
-- M1, `ramp_frames` reads the left channel on a dual block: red only on
-  `a_ramp_no_writer_announced_still_arrives`, in both crates (rerun on the final one-plant test: red).
+- M1, `ramp_frames` reads the left channel alone on a dual block: red only on
+  `a_ramp_no_writer_announced_still_arrives`, in both crates. Rerun on the two-plant test after the
+  fold: red only on it.
+- M1b (the review's finding), `ramp_frames` reads the right channel alone on a dual block
+  (`&self.state[channels - 1..channels]`): green on both crates' suites with the attempt-1
+  one-plant test. On the two-plant test: red only on `a_ramp_no_writer_announced_still_arrives`,
+  in both crates.
 - M2, `ramp_frames` skips the link weights: red on `a_ramp_no_writer_announced_still_arrives`
   (the attempt-1 two-plant draft), plus `glide_tests::a_silent_bank_never_skips_a_glide` and
   `glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law`, in both crates.
@@ -178,6 +185,18 @@ Results:
 **Interaction with GR-7.** None. `ramp_frames` reads only the `remaining` lane words, which GR-7's
 model would keep as lane words, because the SoA stays branch-free. If GR-7 gives `WordRamp` a
 `Settled|Ramping` view, `ramp_frames` is its natural "frames until every ramp settles" accessor.
+
+**Verdict (attempt 1): PASS, with one fold.**
+- The adversarial review confirmed the main claims:
+  - the derived bound is exact, so it is never above the old bound;
+  - the frames the old bound ran past the exact end were exact no-ops, which is why the
+    re-partitioned blocks moved no bit.
+- It also reproduced the harness, judged the per-block cost acceptable and found that the branch
+  merges cleanly.
+- The fold: the attempt-1 test planted on the right channel only, so a `ramp_frames` that read the
+  right channel alone on a dual block survived both suites while freezing left-only ramps. The test
+  now also plants a left-channel ramp on lane 1, on its own bank; both M1 and M1b are red (above).
+- The coordinator tracks the `-0.0` `remaining` loose restore, below, in #2258.
 
 **Follow-ups (not in this issue).**
 - Both crates' `parse_lane` accepts a `remaining` word of `-0.0`. `integral_within` admits it, for a

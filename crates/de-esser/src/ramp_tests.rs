@@ -87,28 +87,31 @@ fn render(bank: &mut DeEsser<Simd4, false>, blocks: u32) {
 
 /// A ramp that a writer starts without announcing it to anything still arrives on its target.
 ///
-/// The plant: the threshold ramp on lane 2's right channel, pointed 10 dB down over 64 frames
-/// straight in the lane words, with nothing else told; one 64-frame block must land it. Red if
+/// Two plants, each on a fresh bank and so each the bank's only ramp: the threshold ramp on
+/// lane 2's right channel, then on lane 1's left channel, pointed 10 dB down over 64 frames
+/// straight in the lane words, with nothing else told; one 64-frame block must land each. Red if
 /// the ramping prefix is sized by anything but the words in force at the block's start: a
 /// hand-kept bound that the writer did not raise (the shape before #2316, red there), or a
-/// derivation that reads the left channel alone on a dual block. Either leaves the ramp frozen
-/// mid-flight on the settled segment, which advances no ramp. A derivation that skips the link
-/// weights, or every lane but the first, is already red in `glide_tests`.
+/// derivation that reads one channel alone on a dual block, either one. Each leaves the ramp
+/// frozen mid-flight on the settled segment, which advances no ramp. A derivation that skips the
+/// link weights, or every lane but the first, is already red in `glide_tests`.
 #[test]
 fn a_ramp_no_writer_announced_still_arrives() {
-    let mut planted = bank();
-    let at = SIGNAL_WORDS + kernel::THRESHOLD * 4;
-    let mut words = lane_words(&planted.state[1], 2);
-    let target = words[at] - 10.0;
-    let chunk: [f32; 4] = words[at..at + 4].try_into().expect("a ramp");
-    words[at..at + 4].copy_from_slice(&glide(chunk, target, RAMP_SAMPLES));
-    set_lane_words(&mut planted.state[1], 2, &words);
-    render(&mut planted, 1);
-    let words = lane_words(&planted.state[1], 2);
-    let arrived: [f32; 4] = words[at..at + 4].try_into().expect("a ramp");
-    assert_eq!(
-        arrived.map(f32::to_bits),
-        [target, target, 0.0, 0.0].map(f32::to_bits),
-        "the right channel's threshold ramp froze in flight"
-    );
+    for (channel, lane) in [(1, 2), (0, 1)] {
+        let mut planted = bank();
+        let at = SIGNAL_WORDS + kernel::THRESHOLD * 4;
+        let mut words = lane_words(&planted.state[channel], lane);
+        let target = words[at] - 10.0;
+        let chunk: [f32; 4] = words[at..at + 4].try_into().expect("a ramp");
+        words[at..at + 4].copy_from_slice(&glide(chunk, target, RAMP_SAMPLES));
+        set_lane_words(&mut planted.state[channel], lane, &words);
+        render(&mut planted, 1);
+        let words = lane_words(&planted.state[channel], lane);
+        let arrived: [f32; 4] = words[at..at + 4].try_into().expect("a ramp");
+        assert_eq!(
+            arrived.map(f32::to_bits),
+            [target, target, 0.0, 0.0].map(f32::to_bits),
+            "channel {channel}'s threshold ramp on lane {lane} froze in flight"
+        );
+    }
 }
