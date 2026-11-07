@@ -5277,6 +5277,27 @@ fn snapshot_lane(
 }
 
 /// Validates one channel section in place, without touching any live state or the heap.
+///
+/// The rule is soft-clip's (#1071, #1300): accept every word the kernel itself can hold, refuse
+/// the rest, so that a lane's own payload always restores and the restored lane continues bit
+/// for bit (#1279 D6).
+///
+/// The `history` taps and the `main_ring` admit every word, NaN and the infinities included
+/// (issue #2324). Both hold input samples verbatim, and the kernel classifies no input word: the
+/// §4.4 check scans the output only. A non-finite input word therefore sits in the main ring for
+/// `B = N + 6` frames (and in the history, for its last 12 of them) with every output finite,
+/// since the detector's `select(P > limit, limit / P, 1)` answers a NaN peak with `1` and an
+/// infinite one with `0`, and the gain words stay finite and in range. At its `B`-th frame it
+/// reaches the output, the §4.4 check fails and the lane is recovered. A lane restored from such
+/// a payload reaches that frame at the same sample and recovers there too. Refusing the word
+/// instead made a live lane's own snapshot unrestorable for those `B` frames, which the
+/// plan-swap carry and `effect_contract::swap_bank_lanes` cannot honour.
+///
+/// The kernel writes a non-finite history word only beside the same sample in the main ring
+/// (`12 < B`). A payload holding one without the other is not the kernel's, and admitting it is
+/// bounded: the detector then answers `r = 1` for at most 12 frames, no gain word leaves its
+/// range, and every output stays the ring word times a gain in `[0, 1]`, so nothing leaves the
+/// §4.4 bound that the check would not catch.
 fn read_lane(
     bytes: &[u8],
     shape: &Shape,
@@ -5348,11 +5369,8 @@ fn read_lane(
         *ramp = read;
     }
 
-    for tap in 0..HISTORY_WORDS {
-        if !read_f32(bytes, words::HISTORY + tap).is_finite() {
-            return Err(state_error("effect.state.history"));
-        }
-    }
+    // Issue #2324: the history taps and the main ring (below) admit every word. See the note
+    // on [`read_lane`].
 
     // Issue #1370 D6: the weight lies in `[0, 1]` on its whole path, the engine never holds
     // `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`, `c` a
@@ -5383,11 +5401,6 @@ fn read_lane(
     let required_base = main_base + shape.main;
     let box_base = required_base + shape.ring;
     debug_assert_eq!(box_base + shape.ring, shape.lane_words());
-    for slot in 0..shape.main {
-        if !read_f32(bytes, main_base + slot).is_finite() {
-            return Err(state_error("effect.state.ring"));
-        }
-    }
     for slot in 0..shape.ring {
         if !(0.0..=1.0).contains(&read_f32(bytes, required_base + slot)) {
             return Err(state_error("effect.state.gain"));
@@ -5492,13 +5505,14 @@ impl<L: Lane> LimiterCore<L> {
         Ok(())
     }
 
-    /// Parses both channel sections of one track, then commits them together or not at all.
-    fn restore_track(
-        &mut self,
-        track: usize,
+    /// Parses and validates both channel sections of one track, writing nothing: the whole
+    /// verdict of [`restore_track`](Self::restore_track), which reads only the payload, the shape
+    /// and the rate (issue #2324).
+    fn parse_track(
+        &self,
         state_layout_version: u32,
         input: &StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
+    ) -> Result<[LaneRestore; 2], StatePayloadError> {
         if state_layout_version != STATE_LAYOUT_VERSION {
             return Err(state_error("effect.state.version"));
         }
@@ -5515,6 +5529,17 @@ impl<L: Lane> LimiterCore<L> {
         if left.mode != right.mode {
             return Err(state_error("effect.state.link"));
         }
+        Ok([left, right])
+    }
+
+    /// Parses both channel sections of one track, then commits them together or not at all.
+    fn restore_track(
+        &mut self,
+        track: usize,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let [left, right] = self.parse_track(state_layout_version, input)?;
         commit_lane(
             &mut self.left,
             track,
@@ -6055,6 +6080,17 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     ) -> Result<(), StatePayloadError> {
         let track = self.checked_member(track_index)?;
         self.core.restore_track(track, state_layout_version, &input)
+    }
+
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.checked_member(track_index)?;
+        self.core.parse_track(state_layout_version, input)?;
+        Ok(())
     }
 
     fn lane_default_bytes(&self) -> Option<usize> {
@@ -11452,8 +11488,8 @@ mod tests {
                         }
                         restored &= pair.restore(track, &payload);
                     }
-                    // A payload whose main ring holds a non-finite word the §4.4 check has not
-                    // reached yet is refused, by both arms alike (`restore` compares verdicts).
+                    // `restore` compares the two arms' verdicts. A payload whose main ring holds
+                    // a non-finite word the §4.4 check has not reached yet restores (#2324).
                     if restored && last {
                         totals.phase_last += 1;
                     } else if restored {

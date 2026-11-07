@@ -4107,6 +4107,9 @@ fn runtime_state_error(error: payload::StatePayloadError) -> StatePayloadError {
 }
 
 /// Reads a whole payload — header, then both lane sections — rejecting before anything is decoded.
+/// One channel of a decoded payload: every band as it commits, and the silence run.
+type ParsedChannel = ([RestoredBand; EQ_SECTION_COUNT], f32);
+
 fn read_payload(
     input: StatePayloadInput<'_>,
 ) -> Result<([u32; STATE_LANE_WORDS], [u32; STATE_LANE_WORDS]), StatePayloadError> {
@@ -4166,18 +4169,25 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     }
 
     /// Restores one track, all or none across both channels.
-    fn restore_track(
-        &mut self,
+    /// Both channels of a payload for lane `track`, decoded and validated, writing nothing: the
+    /// whole verdict of [`restore_track`](Self::restore_track), as `[(bands, silence); 2]`. Reads
+    /// only the payload, the lane's prepared targets and the rate (issue #2324).
+    fn parse_track(
+        &self,
         track: usize,
         version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
+        input: &StatePayloadInput<'_>,
+    ) -> Result<[ParsedChannel; 2], StatePayloadError> {
         if version != STATE_LAYOUT_VERSION {
             return Err(StatePayloadError {
                 code: payload::STATE_VERSION_CODE,
             });
         }
-        let (left, right) = read_payload(input)?;
+        let (left, right) = read_payload(StatePayloadInput {
+            common: input.common,
+            left: input.left,
+            right: input.right,
+        })?;
         let left_configuration =
             Channel::<L, W>::decode_configuration(&left, &self.initial[track][0])?;
         let right_configuration =
@@ -4190,6 +4200,17 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             Channel::<L, W>::decode_track(&right, &right_configuration, sample_rate)?;
         let left_silence = Channel::<L, W>::decode_silence(&left)?;
         let right_silence = Channel::<L, W>::decode_silence(&right)?;
+        Ok([(decoded_left, left_silence), (decoded_right, right_silence)])
+    }
+
+    fn restore_track(
+        &mut self,
+        track: usize,
+        version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let [(decoded_left, left_silence), (decoded_right, right_silence)] =
+            self.parse_track(track, version, &input)?;
         self.left.commit_track(track, &decoded_left, left_silence);
         self.right
             .commit_track(track, &decoded_right, right_silence);
@@ -4551,6 +4572,22 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
             self.silent_fixed_point = false;
         }
         result
+    }
+
+    fn validate_track_state_payload(
+        &self,
+        track_index: u32,
+        version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = bank_track_index(track_index, W)?;
+        if !self.active[track] {
+            return Err(StatePayloadError {
+                code: "effect.bank.track",
+            });
+        }
+        self.parse_track(track, version, input)?;
+        Ok(())
     }
 
     fn as_any(&self) -> Option<&dyn core::any::Any> {
