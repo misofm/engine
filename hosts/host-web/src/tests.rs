@@ -1897,17 +1897,19 @@ fn a_later_failure_or_a_dispose_never_moves_the_lifecycle_back() {
 #[test]
 fn render_failure_retains_ownership_and_silences() {
     let mut host = prepared_host(128);
-    host.render
-        .buffers
+    let RenderSlot::Here(half) = &mut host.render else {
+        panic!("a booted host's render half is here");
+    };
+    half.buffers
         .as_mut()
         .expect("prepared buffers")
         .output_pcm
         .fill(-1.0);
-    host.render.status.next_absolute_sample = u64::MAX;
+    half.status.next_absolute_sample = u64::MAX;
 
     assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
     assert!(
-        host.render.ready.is_some() && host.control.is_some(),
+        host.render.ready().is_some() && host.control.is_some(),
         "a render failure must never drop the plan, session or source rings on the audio thread"
     );
     assert_eq!(host.status().state, STATE_FAILED);
@@ -1922,13 +1924,13 @@ fn render_failure_retains_ownership_and_silences() {
 
     assert_eq!(host.render_next(), RESULT_WRONG_STATE);
     assert!(
-        host.render.ready.is_some() && host.control.is_some(),
+        host.render.ready().is_some() && host.control.is_some(),
         "the retirement slot survives re-entry"
     );
 
     assert_eq!(host.dispose(), RESULT_OK);
     assert!(
-        host.render.ready.is_none() && host.control.is_none(),
+        host.render.ready().is_none() && host.control.is_none(),
         "dispose is the single control-path reclamation point"
     );
     assert_eq!(host.status().state, STATE_DISPOSED);
@@ -4643,7 +4645,7 @@ fn bus_meters_render_and_poll_without_allocating() {
 /// The dense effect slot and the tap index of the tap at `tap`, through the plan's observation
 /// index (#1586 D3, the epoch's since #1589 R2), so a test reaches the reader the read reads.
 fn resolve_observation(host: &AudioWorkletEngineHost, tap: &TapAt) -> Option<(usize, usize)> {
-    let ready = host.render.ready.as_ref()?;
+    let ready = host.render.ready()?;
     let (strip, effect) = key_at(host, tap.track_index, tap.rack, tap.effect_index);
     let rack = if tap.rack == RACK_CONSOLE {
         LiveEffectRack::Console
@@ -5118,8 +5120,7 @@ fn armed_mask(host: &mut AudioWorkletEngineHost, strip_id: &str, insert_id: &str
         .handle?;
     let companions = host
         .render
-        .ready
-        .as_mut()?
+        .ready_mut()?
         .plan
         .active_attachment_mut::<RenderCompanions>()?;
     let handle = companions.effect_observations.get(reader as usize)?;

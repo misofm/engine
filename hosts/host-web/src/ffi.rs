@@ -67,16 +67,32 @@ use core::{
     ptr, slice,
 };
 
-/// The instance's one live session (#1332 S6). A booted instance holds the host, with its render
-/// half here (`single` mode) or released to another instance (the Worker, `worker` mode); a
-/// render-only instance (the worklet in `worker` mode) holds only the render half it adopted, under
-/// the handle of the host it belongs to.
-struct LiveHost {
-    handle: u32,
-    /// The booted host; `None` on a render-only instance.
-    host: Option<Box<AudioWorkletEngineHost>>,
-    /// The adopted render half; `Some` only on a render-only instance.
-    render: Option<RenderHost>,
+/// The instance's one live session (#1332 S6, #2332): a host it booted, or a render half it
+/// adopted with no host of its own, never both.
+///
+/// The instance's role agrees with it. A bound instance ([`handoff::instance_bound`], the worklet
+/// in `worker` mode) only ever holds [`Self::Adopted`]: `miso_engine_web_v1_boot` refuses it, and
+/// `miso_engine_web_v1_instance_bind` refuses an instance that holds a session. An unbound one
+/// holds [`Self::Booted`], or [`Self::Adopted`] for an orphan its dispose frees (#1332 S8).
+enum LiveHost {
+    /// A host this instance booted, with its render half here (`single` mode) or released to
+    /// another instance (the Worker, `worker` mode).
+    Booted {
+        handle: u32,
+        host: Box<AudioWorkletEngineHost>,
+    },
+    /// A render half this instance adopted, under the handle of the host it belongs to: the
+    /// worklet's in `worker` mode, or an orphan the Worker adopted back to free it.
+    Adopted { handle: u32, render: RenderHost },
+}
+
+impl LiveHost {
+    /// The handle the session answers to.
+    const fn handle(&self) -> u32 {
+        match self {
+            Self::Booted { handle, .. } | Self::Adopted { handle, .. } => *handle,
+        }
+    }
 }
 
 /// Where a render export finds the render half (#1332 S6): in the booted host (whose released
@@ -237,10 +253,8 @@ fn with_host<R>(
         let Ok(slot) = slot.try_borrow() else {
             return invalid;
         };
-        let Some(host) = slot
-            .as_ref()
-            .filter(|live| live.handle == handle)
-            .and_then(|live| live.host.as_deref())
+        let Some(LiveHost::Booted { host, .. }) =
+            slot.as_ref().filter(|live| live.handle() == handle)
         else {
             return invalid;
         };
@@ -260,10 +274,8 @@ fn with_host_mut<R>(
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return invalid;
         };
-        let Some(host) = slot
-            .as_mut()
-            .filter(|live| live.handle == handle)
-            .and_then(|live| live.host.as_deref_mut())
+        let Some(LiveHost::Booted { host, .. }) =
+            slot.as_mut().filter(|live| live.handle() == handle)
         else {
             return invalid;
         };
@@ -280,13 +292,10 @@ fn with_render_mut<R>(handle: u32, invalid: R, operation: impl FnOnce(RenderTarg
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return invalid;
         };
-        let Some(live) = slot.as_mut().filter(|live| live.handle == handle) else {
-            return invalid;
-        };
-        match (live.host.as_deref_mut(), live.render.as_mut()) {
-            (Some(host), _) => operation(RenderTarget::Host(host)),
-            (None, Some(render)) => operation(RenderTarget::Half(render)),
-            (None, None) => invalid,
+        match slot.as_mut().filter(|live| live.handle() == handle) {
+            Some(LiveHost::Booted { host, .. }) => operation(RenderTarget::Host(host)),
+            Some(LiveHost::Adopted { render, .. }) => operation(RenderTarget::Half(render)),
+            None => invalid,
         }
     })
 }
@@ -304,23 +313,20 @@ fn with_render<R>(
         let Ok(slot) = slot.try_borrow() else {
             return invalid;
         };
-        let Some(live) = slot.as_ref().filter(|live| live.handle == handle) else {
-            return invalid;
-        };
-        match (live.host.as_deref(), live.render.as_ref()) {
-            (Some(host), _) => operation(
+        match slot.as_ref().filter(|live| live.handle() == handle) {
+            Some(LiveHost::Booted { host, .. }) => operation(
                 host.status(),
                 host.meter_header(),
                 host.meter_frame(),
                 host.output_pcm(),
             ),
-            (None, Some(render)) => operation(
+            Some(LiveHost::Adopted { render, .. }) => operation(
                 render.status(),
                 render.meter_header(),
                 render.meter_frame(),
                 render.output_pcm(),
             ),
-            (None, None) => invalid,
+            None => invalid,
         }
     })
 }
@@ -338,7 +344,7 @@ fn verify_live_host(handle: u32) -> Result<(), u32> {
     LIVE_HOST.with(|slot| {
         let slot = slot.try_borrow_mut().map_err(|_| RESULT_INTERNAL)?;
         slot.as_ref()
-            .filter(|live| live.handle == handle)
+            .filter(|live| live.handle() == handle)
             .map(|_| ())
             .ok_or(RESULT_INVALID_ARGUMENT)
     })
@@ -699,7 +705,9 @@ pub extern "C" fn miso_engine_web_v1_buffer_capacity(handle: u32, kind: u32) -> 
 
 fn boot_staged(len: u32) -> u32 {
     let already_live = LIVE_HOST.with(|slot| slot.try_borrow().map_or(true, |slot| slot.is_some()));
-    if already_live {
+    // #2332: a bound instance is render-only; it never boots a host, whose preparation would
+    // allocate there and whose dispose would free there.
+    if already_live || handoff::instance_bound() {
         BOOT_STAGING.with(|staging| {
             if let Ok(mut staging) = staging.try_borrow_mut() {
                 staging.result = RESULT_REFUSED_LIFECYCLE;
@@ -756,13 +764,12 @@ fn boot_staged(len: u32) -> u32 {
             return None;
         }
         let handle = next_handle();
-        **live_slot = Some(LiveHost {
+        **live_slot = Some(LiveHost::Booted {
             handle,
-            host: Some(Box::new(
+            host: Box::new(
                 host.take()
                     .expect("boot host is present before publication"),
-            )),
-            render: None,
+            ),
         });
         Some(handle)
     });
@@ -781,6 +788,10 @@ fn boot_staged(len: u32) -> u32 {
 }
 
 /// Boot the exact staged document and atomically publish the sole running handle.
+///
+/// `0` for a refusal, whose result [`miso_engine_web_v1_boot_result`] returns: among them
+/// [`RESULT_REFUSED_LIFECYCLE`] on an instance that already holds a session or that bound a
+/// reservation (#2332: a bound instance is render-only).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
     boot_staged(len)
@@ -1596,7 +1607,7 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
             let Ok(mut live_slot) = live_slot.try_borrow_mut() else {
                 return RESULT_INVALID_ARGUMENT;
             };
-            let Some(live) = live_slot.as_ref().filter(|live| live.handle == handle) else {
+            let Some(live) = live_slot.as_ref().filter(|live| live.handle() == handle) else {
                 return RESULT_INVALID_ARGUMENT;
             };
             // #1332 S6: a render-only instance holds no host; its half goes back by a release.
@@ -1604,22 +1615,14 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
             // away, then adopted the half when it came back -- is freed here: only an instance
             // that bound no reservation (`instance_bind` marks the render-only one) frees it,
             // never the worklet, whose render thread must not free.
-            if live.host.is_none() {
-                if handoff::instance_bound() {
-                    return RESULT_WRONG_STATE;
-                }
-                drop(live_slot.take());
-                boot.reset_after_dispose();
-                return RESULT_OK;
+            if matches!(live, LiveHost::Adopted { .. }) && handoff::instance_bound() {
+                return RESULT_WRONG_STATE;
             }
-            let Some(mut live) = live_slot.take() else {
-                return RESULT_INTERNAL;
+            let result = match live_slot.take() {
+                Some(LiveHost::Booted { mut host, .. }) => host.dispose(),
+                Some(LiveHost::Adopted { .. }) => RESULT_OK,
+                None => return RESULT_INTERNAL,
             };
-            let result = live
-                .host
-                .as_mut()
-                .map_or(RESULT_INTERNAL, |host| host.dispose());
-            drop(live);
             boot.reset_after_dispose();
             result
         })
@@ -1658,44 +1661,50 @@ fn release_render_half(handle: u32) -> u64 {
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return 0;
         };
-        let Some(live) = slot.as_mut().filter(|live| live.handle == handle) else {
-            return 0;
-        };
-        if let Some(host) = live.host.as_deref_mut() {
-            let Some(render) = host.release_render() else {
-                return 0;
-            };
-            return match handoff::deposit(handle, render) {
-                Ok(token) => token,
-                Err(render) => {
-                    // A full registry: the half goes back where it was. It is this host's, so the
-                    // adoption cannot refuse it; were it to, the half is forgotten, never dropped
-                    // here.
-                    if let Err(render) = host.adopt_render(render) {
-                        core::mem::forget(render);
+        match slot.as_mut().filter(|live| live.handle() == handle) {
+            None => return 0,
+            Some(LiveHost::Booted { host, .. }) => {
+                let Some(render) = host.release_render() else {
+                    return 0;
+                };
+                return match handoff::deposit(handle, render) {
+                    Ok(token) => token,
+                    Err(render) => {
+                        // A full registry: the half goes back where it was. It is this host's,
+                        // so the adoption cannot refuse it; were it to, the half is forgotten,
+                        // never dropped here.
+                        if let Err(render) = host.adopt_render(render) {
+                            core::mem::forget(render);
+                        }
+                        0
                     }
-                    0
-                }
-            };
+                };
+            }
+            Some(LiveHost::Adopted { .. }) => {}
         }
-        let Some(mut render) = live.render.take() else {
-            return 0;
+        // The adopted half leaves the slot, which holds no session from here on.
+        let mut taken = None;
+        core::mem::swap(&mut **slot, &mut taken);
+        let mut render = match taken {
+            Some(LiveHost::Adopted { render, .. }) => render,
+            // Checked `Adopted` above, so never taken: what was there goes back, and the empty
+            // slot the exchange returns is forgotten, so no drop glue joins the call.
+            mut other => {
+                core::mem::swap(&mut **slot, &mut other);
+                core::mem::forget(other);
+                return 0;
+            }
         };
         if !handoff::bound_canary_intact() {
             let _ = render.fail(RESULT_INTERNAL, STACK_CANARY_DIAGNOSTIC);
         }
         match handoff::deposit(handle, render) {
-            Ok(token) => {
-                // The instance holds no session now. What leaves the slot holds neither a host
-                // nor a half, so it is forgotten: no drop glue joins the call.
-                let mut empty = None;
-                core::mem::swap(&mut **slot, &mut empty);
-                core::mem::forget(empty);
-                token
-            }
+            Ok(token) => token,
             Err(render) => {
-                let mut back = Some(render);
-                core::mem::swap(&mut live.render, &mut back);
+                // A full registry: the half goes back into the empty slot, and the `None` the
+                // exchange returns is forgotten.
+                let mut back = Some(LiveHost::Adopted { handle, render });
+                core::mem::swap(&mut **slot, &mut back);
                 core::mem::forget(back);
                 0
             }
@@ -1729,25 +1738,22 @@ fn adopt_render_half(token: u64) -> u32 {
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
-        if let Some(live) = slot.as_mut() {
-            let Some(host) = live.host.as_deref_mut() else {
-                return RESULT_WRONG_STATE;
-            };
-            if host.render_here() {
-                return RESULT_WRONG_STATE;
+        match slot.as_mut() {
+            Some(LiveHost::Adopted { .. }) => return RESULT_WRONG_STATE,
+            Some(LiveHost::Booted { host, .. }) => {
+                if host.render_here() {
+                    return RESULT_WRONG_STATE;
+                }
+                return match handoff::take(token, |render| host.adopt_render(render)) {
+                    Some(Ok(())) => RESULT_OK,
+                    Some(Err(())) | None => RESULT_INVALID_ARGUMENT,
+                };
             }
-            return match handoff::take(token, |render| host.adopt_render(render)) {
-                Some(Ok(())) => RESULT_OK,
-                Some(Err(())) | None => RESULT_INVALID_ARGUMENT,
-            };
+            None => {}
         }
         match handoff::take(token, Ok) {
             Some(Ok(render)) => {
-                let mut fresh = Some(LiveHost {
-                    handle,
-                    host: None,
-                    render: Some(render),
-                });
+                let mut fresh = Some(LiveHost::Adopted { handle, render });
                 core::mem::swap(&mut **slot, &mut fresh);
                 // The slot was empty (checked above): nothing to drop.
                 core::mem::forget(fresh);
@@ -1778,18 +1784,30 @@ pub extern "C" fn miso_engine_web_v1_instance_reserve(tls_size: u32, tls_align: 
 
 /// Bind this instance to the reservation whose record is at `record` (#1332 S6), so that
 /// [`miso_engine_web_v1_host_release`] checks its stack canary. [`RESULT_OK`] when this module
-/// made the reservation and its canary is intact; [`RESULT_INVALID_ARGUMENT`] otherwise, which
-/// binds nothing. The second instance calls it once, after its stack and TLS are set and before
-/// [`miso_engine_web_v1_host_adopt`]. Render-locked: loads and compares only.
+/// made the reservation and its canary is intact; [`RESULT_WRONG_STATE`] for an instance that
+/// holds a session (#2332: a bound instance is render-only, and binds before it adopts);
+/// [`RESULT_INVALID_ARGUMENT`] otherwise. A refusal binds nothing. The second instance calls it
+/// once, after its stack and TLS are set and before [`miso_engine_web_v1_host_adopt`].
+/// Render-locked: loads and compares only.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_instance_bind(record: u32) -> u32 {
-    render_locked(|| {
-        if handoff::bind(record as usize) {
-            RESULT_OK
-        } else {
-            RESULT_INVALID_ARGUMENT
-        }
-    })
+    render_locked(|| bind_instance(record as usize))
+}
+
+/// [`miso_engine_web_v1_instance_bind`] with a full-width address.
+fn bind_instance(record: usize) -> u32 {
+    // #2332: an instance that holds a session stays what it is. A booted host's dispose frees,
+    // which a bound instance never does, and an orphan an unbound instance adopted to free could
+    // no longer be freed. A refused borrow counts as a session.
+    let live = LIVE_HOST.with(|slot| slot.try_borrow().map_or(true, |slot| slot.is_some()));
+    if live {
+        return RESULT_WRONG_STATE;
+    }
+    if handoff::bind(record) {
+        RESULT_OK
+    } else {
+        RESULT_INVALID_ARGUMENT
+    }
 }
 
 /// The address of the fixed diagnostic of the render-only session's sticky failure, or `0` when
@@ -1974,17 +1992,11 @@ pub mod native_staging {
     /// Bind this thread's instance to the reservation at `record`, as
     /// `miso_engine_web_v1_instance_bind` does with a `u32` address (#1332 S6).
     pub fn instance_bind(record: usize) -> u32 {
-        super::render_locked(|| {
-            if crate::handoff::bind(record) {
-                super::RESULT_OK
-            } else {
-                super::RESULT_INVALID_ARGUMENT
-            }
-        })
+        super::render_locked(|| super::bind_instance(record))
     }
 
     /// The status `miso_engine_web_v1_status_ptr(handle)` names on this thread's instance: the
-    /// host's, its shell's, or a render-only session's (#1332 S6).
+    /// host's, its shell's, or an adopted half's (#1332 S6).
     pub fn render_status(handle: u32) -> Option<crate::WebStatus> {
         super::with_render(handle, None, |status, _, _, _| Some(*status))
     }
