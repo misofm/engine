@@ -11,6 +11,8 @@ import { StemStoreError } from "./opfs-store.js"
  * `opening.signal.throwIfAborted()` with no await in between, so a superseded
  * open can never commit, and its store lease (with its session pin lock) is
  * closed on the way out instead of blocking a newer open of the same session.
+ * The wait for `resume()` ends at that abort too, and the store open takes the
+ * same signal; only the bounded lease closes are awaited to completion.
  */
 export class StemSessionGate {
   #store
@@ -89,12 +91,12 @@ export class StemSessionGate {
         signal: opening.signal,
         onProgress: options.onProgress,
       })
-      const [opened, resumed] = await Promise.all([
-        storeOpening,
-        resumeOutcome,
-      ])
+      lease = await storeOpening
+      // A resume that never settles must not keep a superseded open's lease
+      // (and its pin) alive, so the wait for it ends at the abort.
+      const resumed = await abortable(resumeOutcome, opening.signal)
       if (!resumed.ok) throw resumed.error
-      lease = opened
+      // The abort can land after `resumed` settles and before this line runs.
       opening.signal.throwIfAborted()
       const displaced = this.#lease
       if (displaced !== undefined) {
@@ -129,6 +131,17 @@ export class StemSessionGate {
     this.#lease = undefined
     this.#state = "idle"
   }
+}
+
+/** Settles as `promise` does, or rejects with the abort reason once `signal` aborts. */
+function abortable(promise, signal) {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  let abort
+  return new Promise((resolve, reject) => {
+    abort = () => reject(signal.reason)
+    signal.addEventListener("abort", abort, { once: true })
+    promise.then(resolve, reject)
+  }).finally(() => signal.removeEventListener("abort", abort))
 }
 
 function forwardAbort(signal, controller) {

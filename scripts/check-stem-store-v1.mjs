@@ -270,6 +270,23 @@ async function runMutationLedger() {
       expectedFailure: "a superseded open committed its lease over the newer open",
     },
     {
+      name: "commit a superseded open once its resume settles",
+      file: "web/stem-store/session-gate.js",
+      search:
+        "      // The abort can land after `resumed` settles and before this line runs.\n      opening.signal.throwIfAborted()\n",
+      replace: "",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "an open superseded as its resume settled committed its lease",
+    },
+    {
+      name: "wait out a superseded open's resume",
+      file: "web/stem-store/session-gate.js",
+      search: "const resumed = await abortable(resumeOutcome, opening.signal)",
+      replace: "const resumed = await resumeOutcome",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a superseded open waiting on its resume kept its lease",
+    },
+    {
       name: "omit AbortSignal from the session pin lock wait",
       file: "web/stem-store/opfs-store.js",
       search: '      { mode: "exclusive", signal },\n      async () => {\n        acquired()',

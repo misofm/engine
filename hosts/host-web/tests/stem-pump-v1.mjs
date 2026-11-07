@@ -561,8 +561,19 @@ async function settledWithin(promise, milliseconds) {
   }
 }
 
-async function untilPending(locks, name) {
-  while (!(await locks.query()).pending.some((lock) => lock.name === name)) await tick()
+// Bounded, so a regression goes red here instead of hanging the gate and its mutation ledger.
+async function until(predicate, what, ticks = 1_000) {
+  for (let tried = 0; !(await predicate()); tried += 1) {
+    if (tried === ticks) throw new Error(`timed out waiting for ${what}`)
+    await tick()
+  }
+}
+
+function untilPending(locks, name) {
+  return until(
+    async () => (await locks.query()).pending.some((lock) => lock.name === name),
+    `a queued ${name} request`
+  )
 }
 
 // Issue #2266: an open superseded while it closes its predecessor lease must not commit. Opening
@@ -620,6 +631,119 @@ async function supersededOpenNeverCommits() {
   assert.deepEqual(pins(), ["session:superseded:same"])
   await gate.close()
   assert.deepEqual(pins(), [], "the gate's close released every pin it took")
+}
+
+// Issue #2266: a gate with no current lease has one check between an open's resume settling and
+// its commit. A newer open of the same session lands at every microtask offset after the first
+// open's resume settles (the first lease already granted), and the first must never commit.
+async function supersededAsResumeSettlesNeverCommits() {
+  const bytes = pcm16([5, -5, 7, -7], 1)
+  const stemIdentity = identity(bytes)
+  const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
+  let committedOffsets = 0
+  for (let offset = 0; offset <= 8; offset += 1) {
+    const backend = new FakeOpfsBackend()
+    const gate = new StemSessionGate(
+      new OpfsStemStore({
+        storage: backend.storage(),
+        locks: new FakeLockManager(),
+        tabId: "resume-offset",
+      }),
+      new MemoryStemResolver({ [stemIdentity]: bytes })
+    )
+    let settleResume
+    let resuming
+    let ready = false
+    const first = gate.open({
+      sessionId: "same",
+      stems,
+      resume: () => (resuming = new Promise((resolve) => (settleResume = resolve))),
+      onProgress(event) {
+        if (event.stage === "ready") ready = true
+      },
+    })
+    await until(() => ready, "the first lease")
+    await tick()
+    let second
+    let committedFirst
+    let chain = resuming
+    for (let step = 0; step < offset; step += 1) chain = chain.then(() => {})
+    void chain.then(() => {
+      // From some offset on the first open has committed before the second starts, which is
+      // a legitimate reopen; before it, the first must lose.
+      committedFirst = gate.state === "interactive"
+      second = gate.open({ sessionId: "same", stems, resume() {} })
+    })
+    const firstSettled = settledWithin(first, 500)
+    settleResume()
+    await until(() => second !== undefined, "the second open")
+    const [firstOutcome, secondOutcome] = await Promise.all([
+      firstSettled,
+      settledWithin(second, 500),
+    ])
+    if (committedFirst) {
+      assert.equal(firstOutcome.error, undefined, `offset ${offset}`)
+      committedOffsets += 1
+    } else {
+      assert.equal(
+        firstOutcome.error?.name,
+        "AbortError",
+        `an open superseded as its resume settled committed its lease (offset ${offset})`
+      )
+    }
+    assert.notEqual(secondOutcome, "timed-out", `the newer open deadlocked (offset ${offset})`)
+    assert.equal(secondOutcome.error, undefined)
+    assert.equal(gate.state, "interactive")
+    assert.deepEqual(
+      JSON.parse(new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json")))
+        .stems[stemIdentity].pins,
+      ["session:resume-offset:same"]
+    )
+    await gate.close()
+  }
+  // The sweep must reach past the commit, or it never crossed the window it is here to probe.
+  assert.ok(committedOffsets > 0 && committedOffsets < 9, "the offset sweep spans the commit")
+}
+
+// Issue #2266: an open waiting on a resume that never settles holds its granted lease, and so the
+// session pin; superseding it must end that wait, release the pin and let the newer open through.
+async function neverSettlingResumeReleasesItsLease() {
+  const bytes = pcm16([9, 8, 7, 6], 1)
+  const stemIdentity = identity(bytes)
+  const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
+  const backend = new FakeOpfsBackend()
+  const gate = new StemSessionGate(
+    new OpfsStemStore({ storage: backend.storage(), locks: new FakeLockManager(), tabId: "stuck" }),
+    new MemoryStemResolver({ [stemIdentity]: bytes })
+  )
+  let ready = false
+  const first = gate.open({
+    sessionId: "same",
+    stems,
+    resume: () => new Promise(() => {}),
+    onProgress(event) {
+      if (event.stage === "ready") ready = true
+    },
+  })
+  await until(() => ready, "the first lease")
+  const second = gate.open({ sessionId: "same", stems, resume() {} })
+  const [firstOutcome, secondOutcome] = await Promise.all([
+    settledWithin(first, 500),
+    settledWithin(second, 500),
+  ])
+  assert.equal(
+    firstOutcome.error?.name,
+    "AbortError",
+    "a superseded open waiting on its resume kept its lease"
+  )
+  assert.notEqual(secondOutcome, "timed-out", "the newer open deadlocked on the stuck open's pin")
+  assert.equal(secondOutcome.error, undefined)
+  assert.deepEqual(
+    JSON.parse(new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json")))
+      .stems[stemIdentity].pins,
+    ["session:stuck:same"]
+  )
+  await gate.close()
 }
 
 // Issue #2266: the session pin lock is the one wait in an open that did not take the opening's
@@ -970,6 +1094,8 @@ await readFailureHardStops()
 await resumeInsideGestureGate()
 await sameSessionReplacementReleasesPredecessorPin()
 await supersededOpenNeverCommits()
+await supersededAsResumeSettlesNeverCommits()
+await neverSettlingResumeReleasesItsLease()
 await pinLockWaitObeysAbort()
 await refusedGateNeverBecomesInteractive()
 await rejectedResumeDoesNotLeakPins()
