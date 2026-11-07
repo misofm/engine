@@ -206,7 +206,7 @@ The optional refused-read-before-a-torn-wait row was not added. Both arms of the
 | `drainSharedRing` reads the write index live, not `publication.write` | Shared "a ring's first seek published after a pass's snapshot keeps its first chunk" (attempt 2 fold) |
 | The attach initialiser `seek.epoch = SEEK_EPOCH` replaced by 0 | **Green: equivalent for every SDK ring.** The SDK attaches only rings it has just created (`createMsb1Ring`, `pcm-feed.ts:467`), at epoch 0, and publishes a ring's first seek only after `ready()` saw it attached. Only a raw ring that was sought before its attach could tell the two apart. Raw rings are attached only through the SDK feed's port, so that is outside the contract. |
 | `sharedSlotAge`'s high-half compare dropped | **Green: equivalent below 2^32 generations.** The SDK reserves one generation per seek from 1, so the high half is 0 on every slot and in every publication. |
-| `accountBlocks` settles on `>=`, mutated to `===` | **Green: no test.** It is reachable when render reports a generation past the landing seek's before the drain reads the report. A session seek, or a `miso.seek.v1`, at a later generation moves the source on while a plain ring seek lands. With `===` that landing would keep `admit` for good, and the headroom would stay open. Only the Worker-only headroom rig observes the headroom, and it has no session seek. |
+| `accountBlocks` settles on `>=`, mutated to `===` | The Worker headroom-rig row "#2282: a landing settles when render reports a later generation". A `miso.seek.v1` at g3 moves the source past a plain ring seek landing at g2. The row asserts "the landing settled", and "admit is cleared: the headroom is kept again" (`16 !== 38` under the mutant, with the state assertion removed). |
 
 **Gates run (all green):**
 - `bash scripts/test-web-audioworklet.sh`;
@@ -233,3 +233,10 @@ The carried-quanta wording now says that when only the fill read was refused, th
 - `bash scripts/test-web-audioworklet.sh`;
 - `sdk` `node --test --test-name-pattern="MSB1 consumer" test/browser-pcm-evals.mjs`: 20/20;
 - `bash scripts/check-workspace-policy.sh`.
+
+**Coordinator follow-up (before the PR).** The settle `>=` was reachable and not pinned by a test, so it now has one. A Worker headroom-rig row runs a plain ring seek, landing at g2, admitted into the headroom. A `miso.seek.v1` at g3 then moves the source past it before render reports g2. The row asserts:
+- that render reports g3;
+- that the ring's seek is `settled`;
+- that the next pass keeps the headroom of 38.
+
+With `>=` mutated to `===` it is red: "the landing settled", or "admit is cleared…" (`16 !== 38`) when the state assertion is removed. `bash scripts/test-web-audioworklet.sh` is green.
