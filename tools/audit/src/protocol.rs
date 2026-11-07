@@ -308,6 +308,8 @@ fn prepare_egress_corpus() -> EgressCorpus {
     assert_eq!(response.status, StatusCode::Ok, "prepared telemetry config");
     let revision = controller.session().revision();
     controller
+        .idle()
+        .expect("idle")
         .queues_mut()
         .try_enqueue_event(protocol::ReliableSlot::session_committed(
             revision,

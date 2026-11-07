@@ -711,7 +711,7 @@ fn full_frame_ingress_replays_exact_bytes_and_rejects_changed_request_reuse() {
     let first = process_full_command(&mut endpoint, &input);
     let events = |endpoint: &mut ProtocolController<MockProvider>| {
         endpoint
-            .queues_mut()
+            .queues
             .report(crate::QueueKind::ReliableEvent)
             .occupancy
     };
@@ -828,12 +828,12 @@ fn one_call_transaction_success_and_fallbacks_avoid_owned_preparation() {
         committed_events
     );
     let event = endpoint
-        .queues_mut()
+        .queues
         .try_dequeue_event()
         .expect("one committed event");
     assert_eq!(event.message_id, MessageId::SessionCommitted);
     assert!(
-        endpoint.queues_mut().try_dequeue_event().is_err(),
+        endpoint.queues.try_dequeue_event().is_err(),
         "one-call commit and exact replay emit one event total"
     );
 
@@ -1131,13 +1131,11 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
             &mut accepted_output,
         )
         .expect("accepted one-call path");
-    let accepted_event = accepted.queues_mut().try_dequeue_event().expect("event");
+    let accepted_event = accepted.queues.try_dequeue_event().expect("event");
 
     let mut endpoint = controller(8);
     let before_snapshot = endpoint.session().canonical_snapshot().to_owned();
-    let before_event = endpoint
-        .queues_mut()
-        .report(crate::QueueKind::ReliableEvent);
+    let before_event = endpoint.queues.report(crate::QueueKind::ReliableEvent);
     PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
     RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
     let prepared = match endpoint
@@ -1189,7 +1187,7 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
     assert!(output[committed_len..].iter().all(|byte| *byte == 0xa5));
     assert_eq!(endpoint.session().revision(), SessionRevision(8));
     assert_eq!(
-        endpoint.queues_mut().try_dequeue_event().expect("event"),
+        endpoint.queues.try_dequeue_event().expect("event"),
         accepted_event
     );
     assert_eq!(endpoint.replay().len(), 1);
@@ -1456,7 +1454,7 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
 /// #2330: a structural commit that cannot finish fails before it writes anything. An
 /// attached `OBSERVATION_ENDED` event needs one of the controller's prepared cells as well as its
 /// queue slot; here every cell is taken, because each earlier end event left the controller
-/// through the public fixture accessor (`queues_mut().try_dequeue_event()`) instead of the
+/// through the queues directly (`queues.try_dequeue_event()`) instead of the
 /// controller's egress, which alone frees a cell. The attachment is then refused with nothing
 /// changed.
 ///
@@ -1509,10 +1507,7 @@ fn a_commit_without_a_free_end_cell_is_refused_before_it_writes() {
             .expect("commit");
         // Both events leave by the fixture accessor: the end event's cell stays taken.
         for _ in 0..2 {
-            endpoint
-                .queues_mut()
-                .try_dequeue_event()
-                .expect("a queued event");
+            endpoint.queues.try_dequeue_event().expect("a queued event");
         }
     }
     assert_eq!(endpoint.session().revision(), SessionRevision(10));
@@ -1750,7 +1745,7 @@ fn a_structural_commit_writes_its_replay_entry_and_evicts_at_the_commit() {
         "the reply exists with its entry"
     );
     assert_eq!(replay(&mut endpoint, &first), first_reply);
-    let _ = endpoint.queues_mut().try_dequeue_event();
+    let _ = endpoint.queues.try_dequeue_event();
 
     // A token dropped before its commit changes nothing: entry 1 is still there and exact.
     let token = structural(&mut endpoint, &second);
@@ -1878,9 +1873,7 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
     {
         let mut endpoint = controller(8);
         let snapshot = endpoint.session().canonical_snapshot().to_owned();
-        let events = endpoint
-            .queues_mut()
-            .report(crate::QueueKind::ReliableEvent);
+        let events = endpoint.queues.report(crate::QueueKind::ReliableEvent);
         let prepared = prepare(&mut endpoint, &input);
         assert!(prepared.is_monitor_only());
         assert_eq!(
@@ -2071,26 +2064,12 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
     assert_eq!(blocked.status, StatusCode::Backpressure);
     assert!(owner.replay().is_empty());
     assert_eq!(owner.session().revision(), SessionRevision(7));
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = owner.queues_mut();
-        }))
-        .is_err()
-    );
-    assert!(matches!(
-        owner.enqueue_diagnostic_event(
-            SessionRevision(7),
-            DiagnosticEvent {
-                diagnostic: retained_diagnostic(1, crate::DiagnosticSeverity::Error),
-            },
-        ),
-        Err(EventEgressError::ReliableQueueFull(_))
-    ));
+    assert!(owner.idle().is_none());
     drop(canceled);
     assert_eq!(owner.session().revision(), SessionRevision(7));
     assert!(owner.replay().is_empty());
     owner
-        .queues_mut()
+        .queues
         .try_enqueue_event(ReliableSlot::session_committed(
             SessionRevision(7),
             77,
@@ -2100,7 +2079,7 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
         ))
         .expect("drop released exact reservation");
     let _ = owner
-        .queues_mut()
+        .queues
         .try_dequeue_event()
         .expect("clear reservation probe");
 
@@ -2113,19 +2092,19 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
     assert_eq!(other.session().revision(), SessionRevision(7));
 
     let stale = structural(&mut owner, &first);
-    owner.structural_generation.fetch_add(2, Ordering::AcqRel);
+    owner.token_lock.word().fetch_add(2, Ordering::AcqRel);
     assert!(matches!(
         owner.commit_prepared_structural(stale, EditPath::ModelOnly),
         Err(PreparedCommandCommitError::StaleGeneration)
     ));
-    owner.structural_generation.fetch_add(1, Ordering::AcqRel);
+    owner.token_lock.word().fetch_add(1, Ordering::AcqRel);
 
     let first_token = structural(&mut owner, &first);
     owner
         .commit_prepared_structural(first_token, EditPath::ModelOnly)
         .expect("first serial commit");
     let _ = owner
-        .queues_mut()
+        .queues
         .try_dequeue_event()
         .expect("serial event consumer");
     let second_edits = edit("token-second");
@@ -2590,7 +2569,7 @@ fn a_transport_set_answers_the_state_and_queues_one_event_with_it() {
             .occupancy,
         1
     );
-    let slot = endpoint.queues_mut().try_dequeue_event().expect("event");
+    let slot = endpoint.queues.try_dequeue_event().expect("event");
     assert_eq!(slot.message_id, MessageId::TransportState);
     let mut event = [0_u8; 64];
     let length = endpoint
@@ -2605,7 +2584,7 @@ fn a_transport_set_answers_the_state_and_queues_one_event_with_it() {
             origin_request_id: Some(id(1)),
         })
     );
-    assert!(endpoint.queues_mut().try_dequeue_event().is_err());
+    assert!(endpoint.queues.try_dequeue_event().is_err());
 }
 
 #[test]
@@ -2846,9 +2825,7 @@ fn rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics() {
             before_model
         );
         assert_eq!(
-            controller
-                .queues_mut()
-                .report(crate::QueueKind::ReliableEvent),
+            controller.queues.report(crate::QueueKind::ReliableEvent),
             before_events
         );
     }
@@ -2862,7 +2839,7 @@ fn rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics() {
         let before_revision = typed.session().revision();
         let before_snapshot = typed.session().canonical_snapshot().to_owned();
         let before_model = typed.session().compiled().normalized_model().clone();
-        let before_events = typed.queues_mut().report(crate::QueueKind::ReliableEvent);
+        let before_events = typed.queues.report(crate::QueueKind::ReliableEvent);
         let response = typed.process(ControllerRequest {
             request_id: id(1),
             expected_revision: ExpectedRevision::Exact(before_revision),
@@ -2882,7 +2859,7 @@ fn rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics() {
         let before_revision = btlv.session().revision();
         let before_snapshot = btlv.session().canonical_snapshot().to_owned();
         let before_model = btlv.session().compiled().normalized_model().clone();
-        let before_events = btlv.queues_mut().report(crate::QueueKind::ReliableEvent);
+        let before_events = btlv.queues.report(crate::QueueKind::ReliableEvent);
         let frame = crate::SessionTransactionFrame {
             request_id: id(1),
             expected_revision: ExpectedRevision::Exact(before_revision),
@@ -3030,7 +3007,7 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
         }
     );
     let event = controller
-        .queues_mut()
+        .queues
         .try_dequeue_event()
         .expect("transport event");
     let mut event_payload = [0_u8; 64];
@@ -3138,9 +3115,9 @@ fn a_revision_change_and_a_locate_reserve_and_emit_only_their_own_events() {
             .occupancy,
         1
     );
-    let event = controller.queues_mut().try_dequeue_event().expect("event");
+    let event = controller.queues.try_dequeue_event().expect("event");
     assert_eq!(event.message_id, MessageId::SessionCommitted);
-    assert!(controller.queues_mut().try_dequeue_event().is_err());
+    assert!(controller.queues.try_dequeue_event().is_err());
 
     let locate = controller.process(ControllerRequest {
         request_id: id(2),
@@ -3153,9 +3130,9 @@ fn a_revision_change_and_a_locate_reserve_and_emit_only_their_own_events() {
         },
     });
     assert_eq!(locate.status, StatusCode::Ok);
-    let event = controller.queues_mut().try_dequeue_event().expect("event");
+    let event = controller.queues.try_dequeue_event().expect("event");
     assert_eq!(event.message_id, MessageId::TransportState);
-    assert!(controller.queues_mut().try_dequeue_event().is_err());
+    assert!(controller.queues.try_dequeue_event().is_err());
 }
 
 /// #1628 gate 1. An event frame under the retired ID `0x8002` (`AUTOMATION_CANCELED`) fails typed
@@ -3570,7 +3547,10 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
         ),
     ] {
         let mut endpoint = controller(8);
-        endpoint.set_provider_features(features);
+        endpoint
+            .idle()
+            .expect("idle")
+            .set_provider_features(features);
         let response = endpoint.process(capability(1, b"features"));
         let decoded = codec
             .decode_capabilities(response.payload(), 23)
@@ -3598,7 +3578,10 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
         assert_ne!(decoded.flags.0 & (1 << required_bit), 0);
     }
     let mut endpoint = controller(8);
-    endpoint.set_provider_features(ProviderFeatures::NONE);
+    endpoint
+        .idle()
+        .expect("idle")
+        .set_provider_features(ProviderFeatures::NONE);
     let caps = endpoint.process(capability(1, b"none"));
     let decoded = codec
         .decode_capabilities(caps.payload(), 23)
@@ -3629,7 +3612,7 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
             .status,
         StatusCode::Unavailable
     );
-    assert!(endpoint.queues_mut().try_dequeue_event().is_err());
+    assert!(endpoint.queues.try_dequeue_event().is_err());
 
     let mut endpoint = controller(8);
     endpoint.config.maximum_transaction_edits = 0;
@@ -3673,7 +3656,7 @@ fn session_commit_reserves_reliable_event_before_replacing_store() {
     let mut controller = controller(4);
     let before_snapshot = controller.session().canonical_snapshot().to_owned();
     controller
-        .queues_mut()
+        .queues
         .try_enqueue_event(ReliableSlot::session_committed(
             SessionRevision(7),
             99,
@@ -3710,7 +3693,7 @@ fn a_held_reliable_event_slot_refuses_a_structural_transaction_as_backpressure()
     let mut controller = controller(4);
     let before = controller.session().canonical_snapshot().to_owned();
     let held = controller
-        .queues_mut()
+        .queues
         .reserve_reliable_event()
         .expect("the one slot");
     let edits = [SessionEdit::SetSessionId {
@@ -3773,7 +3756,7 @@ fn a_held_reliable_event_slot_refuses_a_structural_transaction_as_backpressure()
         "nothing was queued"
     );
 
-    controller.queues_mut().release_reliable_event(held);
+    controller.queues.release_reliable_event(held);
     assert!(matches!(
         decode_response(&process_full_command(&mut controller, &frame(3))),
         crate::DecodedTypedResponseFrame::Success { .. }
@@ -3790,7 +3773,7 @@ fn a_backpressure_outcome_is_cached_and_its_retry_executes_nothing() {
     let mut controller = controller(4);
     let before_snapshot = controller.session().canonical_snapshot().to_owned();
     controller
-        .queues_mut()
+        .queues
         .try_enqueue_event(ReliableSlot::session_committed(
             SessionRevision(7),
             99,
@@ -3814,7 +3797,7 @@ fn a_backpressure_outcome_is_cached_and_its_retry_executes_nothing() {
 
     // Free the queue: an execution of the retry would now succeed.
     let _ = controller
-        .queues_mut()
+        .queues
         .try_dequeue_event()
         .expect("the filler event");
     let replayed = controller.process(request());
@@ -3822,7 +3805,7 @@ fn a_backpressure_outcome_is_cached_and_its_retry_executes_nothing() {
     assert_eq!(controller.session().revision(), SessionRevision(7));
     assert_eq!(controller.session().canonical_snapshot(), before_snapshot);
     assert!(
-        controller.queues_mut().try_dequeue_event().is_err(),
+        controller.queues.try_dequeue_event().is_err(),
         "the replay enqueued no event"
     );
 }
@@ -4100,7 +4083,7 @@ fn a_bound_below_the_fallback_reply_refuses_before_dispatch() {
             "nothing executed"
         );
         assert!(
-            endpoint.queues_mut().try_dequeue_event().is_err(),
+            endpoint.queues.try_dequeue_event().is_err(),
             "no transport event"
         );
     }
@@ -4119,7 +4102,7 @@ fn a_bound_below_the_fallback_reply_refuses_before_dispatch() {
         });
         assert_ne!(response.status, StatusCode::Ok, "owned attempt {attempt}");
         assert_eq!(endpoint.provider.transport_state, TransportState::Stopped);
-        assert!(endpoint.queues_mut().try_dequeue_event().is_err());
+        assert!(endpoint.queues.try_dequeue_event().is_err());
     }
 }
 
@@ -4176,7 +4159,7 @@ fn committed_transaction_emits_typed_zero_header_id_event() {
     assert_eq!(response.revision, SessionRevision(8));
     assert_eq!(
         controller
-            .queues_mut()
+            .queues
             .try_dequeue_event()
             .expect("reliable session event"),
         ReliableSlot::session_committed(SessionRevision(8), 1, id(1), SessionRevision(7), 1,)
@@ -4397,11 +4380,11 @@ fn c2b2_event_egress_emits_all_five_schema_closed_full_frames() {
         Some(id(11)),
     );
     controller
-        .queues_mut()
+        .queues
         .try_enqueue_event(committed)
         .expect("committed");
     controller
-        .queues_mut()
+        .queues
         .try_enqueue_event(transport)
         .expect("transport");
     let diagnostic = Diagnostic {
@@ -4591,7 +4574,7 @@ fn the_reliable_backlog_and_delivered_count_follow_each_dequeue_outcome() {
         ReliableSlot::transport_state(revision, 2, TransportState::Stopped, SampleTime(0), None),
     ] {
         controller
-            .queues_mut()
+            .queues
             .try_enqueue_event(slot)
             .expect("room for the event");
     }
@@ -4609,7 +4592,7 @@ fn the_reliable_backlog_and_delivered_count_follow_each_dequeue_outcome() {
     assert_eq!(counts(&controller), (1, 1), "the pending one delivered");
     // A slot no frame encodes: it fails, and stays pending, at every dequeue.
     controller
-        .queues_mut()
+        .queues
         .try_enqueue_event(ReliableSlot {
             header: crate::ReliableHeader::Event,
             revision,
@@ -4639,7 +4622,7 @@ fn c2b2_short_buffers_retain_pending_reliable_order_and_diagnostic_storage() {
     let revision = controller.session().revision();
     let first = ReliableSlot::session_committed(revision, 1, id(1), SessionRevision(6), 1);
     controller
-        .queues_mut()
+        .queues
         .try_enqueue_event(first)
         .expect("first reliable event");
     let mut short = [0xa5_u8; 1];
@@ -4651,7 +4634,7 @@ fn c2b2_short_buffers_retain_pending_reliable_order_and_diagnostic_storage() {
     let second =
         ReliableSlot::transport_state(revision, 2, TransportState::Stopped, SampleTime(0), None);
     controller
-        .queues_mut()
+        .queues
         .try_enqueue_event(second)
         .expect("queued after pending first");
     let mut output = [0_u8; 256];
@@ -4774,11 +4757,11 @@ fn c2b2_disabled_configuration_emits_nothing_and_reliable_full_returns_original(
     assert_eq!(controller.dequeue_lossy_event_frame_into(&mut []), Ok(None));
     let event = ReliableSlot::session_committed(revision, 1, id(1), SessionRevision(6), 1);
     controller
-        .queues_mut()
+        .queues
         .try_enqueue_event(event)
         .expect("first reliable");
     assert!(matches!(
-        controller.queues_mut().try_enqueue_event(event),
+        controller.queues.try_enqueue_event(event),
         Err(crate::ReliableEnqueueError { value, .. }) if value == event
     ));
 }
@@ -5115,13 +5098,16 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
             true
         )
     );
-    endpoint.set_provider_features(ProviderFeatures {
-        controls: false,
-        spectrum: false,
-        loudness: false,
-        observation: false,
-        ..ProviderFeatures::ALL
-    });
+    endpoint
+        .idle()
+        .expect("idle")
+        .set_provider_features(ProviderFeatures {
+            controls: false,
+            spectrum: false,
+            loudness: false,
+            observation: false,
+            ..ProviderFeatures::ALL
+        });
     assert_eq!(
         ids(&mut endpoint, 2),
         (vec![1, 2, 3, 7, 8, 9, 10, 11, 14], false)
@@ -5155,10 +5141,13 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
         }],
     };
     for (request_id, observation) in [(5, false), (6, true)] {
-        endpoint.set_provider_features(ProviderFeatures {
-            observation,
-            ..ProviderFeatures::ALL
-        });
+        endpoint
+            .idle()
+            .expect("idle")
+            .set_provider_features(ProviderFeatures {
+                observation,
+                ..ProviderFeatures::ALL
+            });
         let input = full_command(
             request_id,
             ExpectedRevision::Any,
@@ -5217,7 +5206,7 @@ fn a_frame_under_the_retired_automation_id_is_refused_before_any_state_changes()
             crate::QueueKind::ReliableEvent,
             crate::QueueKind::Telemetry,
         ]
-        .map(|kind| endpoint.queues_mut().report(kind))
+        .map(|kind| endpoint.queues.report(kind))
     };
     let before = reports(&mut endpoint);
     let snapshot = endpoint.session().canonical_snapshot().to_owned();
@@ -5362,15 +5351,113 @@ fn response_get_dispatches_refuses_and_replays_through_the_controller() {
     assert_eq!(endpoint.session().revision(), revision);
 
     // A disabled provider is unavailable and unadvertised.
-    endpoint.set_provider_features(ProviderFeatures {
-        response: false,
-        ..ProviderFeatures::ALL
-    });
+    endpoint
+        .idle()
+        .expect("idle")
+        .set_provider_features(ProviderFeatures {
+            response: false,
+            ..ProviderFeatures::ALL
+        });
     let (_, output) = ask(&mut endpoint, 6, &response_request(8));
     let crate::DecodedTypedResponseFrame::NonOk { header, .. } = decode_response(&output) else {
         panic!("expected a refusal");
     };
     assert_eq!(header.status, StatusCode::Unavailable);
+}
+
+/// #2359: while a token is outstanding, every event-staging entry point refuses with the lock's
+/// own reason, the one the command path reports, and accepts again once the token is dropped.
+///
+/// The token here is a session command's, which holds no reliable slot, so a refusal reported as
+/// a full reliable queue would carry a report with free room (the meter and counter paths are
+/// lossy and do not use that queue at all). Red if any staging entry point reports the lock as
+/// anything other than `PreparedCommandOutstanding`, or if the lock outlives the dropped token.
+#[test]
+fn a_held_token_refuses_event_staging_as_outstanding_not_as_a_full_queue() {
+    let mut endpoint = egress_controller(4, 256);
+    let revision = endpoint.session().revision();
+    configure_event_egress(
+        &mut endpoint,
+        1,
+        1,
+        vec![crate::CounterId::ControlCommandBackpressure],
+        true,
+    );
+    let request = crate::SpectrumConfigureRequest {
+        form: crate::SpectrumForm::Single,
+        entries: vec![crate::SpectrumEntry {
+            target_kind: crate::SpectrumTargetKind::TrackPostPan,
+            target_id: "t1".to_owned(),
+            channels: crate::ParameterChannel::Both,
+        }],
+        maximum_capture_bytes: 1 << 16,
+        hop_frames: None,
+    };
+    let input = full_command(
+        2,
+        ExpectedRevision::Any,
+        crate::CommandPayload::SpectrumConfigure(&request),
+    );
+    let PreparedCommandFrame::Session(token) = endpoint
+        .prepare_command_frame(
+            &input,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            4096,
+        )
+        .expect("prepare")
+    else {
+        panic!("a configure is executed by the session");
+    };
+    let meters = [MeterRecord {
+        handle: 1,
+        component: crate::MeterComponent::Left,
+        flags: 1,
+        value: 0.5,
+    }];
+    let counters = CounterSnapshot {
+        observed_sample: SampleTime(24),
+        values: vec![CounterValue {
+            id: crate::CounterId::ControlCommandBackpressure,
+            value: 1,
+        }],
+    };
+    let diagnostic = || DiagnosticEvent {
+        diagnostic: retained_diagnostic(1, crate::DiagnosticSeverity::Error),
+    };
+    let outstanding = Err(EventEgressError::PreparedCommandOutstanding);
+
+    assert_eq!(
+        endpoint.stage_meter_batch_event(revision, window(12, 24), &meters),
+        outstanding
+    );
+    assert_eq!(
+        endpoint.stage_counter_snapshot_event(revision, &counters),
+        outstanding
+    );
+    assert_eq!(
+        endpoint.enqueue_diagnostic_event(revision, diagnostic()),
+        outstanding
+    );
+    let refused = endpoint
+        .enqueue_response_ready_event(revision, response_ready_event(1))
+        .expect_err("a token is outstanding");
+    assert_eq!(refused.reason, EventEgressError::PreparedCommandOutstanding);
+    assert_eq!(refused.event, response_ready_event(1));
+
+    drop(token);
+    endpoint
+        .stage_meter_batch_event(revision, window(12, 24), &meters)
+        .expect("meters after the token is dropped");
+    endpoint
+        .stage_counter_snapshot_event(revision, &counters)
+        .expect("counters after the token is dropped");
+    endpoint
+        .enqueue_diagnostic_event(revision, diagnostic())
+        .expect("diagnostic after the token is dropped");
+    endpoint
+        .enqueue_response_ready_event(revision, response_ready_event(1))
+        .expect("response-ready after the token is dropped");
 }
 
 fn response_ready_event(tag: u64) -> crate::ResponseReady {
@@ -5386,8 +5473,8 @@ fn response_ready_event(tag: u64) -> crate::ResponseReady {
 }
 
 /// #1578 D3 and D4 at the protocol layer: `enqueue_response_ready_event` hands its event back
-/// unchanged, with no sequence consumed, when the reliable queue is full, a structural transaction
-/// is outstanding or the one cell is held;
+/// unchanged, with no sequence consumed, when the reliable queue is full or the one cell is held
+/// (a held token: `a_held_token_refuses_event_staging_as_outstanding_not_as_a_full_queue`);
 /// a queued event stays in the cell across a short output buffer and leaves it only when its
 /// complete frame (with the endpoint's next sequence) is delivered; and while the cell is held a
 /// strip `RESPONSE_GET` is `BACKPRESSURE` `response.capture.pending` with the capture-slot record
@@ -5448,19 +5535,6 @@ fn a_response_ready_event_is_held_until_delivered_and_holds_off_a_strip_request(
             .expect("the transport event")
             .is_some()
     );
-
-    // A structural transaction outstanding (an odd generation) refuses it too and hands it back.
-    endpoint.structural_generation.store(1, Ordering::Release);
-    let refused = endpoint
-        .enqueue_response_ready_event(revision, response_ready_event(1))
-        .expect_err("a structural transaction is outstanding");
-    assert!(matches!(
-        refused.reason,
-        EventEgressError::ReliableQueueFull(_)
-    ));
-    assert_eq!(refused.event, response_ready_event(1));
-    assert!(!endpoint.response_ready_pending());
-    endpoint.structural_generation.store(0, Ordering::Release);
 
     endpoint
         .enqueue_response_ready_event(revision, response_ready_event(1))

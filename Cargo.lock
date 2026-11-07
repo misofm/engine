@@ -1766,6 +1766,7 @@ dependencies = [
  "conformance",
  "controls",
  "engine",
+ "loom",
  "protocol",
  "session",
 ]
