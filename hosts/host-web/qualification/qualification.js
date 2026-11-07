@@ -2030,8 +2030,8 @@ export async function runSuspendResumeCyclePage(cycle) {
 /// second resume timed out; the cycle carries its stall signature), and `capture` (the output after
 /// the resume was silent or not finite). Issue #2353: `wedge`, a cycle stopped at a covered step
 /// (`wedgeStepCovered`, the page's record) or whose page stopped after its first click (`by:
-/// "harness"`, with the step the page last said it awaited); `wedge-step`, a page record that names
-/// a step the evidence does not cover; `wedge-all`, every cycle wedged, so no cycle held the setup
+/// "harness"`, with the step the page last said it awaited); `wedge-step`, a wedge, from the page or
+/// the harness, that names a step the evidence does not cover, or none; `wedge-all`, every cycle wedged, so no cycle held the setup
 /// checks. A wedged page record is held to every check whose field it filled (`null` is a step it
 /// did not reach); a harness record has no field to hold. `SUSPEND_RESUME_SETUP_CHECKS` are the
 /// checks of the boot and the first segment, and the two wedge-integrity checks; the others are the
@@ -2040,18 +2040,26 @@ export const SUSPEND_RESUME_SETUP_CHECKS = Object.freeze([
   "result", "count", "context", "first-segment", "suspended", "wedge-step", "wedge-all",
 ]);
 
+/// Issue #2353: whether a cycle record carries a wedge. Only a `wedge` object counts: a missing
+/// cycle, or a record with no `wedge` field, is not wedged and is held to every check.
+export function cycleWedged(cycle) {
+  return typeof cycle?.wedge === "object" && cycle.wedge !== null;
+}
+
 export function suspendResumeFailures(run) {
   if (run === null || typeof run !== "object" || !Array.isArray(run.cycles)) return ["result"];
   const failures = new Set();
   if (run.cycles.length !== SUSPEND_RESUME_CYCLES) failures.add("count");
   const quanta = (value) => (typeof value === "string" && /^[0-9]+$/.test(value) ? BigInt(value) : null);
-  if (run.cycles.length > 0 && run.cycles.every((cycle) => cycle?.wedge !== null)) failures.add("wedge-all");
+  if (run.cycles.length > 0 && run.cycles.every(cycleWedged)) failures.add("wedge-all");
   for (const cycle of run.cycles) {
-    const wedged = cycle?.wedge !== null;
+    const wedged = cycleWedged(cycle);
     if (wedged) {
       failures.add("wedge");
-      if (cycle?.wedge?.by !== "page") continue;
+      // A page record and a harness record alike name the step the cycle stopped at; a step the
+      // evidence does not cover (or none) is no wedge.
       if (!wedgeStepCovered(cycle.wedge.awaiting)) failures.add("wedge-step");
+      if (cycle.wedge.by !== "page") continue;
     }
     const reached = (field) => !wedged || (cycle?.[field] !== null && cycle?.[field] !== undefined);
     if (cycle?.contextStateBeforeBoot !== "suspended" || cycle?.meterLeaseResult !== RESULT_OK) {

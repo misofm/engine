@@ -95,7 +95,8 @@ the page when it stops.
    holds a wedged page record to every check whose field it filled (`null` is a step it did not
    reach); a harness record has no field to hold. So Chromium fails on a wedge, and WebKit reports
    it (owner ruling 2026-11-05). Two setup checks, gated on both browsers, bound the exemption
-   (attempt 2): `wedge-step`, a page record naming a step the evidence does not cover, and
+   (attempt 2): `wedge-step`, a wedge (page or harness record, since the attempt-2 fold) naming a
+   step the evidence does not cover, or none, and
    `wedge-all`, every cycle of the leg wedged, so the setup checks were held by no cycle. CI and
    the local runs saw at most one wedge per leg. The per-cycle host
    mode, render-allocation count and resumes are held by the `instance-mode`,
@@ -114,8 +115,29 @@ the page when it stops.
   check whose field a wedged cycle filled, not only `context`; read the page errors after each
   cycle, so an abandoned page loses none; arm the heartbeat before a fresh page's import; the
   "wedged in the page at the close" table row was redundant.
-- **Attempt 2**: the decision above as narrowed (items 3 and 4); every attempt-1 finding addressed.
-  Evidence below.
+- **Attempt 2** (`dd0665072`): **PASS**, with three MINORs, folded after the verdict:
+  1. a harness wedge was never held to a covered step, so harness wedges at
+     `await status (first segment)` or `await dispose` gated nothing on WebKit. Now `wedge-step`
+     holds harness records too, and a null awaited step counts as uncovered;
+  2. a null cycle, or a record with no `wedge` field, counted as wedged and skipped every check.
+     Now only a `wedge` object counts (`cycleWedged`), in `suspendResumeFailures`, `wedge-all`
+     and `run.mjs`'s `render-allocations` and `resume-clicks` gates;
+  3. the "wedged by the harness" row had no unique catch. It became the uncovered-step harness
+     row.
+- Folds (table only; no browser legs re-run, since `suspendResumeFailures` is pure):
+  - new rows: `wedged by the harness at an uncovered step` (`await dispose`) and
+    `... at no logged step` give `["wedge", "wedge-step"]`;
+  - `every cycle wedged` now passes covered steps;
+  - `a missing cycle` (a `null` record) and `a cycle with no wedge field` fail their checks.
+
+  Self-mutations, scratch and reverted:
+  - holding only page records to `wedge-step` turns `wedged by the harness at an uncovered step`
+    red;
+  - the old wedged test (`cycle?.wedge !== null`) throws `TypeError: Cannot read properties of
+    null (reading 'wedge')` on `a missing cycle`.
+
+  `scripts/test-web-audioworklet.sh` and `scripts/check-workspace-policy.sh` pass after merging
+  `origin/main` (already up to date).
 
 ## Evidence (attempt 2)
 

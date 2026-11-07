@@ -11,7 +11,7 @@ import { qualifySuspendedPcmFeed } from "./pcm-feed-suspended.mjs";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
 import {
-  AWAITING_PREFIX, classifyStallSignature, HEARTBEAT_MESSAGE, largeReplaceSource, qualificationConstants, requestFailure,
+  AWAITING_PREFIX, classifyStallSignature, cycleWedged, HEARTBEAT_MESSAGE, largeReplaceSource, qualificationConstants, requestFailure,
   SUSPEND_RESUME_SETUP_CHECKS, suspendResumeCycleClickPlan, suspendResumeFailures, unsubscribeFailures,
 } from "./qualification.js";
 import { worstReplaceDocument } from "./worst-replace-document.js";
@@ -693,7 +693,7 @@ function validate(browserName, result, leg) {
     // unless the cycle wedged before its second control.
     && cycles.every((cycle) => pageLost(cycle) || (cycle?.resumes?.direct === 0
       && cycle.resumes.inClick === cycle.clicks
-      && (cycle.clicks === 2 || (cycle.wedge !== null && cycle.clicks === 1)))),
+      && (cycle.clicks === 2 || (cycleWedged(cycle) && cycle.clicks === 1)))),
   `a real AudioContext was resumed outside a trusted click, the page did not declare its growth and unsubscribe clicks (plus the three SDK clicks when the SDK runs), the harness did not click exactly the declared controls, or a suspend-resume cycle resumed outside its two clicks: ${JSON.stringify({ resumes, suspendResume: cycles.map((cycle) => ({ cycle: cycle?.cycle, clicks: cycle?.clicks, resumes: cycle?.resumes })) })}`);
   // Issue #2245: on fresh real contexts, a short first segment, a suspend and a second trusted-click
   // resume, every cycle's clock and render moved on and its output after the resume was audible. A
@@ -748,7 +748,7 @@ function validate(browserName, result, leg) {
   gate(browserName, "render-allocations", Array.isArray(allocations)
     && allocations.length === RAW_INSTANCES + cycleRows
     && allocations.every((row) => typeof row?.workload === "string" && row.count === 0)
-    && cycles.every((cycle) => cycle?.wedge !== null || cycle?.renderAllocations === 0),
+    && cycles.every((cycle) => cycleWedged(cycle) || cycle?.renderAllocations === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse, leg);
   return "simd128 supported";
@@ -1683,9 +1683,19 @@ function suspendResumeFailureProofs() {
       wedge: { by: "page", awaiting: `render suspend-resume cycle ${suspendResumeCycles - 1} first` },
       quantaAtSuspendCall: null, suspended: null, resumed: null, capturePeak: null,
     }), ["wedge", "wedge-step"]],
-    ["wedged by the harness", lastCycle(harnessWedgedCycle(suspendResumeCycles - 1, { by: "harness" }, 1)), ["wedge"]],
-    ["every cycle wedged", { cycles: green().cycles.map((each) => harnessWedgedCycle(each.cycle, { by: "harness" }, 1)) },
-      ["wedge-all", "wedge"]],
+    ["wedged by the harness at an uncovered step", lastCycle(harnessWedgedCycle(last, {
+      by: "harness", awaiting: `await dispose (suspend-resume cycle ${last})`,
+    }, 1)), ["wedge", "wedge-step"]],
+    ["wedged by the harness at no logged step", lastCycle(harnessWedgedCycle(last, { by: "harness", awaiting: null }, 1)),
+      ["wedge", "wedge-step"]],
+    ["every cycle wedged", { cycles: green().cycles.map((each) => harnessWedgedCycle(each.cycle, {
+      by: "harness", awaiting: `suspend the first segment's suspend (suspend-resume cycle ${each.cycle})`,
+    }, 1)) }, ["wedge-all", "wedge"]],
+    // A malformed cycle is not a wedge: it fails its checks.
+    ["a missing cycle", { cycles: [...green().cycles.slice(1), null] },
+      ["context", "first-segment", "suspended", "resume-state", "stall", "resume-clock", "resume-render", "capture"]],
+    ["a cycle with no wedge field", lastCycle({ wedge: undefined, resumed: null }),
+      ["resume-state", "resume-clock", "resume-render"]],
     ["silent capture", lastCycle({ capturePeak: 0 }), ["capture"]],
     ["capture at the floor", lastCycle({ capturePeak: 0.01 }), ["capture"]],
     ["NaN capture", lastCycle({ capturePeak: Number.NaN }), ["capture"]],
