@@ -76,7 +76,7 @@
 //! values into those buffers; there is no allocation, no lock, no drop and no unbounded loop.
 
 use core::alloc::Layout;
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU32, NonZeroUsize};
 use engine::realtime::{
     CellRead, CellReader, CellWriter, Consumer, DirtyReader, DirtyWord, LatestCell, LiveSnapshot,
     LiveStamp, LiveValuesSuperseded, ObservationPublisher, ObservationWindow, Producer, QueueFull,
@@ -851,8 +851,7 @@ pub fn effect_control_lane(
         observe: consumer,
         bypass,
         mix: settled_mix(bypass),
-        mix_position: 0,
-        hold: 0,
+        phase: CrossfadePhase::START,
         rest_pending: false,
         symmetry,
         carried_bypass: CarriedCell::EMPTY,
@@ -982,15 +981,12 @@ pub struct EffectControlLane {
     /// The wet mix `m` (`1` wet, `0` dry) as an indexed ramp that uses word 0: settled at the
     /// bypass target, or running from the mix the last record found toward it (#1341 D2).
     mix: IndexedRamp,
-    /// Ramp frames rendered since the ramp started, saturated at the ramp's length. The ramp is
-    /// settled exactly when it has reached the length.
-    mix_position: u32,
-    /// Frames the lane still holds the dry signal before its crossfade runs (issue #2129 D3, as
-    /// amended): set by [`Self::begin_hold`] when the lane leaves settled bypass, consumed by
-    /// [`Self::advance_bypass_mix`] before the ramp advances, and `0` otherwise. A lane with a
-    /// hold reads dry and counts as ramping. Per-lane state: it moves with the lane in a lane
-    /// swap and a plan swap's carry.
-    hold: u32,
+    /// Where the crossfade along `mix` is: a hold of the dry signal before it runs (issue #2129
+    /// D3, as amended; started by [`Self::begin_hold`] when the lane leaves settled bypass and
+    /// spent by [`Self::advance_bypass_mix`] before the ramp advances), or the ramp frames
+    /// rendered since it started, saturated at its length. A held lane reads dry and counts as
+    /// ramping. Per-lane state: it moves with the lane in a lane swap and a plan swap's carry.
+    phase: CrossfadePhase,
     /// Set by the [`Self::stage`] that applies a switch out of **settled** bypass (issue #2129 D2,
     /// as amended): the lane's effect state is stale and the caller resets the lane, keeping
     /// parameters, and starts its hold before the block renders ([`Self::take_rest`]). A switch
@@ -1072,6 +1068,93 @@ const fn settled_mix(bypass: bool) -> IndexedRamp {
     IndexedRamp::settled([if bypass { 0.0 } else { 1.0 }, 0.0, 0.0, 0.0])
 }
 
+/// Where a lane's bypass crossfade is along its timeline (issue #2129 D3, #2271): holding dry
+/// before its ramp, or a number of frames into the ramp. One value, so a hold cannot coexist with
+/// a ramp that has moved: the ramp starts at its first frame when the hold ends.
+///
+/// The bank kernel reads the phase as one signed `f32` lane word, the ramp index the lane's
+/// next frame continues from ([`Self::bank_position`]), and stays branch-free over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CrossfadePhase {
+    /// The lane emits the dry signal for `frames` more frames, then its ramp runs from its first
+    /// frame. Only a lane that left settled bypass, and is not bypassed again, is held.
+    Held { frames: NonZeroU32 },
+    /// `position` frames of the ramp are rendered, saturated at its length: the ramp is settled
+    /// exactly when `position` has reached the length.
+    Ramp { position: u32 },
+}
+
+impl CrossfadePhase {
+    /// A ramp that has rendered no frame: where every switch starts.
+    const START: Self = Self::Ramp { position: 0 };
+
+    /// Whether a crossfade runs: a hold, or a ramp short of `mix`'s length.
+    const fn ramping(self, mix: &IndexedRamp) -> bool {
+        match self {
+            Self::Held { .. } => true,
+            Self::Ramp { position } => position < mix.length,
+        }
+    }
+
+    /// The ramp frames rendered: none while the hold lasts.
+    const fn ramp_position(self) -> u32 {
+        match self {
+            Self::Held { .. } => 0,
+            Self::Ramp { position } => position,
+        }
+    }
+
+    /// The wet mix `m` the lane emits now and its next frame continues from: `0` while it holds
+    /// dry, whatever the ramp it waits on starts from, else `m` at its ramp position. A switch
+    /// starts its new ramp from exactly this, so a switch during a hold continues from the dry
+    /// the hold emits.
+    fn mix(self, mix: &IndexedRamp) -> f32 {
+        match self {
+            Self::Held { .. } => 0.0,
+            Self::Ramp { position } => mix.coefficients_at(position)[0],
+        }
+    }
+
+    /// The phase as the bank kernel's one lane word: the ramp index the lane's next frame
+    /// continues from, minus the frames it still holds. A held lane's word is negative, so its
+    /// first `frames` frames take an index below `1` and read dry ([`BypassShunt::crossfade_bank`]).
+    /// Exact: a position is at most the ramp's length and a hold at most
+    /// [`INDEXED_RAMP_LENGTH_MAXIMUM`], both at most `2^22`.
+    fn bank_position(self) -> f32 {
+        match self {
+            Self::Held { frames } => -(frames.get() as f32),
+            Self::Ramp { position } => position as f32,
+        }
+    }
+
+    /// The phase `frames` rendered frames later, under `mix`: a hold is spent before the ramp
+    /// moves, so the frames past its end are the ramp's first, and a ramp saturates at its length.
+    fn advance(self, mix: &IndexedRamp, frames: u32) -> Self {
+        let (held, position) = match self {
+            Self::Held { frames: hold } => (hold.get(), 0),
+            Self::Ramp { position } => (0, position),
+        };
+        let spent = held.min(frames);
+        match NonZeroU32::new(held - spent) {
+            Some(frames) => Self::Held { frames },
+            None => Self::Ramp {
+                position: position.saturating_add(frames - spent).min(mix.length),
+            },
+        }
+    }
+}
+
+/// The proof that a lane's last [`EffectControlLane::stage`] took it out of settled bypass
+/// (issue #2129 D2, #2271), returned by [`EffectControlLane::take_rest`] and spent by
+/// [`EffectControlLane::begin_hold`]: a hold can start only on the lane that was just switched
+/// out of settled bypass, at its ramp's first frame. Between the two calls the caller resets the
+/// lane's effect state, keeping parameters.
+#[must_use = "a lane leaving settled bypass is reset and then begins its hold with this token"]
+#[derive(Debug)]
+pub struct RestToken {
+    _private: (),
+}
+
 impl EffectControlLane {
     /// A lane with no cells that carries only this instance's prepared bypass (issue #1087).
     ///
@@ -1100,8 +1183,7 @@ impl EffectControlLane {
             observe: None,
             bypass,
             mix: settled_mix(bypass),
-            mix_position: 0,
-            hold: 0,
+            phase: CrossfadePhase::START,
             rest_pending: false,
             symmetry,
             carried_bypass: CarriedCell::EMPTY,
@@ -1277,7 +1359,7 @@ impl EffectControlLane {
     /// still holds dry before its crossfade starts ([`Self::begin_hold`]).
     #[must_use]
     pub const fn bypass_ramping(&self) -> bool {
-        self.mix_position < self.mix.length || self.hold != 0
+        self.phase.ramping(&self.mix)
     }
 
     /// Whether this lane is settled at bypass: its target is bypassed and no crossfade runs, so it
@@ -1288,13 +1370,14 @@ impl EffectControlLane {
     }
 
     /// Whether the last [`Self::stage`] took this lane out of settled bypass, clearing the flag
-    /// (issue #2129 D2, as amended). When it returns `true` the caller resets the lane's effect
-    /// state, keeping parameters (a bank's `reset_lane`, an instance's `reset`), and calls
-    /// [`Self::begin_hold`] with the effect's warm-up, before anything of the block reaches the
-    /// effect. Every un-bypass from settled bypass resumes from rest, so a lane's bits never
-    /// depend on whether its bank mates kept its wet path running.
-    pub fn take_rest(&mut self) -> bool {
-        core::mem::take(&mut self.rest_pending)
+    /// (issue #2129 D2, as amended). When it returns a token the caller resets the lane's effect
+    /// state, keeping parameters (a bank's `reset_lane`, an instance's `reset`), and spends the
+    /// token on [`Self::begin_hold`] with the effect's warm-up, before anything of the block
+    /// reaches the effect. Every un-bypass from settled bypass resumes from rest, so a lane's bits
+    /// never depend on whether its bank mates kept its wet path running.
+    #[must_use = "a lane leaving settled bypass must be reset and begin its hold"]
+    pub fn take_rest(&mut self) -> Option<RestToken> {
+        core::mem::take(&mut self.rest_pending).then_some(RestToken { _private: () })
     }
 
     /// Hold the dry signal for `frames` frames before this lane's crossfade runs (issue #2129
@@ -1302,10 +1385,20 @@ impl EffectControlLane {
     /// reads `frames` of post-reset history before it is the output of a lane that never paused. The ramp starts when the hold ends, on the [`IndexedRamp`] law from its first
     /// frame, so the frame `frames` into the hold takes `k = 1`. Clamped to
     /// [`INDEXED_RAMP_LENGTH_MAXIMUM`], which keeps every crossfade index exact in `f32`. A lane
-    /// that is bypassed, or a `frames` of `0`, takes no hold. Render thread, at a block boundary.
-    pub fn begin_hold(&mut self, frames: u32) {
-        if !self.bypass {
-            self.hold = frames.min(INDEXED_RAMP_LENGTH_MAXIMUM);
+    /// that is bypassed, or a `frames` of `0`, takes no hold. `rest` is this lane's
+    /// [`Self::take_rest`] of the block: only a lane that left settled bypass holds, and it holds
+    /// from its ramp's first frame. A lane that has moved since (bypassed again, or a frame into
+    /// its ramp) takes no hold, so a hold never coexists with a moved ramp. Render thread, at a
+    /// block boundary.
+    pub fn begin_hold(&mut self, rest: RestToken, frames: u32) {
+        let RestToken { _private: () } = rest;
+        let fresh = !self.bypass && self.phase == CrossfadePhase::START;
+        debug_assert!(
+            fresh,
+            "a hold begins right after the stage that left settled bypass"
+        );
+        if fresh && let Some(frames) = NonZeroU32::new(frames.min(INDEXED_RAMP_LENGTH_MAXIMUM)) {
+            self.phase = CrossfadePhase::Held { frames };
         }
     }
 
@@ -1321,21 +1414,19 @@ impl EffectControlLane {
     /// settled dry, and the last rendered frame's `m(k)` while a ramp runs.
     #[must_use]
     pub fn bypass_mix(&self) -> f32 {
-        self.mix.coefficients_at(self.mix_position)[0]
+        self.phase.mix(&self.mix)
     }
 
     /// This lane's crossfade for the next rendered block, as one lane of a bank's
     /// [`BankCrossfade`] (#1341 D4).
     #[must_use]
     pub fn bypass_crossfade_lane(&self) -> BankCrossfadeLane {
-        let ramping = self.mix_position < self.mix.length;
+        let ramping = self.phase.ramp_position() < self.mix.length;
         BankCrossfadeLane {
             step: self.mix.step[0],
             start: self.mix.start[0],
-            // Exact: a position is at most the ramp's length and a hold at most
-            // `INDEXED_RAMP_LENGTH_MAXIMUM`, both at most `2^22`. A held lane's position is
-            // negative, so its first `hold` frames take an index below `1` and read dry (#2129).
-            position: self.mix_position as f32 - self.hold as f32,
+            // A held lane's position is negative, so its first held frames read dry (#2129).
+            position: self.phase.bank_position(),
             // A settled lane has length `0`, so no frame index (all at least `1`) is below it.
             length: if ramping { self.mix.length as f32 } else { 0.0 },
             settled_dry: self.bypass,
@@ -1359,20 +1450,14 @@ impl EffectControlLane {
         left: &mut [f32],
         right: &mut [f32],
     ) {
-        if self.hold != 0 {
+        if let CrossfadePhase::Held { frames: hold } = self.phase {
             // #2129 D3: the held frames are dry, then the ramp runs from its first frame.
-            shunt.crossfade_held::<L>(
-                left,
-                right,
-                &self.mix,
-                self.mix_position,
-                self.hold,
-                self.bypass,
-            );
+            shunt.crossfade_held::<L>(left, right, &self.mix, 0, hold.get(), self.bypass);
             let frames = left.len().min(right.len());
             self.advance_bypass_mix(u32::try_from(frames).unwrap_or(u32::MAX));
         } else if self.bypass_ramping() {
-            shunt.crossfade::<L>(left, right, &self.mix, self.mix_position, self.bypass);
+            let position = self.phase.ramp_position();
+            shunt.crossfade::<L>(left, right, &self.mix, position, self.bypass);
             let frames = left.len().min(right.len());
             self.advance_bypass_mix(u32::try_from(frames).unwrap_or(u32::MAX));
         } else if self.bypass {
@@ -1391,12 +1476,7 @@ impl EffectControlLane {
         }
         // A hold is spent before the ramp moves (#2129 D3): the frames past its end are the
         // ramp's first.
-        let held = self.hold.min(frames);
-        self.hold -= held;
-        self.mix_position = self
-            .mix_position
-            .saturating_add(frames - held)
-            .min(self.mix.length);
+        self.phase = self.phase.advance(&self.mix, frames);
         if !self.bypass_ramping() && !self.bypass {
             self.symmetry
                 .admit(&EffectControlRecord::Bypass(BypassSwitch::step(false)));
@@ -1456,8 +1536,7 @@ impl EffectControlLane {
         }
         self.bypass = predecessor.bypass;
         self.mix = predecessor.mix;
-        self.mix_position = predecessor.mix_position;
-        self.hold = predecessor.hold;
+        self.phase = predecessor.phase;
         self.rest_pending = predecessor.rest_pending;
         self.symmetry = predecessor.symmetry;
         if predecessor.link.is_some() {
@@ -1601,8 +1680,7 @@ impl EffectControlLane {
             staged_targets,
             bypass,
             mix,
-            mix_position,
-            hold,
+            phase,
             rest_pending,
             symmetry,
             carried_bypass,
@@ -1647,8 +1725,9 @@ impl EffectControlLane {
             // from the mix the lane is at now, so a reversal mid-ramp continues without a jump.
             if value != *bypass {
                 // #2129 D2: a lane leaving settled bypass resumes from rest.
-                *rest_pending = !value && *mix_position >= mix.length && *hold == 0;
-                let now = mix.coefficients_at(*mix_position)[0];
+                *rest_pending = !value && !phase.ramping(mix);
+                // The mix the lane emits now: a held lane emits dry, whatever its ramp starts from.
+                let now = phase.mix(mix);
                 let target = if value { 0.0 } else { 1.0 };
                 // The writer refuses a longer ramp, so the cell holds only checked words.
                 *mix = IndexedRamp::new(
@@ -1656,10 +1735,9 @@ impl EffectControlLane {
                     [target, 0.0, 0.0, 0.0],
                     ramp_samples.min(INDEXED_RAMP_LENGTH_MAXIMUM),
                 );
-                *mix_position = 0;
-                // A switch during a hold starts from the mix the hold kept, the dry `0`, and ends
-                // the hold: the new ramp is the lane's whole law from here (#2129 D3).
-                *hold = 0;
+                // A switch during a hold starts from the dry `0` the hold emits and ends the hold:
+                // the new ramp is the lane's whole law from here (#2129 D3, #2271).
+                *phase = CrossfadePhase::START;
                 *bypass = value;
                 // A ramping lane counts as bypassed until it settles at wet (#1341 D6).
                 symmetry.admit(&EffectControlRecord::Bypass(BypassSwitch::step(

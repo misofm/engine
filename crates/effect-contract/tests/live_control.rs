@@ -511,6 +511,64 @@ fn a_bypass_crossfade_is_bypassed_to_the_witness_and_needs_dry_until_it_settles_
     assert!(!rig.lane.needs_dry() && rig.lane.symmetry().holds(UNBYPASSED));
 }
 
+/// Issue #2129 D3 as a phase: a lane that left settled bypass by a step holds dry for its warm-up,
+/// and a switch back to bypass with a ramp during that hold crossfades from the dry mix the hold
+/// emits, so every frame after the switch is still exactly the dry word.
+///
+/// Test value: red if the switch reads the mix of the un-bypass ramp it interrupts (`1`, the
+/// target a step reaches at once) instead of the `0` the hold renders: the output would jump from
+/// dry to the reset effect's warm-up output, the words the hold exists to keep out.
+#[test]
+fn a_bypass_during_a_hold_crossfades_from_the_dry_the_hold_emits() {
+    use effect_contract::BypassSwitch;
+    const FRAMES: usize = 64;
+    let mut rig = Rig::new(shape(&[], &[], 0), 0);
+    let mut shunt = BypassShunt::new(FRAMES, 0);
+    let dry: [f32; FRAMES] = core::array::from_fn(|frame| 0.25 + frame as f32 * 0.0078125);
+    let wet: [f32; FRAMES] = core::array::from_fn(|frame| -0.5 - frame as f32 * 0.00390625);
+    let mut block = |rig: &mut Rig| -> [f32; FRAMES] {
+        let (mut left, mut right) = (wet, wet);
+        shunt.capture(&dry, &dry);
+        assert!(rig.lane.needs_dry());
+        rig.lane
+            .apply_bypass::<lane::Native>(&shunt, &mut left, &mut right);
+        assert_eq!(left.map(f32::to_bits), right.map(f32::to_bits));
+        left
+    };
+    rig.commit_bypass(BypassSwitch::step(true)).expect("a cell");
+    rig.stage();
+    assert!(rig.lane.settled_bypassed());
+    rig.commit_bypass(BypassSwitch::step(false))
+        .expect("a cell");
+    rig.stage();
+    let rest = rig.lane.take_rest().expect("left settled bypass");
+    // A warm-up longer than a block: the hold spans the next block's switch.
+    rig.lane.begin_hold(rest, 3 * FRAMES as u32);
+    assert_eq!(block(&mut rig).map(f32::to_bits), dry.map(f32::to_bits));
+    assert!(rig.lane.bypass_ramping());
+    assert_eq!(rig.lane.bypass_mix(), 0.0, "a held lane renders dry");
+
+    rig.commit_bypass(BypassSwitch {
+        bypassed: true,
+        ramp_samples: 2 * FRAMES as u32,
+    })
+    .expect("a cell");
+    rig.stage();
+    assert!(
+        rig.lane.take_rest().is_none(),
+        "a hold is not settled bypass"
+    );
+    assert_eq!(
+        rig.lane.bypass_mix(),
+        0.0,
+        "the new ramp starts at the hold's dry"
+    );
+    for _ in 0..3 {
+        assert_eq!(block(&mut rig).map(f32::to_bits), dry.map(f32::to_bits));
+    }
+    assert!(rig.lane.settled_bypassed());
+}
+
 /// A ramp the indexed ramp law cannot spell is refused before the first write.
 #[test]
 fn a_bypass_ramp_longer_than_the_law_is_refused_and_writes_nothing() {
