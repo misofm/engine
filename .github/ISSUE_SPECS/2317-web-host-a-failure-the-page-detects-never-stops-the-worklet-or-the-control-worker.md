@@ -150,5 +150,11 @@ No Rust file changed, so no other cargo gate applies.
 - Control Worker: red if the Worker leaves the lifecycle word ready or keeps ticking after the post, reads it as a request, calls `session_fail` again for a later post or for one during a dispose, or drops a sticky refusal's planes.
 
 **Follow-ups (not filed):**
-- A well-formed unsolicited frame on a failed host still reaches its listener: meter, telemetry, control event or watermark. A failed host should drop it, or count it.
+- Flagged by review; the coordinator tracks it. A well-formed meter, telemetry, control-event or watermark frame still reaches its listeners after the host has failed (`#receive` dispatches unsolicited frames before any failure check). A failed host should drop such a frame, or count it. This stays out of #2317 (see Non-goals).
+
+**Pending before review: the merge with #2306 (WEB-7).** #2306 replaces the Worker's `disposing`/`disposed` flags with one `this.phase` union: `unbooted | refused | live | disposing{…} | disposed{…}`. During a dispose, the Worker's tick keeps the release deadline. On the merged tree, `receiveHostFailure`'s `this.disposing` guard would be `undefined`. A `miso.fail.v1` during a dispose would then fail the session and stop the deadline tick. The row "a post during a dispose fails nothing" goes red on the three-way merge, so the conflict is caught. Once #2306 is on `main`:
+- merge `origin/main` in with a normal merge commit;
+- guard on `this.phase.kind !== "live"` plus the sticky latch;
+- never stop the tick outside `live`;
+- re-run the generators and update the tables above.
 - #2279's follow-ups stand: the factory-input, returned-plane, boot-reply and frame-schema clause swaps have no rows.
