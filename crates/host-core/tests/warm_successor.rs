@@ -16,7 +16,7 @@
 //! readiness check, the adoption and its prime, on both bank widths, and the growth chain at
 //! every launch rate.
 
-#![cfg(feature = "test-support")]
+#![cfg(all(feature = "test-support", feature = "control-provider"))]
 
 #[path = "support/successor.rs"]
 mod successor;
@@ -1105,7 +1105,7 @@ fn a_join_outside_the_leads_restart_set_is_the_invariant_error() {
 // -------------------------------------------------------------------------------------------------
 // #1355: render's readiness check and the adoption of a warm successor with its prime. Every gate
 // streams a predecessor A, publishes the warm successor W `Primed { lead_blocks: P / q }` through
-// the plan exchange (D3) after setting the carried ring's `prime_required` flag, and renders on.
+// the plan exchange (D3) with `publish_primed` after its producers moved (#2273), and renders on.
 // "A continued" is A rendered on with no swap and the same host commands.
 // -------------------------------------------------------------------------------------------------
 
@@ -1283,22 +1283,17 @@ impl Stream {
         SuccessorBase::new(&self.inventory, &self.committed, self.revision + 1)
     }
 
-    /// Publish `host`, prepared from [`Self::base`], with `adoption`; for a `Primed` candidate,
-    /// first set the carried ring's `prime_required` flag (D3).
+    /// Publish `host`, prepared from [`Self::base`]: adopted at the next block, or, with
+    /// `lead_blocks`, `Primed` through [`host_core::publish_primed`] (D3). The producers move
+    /// first, so the publication's flags must not depend on whether they have moved (#2273).
     fn publish(
         &mut self,
         mut host: PreparedHost,
         committed: &SessionModel,
-        adoption: PlanAdoption,
+        lead_blocks: Option<u32>,
     ) {
         assert!(self.pending.is_none(), "one candidate at a time");
         host.sources.adopt_persisting(&mut self.sources);
-        if let PlanAdoption::Primed { .. } = adoption {
-            host.sources
-                .test_only_prime_flag(SOURCE.as_bytes())
-                .expect("the carried ring")
-                .set(true);
-        }
         self.revision += 1;
         let PreparedHost {
             mut plan,
@@ -1310,10 +1305,14 @@ impl Stream {
             .expect("the successor's gate")
             .publish(self.revision);
         self.pending = Some(inventory.source_read_offset());
-        self.publisher
-            .reserve_replacement(plan, adoption)
-            .unwrap_or_else(|_| panic!("reserve the successor"))
-            .commit(self.revision);
+        let mut reservation = self
+            .publisher
+            .reserve_replacement(plan, PlanAdoption::Next)
+            .unwrap_or_else(|_| panic!("reserve the successor"));
+        if let Some(lead_blocks) = lead_blocks {
+            host_core::publish_primed(&mut reservation, &self.sources, &sources, None, lead_blocks);
+        }
+        reservation.commit(self.revision);
         self.sources = sources;
         self.inventory = inventory;
         self.committed = committed.clone();
@@ -1350,14 +1349,7 @@ impl Stream {
     fn grow(&mut self, b: &Session, config: &WarmConfig) -> u64 {
         let (lead, host) = self.warm(b, config);
         let lead_blocks = u32::try_from(lead.lead_samples / QUANTUM).expect("blocks");
-        self.publish(
-            host,
-            &b.model,
-            PlanAdoption::Primed {
-                not_before: 0,
-                lead_blocks,
-            },
-        );
+        self.publish(host, &b.model, Some(lead_blocks));
         lead.lead_samples
     }
 
@@ -1365,7 +1357,7 @@ impl Stream {
     fn rebuild(&mut self, b: &Session) {
         let host = successor_of(b, &self.caps, self.base(), self.backend)
             .unwrap_or_else(|failure| panic!("ordinary successor: {failure:?}"));
-        self.publish(host, &b.model, PlanAdoption::Next);
+        self.publish(host, &b.model, None);
     }
 
     /// A render call at the wrong sample: render adopts the due candidate at the block boundary,

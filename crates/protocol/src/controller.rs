@@ -1771,6 +1771,10 @@ pub struct ProtocolController<P: ControlProvider> {
     /// refused with `BACKPRESSURE` `response.capture.pending`.
     response_ready: Option<ResponseReady>,
     pending_reliable_event: Option<ReliableSlot>,
+    /// How many reliable event frames reached caller output (#2268): monotone, never reset. It
+    /// saturates rather than wraps, which is unreachable: `u64::MAX` frames at 10^9 a second take
+    /// about 584 years.
+    reliable_events_delivered: u64,
     pending_meter_record: Option<TelemetryRecord>,
     pending_counter_record: Option<CounterTelemetryRecord>,
     pending_telemetry_event: PendingTelemetryEvent,
@@ -1816,6 +1820,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             observation_ended_cells: observation_ended_cells.into_boxed_slice(),
             response_ready: None,
             pending_reliable_event: None,
+            reliable_events_delivered: 0,
             pending_meter_record: None,
             pending_counter_record: None,
             pending_telemetry_event: PendingTelemetryEvent::None,
@@ -4117,9 +4122,30 @@ impl<P: ControlProvider> ProtocolController<P> {
         self.response_ready.is_some()
     }
 
-    /// Dequeue and encode one complete reliable event frame. A short caller output buffer leaves
-    /// the exact queued event pending, so retrying with the required size neither loses nor
-    /// reorders reliable events.
+    /// The reliable events this endpoint holds whose frames have not reached caller output: the
+    /// queued ones, plus the one [`Self::dequeue_reliable_event_frame_into`] popped and keeps
+    /// pending after any error (#2268). A host that interleaves events of its own with these
+    /// places one behind every older event by waiting until
+    /// [`Self::reliable_events_delivered`] reaches its value then plus this backlog.
+    #[must_use]
+    pub fn reliable_backlog(&self) -> u64 {
+        self.queues
+            .report(crate::QueueKind::ReliableEvent)
+            .occupancy
+            .saturating_add(u64::from(self.pending_reliable_event.is_some()))
+    }
+
+    /// How many reliable event frames [`Self::dequeue_reliable_event_frame_into`] has delivered to
+    /// caller output since boot (#2268). Monotone; an error delivers nothing and counts nothing.
+    /// It saturates at `u64::MAX`, which is unreachable (about 584 years at 10^9 frames a second).
+    #[must_use]
+    pub const fn reliable_events_delivered(&self) -> u64 {
+        self.reliable_events_delivered
+    }
+
+    /// Dequeue and encode one complete reliable event frame. Any error, a short caller output
+    /// buffer included, leaves the exact event pending, so a retry neither loses nor reorders
+    /// reliable events.
     pub fn dequeue_reliable_event_frame_into(
         &mut self,
         output: &mut [u8],
@@ -4148,6 +4174,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 self.response_ready = None;
             }
             self.pending_reliable_event = None;
+            self.reliable_events_delivered = self.reliable_events_delivered.saturating_add(1);
         }
         result.map(Some)
     }
