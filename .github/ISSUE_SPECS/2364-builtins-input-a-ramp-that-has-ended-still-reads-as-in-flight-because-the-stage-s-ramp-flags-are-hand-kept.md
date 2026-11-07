@@ -138,8 +138,10 @@ release build (the assertions are debug-only). A ramping block's settles now pub
 retarget adds one scan. Whole-block timings on this machine were too noisy to resolve the
 difference (two head runs of the same trim-ramp loop gave 768 and 606 ns/block at W=4).
 
-**Gates.** `cargo test --locked -p builtins`, `-p rack`, `-p builtins-compiler`,
-`-p graph-compiler`, `-p host-core`: see the attempt record below. clippy
+**Gates.** All pass: `cargo test --locked -p builtins` (every suite), `-p rack`,
+`-p builtins-compiler`, `-p graph-compiler` (plan fixtures unchanged), `-p host-core` (58 suites,
+294 passed), and `--release -p builtins --features builtins/test-support --test filter_liveness
+--test tail_contract`. clippy
 `-p builtins --all-targets -D warnings`, fmt, doc (`-p builtins`), workspace policy and
 `realtime_policy` (298 marked regions in 48 files): clean. `size_of::<InputStage<_>>()` does not
 change (no field added or removed), so `graph_fixture` was not regenerated.
