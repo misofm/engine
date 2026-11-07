@@ -1237,7 +1237,11 @@ class ControlWorker {
   /// skipped its drain: nothing. The quanta rendered since the last pass are no drain blocks, and
   /// the frames the engine missed since the last report read, or misses before the next one, are
   /// not this ring's underruns: the baseline is dropped, so the next read starts a new one. Quanta a
-  /// refused read carried into the wait were rendered before it, and still count.
+  /// refused read carried into the wait were rendered before it, and still count as drain blocks;
+  /// their missing frames do not. The engine's count is cumulative, so the frames missed in the
+  /// carried interval and in this pass's interval cannot be told apart. Closing the baseline here
+  /// would count the second as underruns, which is the wait's to drop. A carry needs a report or
+  /// fill read refused just before a wait, so it is rare, and this errs toward not counting.
   waitBlocks(ring) {
     ring.reportUnderrun = null;
   }

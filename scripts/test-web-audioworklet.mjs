@@ -5067,11 +5067,11 @@ async function testControlWorker() {
       const control = new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4);
       const writer = new Msb1RingWriter(ring);
       writer.engage(1n);
-      const write = (generation, startFrame, value) => {
+      const write = (generation, startFrame, value, endOfRegion = false) => {
         const planes = writer.reserve(64);
         planes[0].fill(value);
         planes[1].fill(-value);
-        writer.commit({ generation, startFrame, frames: 64, endOfRegion: false });
+        writer.commit({ generation, startFrame, frames: 64, endOfRegion });
       };
       let renderedSoFar = 0n;
       const rendered = (quanta) => {
@@ -5114,6 +5114,15 @@ async function testControlWorker() {
       fake.calls.sourceResult = 0;
       tick.callback();
       assert.deepEqual(fake.calls.source.at(-1), [1, 5, 1n, 192n, 2, 64, 0], "and is submitted next");
+      // #2282: once the region's last chunk is submitted, frames the engine reports missing are
+      // not underruns. Red if the drain drops its finished-region rule.
+      write(1n, 256n, 1, true);
+      tick.callback();
+      rendered(5n);
+      fake.calls.seekReportWords = [5n, 1024n, 48000n, 7n + 128n, 9n];
+      tick.callback();
+      assert.deepEqual([control[MSB1_CONTROL.DRAIN_BLOCKS], control[MSB1_CONTROL.UNDERRUNS]], [5, 1],
+        "a finished region's missing frames are no underrun");
       // A seek in `worker` mode: the drain seeks the source before it reads a slot, drops the
       // chunks of the old generation and resumes at the new one. Red if the drain submits a stale
       // chunk, or reads a slot before the seek.
@@ -5136,13 +5145,13 @@ async function testControlWorker() {
       // holds that rule). Red if the wait drops the carried quanta too.
       const drained = control[MSB1_CONTROL.DRAIN_BLOCKS];
       fake.calls.seekReportResult = 6;
-      rendered(6n);
+      rendered(7n);
       tick.callback();
       fake.calls.seekReportResult = 0;
       writer.seek(3n, 0n, 6400n);
       write(3n, 0n, 0.5);
       const seeks = fake.calls.seek.length;
-      rendered(9n);
+      rendered(10n);
       tick.callback();
       assert.equal(fake.calls.source.length, submitted + 4, "nothing of the anchored ring is read before the handler");
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: 6400n });

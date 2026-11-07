@@ -9,6 +9,7 @@ In `worker` mode the control Worker drains the SDK's MSB1 rings (`hosts/host-web
 **The claimed wedge does not hold.** The claim was that an anchored seek whose `seek-at` is refused or never sent gets BACKPRESSURE on every tick. That wait is the designed contract, and it is the same in both copies:
 - The prelude documents it at `miso-engine-v1-pcm-feed-worklet.js:630-637`: "a refused `seek-at` leaves it unseen until a newer ring seek supersedes it".
 - The SDK's public contract documents it at `sdk/src/browser/pcm-feed.ts:133-135`: "Until it did, the drain reads none of that ring's chunks".
+- `Msb1RingWriter.seek` documents it at `sdk/src/browser/pcm-ring.ts:47-49`. This is the one place a host that writes a raw ring is told: "an anchored seek published without that message stalls the ring (the drain reads none of its chunks)".
 - The shared consumer case table pins it for both copies (`sdk/test/msb1-consumer-cases.mjs`, "an anchored seek waits for the handler's OK for its exact tuple").
 - The SDK never leaves such a ring open. A refused `seekSourceAt` throws (`pcm-feed.ts:602`). `ready()` catches the throw and closes the feed (`pcm-feed.ts:630`), and the close posts `detach`, so the Worker withdraws the ring.
 - Reading a slot during the wait would submit the new generation's PCM to a source the engine never sought. So the wait is correct.
@@ -44,6 +45,7 @@ Nothing stops `seekAdmit` being true while no seek is landing. `excludedFrames` 
   - The quanta rendered since the last pass are dropped: they are not drain blocks.
   - `pendingElapsed` is kept, because it was rendered before the wait.
   - The underrun baseline is dropped (`reportUnderrun = null`). The next report read starts a new baseline, so the frames the engine missed during the wait are never this ring's underruns.
+  - The carried quanta keep their drain blocks but lose their underruns. The engine's count is cumulative. The frames missed in the carried interval and in the first waiting pass's interval cannot be told apart. Closing the baseline on the wait's first pass would count the second as underruns, and #1387's rule gives that interval to the wait. A carry needs a refused report or fill read just before a wait, so it is rare, and the rule errs toward not counting. `waitBlocks`' comment records this (attempt 2, review MINOR 2).
 
   At the wait's edges this is accurate to one Worker tick, the granularity the Worker's accounting already has (#1387 attempt 3).
 - **`ring.publication`** is one record for the seqlock snapshot (`epoch`, `tag`, `write`, `generation`, `generationHigh`, `generationLow`, `frame`, `anchor`). `readSharedSeek` updates it in place.
@@ -58,6 +60,8 @@ Nothing stops `seekAdmit` being true while no seek is landing. `excludedFrames` 
 
 ## Gates
 - A new shared case in `sdk/test/msb1-consumer-cases.mjs`: "a ring waiting for its seek counts no drain block and no underrun, though the engine runs dry meanwhile". It must be red on base for the Worker and green for the prelude on base.
+- A second shared case, next to the #2184 one: "a ring whose seek publication is in flight counts no drain block and no underrun, though the engine runs dry meanwhile" (the torn arm of the wait; attempt 2). It must be red on base for the Worker and green for the prelude on base.
+- The guard table under attempt 2: every guard in the touched functions names the test that goes red when the guard is deleted, or why it is equivalent.
 - The Worker-only #1387 row in `scripts/test-web-audioworklet.mjs` checks that the quanta a refused report read carried into an anchored wait still count once the wait ends. It must be red on base. It replaces that row's "the quanta of the wait pass uncounted" assertion, which the shared case now holds for both copies.
 - `bash scripts/test-web-audioworklet.sh`.
 - `node --test test/browser-pcm-evals.mjs` in `sdk/`.
@@ -118,3 +122,95 @@ The same shared case is green on the prelude on base: `node --test --test-name-p
 **Follow-ups (not in this issue).**
 - One generated source for both MSB1 consumers. This is a packaging change across the engine artifact and the SDK asset; the header of `sdk/test/msb1-consumer-cases.mjs` already names it.
 - If the source is ever shared, the prelude's `seenEpoch` and `anchored*` fields could take the same shape, using preallocated records so `process()` never allocates.
+
+**Verdict on attempt 1 (Sol): FAIL, on one MAJOR.** The reviewer agreed with the rest:
+- the wedge is a documented contract. The reviewer asked that `pcm-ring.ts:47-49` be cited, and it now is;
+- behaviour is preserved;
+- nothing allocates on the render path.
+
+The findings:
+1. **MAJOR.** The torn-publication arm of the wait had no test. Splitting the guard back to base (`if (!this.readSharedSeek(ring)) { ring.pendingElapsed = 0; return; }`) left the suite green. So did skipping `waitBlocks` on the torn wait.
+2. **MINOR.** Carried quanta keep their drain blocks but lose their underruns. This was not documented.
+3. **MINOR.** Several guards inherited into rewritten lines had no test:
+   - `!ring.finished`;
+   - the anchored tuple's `sample` and `generation` compares;
+   - the `anchoredSeek = null` clear;
+   - the `prepareSharedSeeks` `matches` conjuncts and its `publication.anchor`;
+   - the epoch rechecks in `readSharedSeek`.
+
+### Attempt 2 (Terra, 2026-11-07)
+Branch merged with `origin/main` at `1ed042efc` by a merge commit. None of this issue's files changed upstream.
+
+**MAJOR.** There is a new shared case next to the #2184 one: "a ring whose seek publication is in flight counts no drain block and no underrun, though the engine runs dry meanwhile". It makes the steps the reviewer gave:
+- attach, write g1, one pass: `[UNDERRUNS, DRAIN_BLOCKS]` is `[0, 1]`;
+- hand-publish an odd epoch, three passes: `[0, 1]`;
+- make the epoch even, write g2, one pass: `[0, 2]`.
+
+It is green on the prelude. Against the base Worker (`git show 1aee7e20d:…control-worker.js`, through `MISO_ENGINE_WEB_CONTROL_WORKER_TEST_MODULE`, with the Worker row's carry assertion disabled so that the run reaches the case table) it is red:
+```
+AssertionError [ERR_ASSERTION]: nor once it ends: the blocks the engine ran dry in were the wait's
++   3,
+-   0,
+    at run (sdk/test/msb1-consumer-cases.mjs:192:14)
+```
+The optional refused-read-before-a-torn-wait row was not added. Both arms of the wait are one guard and one `waitBlocks` call, and the carry is already tested through the anchored arm. The table below shows that every way of splitting the arms back apart goes red.
+
+**MINOR 2.** This is documented, both in `waitBlocks` and in the Decision above. The suggested close-out on the wait's first pass was not taken. The engine's cumulative count cannot be split between the carried interval and the first waiting pass's interval. Closing the baseline there would count the wait's own interval as underruns, which is the defect this issue removes.
+
+**MINOR 3.** Each inherited guard now has a test, except the two seqlock rechecks. Those need an interleaving hook inside `readSharedSeek` and are a follow-up. The tests added:
+- the Worker #1387 row: a finished region's missing frames are no underrun;
+- the shared "a seek clears the finished mark" case: the region underruns again after its seek (6 blocks), in both copies;
+- the anchored case: a mismatched generation and a mismatched anchor sample leave the ring waiting, beside the existing mismatched frame. Also, an OK is spent on the seek it applied, so the same tuple published again waits;
+- the prepare-seek case:
+  - an epoch-0 request is superseded;
+  - an old epoch whose tuple was republished is superseded;
+  - the right epoch with another generation, or with another frame, is superseded;
+  - an anchored publication without its OK is refused with 6 and prepares nothing.
+
+  Its "no seek" assertion now counts `source_prepare_seek` calls, not every seek. The Worker drains after each message, and so applies the republished plain seek.
+
+**Guard table.** These are the guards of the touched functions (`drainSharedRing`'s wait and headroom, `accountBlocks`, `waitBlocks`, `readSharedSeek`, `applySharedSeek`, `consumeSharedSeek` and `prepareSharedSeeks`' `matches`). Each mutant replaced the control Worker for one full run of `node scripts/test-web-audioworklet.mjs`, through `MISO_ENGINE_WEB_CONTROL_WORKER_TEST_MODULE`. The shared cases run there against the Worker.
+
+| Guard (mutation) | Red test, or why equivalent |
+|---|---|
+| The wait's torn arm split back to base (`pendingElapsed = 0; return`) | Shared torn case: `[3, 2]` |
+| The torn arm skips `waitBlocks` | Shared torn case |
+| The apply arm skips `waitBlocks` | Shared anchored-wait case: `[3, 2]` |
+| `waitBlocks` keeps the baseline | Shared torn case (the first to run) |
+| `waitBlocks` zeroes `pendingElapsed` | Worker #1387 row: "the two carried quanta count, the wait's three do not" |
+| `admit` never honoured (`false ?`) | Headroom rig: "the plain seek's new generation fills the headroom (its runway)…" |
+| `admit` always honoured (`true ?`) | Headroom rig: "the drain keeps H = 38 of the 80 free" |
+| A refused read carries no quanta | Worker #1387 row (the carry) |
+| A landing settles on any report (generation compare dropped) | Headroom rig: "the plain seek's new generation fills the headroom…" |
+| A landing never settles | Headroom rig: "once render reports the seek in effect, the headroom is kept again" |
+| `reportUnderrun !== null` dropped | Worker #1387 row: "the tick submits every published chunk". The first accounting throws on the null baseline (a bigint minus null), and the pass submits nothing |
+| `!ring.finished` dropped | Worker #1387 row: "a finished region's missing frames are no underrun" |
+| `WRITER_STATE === 1` dropped | Shared "a ring whose writer is not live counts no underrun" |
+| The odd-epoch refusal dropped | Shared #2184 case: "a publication in flight asks no seek and reads no slot" |
+| The cached-epoch recheck dropped | **Green: follow-up.** A writer must publish between the reads. That needs a hook inside `readSharedSeek`, and `onSnapshot` runs only after it returns. |
+| The tuple recheck dropped | **Green: follow-up**, for the same reason. |
+| `epoch === seek.epoch` dropped | Worker #1387 row (every pass applies the seek again) |
+| `recorded === null` dropped (`recorded?.sample`) | **Green: equivalent.** `undefined !== anchor` holds for every anchor (an `i64` bigint), so the null case still waits. |
+| `recorded.sample` compare dropped | Shared anchored case: "a mismatched tuple is not this ring's seek: anchorSample" |
+| `recorded.generation` compare dropped | Shared anchored case: "…: generation" |
+| `recorded.frame` compare dropped | Shared anchored case: "…: sourceFrame" |
+| `anchoredSeek = null` dropped | Shared anchored case: "a spent OK applies nothing" |
+| An anchored seek lands with `admit` | Headroom rig: "pass 0: the headroom stays free through the hold" |
+| A plain seek lands without `admit` | Headroom rig: "the plain seek's new generation fills the headroom…" |
+| `consumeSharedSeek` does not clear `ring.finished` | Shared finished-mark case: "the region runs dry again after its one chunk" |
+| `matches`: `seek.epoch !== 0` dropped | Shared prepare case: the epoch-0 request |
+| `matches`: the epoch compare dropped | Shared prepare case: the republished tuple at its old epoch |
+| `matches`: the generation compare dropped | Shared prepare case: the right epoch, another generation |
+| `matches`: the frame compare dropped | Shared prepare case: the right epoch, another frame |
+| `prepareSharedSeeks` passes `NO_ANCHOR` for `publication.anchor` | Shared prepare case: the anchored publication is refused with 6 and prepares nothing |
+
+**Gates run (all green):**
+- `bash scripts/test-web-audioworklet.sh`;
+- `node --test test/browser-pcm-evals.mjs` in `sdk/`: 52/52, with `MISO_ENGINE_SDK_ARTIFACTS_HEX` set to the attempt-1 build. The prelude runs all 17 shared cases. Attempt 2 changes only a comment in the Worker, so the build was not redone;
+- `bash scripts/check-workspace-policy.sh`.
+
+**Test value (attempt 2).**
+- Shared torn case: red when a consumer counts the engine running dry while a publication is in flight. The anchored-wait case does not reach the torn arm.
+- The added guard assertions: each is red only when its guard is deleted (the table), and no earlier test caught that deletion.
+
+**Follow-up.** An interleaving hook inside `readSharedSeek`, so that the two epoch rechecks can be tested: a writer that publishes between the epoch load and the recheck.
