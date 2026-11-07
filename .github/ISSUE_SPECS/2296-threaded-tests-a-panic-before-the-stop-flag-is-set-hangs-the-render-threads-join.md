@@ -163,3 +163,18 @@ claimed and base never did.
 - `host-core/src/spectrum.rs` cancel-race test: its first `progress < 2` wait has no bound.
 - Both detach their render thread with `thread::spawn`, so a control panic leaves it spinning
   until the binary exits; a scoped thread with `StopOnDrop` would end it.
+- The coordinator files these host-core follow-ups (`session_seek.rs` :192/:207 and the
+  `spectrum.rs` :4647 cancel race) under #2258.
+
+## Verdict (attempt 1)
+**PASS** (Sol's adversarial review). The reviewer confirmed:
+- The coverage claim holds, and collection captures now arm: 0 collection `Ready` reads per run
+  on base, about 19 per run at head.
+- The 30 s deadlines are acceptable under the #1251 precedent and held at 32x CPU load. (The
+  reviewer's own load table was not passed on to this record; these are the figures relayed.)
+- `StopOnDrop` is bound in the right place, before any control-thread statement that can panic
+  and inside the scope that joins the render thread.
+- The host-core follow-ups are correctly left out of scope.
+
+Folded in on the same branch: the test's doc comment now says that collection captures arm since
+#2296.

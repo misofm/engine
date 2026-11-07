@@ -1643,9 +1643,9 @@ fn a_refused_configure_changes_nothing_and_a_pending_edit_is_superseded() {
 /// read allocates on the render thread or races into an internal error: while another thread
 /// renders, the control thread alternates two configurations 40 times (each a rebuild) and sends
 /// 25 `SPECTRUM_CAPTURE` operations after each (1,000 in all: arms, reads with and without the
-/// window, cancels), and after the last keeps capturing until a read comes back `Ready`; every
-/// render call allocates and frees nothing, every configure answers a reply and no capture answers
-/// `INTERNAL`.
+/// window, cancels; collection captures arm since #2296), and after the last keeps capturing until
+/// a read comes back `Ready`; every render call allocates and frees nothing, every configure
+/// answers a reply and no capture answers `INTERNAL`.
 ///
 /// A slow machine renders fewer blocks per capture, so the run waits for the first `Ready` read
 /// instead of expecting one by a count, and fails with a named panic after `PROGRESS_DEADLINE`
