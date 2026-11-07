@@ -5773,7 +5773,9 @@ where
     ///
     /// **A refused re-preparation is a defect (D2 step 3).** W is republished whole, still pending
     /// with its record, and `transition_reprepare_refusals` rises (counted, not asserted: root
-    /// ruling on #1358). W's revision stays pending and the next step retries. **Acked-batch
+    /// ruling on #1358). W's revision stays pending and the next step retries. A withdrawal of
+    /// another candidate than W, a broken invariant, republishes it, drops W's record and is
+    /// `Internal`, once. **Acked-batch
     /// question (D4): can an ack ever precede a drop? No:** W drops only after its replacement is prepared from the committed model, which holds
     /// every acked edit, and its rings move by a donation checked before anything is published.
     fn fall_back_pending_warm(&mut self) -> Result<TransitionStep, CommandError> {
@@ -5800,15 +5802,25 @@ where
             Some(candidate) if candidate.epoch().0 != record.epoch() => {
                 // The record is the newest pending epoch's, and a withdrawal takes back the newest
                 // candidate published, which is that epoch (every publication pushes its epoch):
-                // unreachable (#1358 D3).
+                // unreachable (#1358 D3). Should it happen, the candidate goes back, the record
+                // drops so the next call's step does not withdraw again, and the step reports the
+                // broken invariant once as an internal fault (the service step's
+                // `ServiceFailure::Deadline`) instead of repeating silently on every call (#2328).
                 if let Some(candidate) = withdrawn.take() {
                     self.publisher.republish(candidate);
+                }
+                if let Some(prime) = self
+                    .pending_providers
+                    .last_mut()
+                    .and_then(ProviderEpoch::prime_mut)
+                {
+                    *prime = None;
                 }
                 debug_assert!(
                     false,
                     "#1358 D3: a withdrawal of another epoch than the record's"
                 );
-                return Ok(TransitionStep::NotPending);
+                return Err(CommandError::Internal);
             }
             Some(_) => {}
         }
