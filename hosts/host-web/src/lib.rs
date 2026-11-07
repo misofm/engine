@@ -2746,7 +2746,7 @@ impl AudioWorkletEngineHost {
 
     /// Fail the session sticky with `code`, for a failure the host found outside the engine
     /// (#2267): a protocol fault the control Worker detects in JavaScript, such as an
-    /// out-of-order request ID. It is the control half's [`Self::fail`]: the lifecycle word goes
+    /// out-of-order request ID. It is the control half's `fail`: the lifecycle word goes
     /// to [`STATE_FAILED`], so a render half on another thread silences from its next block and
     /// every later control call is refused [`RESULT_WRONG_STATE`]; the status's last result is
     /// `code`, and the diagnostic is `web.host.failed`.
