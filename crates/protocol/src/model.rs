@@ -1103,12 +1103,13 @@ pub struct PreparedSessionTransaction {
     applied_operations: usize,
     edit_ramps: EditRamps,
     monitor_edits: Vec<controls::MonitorWrite>,
-    monitor_only: bool,
     set_control_rows: Option<Vec<controls::ControlAddress>>,
     observation: Option<ObservePrepared>,
 }
 
-/// What a prepared transaction holds of the session it would commit.
+/// What a prepared transaction holds of the session it would commit. Whether the transaction is
+/// one of monitor writes only is the form's, and nothing else's (#2286): such a transaction
+/// commits no model and no revision, so its commit leaves the store as it is.
 enum TransactionForm {
     /// The complete prospective compilation: the clone of the model with the edits applied,
     /// validated, normalized and written as canonical text.
@@ -1117,10 +1118,14 @@ enum TransactionForm {
     /// the owners the edits changed and nothing else of the model. The committed compilation is not cloned, compiled or serialized;
     /// the commit installs the owners in it.
     InPlace(InPlaceEdit),
-    /// A transaction of solo writes only: the model, the revision and the compilation stay as
-    /// they are (#1559 D4), and nothing of them is cloned. It keeps its edits, for
-    /// [`SessionStore::materialize`].
-    Monitor(Vec<SessionEdit>),
+    /// A transaction of monitor writes only, prepared whole: the model, the revision and the
+    /// compilation stay as they are (#1559 D4). It holds the committed compilation, at the committed
+    /// revision, for [`PreparedSessionTransaction::compiled`].
+    MonitorWhole(CompiledSession),
+    /// A transaction of monitor writes only, prepared in place: the model, the revision and the
+    /// compilation stay as they are (#1559 D4), and nothing of them is cloned. It keeps its edits,
+    /// for [`SessionStore::materialize`].
+    MonitorInPlace(Vec<SessionEdit>),
 }
 
 /// The owners a transaction of values changed (#1613).
@@ -1148,8 +1153,10 @@ impl PreparedSessionTransaction {
     #[must_use]
     pub fn compiled(&self) -> Option<&CompiledSession> {
         match &self.form {
-            TransactionForm::Compiled(compiled) => Some(compiled),
-            TransactionForm::InPlace(_) | TransactionForm::Monitor(_) => None,
+            TransactionForm::Compiled(compiled) | TransactionForm::MonitorWhole(compiled) => {
+                Some(compiled)
+            }
+            TransactionForm::InPlace(_) | TransactionForm::MonitorInPlace(_) => None,
         }
     }
 
@@ -1158,7 +1165,10 @@ impl PreparedSessionTransaction {
     /// [`Self::edited_owners`] for them) or it is a transaction of solo writes only.
     #[must_use]
     pub const fn is_in_place(&self) -> bool {
-        !matches!(self.form, TransactionForm::Compiled(_))
+        matches!(
+            self.form,
+            TransactionForm::InPlace(_) | TransactionForm::MonitorInPlace(_)
+        )
     }
 
     /// The owners a transaction prepared in place changed: a model with the session header and the
@@ -1168,18 +1178,23 @@ impl PreparedSessionTransaction {
     pub fn edited_owners(&self) -> Option<&SessionModel> {
         match &self.form {
             TransactionForm::InPlace(edit) => Some(&edit.owners),
-            TransactionForm::Compiled(_) | TransactionForm::Monitor(_) => None,
+            TransactionForm::Compiled(_)
+            | TransactionForm::MonitorWhole(_)
+            | TransactionForm::MonitorInPlace(_) => None,
         }
     }
 
     /// The resource estimate of the model after the commit, when the transaction was prepared in
-    /// place (the committed estimate for solo writes only); `None` for a transaction that holds a
-    /// compilation, whose own [`CompiledSession::resource_estimate`] is that estimate.
+    /// place and changes values; `None` for a transaction that holds a compilation, whose own
+    /// [`CompiledSession::resource_estimate`] is that estimate, and for one of monitor writes only,
+    /// whose estimate is the committed one.
     #[must_use]
     pub fn in_place_estimate(&self) -> Option<session::ResourceEstimate> {
         match &self.form {
             TransactionForm::InPlace(edit) => Some(edit.estimate),
-            TransactionForm::Compiled(_) | TransactionForm::Monitor(_) => None,
+            TransactionForm::Compiled(_)
+            | TransactionForm::MonitorWhole(_)
+            | TransactionForm::MonitorInPlace(_) => None,
         }
     }
 
@@ -1199,7 +1214,9 @@ impl PreparedSessionTransaction {
             }
             TransactionForm::InPlace(edit) => SessionRevision(edit.revision),
             // Not a mutation: the committed revision.
-            TransactionForm::Monitor(_) => self.base_revision,
+            TransactionForm::MonitorWhole(_) | TransactionForm::MonitorInPlace(_) => {
+                self.base_revision
+            }
         }
     }
 
@@ -1221,12 +1238,16 @@ impl PreparedSessionTransaction {
         self.set_control_rows.as_deref()
     }
 
-    /// Whether every edit of the transaction is a write to a monitor row. Such a transaction
-    /// leaves the model and the revision as they are: [`Self::compiled`] is the committed
-    /// compilation and [`Self::revision`] the committed revision (#1559 D4).
+    /// Whether every edit of the transaction is a monitor edit. Such a transaction leaves the
+    /// model and the revision as they are: [`Self::revision`] is the committed revision, and
+    /// [`Self::compiled`], when the transaction was not prepared in place, the committed
+    /// compilation (#1559 D4).
     #[must_use]
     pub const fn is_monitor_only(&self) -> bool {
-        self.monitor_only
+        matches!(
+            self.form,
+            TransactionForm::MonitorWhole(_) | TransactionForm::MonitorInPlace(_)
+        )
     }
 
     /// The host's binding table with the transaction's `Observe` edits applied in order (#1584
@@ -1375,7 +1396,7 @@ impl SessionStore {
         edits: &[SessionEdit],
     ) -> Result<SessionCommit, SessionStoreError> {
         let prepared = self.prepare_transaction_with_monitor(expected_revision, edits)?;
-        Ok(self.commit_or_keep(prepared))
+        Ok(self.commit_prepared(prepared))
     }
 
     /// [`Self::apply_transaction_with_monitor`] with the preparation of
@@ -1387,17 +1408,7 @@ impl SessionStore {
         edits: &[SessionEdit],
     ) -> Result<SessionCommit, SessionStoreError> {
         let prepared = self.prepare_transaction_in_place(expected_revision, edits)?;
-        Ok(self.commit_or_keep(prepared))
-    }
-
-    fn commit_or_keep(&mut self, prepared: PreparedSessionTransaction) -> SessionCommit {
-        if prepared.monitor_only {
-            return SessionCommit {
-                revision: prepared.base_revision,
-                applied_operations: prepared.applied_operations,
-            };
-        }
-        self.commit_prepared(prepared)
+        Ok(self.commit_prepared(prepared))
     }
 
     /// Resolve and compile one transaction without changing the authoritative session triple.
@@ -1546,9 +1557,11 @@ impl SessionStore {
         prepared: PreparedSessionTransaction,
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
         let edits = match &prepared.form {
-            TransactionForm::Compiled(_) => return Ok(prepared),
+            TransactionForm::Compiled(_) | TransactionForm::MonitorWhole(_) => {
+                return Ok(prepared);
+            }
             TransactionForm::InPlace(edit) => &edit.edits,
-            TransactionForm::Monitor(edits) => edits,
+            TransactionForm::MonitorInPlace(edits) => edits,
         };
         // A token prepared in place holds no `Observe` edit (the full path prepares those), so no
         // binding table is needed.
@@ -1746,13 +1759,17 @@ impl SessionStore {
             ),
             None => None,
         };
+        let form = if monitor_only {
+            TransactionForm::MonitorWhole(compiled)
+        } else {
+            TransactionForm::Compiled(compiled)
+        };
         Ok(PreparedSessionTransaction {
             base_revision: current,
-            form: TransactionForm::Compiled(compiled),
+            form,
             applied_operations: edits.len(),
             edit_ramps,
             monitor_edits,
-            monitor_only,
             set_control_rows,
             observation,
         })
@@ -1762,6 +1779,8 @@ impl SessionStore {
     /// before this call.  Moving the complete compilation is allocation-free and non-fallible; so
     /// is installing the owners of a transaction prepared in place, which is the first write of the
     /// committed model (#1613): a swap of each edited owner, then the revision and the estimate.
+    /// A transaction of monitor writes only commits nothing (#1559 D4): the result names the
+    /// committed revision and the store is as it was.
     pub(crate) fn commit_prepared(
         &mut self,
         prepared: PreparedSessionTransaction,
@@ -1772,17 +1791,13 @@ impl SessionStore {
     /// [`Self::commit_prepared`], returning the compiled session the commit displaced (#1310 D3):
     /// `Some` for a transaction installed as a whole compilation (every rebuild), so a host can
     /// keep the predecessor's model while a successor prepared from it is pending; `None` for one
-    /// committed in place (#1613), which displaces no compilation. Moving it out is
-    /// allocation-free; dropping it is the caller's.
+    /// committed in place (#1613), which displaces no compilation, and for one of monitor writes
+    /// only, which commits nothing. Moving it out is allocation-free; dropping it is the caller's.
     pub(crate) fn commit_prepared_displacing(
         &mut self,
         prepared: PreparedSessionTransaction,
     ) -> (SessionCommit, Option<CompiledSession>) {
         debug_assert_eq!(self.revision(), prepared.base_revision);
-        debug_assert!(
-            !prepared.monitor_only,
-            "a monitor-only transaction commits no model"
-        );
         let revision = prepared.revision();
         let applied_operations = prepared.applied_operations;
         let displaced = match prepared.form {
@@ -1794,9 +1809,8 @@ impl SessionStore {
                 self.compiled.finish_in_place(edit.revision, edit.estimate);
                 None
             }
-            TransactionForm::Monitor(_) => {
-                unreachable!("a monitor-only transaction commits no model")
-            }
+            // Not a mutation (#1559 D4): the store stays as it is, at the committed revision.
+            TransactionForm::MonitorWhole(_) | TransactionForm::MonitorInPlace(_) => None,
         };
         (
             SessionCommit {
@@ -1864,11 +1878,10 @@ impl SessionStore {
         if monitor_only {
             return Some(PreparedSessionTransaction {
                 base_revision: current,
-                form: TransactionForm::Monitor(edits.to_vec()),
+                form: TransactionForm::MonitorInPlace(edits.to_vec()),
                 applied_operations: edits.len(),
                 edit_ramps,
                 monitor_edits,
-                monitor_only: true,
                 set_control_rows: Some(rows),
                 observation: None,
             });
@@ -1907,7 +1920,6 @@ impl SessionStore {
             applied_operations: edits.len(),
             edit_ramps,
             monitor_edits,
-            monitor_only: false,
             set_control_rows: Some(rows),
             observation: None,
         })
@@ -2193,10 +2205,12 @@ mod tests {
 
     /// #1310 D3. A commit installed as a whole compilation returns the compiled session it
     /// displaced, the model the plan that renders was prepared from; a commit made in place
-    /// displaces none.
+    /// displaces none; a commit of solo writes only, prepared whole, changes nothing and displaces
+    /// none (#2286).
     ///
     /// Red if the displaced compilation is the committed one (a host would keep the successor's
-    /// model as the running plan's), or if an in-place commit claims to displace one.
+    /// model as the running plan's), if an in-place commit claims to displace one, or if a commit
+    /// of solo writes panics, installs its compilation or claims to displace one.
     #[test]
     fn a_compiled_commit_returns_the_compilation_it_displaced() {
         let mut store = store();
@@ -2220,6 +2234,32 @@ mod tests {
             .expect("prepares");
         assert!(prepared.is_in_place());
         assert!(store.commit_prepared_displacing(prepared).1.is_none());
+
+        // #2286: solo writes alone, prepared whole, commit nothing. (The in-place form's commit is
+        // `a_transaction_of_values_is_prepared_in_place_and_commits_as_the_full_path_does`'s.)
+        let committed = store.compiled().normalized_model().clone();
+        let base = store.revision();
+        let track = committed.tracks[0].id.clone();
+        let solo = SessionEdit::set_control(
+            controls::ControlAddress {
+                owner: Owner::Strip(track),
+                section: Section::Own,
+                control: 2,
+                lane: Lane::Both,
+            },
+            1.0,
+            None,
+        );
+        let revision = ExpectedRevision::Exact(base);
+        let prepared = store
+            .prepare_transaction_with_monitor(revision, std::slice::from_ref(&solo))
+            .expect("prepares");
+        assert!(prepared.is_monitor_only() && !prepared.is_in_place());
+        let (commit, displaced) = store.commit_prepared_displacing(prepared);
+        assert_eq!(commit.revision, base);
+        assert!(displaced.is_none(), "a solo displaces no compilation");
+        assert_eq!(store.revision(), base);
+        assert_eq!(store.compiled().normalized_model(), &committed);
     }
 
     /// #1613. A transaction of values is prepared in place, holds the edited owners and no

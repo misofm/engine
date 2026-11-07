@@ -240,20 +240,16 @@ impl Drop for HandleClaim<'_> {
     }
 }
 
-/// Claims `plan`'s render state for one render-side call, or records `render.busy` and returns
-/// `None` (#2213).
+/// Claims `plan`'s render state for one render-side call (#2213), or `None` when another holds
+/// it. A refused call returns [`RESULT_BUSY`] and touches nothing (#2293): the plan's diagnostic
+/// word belongs to the holder, so a refusal never stores over the code the holder left there.
 ///
 /// # Safety
 ///
 /// `plan` must have passed [`plan_kind`].
 unsafe fn claim_render_side<'a>(plan: *const Plan) -> Option<HandleClaim<'a>> {
-    // SAFETY: The caller proved the live kind; both projections are disjoint from `state`.
-    let claim = HandleClaim::try_claim(unsafe { &*plan_busy_slot(plan) });
-    if claim.is_none() {
-        // SAFETY: See above.
-        unsafe { &*plan_error_slot(plan) }.store(plan_error::BUSY, Ordering::Relaxed);
-    }
-    claim
+    // SAFETY: The caller proved the live kind; the projection is disjoint from `state`.
+    HandleClaim::try_claim(unsafe { &*plan_busy_slot(plan) })
 }
 
 /// Projects a session's claim word (#2276) without borrowing the whole handle.
@@ -1329,8 +1325,8 @@ pub unsafe extern "C" fn miso_engine_v1_dequeue_event(
 /// `plan` must be live and exclusive; `output` must satisfy the caller-owned output contract.
 ///
 /// A call made while another render-side call holds the plan (a concurrent render or
-/// [`miso_engine_v1_plan_prepare_seek`]) touches no plan state and returns
-/// `RESULT_RENDER_REJECTED` with `render.busy` (#2213).
+/// [`miso_engine_v1_plan_prepare_seek`]) touches no plan state, writes no diagnostic and returns
+/// [`RESULT_BUSY`] (#2213, #2293).
 ///
 /// Thread: render only, never concurrently with itself or with `plan_prepare_seek`.
 #[unsafe(no_mangle)]
@@ -1354,7 +1350,7 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
         // `&mut PlanState` while this one runs.
         // SAFETY: `plan` passed the live-kind check.
         let Some(_claim) = (unsafe { claim_render_side(plan) }) else {
-            return RESULT_RENDER_REJECTED;
+            return RESULT_BUSY;
         };
         if output.is_null() {
             return RESULT_INVALID_ARGUMENT;
@@ -1456,8 +1452,8 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
 /// nothing to prepare is `RESULT_OK` and does nothing. It renders nothing, advances no clock and
 /// allocates nothing.
 ///
-/// A call made while another render-side call holds the plan touches no plan state and returns
-/// `RESULT_RENDER_REJECTED` with `render.busy`. A success clears the plan's diagnostic.
+/// A call made while another render-side call holds the plan touches no plan state, writes no
+/// diagnostic and returns [`RESULT_BUSY`] (#2293). A success clears the plan's diagnostic.
 ///
 /// # Safety
 ///
@@ -1475,7 +1471,7 @@ pub unsafe extern "C" fn miso_engine_v1_plan_prepare_seek(plan: *mut Plan) -> u3
         }
         // SAFETY: `plan` passed the live-kind check.
         let Some(_claim) = (unsafe { claim_render_side(plan) }) else {
-            return RESULT_RENDER_REJECTED;
+            return RESULT_BUSY;
         };
         // SAFETY: The live-kind check establishes the concrete representation and the claim
         // excludes every other render-side borrow of `state`. The projections are disjoint, so a
