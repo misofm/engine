@@ -136,10 +136,11 @@ pub fn hold_primed_until(reservation: &mut PlanReplacementReservation<'_>, not_b
 ///    `true`; every ring W created reads `false`.
 ///
 /// It then reads `not_before` from the render clock and sets the reservation's adoption to
-/// `Primed { not_before, lead_blocks }`, which [`PrimedCandidate::of`] reads back. The caller publishes only into an `Empty` cell (#1343 D3),
-/// so no `Primed` candidate is `Full` while the flags are written, and render reads them only
-/// for a `Full` `Primed` cell after its `Acquire` of the mailbox, which the commit's `Release`
-/// orders after these stores. Control thread only; allocation-free.
+/// `Primed { not_before, lead_blocks }`, which [`PrimedCandidate::of`] reads back. The caller
+/// publishes only into an `Empty` cell (#1343 D3), so no `Primed` candidate is `Full` while the
+/// flags are written, and render reads them only for a `Full` `Primed` cell after its `Acquire`
+/// of the mailbox, which the commit's `Release` orders after these stores. Control thread only;
+/// allocation-free.
 pub fn publish_primed(
     reservation: &mut PlanReplacementReservation<'_>,
     running_sources: &SourceControlSet,

@@ -133,9 +133,9 @@ pub struct ProviderEpoch {
 /// its plan), and [`ProviderEpoch::park`] as it leaves `providers` for `retired_providers`
 /// (render displaced its plan). A pending candidate that a supersession withdraws, and a parked
 /// epoch whose plan is reclaimed, drop in their phase. So a running epoch holds no candidate's
-/// captures, `Primed` record or declared discontinuity, a pending one keeps no committed base and awaits no
-/// pairing, and a parked one keeps no base: what a transition leaves behind drops in it, on
-/// the control thread, and nothing is cleared by hand.
+/// captures, `Primed` record or declared discontinuity, a pending one keeps no committed base
+/// and awaits no pairing, and a parked one keeps no base: what a transition leaves behind drops
+/// in it, on the control thread, and nothing is cleared by hand.
 #[allow(
     clippy::large_enum_variant,
     reason = "one per held epoch, in place; boxing would allocate at promotion"
@@ -1078,8 +1078,9 @@ impl ProviderEpoch {
 
     /// The transition from `Pending` to `Running`, as render's adoption of this epoch's plan is
     /// promoted: the epoch keeps no base yet and awaits no pairing, its `Primed` record drops with
-    /// the phase, and the candidate's spectrum half moves out to be installed. `None`, with the phase unchanged, for an epoch that is
-    /// not pending, which a promotion checks before it moves anything.
+    /// the phase, and the candidate's spectrum half moves out to be installed. `None`, with the
+    /// phase unchanged, for an epoch that is not pending, which a promotion checks before it moves
+    /// anything.
     pub(crate) fn promote(&mut self) -> Option<crate::spectrum::CandidateSpectrum> {
         let running = EpochPhase::Running {
             kept: None,
