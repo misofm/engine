@@ -883,3 +883,164 @@ fn the_fader_operation_sink_refuses_without_queuing() {
     assert_eq!(sink.gain[1][0], Some(gain));
     assert_eq!(sink.mute[0][0], Some(mute));
 }
+
+/// Tracker #2258 GR-8: the input stage's ramp flags are what its countdowns say, after every
+/// writer. A stepped (window `0`) trim or polarity record ends a lane's countdown on the
+/// channels it addresses; when that was the last countdown in flight, the stage has no ramp, so
+/// it must report every lane at rest and render the settled body. The steps here end the ramps
+/// one channel and one lane at a time, so a flag derived from only the addressed channel, the
+/// addressed lane, or the first member is also caught; padding lanes are present at every
+/// vector width.
+#[test]
+fn a_stepped_retarget_that_ends_the_last_trim_ramp_leaves_the_stage_at_rest() {
+    fn check<L: super::Lane>() {
+        let track = prepare_sections(48_000, BuiltinParameters::default())
+            .unwrap()
+            .0
+            .stage
+            .lane_track(0);
+        let members = L::WIDTH.div_ceil(2);
+        let last = members - 1;
+        let mut stage = InputStage::<L>::new(&vec![track; members]);
+        let all = (1_u32 << L::WIDTH) - 1;
+        assert_eq!(
+            stage.lanes_at_rest(),
+            all,
+            "W={}: a fresh stage rests",
+            L::WIDTH
+        );
+        stage.set_trim_db(0, BuiltinLaneSelector::Both, 0.5, 64);
+        stage.set_polarity_invert(last, BuiltinLaneSelector::Left, true, 64);
+        assert_eq!(stage.lanes_at_rest(), 0, "W={}: ramps in flight", L::WIDTH);
+        // Lane 0's left countdown ends; its right one, and the last member's, still run.
+        stage.set_trim_db(0, BuiltinLaneSelector::Left, 0.25, 0);
+        assert_eq!(
+            stage.lanes_at_rest(),
+            0,
+            "W={}: lane 0 right ramps",
+            L::WIDTH
+        );
+        stage.set_trim_db(0, BuiltinLaneSelector::Right, 0.25, 0);
+        if members > 1 {
+            assert_eq!(
+                stage.lanes_at_rest(),
+                0,
+                "W={}: the last lane ramps",
+                L::WIDTH
+            );
+        }
+        stage.set_polarity_invert(last, BuiltinLaneSelector::Left, true, 0);
+        assert_eq!(
+            stage.lanes_at_rest(),
+            all,
+            "W={}: no countdown is in flight, so no ramp is",
+            L::WIDTH
+        );
+        // A block renders the settled body and leaves the stage where it was.
+        let mut left = vec![0.0_f32; 32 * L::WIDTH];
+        let mut right = left.clone();
+        stage.process(&mut left, &mut right, 32);
+        assert_eq!(stage.lanes_at_rest(), all, "W={}: still at rest", L::WIDTH);
+    }
+    lane::each_lane!(|L| check::<L>());
+}
+
+/// Tracker #2258 GR-8: a collapsed block ([`InputStage::process_mono`]) that ends every filter
+/// countdown leaves no filter ramp. The one-plane body advances channel `0`'s countdowns and
+/// mirrors them onto channel `1` after the flag is published, so a flag taken over both channels
+/// at that point reads channel `1`'s pre-block countdown and reports a ramp that has ended; the
+/// dual block is the control.
+#[test]
+fn a_collapsed_block_that_ends_the_filter_ramps_leaves_the_stage_at_rest() {
+    fn check<L: super::Lane>(collapsed: bool) {
+        let track = prepare_sections(48_000, BuiltinParameters::default())
+            .unwrap()
+            .0
+            .stage
+            .lane_track(0);
+        let members = L::WIDTH.div_ceil(2);
+        let mut stage = InputStage::<L>::new(&vec![track; members]);
+        let pair = super::prepare_input_filter_pair(48_000, 120.0, 0.0).unwrap();
+        for lane in 0..members {
+            stage.apply_prepared_filter(lane, pair.targets[0]);
+        }
+        assert_eq!(
+            stage.lanes_at_rest(),
+            0,
+            "W={}: a filter ramp in flight",
+            L::WIDTH
+        );
+        let frames = super::INPUT_FILTER_RAMP_SAMPLES as usize;
+        let mut left = vec![0.0_f32; frames * L::WIDTH];
+        if collapsed {
+            stage.process_mono(&mut left, frames);
+        } else {
+            let mut right = left.clone();
+            stage.process(&mut left, &mut right, frames);
+        }
+        assert_eq!(
+            stage.lanes_at_rest(),
+            (1_u32 << L::WIDTH) - 1,
+            "W={} collapsed={collapsed}: every filter countdown ended, so no ramp is in flight",
+            L::WIDTH
+        );
+    }
+    lane::each_lane!(|L| {
+        check::<L>(false);
+        check::<L>(true);
+    });
+}
+
+/// Tracker #2258 GR-8: a reset and a lane import write countdowns outside a block, so each must
+/// republish the ramp flags. An import is the dangerous direction: a lane carried mid-ramp into a
+/// settled stage that kept its flags clear would render the settled body and drop the rest of
+/// its ramp, and a settled lane carried over a ramping one would keep the bank off rest.
+#[test]
+fn a_reset_and_a_lane_import_republish_the_ramp_flags() {
+    fn check<L: super::Lane>() {
+        let track = prepare_sections(48_000, BuiltinParameters::default())
+            .unwrap()
+            .0
+            .stage
+            .lane_track(0);
+        let members = L::WIDTH.div_ceil(2);
+        let last = members - 1;
+        let all = (1_u32 << L::WIDTH) - 1;
+        let pair = super::prepare_input_filter_pair(48_000, 120.0, 0.0).unwrap();
+        let settled = InputStage::<L>::new(&vec![track; members]);
+        for filter in [false, true] {
+            let mut ramping = settled.clone();
+            if filter {
+                ramping.apply_prepared_filter(last, pair.targets[0]);
+            } else {
+                ramping.set_trim_db(last, BuiltinLaneSelector::Right, 0.5, 64);
+            }
+            assert_eq!(ramping.lanes_at_rest(), 0, "W={} filter={filter}", L::WIDTH);
+
+            let mut carried = settled.clone();
+            carried.import_lane(last, &ramping.export_lane(last));
+            assert_eq!(
+                carried.lanes_at_rest(),
+                0,
+                "W={} filter={filter}: a lane imported mid-ramp ramps",
+                L::WIDTH
+            );
+            carried.import_lane(last, &settled.export_lane(last));
+            assert_eq!(
+                carried.lanes_at_rest(),
+                all,
+                "W={} filter={filter}: a settled lane imported over it does not",
+                L::WIDTH
+            );
+
+            ramping.reset();
+            assert_eq!(
+                ramping.lanes_at_rest(),
+                all,
+                "W={} filter={filter}: a reset ends every ramp",
+                L::WIDTH
+            );
+        }
+    }
+    lane::each_lane!(|L| check::<L>());
+}
