@@ -16,13 +16,16 @@ So after the release, the cached address is the released half's status. That sta
 A Worker status read after a control failure therefore reports what the render half last wrote, not the control half's failure. A mutation that stops `record` mirroring the lifecycle state into the shell stays green: no Rust test reads the shell after a render-side failure followed by a control call, and the JS rows run on a fake module that has one fixed status address.
 
 ## Model
-The status address belongs to the slot, not the boot: the Worker reads `status_ptr` on every status read and never caches it. After a release that address is the shell, which is stable because the host is boxed. After the adoption back (in `finishDispose`) it is the half's own status again, which is also current, so a status answered there carries the half's clock.
+The status address belongs to the slot, not the boot: the Worker reads `status_ptr` on every status read and never caches it. After a release that address is the shell, which is stable because the host is boxed. After the adoption back (in `finishDispose`) it is the half's own status again, so a status answered there carries the half's clock. Its control fields are the half's own too: `adopt_render` does not copy the shell's lifecycle state or `last_result` into the half's `WebStatus`, and the half becomes FAILED only when it renders a block. So a read answered after a control failure, when the half was released before its next block, shows READY and the half's own result. That is not a regression from this issue (see the follow-up below).
+
+`readStatus` refuses a zero address. That check is defensive and has no test: a read at address 0 would fail the header check (`STATUS_BYTES`, `ABI_VERSION`) anyway, so deleting the check changes no outcome a test can see.
 
 Other cached addresses checked:
 - `sourceIdPointer` and `sourcePcmPointer` are control-half staging (`buffer_pointer` -> `source_id_mut`/`source_pcm_mut`), so the release does not move them.
 - `renderStatusPointer` is the worklet's own half status, which the worklet names and the Worker reads only with `Atomics.load`.
 
 ## Non-goals
+- Copying the lifecycle state and the control `last_result` into the half's status at `adopt_render`. That is a Rust slot-model change, and it is the follow-up recorded below.
 - No change to the status layout, the ABI or the Rust slot model (#2332).
 - The worklet's own status binding: it binds after it adopts the half, so it is the half's.
 
@@ -51,3 +54,10 @@ AssertionError [ERR_ASSERTION]: the Worker reports the shell's lifecycle state a
 **Gates** (all green): `cargo test --locked -p host-web --all-features`; `cargo clippy --locked -p host-web --all-features --all-targets -- -D warnings`; `cargo fmt --check -p host-web`; `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p host-web --all-features`; `bash scripts/test-web-audioworklet.sh`; `bash scripts/check-workspace-policy.sh`.
 
 **Limits.** The JS rows drive the Worker on a fake module, so the JS row proves the Worker follows the address `status_ptr` names. The Rust row proves the shell that address names carries the mirrored lifecycle state. No hermetic test runs the real wasm in the Worker; the browser qualification does.
+
+**Verdict.** Attempt 1: PASS, MINORs only (Sol). The MINORs folded:
+- the Model wording for the adoption-back read;
+- the zero-address refusal, kept and documented as a defensive check with no test;
+- this verdict, with the issue body synced to the spec.
+
+**Follow-up (not filed here).** `adopt_render` should copy the lifecycle state and the control `last_result` into the half's `WebStatus`, so a status read after the adoption back shows a control failure the half has not yet rendered.
