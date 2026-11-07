@@ -77,7 +77,10 @@ copy.
   per banking launch effect, plus a set check that every banking effect has a row.
 - Mutation: removing one effect's dual entry, putting it back after the automation, or removing
   one writer's entry turns that row red.
-- Rows for a right-channel span on the first dual block and a restore while engaged (attempt 2).
+- Rows for a right-channel span on the first dual block and a restore while engaged (attempt 2),
+  and for a direct lane copy, a direct swap (either side), a reset to asymmetric defaults and a
+  right-channel prepared target (attempt 3). Each writer either has the row that turns red, or is
+  recorded as an equivalent mutant with its reason (attempt 3 evidence).
 - A one-time release-mode no-bit-moved comparison against base, as evidence (not a committed test).
 - `cargo test --locked` for the touched crates, clippy `-D warnings`, `cargo fmt --check`, rustdoc
   `-D warnings`, `scripts/check-workspace-policy.sh`, the realtime policy tool.
@@ -93,7 +96,15 @@ copy.
   `restore_track_state_payload`, then `process_bank` was red in all nine; base got that lane right.
   Minor: an `impl` between `LaneRestore`'s doc comment and the struct in the gate. The reviewer
   agreed with self-repair and with deleting the limiter's M4 gate.
-- **Attempt 2**: below.
+- **Attempt 2** (`047a6a9a6`): **FAIL**, one MAJOR finding. The fix was judged correct, along with
+  both departures (copy-on-reset rather than `clear()`, which would be wrong for a reset that keeps
+  parameters; the parametric-EQ test edits, since that raw right section is not product-observable).
+  The failure was coverage. Deleting the compressor's `copy_lane_from` or `swap_lanes_direct` entry,
+  or the EQ's `apply_prepared_target_lane` entry, left every suite green, so the gate "removing one
+  writer's entry turns that row red" was not met. Minor findings: the `Maximum` rows' comment
+  claimed to cover the limiter's `link.restate(true)`, but removing it left the row green; and the
+  chain-path cost was not recorded.
+- **Attempt 3**: below.
 
 ## Evidence (attempt 1)
 
@@ -225,3 +236,72 @@ Base `900c3d24c` and this head give the same FNV-64 for all nine banks: compress
 **Minor findings.** The gate's `impl CollapsibleChannels` now sits above `LaneRestore`'s doc
 comment. The contract text and the `collapse` module doc now say which entries take the copy and
 what `InputStage` does (dual body and lane import copy; reset clears).
+
+## Evidence (attempt 3)
+
+`origin/main` @ `8147ab6b8` merged first. That merge changed control-plane, host-web and the web
+test script; no effect crate. No effect source changed in this attempt, only
+`crates/effect-compiler/tests/collapse_dual_entry.rs`.
+
+**New boundaries in the same table.** Each one is skipped as vacuous where its writer does not
+apply, and asserted to apply where it must:
+- `CopyLane` (`copy_lane_from` from a donor whose channels differ; the answer is `Some(false)`);
+- `Swap` (`swap_lanes_direct` with that donor);
+- `SwapAsPeer` (the same swap called on the donor, with this bank as the peer);
+- `ResetToDefaults`: lane 0 takes asymmetric defaults through `exchange_lane_defaults` before the
+  collapse. Defaults are no state word, so the collapse stays lawful. At the boundary the bank
+  takes `reset(FullToDefaults)`.
+- `RightTarget` (`apply_prepared_target_lane` with the targets that move one right-channel
+  parameter; asserted to apply on the EQ).
+
+`CopyLane`, `Swap` and `SwapAsPeer` apply to the compressor and the EQ, the only banks that
+implement the direct lane paths.
+
+**Per writer: the row that turns red, or why it is an equivalent mutant.** Mutations are recorded
+in this attempt unless marked; each deletes one entry copy, then the tree is restored and touched.
+
+| writer entry | covered by |
+|---|---|
+| dual entry in each bank body | `Dual` (base, 9 of 9) and `RightSpan` (attempt 1, 7 of 7). Mutations in attempts 1-2: compressor, gate, limiter, EQ. |
+| `restore_track_state_payload` | `Restore`. Compressor, EQ (this attempt), gate, limiter (attempt 2): red. |
+| `copy_lane_from` | `CopyLane`. Compressor and EQ: red. |
+| `swap_lanes_direct` (own bank) | `Swap`. Compressor and EQ: red. |
+| `swap_lanes_direct` (peer) | `SwapAsPeer`. Compressor and EQ: red. |
+| `reset` | `ResetToDefaults`. Compressor, EQ, gate, limiter: red. |
+| `apply_prepared_target_lane` | `RightTarget`. EQ, the one bank that applies prepared targets: red. |
+| `exchange_lane_defaults` | **Equivalent mutant.** It changes no state word and no payload word (contract), so a copy before it moves nothing; compressor and EQ mutants green. Kept for uniformity. |
+| `reset_lane(DiscontinuityKeepParameters)` | **Equivalent on a lawful collapse.** It writes both channels of the lane alike, from parameters the witness made equal; EQ mutant green. Kept for uniformity. |
+| `retarget_link` | **Equivalent on a lawful collapse.** It moves both channels' link weights alike; compressor mutant green. Kept for uniformity. |
+
+**The `Maximum` rows are gone.** They caught nothing. The limiter's `link.restate(true)` in
+`copy_left_channel_onto_right` moves no bit, because the linked body is bit-identical to the
+unlinked one, and that word only re-arms the fast path. Removing it leaves `collapse_dual_entry`
+green and turns the limiter's own liveness gates red: `the_linked_body_engages_exactly_where_the_record_allows`
+and `randomized_scenarios_match_the_current_frame_law`, which are 990-M14 in `tests/MUTATIONS.md`.
+That claim is tested once, in the crate that owns it.
+
+**Chain-path cost.** These figures are the reviewer's. `rack` calls three writers on a bank whose
+chain is `Collapsed`:
+- `reset_lane` (DKP) at rack ~2874, when a lane leaves settled bypass;
+- `retarget_link` at ~2884, on a link switch;
+- `apply_prepared_target_lane` at ~3111, when a target cell changes.
+
+Each such call now takes the whole-bank copy if the bank is engaged. The first one disengages, and
+the block's `process_bank_mono` engages again, so there is at most one copy per bank per block,
+and only on blocks that carry such a control. The EQ's copy is about 4 KB at AVX2 width. It is
+bit-exact: the no-bit-moved probe of attempt 2 calls `reset_lane` and `retarget_link` inside
+collapsed runs and matches base for all nine banks.
+
+**Gates** (local, AVX2):
+- `cargo test --locked --no-fail-fast -p effect-compiler`: green.
+- clippy `-D warnings` and rustdoc `-D warnings` on effect-compiler: green.
+- `cargo fmt --check`: green.
+- `scripts/check-workspace-policy.sh`: ok.
+- `realtime_policy`: ok (298 regions in 48 files).
+- No effect source changed since attempt 2, whose per-crate gates stand.
+
+**Recorded follow-up (not in scope).** A snapshot of an engaged bank could write the
+counterfactual right section, the left channel's, instead of the frozen one. That would remove the
+`&self` exception in the contract and make a collapsed bank's snapshot independent of placement, so
+the parametric EQ's `collapsed_view` would no longer be needed. It needs a per-effect check that the
+payload's right section holds only words the copy covers.

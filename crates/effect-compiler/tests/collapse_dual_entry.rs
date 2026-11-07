@@ -6,19 +6,20 @@
 //! bank takes the copy itself when an entry that reads or writes channel state is entered
 //! collapsed (`effect_runtime::collapse::MonoCollapse`). This file drives each banking launch
 //! effect through its registry factory, as a host binds it, and holds the run that collapses and
-//! then, **without** calling `desymmetrize_channels`, meets one of three boundaries -- a plain dual
-//! block, a dual block carrying a right-channel span, a restore of a lane whose channels differ --
-//! to a run that never collapsed: both planes, the rest mask, the report and every lane's state
-//! payload, bit for bit. A linked row (`Maximum`) runs beside the dual-mono one wherever the
-//! effect links lanes.
+//! then, **without** calling `desymmetrize_channels`, meets one boundary -- a plain dual block, or
+//! a writer of channel state whose write would be lost to a late copy -- and renders on, against a
+//! run that never collapsed: both planes, the rest mask, the report and every lane's state
+//! payload, bit for bit. Beside the dual block, the boundaries are the bank's writers of channel
+//! state that a later copy could otherwise overwrite: see [`Boundary`].
 
 use effect_compiler::{NEVER_BANKED_EFFECTS, launch_native_effect_registry};
 use effect_contract::{
-    BankWidth, EffectBankProcessBlock, EffectDescriptor, EffectQuality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, ParameterChannel, PortRole, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
-    decimal_to_f32, default_initial_values, parameter_lattice_points,
+    BankWidth, EffectBankProcessBlock, EffectDescriptor, EffectQuality, EffectTargetRequest,
+    InitialParameterValue, LinkMode, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
+    ParameterChannel, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectTarget, PreparedNativeEffectBank,
+    PreparedPorts, PreparedSidechainPort, ResetKind, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, decimal_to_f32, default_initial_values, parameter_lattice_points,
 };
 use lane::Backend;
 
@@ -66,14 +67,13 @@ fn ports(descriptor: &'static EffectDescriptor) -> PreparedPorts {
 fn request<'a>(
     descriptor: &'static EffectDescriptor,
     initial: &'a [InitialParameterValue],
-    link: LinkMode,
 ) -> PrepareEffectRequest<'a> {
     PrepareEffectRequest {
         sample_rate: SAMPLE_RATE,
         quantum: QUANTUM,
         quality: EffectQuality::Normal,
         bypass: false,
-        link_mode: link,
+        link_mode: LinkMode::DualMono,
         ports: ports(descriptor),
         initial_values: initial,
         limits: PrepareEffectLimits {
@@ -95,7 +95,6 @@ fn initial_values(
     factory: &dyn NativeEffectFactory,
     lanes: usize,
     seed: u64,
-    link: LinkMode,
 ) -> Vec<Vec<InitialParameterValue>> {
     let descriptor = factory.descriptor();
     let lattices: Vec<Vec<f32>> = descriptor
@@ -136,7 +135,7 @@ fn initial_values(
                         InitialParameterValue { value, ..*slot }
                     })
                     .collect();
-                if factory.prepare(request(descriptor, &values, link)).is_ok() {
+                if factory.prepare(request(descriptor, &values)).is_ok() {
                     return values;
                 }
             }
@@ -149,12 +148,11 @@ fn bind(
     factory: &dyn NativeEffectFactory,
     width: BankWidth,
     initial: &[Vec<InitialParameterValue>],
-    link: LinkMode,
 ) -> Box<dyn PreparedNativeEffectBank> {
     let descriptor = factory.descriptor();
     let requests: Vec<_> = initial
         .iter()
-        .map(|values| request(descriptor, values, link))
+        .map(|values| request(descriptor, values))
         .collect();
     factory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
@@ -212,6 +210,89 @@ enum Boundary {
     /// Lane 0 is restored from a payload whose channels differ before the first dual block: the
     /// copy must land before the restore, not over it at the next dual entry.
     Restore,
+    /// Lane 0 is copied from lane 0 of a donor bank whose channels differ (`copy_lane_from`).
+    CopyLane,
+    /// Lane 0 is swapped with lane 0 of such a donor (`swap_lanes_direct`).
+    Swap,
+    /// The same swap called on the donor, with this bank as its peer: the peer's copy.
+    SwapAsPeer,
+    /// Lane 0 took prepared defaults whose channels differ (`exchange_lane_defaults`) at bind, and
+    /// the whole bank resets to its defaults (`reset(FullToDefaults)`).
+    ResetToDefaults,
+    /// Lane 0 takes a prepared target on one right-channel parameter
+    /// (`apply_prepared_target_lane`).
+    RightTarget,
+}
+
+/// The effects whose bank implements `copy_lane_from` and `swap_lanes_direct` itself; every
+/// other bank declines both, and the rows for them are vacuous.
+const DIRECT_LANE_PATHS: [&str; 2] = ["miso.compressor", "miso.parametric-eq"];
+
+/// One automatable live right-channel slot of `values` moved to another lattice value, or `None`.
+fn moved_right(
+    descriptor: &'static EffectDescriptor,
+    values: &[InitialParameterValue],
+) -> Option<(u32, f32)> {
+    values.iter().find_map(|slot| {
+        let parameter = &descriptor.parameters[slot.parameter_index as usize];
+        if slot.channel != ParameterChannel::Right
+            || !parameter.automatable
+            || parameter.prepared_reason.is_some()
+        {
+            return None;
+        }
+        parameter_lattice_points(parameter)
+            .expect("a lawful lattice")
+            .iter()
+            .map(|point| decimal_to_f32(&point.canonical).expect("a convertible point"))
+            .rev()
+            .find(|value| value.to_bits() != slot.value.to_bits())
+            .map(|value| (slot.parameter_index, value))
+    })
+}
+
+/// The prepared targets that move lane `values`' first movable right-channel slot.
+fn right_targets(
+    factory: &dyn NativeEffectFactory,
+    values: &[InitialParameterValue],
+) -> Vec<PreparedEffectTarget> {
+    let (Some(preparation), Some((index, value))) = (
+        factory.target_preparation(),
+        moved_right(factory.descriptor(), values),
+    ) else {
+        return Vec::new();
+    };
+    let mut next = values.to_vec();
+    let changed: Vec<bool> = next
+        .iter_mut()
+        .map(|slot| {
+            let hit = slot.parameter_index == index && slot.channel == ParameterChannel::Right;
+            if hit {
+                slot.value = value;
+            }
+            hit
+        })
+        .collect();
+    let mut out = vec![
+        PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; PREPARED_EFFECT_TARGET_WORDS],
+        };
+        preparation.maximum_targets()
+    ];
+    let Ok(count) = preparation.prepare_targets(
+        EffectTargetRequest {
+            sample_rate: SAMPLE_RATE,
+            values: &next,
+            changed: &changed,
+        },
+        &mut out,
+    ) else {
+        return Vec::new();
+    };
+    out.truncate(count);
+    out
 }
 
 /// One right-channel span per lane, at the block's first sample (the only one every effect
@@ -255,24 +336,21 @@ fn right_spans(
 fn check(effect: &str) {
     let registry = launch_native_effect_registry().expect("launch registry");
     let factory = registry.get_ascii(effect).expect("a launch effect");
-    let descriptor = factory.descriptor();
     let Some(width) = BankWidth::for_backend(Backend::current()) else {
         return;
     };
     let lanes = width.lanes() as usize;
-    // Every effect at dual-mono, and a linked one at `Maximum` too: the limiter's copy restates
-    // its link record, which only a linked row reaches.
-    let links: Vec<LinkMode> = [LinkMode::DualMono, LinkMode::Maximum]
-        .into_iter()
-        .filter(|&mode| {
-            mode == LinkMode::DualMono
-                || (descriptor.lane_link && descriptor.supported_link_modes.contains(mode))
-        })
-        .collect();
-    for link in links {
-        for boundary in [Boundary::Dual, Boundary::RightSpan, Boundary::Restore] {
-            check_case(factory, width, lanes, link, boundary);
-        }
+    for boundary in [
+        Boundary::Dual,
+        Boundary::RightSpan,
+        Boundary::Restore,
+        Boundary::CopyLane,
+        Boundary::Swap,
+        Boundary::SwapAsPeer,
+        Boundary::ResetToDefaults,
+        Boundary::RightTarget,
+    ] {
+        check_case(factory, width, lanes, boundary);
     }
 }
 
@@ -280,18 +358,17 @@ fn check_case(
     factory: &dyn NativeEffectFactory,
     width: BankWidth,
     lanes: usize,
-    link: LinkMode,
     boundary: Boundary,
 ) {
     let descriptor = factory.descriptor();
     let effect = descriptor.id.as_str();
-    let case = format!("{effect} {link:?} {boundary:?}");
+    let case = format!("{effect} {boundary:?}");
     let seed = effect.bytes().fold(0x2352_0000_u64, |hash, byte| {
         hash.rotate_left(7) ^ u64::from(byte)
     });
-    let initial = initial_values(factory, lanes, seed, link);
+    let initial = initial_values(factory, lanes, seed);
     let sizes = factory
-        .prepare(request(descriptor, &initial[0], link))
+        .prepare(request(descriptor, &initial[0]))
         .expect("lane 0 prepares")
         .metadata
         .state_sizes;
@@ -334,8 +411,8 @@ fn check_case(
         right_spans(descriptor, &initial, (COLLAPSED * QUANTUM as usize) as u64);
     // The restored payload: lane 0 of a donor bank that rendered the collapsed span dual with its
     // right plane at half the left, so its two channels' state differ.
-    let donor = {
-        let mut bank = bind(factory, width, &initial, link);
+    let donor_bank = || {
+        let mut bank = bind(factory, width, &initial);
         for (index, plane) in planes.iter().take(COLLAPSED).enumerate() {
             let mut left = plane.clone();
             let mut right: Vec<f32> = plane.iter().map(|word| word * 0.5).collect();
@@ -353,10 +430,45 @@ fn check_case(
             .expect("block shape");
             let _ = bank.process_bank(block);
         }
-        payload(&*bank, 0, sizes)
+        bank
     };
+    let donor = payload(&*donor_bank(), 0, sizes);
+    // Lane 0's defaults with one right-channel slot moved, read out of a bank bound with them.
+    let asymmetric_defaults = moved_right(descriptor, &initial[0]).and_then(|(index, value)| {
+        let mut lanes_values = initial.clone();
+        for slot in &mut lanes_values[0] {
+            if slot.parameter_index == index && slot.channel == ParameterChannel::Right {
+                slot.value = value;
+            }
+        }
+        factory
+            .prepare(request(descriptor, &lanes_values[0]))
+            .ok()?;
+        let mut bank = bind(factory, width, &lanes_values);
+        let mut bytes = vec![0_u8; bank.lane_default_bytes()?];
+        bank.exchange_lane_defaults(0, &mut bytes).then_some(bytes)
+    });
+    let targets = right_targets(factory, &initial[0]);
+    // Whether the boundary's writer did anything: a bank that declines a direct lane path, or an
+    // effect with no prepared targets or no lane defaults, makes its row vacuous, and the rows the
+    // effect is known to implement must not be.
+    let applies = match boundary {
+        Boundary::CopyLane | Boundary::Swap | Boundary::SwapAsPeer => {
+            DIRECT_LANE_PATHS.contains(&effect)
+        }
+        Boundary::ResetToDefaults => asymmetric_defaults.is_some(),
+        Boundary::RightTarget => !targets.is_empty(),
+        Boundary::Dual | Boundary::RightSpan | Boundary::Restore => true,
+    };
+    if effect == "miso.parametric-eq" && matches!(boundary, Boundary::RightTarget) {
+        assert!(applies, "{case}: the EQ designs a right-channel target");
+    }
+    if !applies {
+        return;
+    }
     let run = |collapse: bool| -> (Vec<Observed>, Vec<Vec<u8>>) {
-        let mut bank = bind(factory, width, &initial, link);
+        let mut bank = bind(factory, width, &initial);
+        let mut peer = donor_bank();
         assert!(
             bank.supports_mono_collapse(),
             "{effect}: a banking launch effect collapses"
@@ -365,6 +477,15 @@ fn check_case(
         let mut frozen = Vec::new();
         for (index, plane) in planes.iter().enumerate() {
             let mut automation: (&[PreparedAutomationSpan], &[u32]) = (&[], &empty);
+            // Defaults are no state word, so a bank holding asymmetric ones still collapses
+            // lawfully; the reset at the boundary is what writes them into the right channel.
+            if index == 0 && matches!(boundary, Boundary::ResetToDefaults) {
+                let mut bytes = asymmetric_defaults.clone().expect("lane defaults");
+                assert!(
+                    bank.exchange_lane_defaults(0, &mut bytes),
+                    "{case}: exchange"
+                );
+            }
             if index == COLLAPSED {
                 frozen = payloads(&*bank, lanes, sizes);
                 match boundary {
@@ -380,6 +501,30 @@ fn check_case(
                                 .expect("payload shape"),
                         )
                         .unwrap_or_else(|failure| panic!("{case}: restore: {}", failure.code));
+                    }
+                    Boundary::CopyLane => {
+                        // `Some(false)`: copied, and the lane's two sections disagree.
+                        let copied = bank.copy_lane_from(0, &*peer, 0);
+                        assert_eq!(copied, Some(false), "{case}: the direct copy");
+                    }
+                    Boundary::Swap => {
+                        assert!(
+                            bank.swap_lanes_direct(0, Some(&mut *peer), 0),
+                            "{case}: the direct swap"
+                        );
+                    }
+                    Boundary::SwapAsPeer => {
+                        assert!(
+                            peer.swap_lanes_direct(0, Some(&mut *bank), 0),
+                            "{case}: the direct swap"
+                        );
+                    }
+                    Boundary::ResetToDefaults => bank.reset(ResetKind::FullToDefaults),
+                    Boundary::RightTarget => {
+                        for target in &targets {
+                            bank.apply_prepared_target_lane(0, target)
+                                .unwrap_or_else(|failure| panic!("{case}: target: {failure:?}"));
+                        }
                     }
                 }
             }
