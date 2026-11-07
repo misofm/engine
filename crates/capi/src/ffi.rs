@@ -1367,6 +1367,35 @@ pub unsafe extern "C" fn miso_engine_v1_dequeue_event(
     })
 }
 
+/// Whether the canonical floating-point control word is in effect on the calling thread (#146).
+///
+/// The render entry asks this inside its [`CanonicalFpEnv`] guard on every block, so it reads back
+/// the word the guard just installed on whichever thread the block runs (#2357). In this crate's
+/// unit tests a thread can be marked as one whose pin does not take
+/// (`test_refuse_fp_pin_on_this_thread`), which conforming hardware never produces.
+#[inline]
+fn canonical_fp_env_in_effect() -> bool {
+    #[cfg(test)]
+    if FP_PIN_REFUSED.with(core::cell::Cell::get) {
+        return false;
+    }
+    // Replacing this readback with `true` survives every test by construction (conforming hardware
+    // always reads back the canonical word); only M-146-2, the guard's removal, defends this arm.
+    lane::fpenv::in_canonical_fp_environment()
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// The calling test thread stands in for one whose canonical floating-point word does not take.
+    static FP_PIN_REFUSED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Mark the calling thread as one whose canonical floating-point word does not take (#2357).
+#[cfg(test)]
+pub(crate) fn test_refuse_fp_pin_on_this_thread() {
+    FP_PIN_REFUSED.with(|refused| refused.set(true));
+}
+
 /// Render one exact-time quantum directly into caller-owned contiguous planar storage.
 ///
 /// The caller's floating-point environment is borrowed, never adopted (issue #146): every path out
@@ -1428,15 +1457,13 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
         let state = unsafe { &mut *plan_state(plan) };
         // SAFETY: See above; the diagnostic slot is disjoint from `state`.
         let error = unsafe { &*plan_error_slot(plan) };
-        // Issue #146 session-start re-attestation, on the thread that will render: the first block
-        // this plan renders proves the canonical word actually took here, and refuses the render
-        // rather than silently producing off-pin audio if it did not. Later blocks skip it.
-        if !state.fp_env_attested() {
-            if !lane::fpenv::in_canonical_fp_environment() {
-                error.store(plan_error::FP_ENVIRONMENT, Ordering::Relaxed);
-                return RESULT_RENDER_REJECTED;
-            }
-            state.attest_fp_env();
+        // Issue #146 attestation, on every block (#2357): the block proves the canonical word took
+        // on the thread it runs on, and is refused rather than silently rendered off-pin if it did
+        // not. A C host may move the plan to another render thread between blocks, so a pass on
+        // an earlier block proves nothing about this one; the check is one control-word read.
+        if !canonical_fp_env_in_effect() {
+            error.store(plan_error::FP_ENVIRONMENT, Ordering::Relaxed);
+            return RESULT_RENDER_REJECTED;
         }
         if !output.samples.is_aligned() {
             error.store(plan_error::OUTPUT_UNALIGNED, Ordering::Relaxed);
