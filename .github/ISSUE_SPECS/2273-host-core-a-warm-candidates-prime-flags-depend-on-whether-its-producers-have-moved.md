@@ -31,7 +31,8 @@ Not held: the tracker's second point, `PrimedCandidate::hold_until`'s epoch matc
 `debug_assert_eq!`. A reservation borrows its `PlanPublisher` exclusively (`reserve_replacement`
 takes `&mut self`), the control plane holds one publisher, and the record and the hold are made
 from the same `reservation.inner` in one function, so no second reservation can be passed. Binding
-the record to its candidate beyond that is PR-7's model (the record moves onto the pending epoch).
+`hold_until` to its candidate beyond that goes to PR-7 (#2258): its model moves the record onto the
+pending epoch, and this issue leaves `hold_until` and its `debug_assert_eq!` unchanged.
 
 ## Contract
 - Whether a set's plan carries a source's ring is recorded once, when the set is prepared, and
@@ -81,7 +82,9 @@ reads it. `publish_primed` and `restore_prime_flags` write every flag as
 **Regression test.** The `Stream` rig of `crates/host-core/tests/warm_successor.rs` no longer sets
 the carried ring's flag by hand: it publishes a warm successor through `host_core::publish_primed`,
 after `adopt_persisting` has moved the producers. The file now needs `control-provider`, as
-`withdrawn_successor.rs` does (CI's workspace step enables it through `control-plane`). Red on base
+`withdrawn_successor.rs` does. `cargo test -p host-core --features test-support --test
+warm_successor` without `control-provider` therefore runs 0 tests; CI's test-debug-a workspace
+step enables the feature through `control-plane` and runs all 22. Red on base
 (this rig on the `de0878e23` source):
 - `a_warm_successor_waits_for_every_carried_ring_and_a_held_seek`: panics at
   `warm_successor.rs:2041` `not adopted while withheld`;
@@ -129,5 +132,25 @@ no-bit-moved evidence: render reads only these flags, which are unchanged.
 **Follow-ups (not in this issue).**
 - HC-5: `provider: None` still means both "awaiting the predecessor's producer" and "producer
   given to a successor" (and, before this change, "projected"). With `carried` recorded, an enum
-  over the mutable producer state is a smaller change.
-- PR-7: the `primed` record still lives apart from its candidate in `SessionState`.
+  over the mutable producer state is a smaller change. `adopt_persisting`
+  (`crates/host-core/src/source.rs`) still decides what to fill by vacancy alone; HC-5 should
+  make it move a producer only into an entry with `carried && provider.is_none()`.
+- PR-7: the `primed` record still lives apart from its candidate in `SessionState`; binding
+  `hold_until` to its candidate belongs there.
+
+## Verdict (attempt 1)
+**PASS** (Sol's adversarial review), with four minors folded in on the same branch:
+1. `tools/bench/src/swap.rs` now writes the candidate's own flags with `carries` (the
+   `publish_primed` rule) instead of `|_| false`, and drops the order wording. The bench's
+   host-core has no `control-provider`, so it cannot call `publish_primed`.
+2. The `adopt_persisting` vacancy rule is recorded under the HC-5 follow-up above, not changed.
+3. The #1403 D3 comment in `rebuild` (`control.rs`) is re-wrapped.
+4. This spec records that binding `hold_until` goes to PR-7, and that `--test warm_successor` runs
+   0 tests without `control-provider`.
+
+The reviewer confirmed:
+- `carried` is immutable: the builder's `push` is its single write;
+- the panic-republish (`restore_prime_flags`) and donation paths are correct under the new rule;
+- the order-free model is better than the suggested typestate;
+- CI's test-debug-a step runs all 22 `warm_successor` tests;
+- the `large_enum_variant` allow on `PreparedProducer` is justified.

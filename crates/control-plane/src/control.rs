@@ -6369,10 +6369,9 @@ where
         // change it (#2273). It sets the prime flags of rings render reads, so it runs after the
         // last refusal: the commit below cannot refuse once its predicate passed above, with no
         // controller write between. #2044: it runs before the protocol commit, so a panic here
-        // or in the commit (no lock is held) leaves the controller as it
-        // was and republishes the withdrawn candidate (#2010). Its flags are then the
-        // successor's: `rebuild_withdrawn` sets a `Primed` candidate's again before it republishes
-        // it (`restore_prime_flags`).
+        // or in the commit (no lock is held) leaves the controller as it was and republishes the
+        // withdrawn candidate (#2010). Its flags are then the successor's: `rebuild_withdrawn`
+        // sets a `Primed` candidate's again before it republishes it (`restore_prime_flags`).
         let mut primed = warm_lead_blocks.map(|lead_blocks| {
             let (running, withdrawn_sources) = if superseding {
                 let len = self.pending_providers.len();
