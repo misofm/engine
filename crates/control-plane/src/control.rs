@@ -2034,25 +2034,42 @@ fn core_selection<'a>(
 /// The wire row of one core row (#1586 D1): the arm state is the slot's published state, or none
 /// when render has not applied the tap's last record or the read tore.
 fn wire_row(row: &host_core::observation::ObservationRow) -> protocol::ObservationReadRow {
-    use host_core::observation::ObservationReadStatus as Status;
-    let state = row.state;
+    use host_core::observation::ObservationReading as Reading;
+    let published = |status, state: Option<engine::realtime::ObservationState>| {
+        (
+            status,
+            state.is_some_and(|state| state.armed),
+            state.map_or(0, |state| state.arm_sample),
+            state.map_or(0, |state| state.arm_tag),
+        )
+    };
+    let (status, armed, arm_sample, arm_tag) = match row.reading {
+        Reading::Pending { state } => published(protocol::ObservationRowStatus::Pending, state),
+        Reading::Unarmed { state } => published(protocol::ObservationRowStatus::Unarmed, state),
+        Reading::Ready {
+            arm_sample,
+            arm_tag,
+            ..
+        } => (
+            protocol::ObservationRowStatus::Ready,
+            true,
+            arm_sample,
+            arm_tag,
+        ),
+    };
     protocol::ObservationReadRow {
-        status: match row.status {
-            Status::Pending => protocol::ObservationRowStatus::Pending,
-            Status::Unarmed => protocol::ObservationRowStatus::Unarmed,
-            Status::Ready => protocol::ObservationRowStatus::Ready,
-        },
-        armed: state.is_some_and(|state| state.armed),
-        arm_sample: state.map_or(0, |state| state.arm_sample),
-        arm_tag: state.map_or(0, |state| state.arm_tag),
-        window: row.window.map(|window| protocol::ObservationRowWindow {
+        status,
+        armed,
+        arm_sample,
+        arm_tag,
+        window: row.window().map(|window| protocol::ObservationRowWindow {
             first_sample: window.first_sample,
             end_sample: window.end_sample,
             sequence: window.sequence,
             blocks: window.blocks,
         }),
-        left: row.left,
-        right: row.right,
+        left: row.left(),
+        right: row.right(),
         unit: row
             .tap
             .map_or(protocol::ParameterUnit::Db, |tap| wire_unit(tap.unit)),

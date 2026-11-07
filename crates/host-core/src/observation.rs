@@ -102,21 +102,95 @@ pub struct ObservationKey<'a> {
 /// One row of a read, for the selection at the same position.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ObservationRow {
-    /// The row's status.
-    pub status: ObservationReadStatus,
-    /// The slot's published state the status was taken from: `None` when the read tore on every
-    /// attempt or when the slot's tag is below the issued tag (render has not applied the tap's
-    /// last record).
-    pub state: Option<ObservationState>,
-    /// The window, present exactly when the status is [`ObservationReadStatus::Ready`].
-    pub window: Option<ObservationWindow>,
-    /// The left lane, present when ready and asked for.
-    pub left: Option<f32>,
-    /// The right lane, present when ready and asked for.
-    pub right: Option<f32>,
+    /// What the read found: a window exists only in [`ObservationReading::Ready`] (#2307).
+    pub reading: ObservationReading,
     /// The tap's declaration, which names its native unit: always present in a row a read wrote,
     /// `None` only in a default row.
     pub tap: Option<&'static ObservationDescriptor>,
+}
+
+/// What one read of a tap found (the rule is the module's). Only a ready reading holds a window,
+/// and its lanes are read from that window, so a row cannot carry a window or a lane it is not
+/// ready for, or a lane that is not its window's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ObservationReading {
+    /// [`ObservationReadStatus::Pending`].
+    Pending {
+        /// The slot's published state, at a tag at or above the issued one: `None` when the read
+        /// tore on every attempt or when the slot's tag is below the issued tag (render has not
+        /// applied the tap's last record). When present, it is armed.
+        state: Option<ObservationState>,
+    },
+    /// [`ObservationReadStatus::Unarmed`].
+    Unarmed {
+        /// The slot's published state, as for [`Self::Pending`].
+        state: Option<ObservationState>,
+    },
+    /// [`ObservationReadStatus::Ready`]: the slot is armed at a tag at or above the issued one,
+    /// and its newest window opened at or after the arm.
+    Ready {
+        /// The sample of the arm render applied.
+        arm_sample: u64,
+        /// The tag of the arm render applied.
+        arm_tag: u64,
+        /// The newest window; it opened at or after `arm_sample`.
+        window: ObservationWindow,
+        /// The lanes asked for.
+        channels: ObservationReadChannels,
+    },
+}
+
+impl Default for ObservationReading {
+    fn default() -> Self {
+        Self::Pending { state: None }
+    }
+}
+
+impl ObservationRow {
+    /// The row's status.
+    #[must_use]
+    pub const fn status(&self) -> ObservationReadStatus {
+        match self.reading {
+            ObservationReading::Pending { .. } => ObservationReadStatus::Pending,
+            ObservationReading::Unarmed { .. } => ObservationReadStatus::Unarmed,
+            ObservationReading::Ready { .. } => ObservationReadStatus::Ready,
+        }
+    }
+
+    /// The window: present exactly when the row is ready.
+    #[must_use]
+    pub const fn window(&self) -> Option<ObservationWindow> {
+        match self.reading {
+            ObservationReading::Ready { window, .. } => Some(window),
+            ObservationReading::Pending { .. } | ObservationReading::Unarmed { .. } => None,
+        }
+    }
+
+    /// The window's left lane: present exactly when the row is ready and asked for it.
+    #[must_use]
+    pub const fn left(&self) -> Option<f32> {
+        match self.reading {
+            ObservationReading::Ready {
+                window,
+                channels: ObservationReadChannels::Left | ObservationReadChannels::Both,
+                ..
+            } => Some(window.left),
+            _ => None,
+        }
+    }
+
+    /// The window's right lane: present exactly when the row is ready and asked for it.
+    #[must_use]
+    pub const fn right(&self) -> Option<f32> {
+        match self.reading {
+            ObservationReading::Ready {
+                window,
+                channels: ObservationReadChannels::Right | ObservationReadChannels::Both,
+                ..
+            } => Some(window.right),
+            _ => None,
+        }
+    }
 }
 
 /// Why a read refused its whole batch, and which selection it names.
@@ -505,37 +579,24 @@ fn read_row(
         .and_then(|views| views.get(found.tap as usize))
         .and_then(ObservationView::read_state)
         .filter(|state| state.arm_tag >= issued_tag);
-    let window = state
-        .filter(|state| state.armed && !disarmed)
-        .and_then(|state| {
-            state
-                .window
-                .and_then(|window| window_since_arm(window, state.arm_sample))
-        });
-    let status = match state {
-        _ if disarmed => ObservationReadStatus::Unarmed,
-        Some(state) if !state.armed => ObservationReadStatus::Unarmed,
-        _ if window.is_some() => ObservationReadStatus::Ready,
-        _ => ObservationReadStatus::Pending,
-    };
-    let (left, right) = match (status, window, found.channels) {
-        (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Left) => {
-            (Some(window.left), None)
-        }
-        (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Right) => {
-            (None, Some(window.right))
-        }
-        (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Both) => {
-            (Some(window.left), Some(window.right))
-        }
-        _ => (None, None),
+    let reading = match state {
+        _ if disarmed => ObservationReading::Unarmed { state },
+        Some(state) if !state.armed => ObservationReading::Unarmed { state: Some(state) },
+        Some(ObservationState {
+            window: Some(window),
+            arm_sample,
+            arm_tag,
+            ..
+        }) if window_since_arm(window, arm_sample).is_some() => ObservationReading::Ready {
+            arm_sample,
+            arm_tag,
+            window,
+            channels: found.channels,
+        },
+        _ => ObservationReading::Pending { state },
     };
     ObservationRow {
-        status,
-        state,
-        window,
-        left,
-        right,
+        reading,
         tap: Some(tap),
     }
 }
