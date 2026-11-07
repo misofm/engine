@@ -185,7 +185,7 @@ merges cleanly with #2274.
   corrects it on #2258.
 
 ## Evidence (attempt 2)
-`origin/main` merged first (`60054a023`); then one commit.
+`origin/main` merged first (`60054a023`); then one commit (`71a0f18fc`). Attempt 3 re-merged `origin/main` at `8d181a6cb`.
 
 **Changes.**
 - `lane_state::an_unmute_holds_the_gain_only_while_its_countdown_runs` gains two cases. A lane in
@@ -253,3 +253,112 @@ Survivors:
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (292 marked regions in
   46 files)`.
+
+## Verdict (attempt 2)
+**FAIL**, on one MAJOR test gap. The reviewer confirmed the model, M2, the import re-derivation
+and no-bit-moved, and accepted R1 (unreachable) and R9 (equivalent).
+- *MAJOR.* The `Armed` arm of the phase rules was untested. X5 (`settled` ends an arm) and its
+  reset-only form X4 survived every crate: either drops an unfired arm on a plan-swap carry or a
+  reset, and the lane stays silent for good. X6 (`gain_held` excludes `Armed`) survived too: a
+  timed `SetGain` retargets an armed lane, so the fire's fade-in becomes a step.
+- *MINOR.* Two gaps that predate this issue, on lines it rewrote: X2 (`fire_fade_in` ends the arm
+  only when it opens) and X3 (`end_ramp_windows` settles `Unmuting` outside
+  `if *remaining == 0`).
+- *MINOR.* The attempt-2 merge SHA was stale after the re-merge.
+
+## Evidence (attempt 3)
+`origin/main` (`fd33447dc`, including #2274 as `97a45db0a`) was merged first (`8d181a6cb`); then
+one commit.
+
+**Changes (tests only).**
+- New sibling test `lane_state::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset`
+  folds in the reviewer's probe:
+  - a timed `SetGain` on an armed lane leaves `ramp_target == 0.0` (X6);
+  - an exported armed lane imports with `is_armed == Some(true)` (X5);
+  - `reset` keeps `is_armed == Some(true)` (X4, X5);
+  - a lane armed muted whose fire stays muted, then unmuted, is open (X2).
+- `an_unmute_holds_the_gain_only_while_its_countdown_runs` gains X3: an unmute ramp of
+  `4 * FRAMES` still holds the gain after one block.
+
+**Guard table, attempt 3.** Every arm of every `FaderPhase` method (`prepared`, `muted`,
+`gain_held`, `settled`, `at_countdown`), every arm of the stage's `is_armed`, every phase write,
+and every call site of each method (including the stage's `gain_held`, `is_muted`, `sync_mute`
+and `timed_gain`). Each mutant was applied alone and reverted, against
+`-p builtins --lib --test fader_ramp` on the merged tree; W1, W2 and W2b against `--lib --test
+fader_ramp --test stage --test randomized --test contract`. The attempt-2 survivors R1 and R9 had
+already run against builtins, builtins-compiler, graph and rack. "New" marks a mutant first run
+in attempt 3. `lane_state::` is shortened to `ls::`, and `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute`
+to `armed_fade_in`.
+
+| Id | Site | Mutation | Killed by |
+|---|---|---|---|
+| W1 | `new` | prepared mute ignored | `a_move_made_while_muted_applies_on_unmute`, `ls::an_unmute_holds_…` |
+| W2 | `arm_fade_in` | `opens` inverted | `armed_fade_in`, `ls::an_arm_holds_…` |
+| W2b | `arm_fade_in` | `Armed` never written | `armed_fade_in`, `ls::an_arm_holds_…` |
+| W3 | `fire_fade_in` | arm not ended | `armed_fade_in`, `ls::an_arm_holds_…` |
+| X2 (new) | `fire_fade_in` | arm ended only when it opens | `ls::an_arm_holds_…` |
+| W4 (M2) | `live_gain` | `Unmuting` not ended | `ls::an_unmute_holds_…` |
+| W5 | `mute_channel`, armed | `opens = muted` | `armed_fade_in` |
+| W5b | `mute_channel`, armed | `opens` not written | `armed_fade_in` |
+| W6 | `mute_channel` | a mute enters `Open` | `a_repeated_mute_leaves_the_stage_as_it_was`, `a_zero_window_mute_is_the_exact_prepared_mute`, others |
+| W7 | `mute_channel` | an instant unmute enters `Unmuting` | `ls::an_unmute_holds_…` |
+| W8 | `mute_channel` | a ramped unmute enters `Open` | `ls::an_unmute_holds_…` |
+| C3 (new) | `mute_channel` | mute mask not re-derived | `a_zero_window_mute_is_the_exact_prepared_mute`, `armed_fade_in`, others |
+| W9 | `end_ramp_windows` | `Unmuting` not settled | `gain_moves_during_a_mute_ramp_are_remembered_and_never_restart_it` |
+| X3 (new) | `end_ramp_windows` | settles every lane, ended or not | `ls::an_unmute_holds_…` |
+| W10 | `export_lane` | phase not carried | `ls::a_fader_lane_imported_mid_fade_…`, `ls::an_arm_holds_…`, `ls::an_unmute_holds_…` |
+| W11 | `import_lane` | phase copied verbatim | `ls::an_unmute_holds_…` |
+| W11b | `import_lane` | phase not written | `ls::a_fader_lane_imported_mid_fade_…`, `ls::an_arm_holds_…`, `ls::an_unmute_holds_…` |
+| C2 (new) | `import_lane` | mute mask not re-derived | `ls::a_fader_lane_imported_mid_fade_…` |
+| W12 | `reset` | `Unmuting` not settled | `ls::an_unmute_holds_…` |
+| X4 (new) | `reset` | ends an arm | `ls::an_arm_holds_…` |
+| R1 | `arm_fade_in` | a re-arm overwrites the arm | survives: unreachable (accepted) |
+| R2 | `fire_fade_in` | a lane not armed is fired too | `armed_fade_in` |
+| R2b | `fire_fade_in` | `opens` ignored | `armed_fade_in` |
+| R3 | `is_armed` | `opens` ignored | `armed_fade_in` |
+| I2 (new) | `is_armed` | `opens` inverted | `armed_fade_in`, `ls::an_arm_holds_…` |
+| R4 | `sync_mute` | mask from nothing | `a_zero_window_mute_is_the_exact_prepared_mute`, `armed_fade_in`, others |
+| R5 | `live_gain` | a muted lane not held | `a_move_made_while_muted_applies_on_unmute`, `armed_fade_in`, others |
+| R6 | `mute_channel` | the arm ignored | `armed_fade_in` |
+| R7 | `mute_channel` | a repeated state is not a no-op | `a_repeated_mute_leaves_the_stage_as_it_was` |
+| R8 | stage `gain_held` | never held | `gain_moves_during_a_mute_ramp_…`, `ls::an_arm_holds_…`, `ls::an_unmute_holds_…` |
+| C1 (new) | `timed_gain` | always retargets | `gain_moves_during_a_mute_ramp_…`, `ls::an_arm_holds_…`, `ls::an_unmute_holds_…` |
+| R9 | `lanes_at_rest` | `muted()` dropped from `zero_out` | survives: equivalent (accepted) |
+| R10 | stage `is_muted` | never muted | `mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero` |
+| P5 | `FaderPhase::prepared` | inverted | `a_move_made_while_muted_applies_on_unmute`, others |
+| P5a (new) | `prepared` | a muted lane prepares `Open` | `a_move_made_while_muted_applies_on_unmute`, `ls::an_unmute_holds_…` |
+| P5b (new) | `prepared` | an unmuted lane prepares `Muted` | `a_repeated_mute_leaves_the_stage_as_it_was`, others |
+| M1 (new) | `FaderPhase::muted` | `Muted` not muted | `a_move_made_while_muted_applies_on_unmute`, `armed_fade_in`, others |
+| P1 | `muted` | `Armed` not muted | `armed_fade_in` |
+| M3 (new) | `muted` | `Unmuting` muted | `gain_moves_during_a_mute_ramp_…`, `ls::an_unmute_holds_…`, others |
+| M4 (new) | `muted` | `Open` muted | `a_move_made_while_muted_applies_on_unmute`, others |
+| G4 (new) | `FaderPhase::gain_held` | `Open` held | `a_repeated_mute_leaves_the_stage_as_it_was`, `ls::an_unmute_holds_…`, others |
+| P2 | `gain_held` | `Unmuting` not held | `ls::an_unmute_holds_…` |
+| G3 (new) | `gain_held` | `Muted` not held | `gain_moves_during_a_mute_ramp_…`, `the_scalar_fader_refuses_a_lane_out_of_range` |
+| X6 (new) | `gain_held` | `Armed` not held | `ls::an_arm_holds_…` |
+| P3 | `FaderPhase::settled` | `Unmuting` kept | `gain_moves_during_a_mute_ramp_…`, `ls::an_unmute_holds_…` |
+| S4 (new) | `settled` | `Open` becomes `Unmuting` | `rest_tests::a_fader_lane_called_at_rest_stays_there_on_a_silent_block` |
+| S3 (new) | `settled` | `Muted` becomes `Open` | `gain_moves_during_a_mute_ramp_…`, `mute_is_a_fader_endpoint_…`, others |
+| X5 (new) | `settled` | ends an arm | `ls::an_arm_holds_…` |
+| P4 | `FaderPhase::at_countdown` | settles a live countdown | `ls::an_unmute_holds_…` |
+| A2 (new) | `at_countdown` | never settles | `ls::an_unmute_holds_…` |
+
+So 48 of 50 mutants are killed, each by a named test, and R1 and R9 survive with the reasons the
+attempt-2 review accepted. Every arm of every `FaderPhase` method (`prepared` 2, `muted` 4,
+`gain_held` 4, `settled` 4, `at_countdown` 2) and of `is_armed` (2) has a mutant that a named
+test turns red.
+
+**No bit moved, on the merged tree.** The attempt-1 harness (`gr1_bits.rs`, scratch, never
+committed) was run on the merged tree twice: at head, and with `origin/main`'s
+`crates/builtins/src/lib.rs` and `rest_tests.rs` (`fd33447dc`) in their place. Both give simd4
+`c50ab7ba3c148cb5`, simd8 `c632900598d806ce`, scalar `1d4ee1dfcd9290db`, the attempt-1 values.
+
+**Gates (head).** 
+- `cargo test --locked -p builtins -p builtins-compiler --features builtins-compiler/test-support
+  -p graph -p rack`: 42 binaries, all ok.
+- `cargo clippy --locked -p builtins --all-targets --all-features -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p builtins`: clean.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (295 marked regions in
+  46 files)` (the count rose with `origin/main`, not with this change).

@@ -7706,6 +7706,70 @@ mod lane_state {
                     "{backend:?}: {how} retargets"
                 );
             }
+            // An unmute ramp longer than a block still holds after the block: only the block
+            // that ends its countdown ends it.
+            bank.set_mute(0, BuiltinLaneSelector::Both, true, 0)
+                .expect("lane");
+            bank.set_mute(0, BuiltinLaneSelector::Both, false, 4 * FRAMES as u32)
+                .expect("lane");
+            run_fader(&mut bank, 0, 1, 0.0);
+            assert_eq!(
+                bank.gain_held(0, 0),
+                Some(true),
+                "{backend:?}: an unmute ramp outlives a block"
+            );
+        }
+    }
+
+    /// Issue #2280: an armed lane (issue #1288 D2, #2080 R1) holds its gain at `+0.0` until its
+    /// fire, keeps its arm across a plan swap's carry and a reset, and a fire ends the arm whether
+    /// it opens the lane or not. Red if a timed fader move retargets an armed lane (the fire's
+    /// fade-in then starts from the move, a step), if an import or a reset ends an unfired arm
+    /// (the lane, muted with no fire left to open it, then stays silent for good), or if a fire
+    /// that stays muted keeps the arm (a later unmute then only retargets a fire that never
+    /// comes, and the lane stays silent).
+    #[test]
+    fn an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset() {
+        let both = BuiltinLaneSelector::Both;
+        for (backend, width) in banks() {
+            let mut bank =
+                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false); 2])
+                    .expect("bank");
+            bank.arm_fade_in(0).expect("lane");
+            bank.apply_fader_operation(0, both, FaderOperation::SetGain { gain: 0.5 })
+                .expect("lane");
+            assert_eq!(
+                bank.ramp_target(0, 0),
+                Some(0.0),
+                "{backend:?}: a timed move on an armed lane only remembers"
+            );
+            let mut next =
+                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false)])
+                    .expect("bank");
+            next.import_lane(0, &bank.export_lane(0).expect("a member lane"))
+                .expect("a member lane");
+            assert_eq!(
+                next.is_armed(0, 0),
+                Some(true),
+                "{backend:?}: a carried arm stays armed"
+            );
+            bank.reset();
+            assert_eq!(
+                bank.is_armed(0, 0),
+                Some(true),
+                "{backend:?}: a reset keeps the arm"
+            );
+            // A lane armed muted, whose fire stays muted: the fire ends the arm, so a later
+            // unmute opens the lane.
+            bank.set_mute(1, both, true, 0).expect("lane");
+            bank.arm_fade_in(1).expect("lane");
+            bank.fire_fade_in(1, 64);
+            bank.set_mute(1, both, false, 0).expect("lane");
+            assert_eq!(
+                bank.is_muted(1, 0),
+                Some(false),
+                "{backend:?}: a fire that stays muted ends the arm"
+            );
         }
     }
 
