@@ -605,6 +605,7 @@ impl<T: Composable> Composed<T> {
             span,
             mode,
             ended: false,
+            at: 0,
         }
     }
 
@@ -688,8 +689,10 @@ impl<T: Composable> Composed<T> {
 /// a carry or a cursor's state) cannot be made until it ends. [`Self::finish`] walks the rest of
 /// the block and hands the output to a between-block call; [`Self::restart`] begins the next
 /// block (or piece) on the same output. A walk dropped before its end stops at its last decided
-/// offset and loses no event: each cursor whose event was pulled and not decided returns to the
-/// state its pull started from, so the next block pulls that event again.
+/// offset and loses no event: every cursor's state is the one a block ending at that offset would
+/// leave, so an event pulled past it is pulled again by the next block. The restore covers a walk
+/// abandoned between two calls, not one unwound in the middle of an offset's merge (release builds
+/// abort on panic).
 ///
 /// The between-block call after the walk is dropped compiles (the walk implements `Drop`, so its
 /// borrow lasts until it is dropped or goes out of scope):
@@ -768,6 +771,9 @@ pub struct BlockWalk<'a, T> {
     mode: SeekMode,
     /// The block's events have ended.
     ended: bool,
+    /// The first offset not yet decided: one past the last offset the walk merged (`0` before the
+    /// first). A walk dropped before its end stops here.
+    at: u32,
 }
 
 impl<'a, T: Composable> BlockWalk<'a, T> {
@@ -902,6 +908,7 @@ impl<'a, T: Composable> BlockWalk<'a, T> {
                 cursor.consumed = false;
                 cursor.moved = false;
             }
+            self.at = next;
             if event.is_some() {
                 return event;
             }
@@ -937,23 +944,25 @@ impl<'a, T: Composable> BlockWalk<'a, T> {
         self.span = span;
         self.mode = mode;
         self.ended = false;
+        self.at = 0;
     }
 }
 
 impl<T> BlockWalk<'_, T> {
-    /// A walk dropped before its end stops at its last decided offset (#2297): each cursor whose
-    /// event was pulled and not decided returns to the state its pull started from, so the next
-    /// block pulls that event again instead of losing it, and a between-block call made first
-    /// sees that state. A walk at its end has no such cursor. Run by the walk's `Drop`.
+    /// A walk dropped before its end stops at its last decided offset (#2297): every cursor
+    /// returns to the state a block ending there would leave (an event pulled past it is not
+    /// decided, so the next block pulls it again instead of losing it), and a between-block call
+    /// made first sees that state. A walk at its end changes nothing. Run by the walk's `Drop`.
     fn abandon(&mut self) {
         if self.ended {
             return;
         }
+        let (program, span, mode, at) = (self.program, self.span, self.mode, self.at);
         for cursor in self.output.cursors.iter_mut() {
-            if cursor.next.is_some() && !cursor.consumed {
-                cursor.state = cursor.before;
-            }
-            cursor.next = None;
+            // Back to the state its last pull started from, then forward through the offsets
+            // before `at` again, where that pull found no event: the state a block that ended
+            // at `at` would leave, whether the pull found an event past it or none.
+            replay(cursor, program, &span, mode, at);
             cursor.consumed = false;
         }
     }
