@@ -88,7 +88,8 @@ controller does (tracker pattern 2).
 - The provider's `DIAGNOSTICS_GET` projection (`ControlProvider::set_render_diagnostic`,
   `crates/host-core/src/control_provider.rs`). It serves a different reader, the history query,
   and egress does not read it as a copy.
-- The ring's head/len.
+- The ring's head/len. The empty-ring branch's `debug_assert_eq!(render_diagnostic_len, 0)` does
+  not catch a `Staged` head with `len == 0` (attempt-2 review note).
 - A probe encode for `TRANSPORT_SET`'s event (see Follow-ups).
 - The wire and rendered output. Everything here runs in the control-thread service and egress, not
   in render.
@@ -126,18 +127,45 @@ The attempt-1 record follows unchanged, apart from the gates' heading.
 - **Gates** were green: 744 tests in `protocol`, `control-plane`, `capi` and `host-web`, then
   clippy, fmt, workspace policy and realtime policy.
 
-## Evidence (attempt 2)
+## Attempt 2 (9b1ae7f6a): FAIL
+The review accepted the absolute-target model and found no other FIFO violation. It checked three
+and four diagnostics, ring reuse, and a commit staged while a plan is pending; all came out in
+order. It also confirmed:
+- the counter rises exactly once per delivered frame, on every path;
+- `dequeue_reliable_event_frame_into` is the only egress;
+- the controller is never replaced, so a session replacement cannot reset the counts.
+
+Findings:
+- **MAJOR:** no test checked that "an error counts no delivery". Moving the increment out of
+  `if result.is_ok()` kept the whole gate green, yet it breaks FIFO through the public API. The
+  repro: apply `SetSessionId`, render block 0 (the diagnostic's target is 1), make a short-buffer
+  dequeue (counted under the mutation), then a full dequeue. The diagnostic goes before
+  `SESSION_COMMITTED`.
+- **MINOR:** the counter's doc did not say that saturation is unreachable.
+- **Note:** the ring branch with no staged head checks `render_diagnostic_len == 0`, but a
+  `Staged` head with `len == 0` passes it unseen. This is listed as a non-goal.
+
+Out of scope, and filed separately by the coordinator: a staged diagnostic's reservation makes a
+later structural commit fail with `Internal` instead of `BACKPRESSURE`. The structural precheck
+(`controller.rs:3001-3010`) ignores reservations. This issue does not change it.
+
+## Evidence (attempts 2 and 3)
+
+Attempt 3 (this head) extends both cases of the order test. It also documents the counter's
+saturation in the field doc and the accessor doc.
 
 **Tests** (`crates/control-plane/src/control.rs`, `control::tests::rendered_meters`, under
 `control-plane/test-support`):
 - **`each_render_diagnostic_goes_after_exactly_the_protocol_events_older_than_it`.** This
   replaces attempt 1's test and has two cases.
   - **The review's repro** (defect 2, through the public API, and defect 1's short-buffer path):
-    an apply, then a short-buffer dequeue, then blocks 0 and 1 (two diagnostics). It drains two
-    events, then sends `TRANSPORT_SET`, then drains the rest. The order must be committed,
-    diagnostic, diagnostic, transport.
+    an apply, then a short-buffer dequeue, then block 0. Then a second short-buffer dequeue
+    (attempt 3: while `SESSION_COMMITTED` is still pending, after the diagnostic was staged), then
+    block 1. It drains two events, then sends `TRANSPORT_SET`, then drains the rest. The order must
+    be committed, diagnostic, diagnostic, transport.
   - **An injected `EmptyResponse` at the head** (defect 1's non-short-buffer error). After a
-    block, the next dequeue must fail again rather than deliver the diagnostic.
+    block, the next two dequeues must both fail rather than deliver the diagnostic. Attempt 3
+    added the second one.
 - **`a_diagnostic_waiting_for_events_the_controller_lost_stops_a_debug_build`** (debug builds
   only, `should_panic`). A `TRANSPORT_STATE` is queued and a diagnostic staged behind it. The event
   is then popped from the queue directly, which no product path does, so the controller no longer
@@ -158,8 +186,9 @@ test result: FAILED. 0 passed; 2 failed
 Some("diagnostic")` at the second `diagnostic` assertion.
 
 **Test value:**
-- **The order test** goes red if a diagnostic's target misses the pending event, or if a second
-  staged diagnostic waits for events that go before the first. Either way a diagnostic is
+- **The order test** goes red if a diagnostic's target misses the pending event, if a second
+  staged diagnostic waits for events that go before the first, or if a failed dequeue counts as a
+  delivery. In each case a diagnostic is
   reordered against a protocol event. No existing test stages a diagnostic while a protocol event
   is pending, or stages two behind one: the #2198 slot test and the capi egress tests drain with a
   roomy buffer.
@@ -181,6 +210,12 @@ scratchpad):
 - **n7**, both checks removed, with base's `Ok(None) => return Ok(None)` restored: the
   `should_panic` test is red.
 - Attempt 1's per-slot model is attempt 1 itself: the order test is red there, as recorded above.
+- **n8** (attempt 3; the attempt-2 review's mutation), the increment moved out of
+  `if result.is_ok()` so that a failed dequeue counts. The order test is red:
+  `left: Some("diagnostic") right: Some("committed")`, from the short buffer after staging.
+  - With that short buffer removed for the check (and n8 still applied), the injected case's added
+    second dequeue is red on its own: `Ok(Some(144))`. Each attempt-3 addition catches n8.
+  - The whole n1-n8 set was re-run at this head with the same results.
 
 **No bit moved.** Not applicable, because no render-path code changed. `stage_render_diagnostic`
 and `dequeue_reliable_event` run in the control thread's service step and egress.
@@ -188,11 +223,14 @@ and `dequeue_reliable_event` run in the control thread's service step and egress
 **Cross-thread.** None. The target, the slots and the controller's counts are all owned by the
 control thread, so no loom model is needed.
 
-**Gates (head):**
+The red-on-base check was re-run with attempt 3's tests, and gave the same two failures.
+
+**Gates (attempt-3 head):**
 - `cargo test --locked --all-targets -p protocol -p control-plane -p capi -p host-web --features protocol/test-support,control-plane/test-support,host-web/test-support,host-web/render-lock-probe,host-core/test-support`:
   57 test binaries, 745 tests, all pass.
 - `cargo clippy --locked -p protocol -p control-plane -p capi -p host-web --all-targets --all-features -- -D warnings`:
   clean.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps -p protocol -p control-plane`: clean.
 - `cargo fmt --check`: clean.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (292 marked regions in 46 files)`.

@@ -9112,8 +9112,9 @@ mod tests {
         /// Test value: red if a diagnostic's barrier misses the pending event (counting only the
         /// queued ones, or learning of the pending one only from a short-buffer error, the mirror
         /// #2268 deleted), or if a second staged diagnostic waits for events that went before the
-        /// first (attempt 1's per-slot count, lowered only at the head): a diagnostic would
-        /// overtake an older protocol event, or a newer one overtake it.
+        /// first (attempt 1's per-slot count, lowered only at the head), or if a failed dequeue
+        /// counts as a delivery: a diagnostic would overtake an older protocol event, or a newer
+        /// one overtake it.
         #[test]
         fn each_render_diagnostic_goes_after_exactly_the_protocol_events_older_than_it() {
             let mut children = boot(None, Vec::new());
@@ -9150,7 +9151,8 @@ mod tests {
             assert_eq!(kind(&mut children), None, "the lane starts empty");
 
             // A short buffer leaves `SESSION_COMMITTED` pending in the controller. The two
-            // diagnostics staged next go after it, and before the newer `TRANSPORT_STATE`.
+            // diagnostics staged next go after it, and before the newer `TRANSPORT_STATE`; a
+            // short buffer after staging delivers, and counts, nothing.
             let rename = SessionEdit::SetSessionId {
                 session_id: StableId::parse("renamed").expect("session ID"),
             };
@@ -9164,6 +9166,10 @@ mod tests {
                 Err(EventError::BufferTooSmall { .. })
             ));
             render(&mut children, 0);
+            assert!(matches!(
+                children.session.dequeue_event(EventLane::Reliable, 8),
+                Err(EventError::BufferTooSmall { .. })
+            ));
             render(&mut children, 1);
             assert_eq!(kind(&mut children), Some("committed"));
             assert_eq!(kind(&mut children), Some("diagnostic"));
@@ -9196,11 +9202,13 @@ mod tests {
                 Err(EventError::Internal)
             ));
             render(&mut children, 2);
-            let next = children.session.dequeue_event(EventLane::Reliable, 4_096);
-            assert!(
-                matches!(next, Err(EventError::Internal)),
-                "the pending event still heads the lane, so the diagnostic waits: {next:?}"
-            );
+            for _ in 0..2 {
+                let next = children.session.dequeue_event(EventLane::Reliable, 4_096);
+                assert!(
+                    matches!(next, Err(EventError::Internal)),
+                    "the pending event still heads the lane, so the diagnostic waits: {next:?}"
+                );
+            }
         }
 
         /// #2268: a staged render diagnostic waits only for events the controller still holds.

@@ -1771,7 +1771,9 @@ pub struct ProtocolController<P: ControlProvider> {
     /// refused with `BACKPRESSURE` `response.capture.pending`.
     response_ready: Option<ResponseReady>,
     pending_reliable_event: Option<ReliableSlot>,
-    /// How many reliable event frames reached caller output (#2268): monotone, never reset.
+    /// How many reliable event frames reached caller output (#2268): monotone, never reset. It
+    /// saturates rather than wraps, which is unreachable: `u64::MAX` frames at 10^9 a second take
+    /// about 584 years.
     reliable_events_delivered: u64,
     pending_meter_record: Option<TelemetryRecord>,
     pending_counter_record: Option<CounterTelemetryRecord>,
@@ -4135,6 +4137,7 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// How many reliable event frames [`Self::dequeue_reliable_event_frame_into`] has delivered to
     /// caller output since boot (#2268). Monotone; an error delivers nothing and counts nothing.
+    /// It saturates at `u64::MAX`, which is unreachable (about 584 years at 10^9 frames a second).
     #[must_use]
     pub const fn reliable_events_delivered(&self) -> u64 {
         self.reliable_events_delivered
