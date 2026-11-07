@@ -56,6 +56,13 @@ serde_json = "=1.0.151"
 # never links it.
 session = { workspace = true, features = ["test-support"] }
 
+# Issue #2298: the session's `SessionLifecycle` word names `loom` under `--cfg loom`, where
+# `lifecycle_loom` runs. A cfg dependency rather than a dev-dependency, because the library itself
+# names it; the same pinned crate as `engine`, `host-core`, `control-plane` and `capi`. Nothing
+# reaches it, and so neither the browser artifact, without `--cfg loom`.
+[target.'cfg(loom)'.dependencies]
+loom = "=0.7.2"
+
 [features]
 default = []
 # `control-plane/test-support` and `engine/test-support` let the timeline test reader reach the

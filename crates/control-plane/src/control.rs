@@ -2252,25 +2252,42 @@ fn core_selection<'a>(
 /// The wire row of one core row (#1586 D1): the arm state is the slot's published state, or none
 /// when render has not applied the tap's last record or the read tore.
 fn wire_row(row: &host_core::observation::ObservationRow) -> protocol::ObservationReadRow {
-    use host_core::observation::ObservationReadStatus as Status;
-    let state = row.state;
+    use host_core::observation::ObservationReading as Reading;
+    let published = |status, state: Option<engine::realtime::ObservationState>| {
+        (
+            status,
+            state.is_some_and(|state| state.armed),
+            state.map_or(0, |state| state.arm_sample),
+            state.map_or(0, |state| state.arm_tag),
+        )
+    };
+    let (status, armed, arm_sample, arm_tag) = match row.reading {
+        Reading::Pending { state } => published(protocol::ObservationRowStatus::Pending, state),
+        Reading::Unarmed { state } => published(protocol::ObservationRowStatus::Unarmed, state),
+        Reading::Ready {
+            arm_sample,
+            arm_tag,
+            ..
+        } => (
+            protocol::ObservationRowStatus::Ready,
+            true,
+            arm_sample,
+            arm_tag,
+        ),
+    };
     protocol::ObservationReadRow {
-        status: match row.status {
-            Status::Pending => protocol::ObservationRowStatus::Pending,
-            Status::Unarmed => protocol::ObservationRowStatus::Unarmed,
-            Status::Ready => protocol::ObservationRowStatus::Ready,
-        },
-        armed: state.is_some_and(|state| state.armed),
-        arm_sample: state.map_or(0, |state| state.arm_sample),
-        arm_tag: state.map_or(0, |state| state.arm_tag),
-        window: row.window.map(|window| protocol::ObservationRowWindow {
+        status,
+        armed,
+        arm_sample,
+        arm_tag,
+        window: row.window().map(|window| protocol::ObservationRowWindow {
             first_sample: window.first_sample,
             end_sample: window.end_sample,
             sequence: window.sequence,
             blocks: window.blocks,
         }),
-        left: row.left,
-        right: row.right,
+        left: row.left(),
+        right: row.right(),
         unit: row
             .tap
             .map_or(protocol::ParameterUnit::Db, |tap| wire_unit(tap.unit)),
@@ -5881,8 +5898,8 @@ where
     /// on B (root ruling B15-Q4), then the protocol's commit predicate. A refusal returns with
     /// `withdrawn` untouched, and the caller republishes A. After the commit, infallibly and in
     /// order (D5): the donation and the producer moves, B's `superseded` word and revision, B's
-    /// publication, the return to P0's epoch of every producer A still holds that P0 holds
-    /// vacant, and A's drop.
+    /// publication, the return to P0's epoch of every producer P0 handed A that A still holds
+    /// ([`host_core::SourceControlSet::reclaim_from_withdrawn`]), and A's drop.
     ///
     /// **Acked-batch question (D8): can an ack ever precede a drop? No.** A's revisions stay
     /// committed: their edits are in the model B is compiled from, A's host-fed rings move into
@@ -6957,13 +6974,13 @@ where
             });
         }
         if let Some((donor_plan, mut donor)) = superseded {
-            // #1310 D5 step 5: P0 still renders until B is adopted, so every producer A still
-            // holds that P0 holds vacant (a source B removed or redeclared) goes back to P0's
-            // epoch before A drops. Infallible and allocation-free; keyed by source ID.
+            // #1310 D5 step 5: P0 still renders until B is adopted, so every producer P0 handed
+            // A that A still holds (a source B removed or redeclared) goes back to P0's epoch
+            // before A drops. Infallible and allocation-free; keyed by source ID.
             let holder = self
                 .kept_holder_mut()
                 .expect("B succeeds the epoch A succeeded");
-            holder.sources.adopt_persisting(&mut donor.sources);
+            holder.sources.reclaim_from_withdrawn(&mut donor.sources);
             // Step 6: A's plan, provider epoch (with its gate handle) and credit drop here, on the
             // control thread. The credit went back when the plan was taken out.
             drop(ObservedCandidatePlan::returned(donor_plan));
