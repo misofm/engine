@@ -123,7 +123,9 @@ pub enum ObservationReading {
     },
     /// [`ObservationReadStatus::Unarmed`].
     Unarmed {
-        /// The slot's published state, as for [`Self::Pending`].
+        /// The slot's published state at a tag at or above the issued one, or `None` as for
+        /// [`Self::Pending`]. When present it reads unarmed, unless the last issued record is a
+        /// disarm (in effect when it is accepted), which supersedes whatever the slot reads.
         state: Option<ObservationState>,
     },
     /// [`ObservationReadStatus::Ready`]: the slot is armed at a tag at or above the issued one,
@@ -579,21 +581,21 @@ fn read_row(
         .and_then(|views| views.get(found.tap as usize))
         .and_then(ObservationView::read_state)
         .filter(|state| state.arm_tag >= issued_tag);
-    let reading = match state {
-        _ if disarmed => ObservationReading::Unarmed { state },
-        Some(state) if !state.armed => ObservationReading::Unarmed { state: Some(state) },
-        Some(ObservationState {
-            window: Some(window),
-            arm_sample,
-            arm_tag,
-            ..
-        }) if window_since_arm(window, arm_sample).is_some() => ObservationReading::Ready {
-            arm_sample,
-            arm_tag,
-            window,
-            channels: found.channels,
-        },
-        _ => ObservationReading::Pending { state },
+    let reading = if disarmed || state.is_some_and(|state| !state.armed) {
+        ObservationReading::Unarmed { state }
+    } else {
+        // Armed at a tag at or above the issued one: ready on the window since the arm, if any.
+        let since_arm = state
+            .and_then(|state| Some((state, window_since_arm(state.window?, state.arm_sample)?)));
+        match since_arm {
+            Some((state, window)) => ObservationReading::Ready {
+                arm_sample: state.arm_sample,
+                arm_tag: state.arm_tag,
+                window,
+                channels: found.channels,
+            },
+            None => ObservationReading::Pending { state },
+        }
     };
     ObservationRow {
         reading,
