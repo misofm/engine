@@ -50,11 +50,16 @@ shape the session lacks.
   session call cannot set one, and an existing code such as `BACKPRESSURE` would leave
   `last_error` naming some other failure. The ABI growth rule (`docs/C_ABI_V1_QUALIFICATION.md`,
   #1317 D15-3) adds a result code without a feature bit; a host treats a code it does not know as
-  a failure. Open for root review: the alternative is `BACKPRESSURE` with no diagnostic.
-- **Destroy claims too.** `session_destroy` claims the word and frees the session holding it; one
-  that finds it claimed frees nothing and returns (the session stays live and is leaked, because
-  freeing it would free state under the running call). The other half of the destroy rule (no call
-  may start after destroy) stays the host's: freed memory carries no claim.
+  a failure. Ruled at review: keep `BUSY` (Verdict below).
+- **Destroy claims too.** `session_destroy` claims the word and frees the session holding it. One
+  that finds it claimed is refused: it frees nothing and returns, because freeing would free state
+  under the running call. The session stays live and valid, the call in flight and every later
+  call proceed normally, and a later quiescent destroy frees it; a host that never destroys it
+  again leaks it. The other half of the destroy rule (no call may start after a successful
+  destroy) stays the host's: freed memory carries no claim.
+- **Retained bytes.** The word grows `size_of::<Session>()` from 11,224 to 11,232 bytes, which
+  `CapiAdapter::ADAPTER_ALLOCATIONS` charges: +8 bytes of `capi_retained_bytes` per session; a
+  caller whose cap was exact must raise it.
 - **Render and session calls may overlap; that is the design.** The `Session` and the `Plan` are
   separate handles with disjoint state, joined only by the engine's lock-free exchange (rings,
   plan exchange, seqlocks), so no claim is needed between a render call and a session call, and
@@ -63,17 +68,22 @@ shape the session lacks.
 ## Non-goals
 - No change to the plan's busy refusal (`RENDER_REJECTED`, `render.busy`), to the render path's
   arithmetic, or to `hosts/host-web`.
-- `plan_destroy` against an in-flight render-side call and the engine handle's `RefCell`
-  diagnostic under concurrent `compile_session` calls are the same class on other handles; they are
-  follow-ups, not this issue.
+- Follow-ups, the same class on other handles, not this issue (filed in #2258 by the
+  coordinator):
+  - `plan_destroy` against an in-flight render-side call (`render_f32_planar`,
+    `plan_prepare_seek`): it frees the plan without taking `render_busy`.
+  - The engine handle's `RefCell` diagnostic under concurrent `compile_session` (and
+    `last_error`) calls on one engine.
 
 ## Gates
 - A unit test, red on base: with the session's claim word held, every session entry returns
   `BUSY`, changes no state (transaction snapshot, diagnostic, out pointers) and runs no service
-  step; `session_destroy` frees nothing; released, the same session serves calls and is destroyed.
-- `handle_claim_loom`: two threads race to claim one word; in every interleaving at most one holds
-  it (a `loom::cell::UnsafeCell` access under the claim), at least one wins, a refusal only happens
-  while the other holds it, and both an early error return and an unwind release it. A CI leg in
+  step, also with a null or over-long source ID (the claim precedes the source-ID check's
+  diagnostic write); `session_destroy` frees nothing; released, the same session serves calls and
+  a quiescent destroy frees it.
+- `handle_claim_loom`: two threads race to claim one word, one leaving by an early error return
+  and one by an unwind; in every interleaving at most one holds it (a `loom::cell::UnsafeCell`
+  access under the claim), at least one wins, and the word ends released. A CI leg in
   `.github/workflows/qualification.yml`.
 - The header's thread-ownership block, the result-code list, `abi_smoke.c` and
   `docs/C_ABI_V1_QUALIFICATION.md` state the refusal.
@@ -117,10 +127,15 @@ and the diagnostic copy all reached the state. At head it passes.
 - Claim's success ordering `Acquire` weakened to `Relaxed`: loom red, `Causality violation:
   Concurrent write accesses to UnsafeCell`.
 - Compare-exchange replaced by a separate load and store: loom red, the same causality violation.
+- Release store's ordering `Release` weakened to `Relaxed` (the reviewer's mutation, confirmed
+  here): loom red, `Causality violation: Concurrent write accesses to UnsafeCell`.
 - `miso_engine_v1_service` without the claim: unit test red, `left: [9, 9, 9, 9, 9, 9, 9, 0, ...]`.
 - `last_error` on a session without the claim: unit test red, the thirteenth result `0`.
 - `session_destroy` without the claim: unit test red, `current_provider_disposed: 1` and
   `replay_current_disposed: 1` against the expected zero counters (the held session was freed).
+- `borrowed_source_id` moved before `claim_session` in `source_seek_entry` (minor 1 of the review,
+  green on the attempt-1 test): the folded source-ID rows are red, `left: [9, 1, 9]` (the seek ran
+  the source-ID check and wrote `source.id.invalid` into the holder's diagnostic).
 
 **Test value.**
 - Unit test: red if any session entry point, `last_error` on a session or `session_destroy`
@@ -141,7 +156,8 @@ type alias (`AtomicU32` outside loom). Two one-time comparisons, never committed
   every result code and output bit: `7b6a72dd2cba099b` at base and at head.
 
 **Gates (head).**
-- `cargo test --locked -p capi`: 190 lib tests, the nine integration binaries and the doc tests pass.
+- `cargo test --locked -p capi`: 190 lib tests, the nine integration binaries and the doc tests
+  pass.
 - `cargo clippy --locked -p capi --all-targets --all-features -- -D warnings`: clean. The same
   clippy of the lib tests under the loom leg's flags: clean.
 - `cargo fmt --check`: clean.
@@ -159,5 +175,39 @@ type alias (`AtomicU32` outside loom). Two one-time comparisons, never committed
 - A render call and a session call overlapping is the design and needs no claim: they own
   different handles, `Plan`'s render state and `Session`'s control state, joined only by the
   engine's lock-free exchange. Nothing here claims against the plan.
-- Open for root review: the new code `BUSY` against `BACKPRESSURE` without a diagnostic (Decision
-  above), and the leak on a destroy that finds the session held.
+- The two open questions were ruled at review (Verdict below).
+
+## Verdict (attempt 1)
+**PASS**, with five minor findings folded on the branch. The reviewer's rulings on the two open
+questions:
+- **Keep `MISO_ENGINE_V1_BUSY`.** #2213's no-new-code ruling rested on the plan's diagnostic being
+  one atomic word a refused call can write. The session's diagnostic is the holder's `RefCell`,
+  which a refused call cannot write, so every existing code would mislead; the ABI growth rule
+  (#1317 D15-3) admits a new result code without a feature bit.
+- **Keep refuse-and-leak on a held destroy.** It is the only memory-safe option: freeing would free
+  state under the running call, and deferring the free to the holder would free the handle from
+  inside its own call.
+
+The minors, folded:
+1. *Test gap at the source-ID sites*: the test never reached the pre-claim diagnostic write, so
+   moving `borrowed_source_id` before the claim stayed green. Folded: held calls with a null and a
+   128-byte source ID to `source_submit_planar_f32`, `source_seek` and `source_seek_report`, each
+   `BUSY` with the diagnostic unchanged; mutation-checked (above).
+2. *Retained bytes*: `size_of::<Session>()` grew from 11,224 to 11,232 bytes (11,232 confirmed at
+   head), +8 bytes of `capi_retained_bytes` per session. Folded into the decision record and
+   `docs/C_ABI_V1_QUALIFICATION.md`.
+3. *Loom gate wording*: the gate claimed "a refusal only happens while the other holds it", which
+   the model does not assert. Folded: the gate now states what is asserted, and the reviewer's
+   `Release`-to-`Relaxed` mutation is in the mutation list.
+4. *Destroy wording*: folded into the header, the `session_destroy` rustdoc, the qualification doc
+   and the decision record: refused, the session stays live and valid, the call in flight and later
+   calls proceed normally, and a later quiescent destroy frees it.
+5. *Deferred follow-ups*: kept in the non-goals; the coordinator files them in #2258, with the
+   reviewer's recommendation that HC-8's fix moves the plan's busy refusal to `BUSY` with no
+   diagnostic write.
+
+Gates re-run after the fold, all green: `cargo test --locked -p capi` (190 lib tests, nine
+integration binaries, doc tests); the loom leg; clippy `-D warnings` normally (`--all-targets
+--all-features`) and under the loom flags; `cargo fmt --check`; `RUSTDOCFLAGS='-D warnings' cargo
+doc --locked -p capi --no-deps`; `bash scripts/check-capi-abi.sh`; `bash
+scripts/check-workspace-policy.sh`.

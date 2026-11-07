@@ -429,7 +429,9 @@ result code is authoritative, because the winner may overwrite the plan's last e
 The session handle refuses misuse the same way (#2276), an in-place V1 amendment: one new result
 code, `MISO_ENGINE_V1_BUSY` (9), which takes no feature bit under the growth rule below; no symbol,
 struct, size or `ABI_VERSION` changes (`Session` is opaque, so its new claim word is not a layout
-change). Before #2276 the session calls took `&mut` of the whole session on the strength of the
+change). The word grows `size_of::<Session>()` from 11,224 to 11,232 bytes, which
+`CapiAdapter::ADAPTER_ALLOCATIONS` charges: +8 bytes of `capi_retained_bytes` per session; a caller
+whose cap was exact must raise it. Before #2276 the session calls took `&mut` of the whole session on the strength of the
 header's thread rule alone, so a host that broke it got two exclusive borrows of one
 `SessionState` (undefined behaviour). Now every session call, `last_error` on a session included,
 claims the session's `busy` word right after the handle check with the plan's claim type
@@ -439,13 +441,16 @@ call that finds the word claimed touches no session state, writes no out pointer
 diagnostic, and returns `BUSY`. It is a new code rather than `BACKPRESSURE` or #2213's
 `RENDER_REJECTED` because the session's diagnostic is the holder's `RefCell`, which a refused call
 cannot write, so an existing code would leave `last_error` naming another failure.
-`miso_engine_v1_session_destroy` claims the word too and frees the session holding it; one that
-finds it claimed frees nothing (the session is leaked, not freed under the running call). A call
-that starts after a destroy stays the host's to prevent. Render and session calls may still run at
+`miso_engine_v1_session_destroy` claims the word too and frees the session holding it. One that
+finds it claimed is refused: it frees nothing, rather than free the session under the running call.
+The session stays live and valid, the call in flight and every later call proceed normally, and a
+later quiescent destroy frees it; a host that never destroys it again leaks it. A call that starts
+after a successful destroy stays the host's to prevent. Render and session calls may still run at
 once: they own different handles, joined only by the engine's lock-free exchange. The gates: `capi`
 `ffi::tests::a_session_call_while_another_holds_the_session_is_refused_not_raced` (with the word
 held, all thirteen session entry points return `BUSY` and change no state, diagnostic or out
-pointer, and a destroy frees nothing; released, the session serves calls) and the loom model
+pointer, a null or over-long source ID is refused as busy before its own check, and a destroy
+frees nothing; released, the session serves calls and a quiescent destroy frees it) and the loom model
 `ffi::tests::handle_claim_loom::handle_claim_loom` (two threads, one leaving by an error and one
 by an unwind: at most one holds the state, at least one wins, both release), on its own
 `test-release` leg (a debug build).

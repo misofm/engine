@@ -54,9 +54,11 @@ extern "C" {
  *                miso_engine_v1_plan_destroy require quiescence: no other call on that handle is
  *                in flight or will start. A session and its plan may be destroyed in either order.
  *                miso_engine_v1_session_destroy claims the session as the session calls do; one
- *                that finds it claimed frees nothing and returns, so the session stays allocated
- *                (leaked) rather than freed under the running call. A call that starts after a
- *                destroy is undefined, as before.
+ *                that finds it claimed is refused: it frees nothing and returns, rather than free
+ *                the session under the running call. The session stays live and valid, the call
+ *                in flight and every later call proceed normally, and a later quiescent destroy
+ *                frees it (a host that never destroys it again leaks it). A call that starts
+ *                after a successful destroy is undefined, as before.
  *
  * Live edits. A committed SESSION_TRANSACTION_APPLY whose changes are all live is applied to the
  * running plan: no plan is prepared, and the source rings, the effect state and the render

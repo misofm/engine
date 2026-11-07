@@ -1642,10 +1642,11 @@ pub unsafe extern "C" fn miso_engine_v1_last_error(
 
 /// Destroys a session handle off render; null is a no-op.
 ///
-/// A destroy that finds another session call holding the session (#2276) frees nothing and
-/// returns: the session stays live, and is leaked, because freeing it would free the state under
-/// the running call. A call that starts after a destroy is still the host's to prevent; freed
-/// memory carries no claim.
+/// A destroy that finds another session call holding the session (#2276) is refused: it frees
+/// nothing and returns, because freeing would free the state under the running call. The session
+/// stays live and valid, the call in flight and every later call proceed normally, and a later
+/// quiescent destroy frees it; a host that never destroys it again leaks it. A call that starts
+/// after a successful destroy is still the host's to prevent: freed memory carries no claim.
 ///
 /// # Safety
 ///
@@ -3946,6 +3947,28 @@ mod tests {
             ]
         };
         assert_eq!(refused, [crate::RESULT_BUSY; 13]);
+        // The three entries that refuse a bad source ID write `source.id.invalid` into the
+        // diagnostic, so the claim must come before that check too: a null ID and one over the
+        // 127-byte bound are refused as busy, with the diagnostic unchanged.
+        let long = [b'a'; 128];
+        for (id, id_bytes) in [(ptr::null(), 0), (long.as_ptr(), long.len() as u64)] {
+            // SAFETY: As above; a nonnull ID is readable for its declared length.
+            let refused = unsafe {
+                [
+                    miso_engine_v1_source_submit_planar_f32(
+                        session,
+                        id,
+                        id_bytes,
+                        &chunk,
+                        &mut submitted,
+                    ),
+                    miso_engine_v1_source_seek(session, id, id_bytes, 2, 0),
+                    miso_engine_v1_source_seek_report(session, id, id_bytes, &mut report),
+                ]
+            };
+            assert_eq!(refused, [crate::RESULT_BUSY; 3]);
+            assert_eq!(test_last_error(session), diagnostic);
+        }
         assert_eq!(
             (
                 submitted.accepted_frames,
