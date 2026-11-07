@@ -7562,7 +7562,10 @@ mod lane_state {
     /// imported into a lane of a bank prepared with other values (unmuted, another gain). Both
     /// then render the rest of the fade, a settled mute that is exactly `+0.0` on a negative
     /// input, and the unmute, which returns to the remembered gain. Red if the countdown, the
-    /// ramp words, the mute flag or the remembered gain is not imported.
+    /// ramp words, the mute flag or the remembered gain is not imported. Red, too (issue #2354),
+    /// if an export or import takes one channel's phase or countdown for the other's: a plan swap
+    /// then un-mutes a muted right channel, or drops a right channel's unmute hold so that a
+    /// fader move cuts its ramp into a step.
     #[test]
     fn a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders() {
         for (backend, width) in banks() {
@@ -7614,6 +7617,59 @@ mod lane_state {
             // A padding lane or one past the bank is refused.
             assert!(destination.export_lane(members).is_none());
             assert!(destination.import_lane(members, &state).is_err());
+            // Issue #2354: a dual-mono lane whose channels differ carries each channel's own
+            // phase and countdown: (a) the right channel muted, the left open; (b) both muted,
+            // then the right in an unmute ramp longer than a block.
+            for row in ["right muted", "right mid-unmute"] {
+                let mut source =
+                    BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false); 3])
+                        .expect("source bank");
+                let mut destination =
+                    BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false); 3])
+                        .expect("destination bank");
+                if row == "right muted" {
+                    source
+                        .set_mute(0, BuiltinLaneSelector::Right, true, 0)
+                        .expect("lane");
+                } else {
+                    source
+                        .set_mute(0, BuiltinLaneSelector::Both, true, 0)
+                        .expect("lane");
+                    source
+                        .set_mute(0, BuiltinLaneSelector::Right, false, 4 * FRAMES as u32)
+                        .expect("lane");
+                }
+                destination
+                    .import_lane(2, &source.export_lane(0).expect("a member lane"))
+                    .expect("a member lane");
+                for channel in 0..2 {
+                    assert_eq!(
+                        destination.is_muted(2, channel),
+                        source.is_muted(0, channel),
+                        "{backend:?}: {row}: channel {channel}'s mute carries"
+                    );
+                    assert_eq!(
+                        destination.gain_held(2, channel),
+                        source.gain_held(0, channel),
+                        "{backend:?}: {row}: channel {channel}'s hold carries"
+                    );
+                }
+                // The same timed fader move on both: a carried mute or unmute hold only
+                // remembers it, so neither lane steps or plays a muted channel.
+                for (bank, lane) in [(&mut source, 0), (&mut destination, 2)] {
+                    bank.apply_fader_operation(
+                        lane,
+                        BuiltinLaneSelector::Both,
+                        FaderOperation::SetGain { gain: 0.5 },
+                    )
+                    .expect("lane");
+                }
+                assert_eq!(
+                    run_fader(&mut source, 0, 2, -0.5),
+                    run_fader(&mut destination, 2, 2, -0.5),
+                    "{backend:?}: {row}: the carried lane renders what the exported lane renders"
+                );
+            }
         }
     }
 

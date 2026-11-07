@@ -7,7 +7,7 @@ This is the bounded successor to #2280 (tracker #2258, GR-1). #2280 stopped unde
 - no rendered bit moved: simd4 `c50ab7ba3c148cb5`, simd8 `c632900598d806ce`, scalar `1d4ee1dfcd9290db`, identical on base and head;
 - 52 of 66 review mutants killed, and 14 accepted with named reasons.
 
-#2280's spec on that branch records the whole history. This issue owns exactly the two things attempt 5 lacked.
+#2280's spec, `.github/ISSUE_SPECS/2280-builtins-a-fader-lane-s-phase-is-four-parallel-flags-and-a-lane-import-copies-them-unchecked.md` at `f82131236`, records the whole history. #2280 is closed, and that spec was never on `main`, so this issue's branch deletes it. This issue owns exactly the two things attempt 5 lacked, plus the per-channel carry contract that attempt 1's review added (below).
 
 ## Scope
 
@@ -19,11 +19,22 @@ This is the bounded successor to #2280 (tracker #2258, GR-1). #2280 stopped unde
    - Mutant F5 survives: in `mute_channel`'s no-op check (~3481 on the branch), `phase.muted() == muted` becomes `phase.gain_held() == muted`. A mute during an unmute ramp then returns early, and the strip stays audible while the model says muted.
    - Add, inside `lane_state`'s existing tests (no sibling test): unmute over 64 frames, then mute with window 0 and with a window. Assert `is_muted == Some(true)` and an exact `+0.0` block once the mute lands. Do the same for a mute during an opening fire's fade-in.
    - F5 must go red.
+3. **The per-channel lane carry gets a test** (added by attempt 1's review).
+   - #2280 rewrote `export_lane` and `import_lane`. No test carries a lane whose two channels differ, so four mutants survive:
+     - F8: import takes channel 0's phase.
+     - F14: export takes channel 0's phase.
+     - G3: import settles each channel against channel 0's `remaining`.
+     - G5: export writes channel 0's `remaining` for both channels.
+   - The defects behind them:
+     - A lane with the right channel muted and the left open comes back right-unmuted. After a timed SetGain it is audible, so a plan swap un-mutes a muted right channel.
+     - A lane whose right channel is mid-unmute loses its hold, so a fader move cuts the ramp into a step.
+   - The test goes inside `a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders`. It has two rows whose channels differ. Each row is exported, imported into another lane, and given the same timed SetGain on both lanes. Then the `run_fader` words are compared, and `is_muted` and `gain_held` are asserted per channel.
+   - F8, F14, G3 and G5 must go red.
 
 ## Non-goals
 
 - No change to the enum or its transitions unless a gate proves one is wrong.
-- The dual-mono channel-index gap (N12, N15, N16 and F7) is its own issue (#2355).
+- The dual-mono channel-index gap outside the lane carry (N12, N15, N16 and F7) is its own issue (#2355).
 
 ## Gates
 
@@ -61,7 +72,7 @@ Test value: in `mute_channel`'s no-op check, testing `gain_held()` instead of `m
 **Mutants.** The scripts are scratch-only (`i2354/runm.sh`, which applies `review-2280e/scripts/fresh.py`'s table).
 - **F5** (`phase.muted() == muted` becomes `phase.gain_held() == muted`) is **red** in both tests, against `-p builtins --lib`. Failure: `Simd4: a mute over 0 frames during an unmute ramp`, left `Some(false)`, right `Some(true)`. The same failure appears for a fade-in.
 - **The 18 table mutants** the #2280 attempt-5 review re-ran are all still **red**, each against `-p builtins --lib`: A, C, D, M2, N10, N17, N21, N24, N26, P4, X12, X4, X9, Y14, Y2, Y7, Y8, Y9. Each is killed by the same `lane_state` test as in that review.
-- **Finding: the stale fixture had masked two mutants.** In the #2280 attempt-5 review, fresh mutants F8 (`import_lane` takes the phase from channel 0) and F14 (`export_lane` takes the phase from channel 0) were "killed" only by the stale `checked_in_fixtures_are_the_generated_bytes`, which was red for an unrelated reason. With the fixtures regenerated, both **survive** the full `builtins` (test-support) and `graph-compiler` suites, and so does F7. All three are the dual-mono channel-index gap that #2355 owns (N12, N15, N16, F7). They are recorded here so #2355 adds F8 and F14 to its table. This issue does not change them (non-goal).
+- **Finding: the stale fixture had masked two mutants.** In the #2280 attempt-5 review, fresh mutants F8 (`import_lane` takes the phase from channel 0) and F14 (`export_lane` takes the phase from channel 0) were "killed" only by the stale `checked_in_fixtures_are_the_generated_bytes`, which was red for an unrelated reason. With the fixtures regenerated, both **survive** the full `builtins` (test-support) and `graph-compiler` suites, and so does F7 (#2355's). Attempt 2 moves F8 and F14 into this issue (see the review verdict below).
 
 **No bit moved.** The scratch harness `gr1/gr1_bits.rs` was copied into `crates/builtins/tests/`, run with `cargo test --release -p builtins --features test-support --test gr1_bits`, then removed, so it is not committed. It gives simd4 `c50ab7ba3c148cb5`, simd8 `c632900598d806ce` and scalar `1d4ee1dfcd9290db`, the same as the #2280 base and head.
 
@@ -75,3 +86,43 @@ Test value: in `mute_channel`'s no-op check, testing `gain_held()` instead of `m
 - `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p builtins`: clean.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (298 marked regions in 48 files)`.
+
+**Attempt 1 verdict: FAIL** (head `67fb27aaa`). The fixtures were confirmed: regenerating them gives zero diff. The F5 cases were confirmed too. There were three findings.
+- **MAJOR:** the per-channel lane carry has no test. F8, F14, G3 and G5 survive (scope item 3). This belongs here, not in #2355, because #2280 rewrote exactly `export_lane` and `import_lane`, and #2355's scope covers no carry.
+- **MINOR:** the mute-during-fade-in case goes through the same `Unmuting -> Muted` transition as the unmute case, so it kills no mutant on its own.
+- **MINOR:** #2280's spec was still in `.github/ISSUE_SPECS/`.
+
+### Attempt 2
+
+`origin/main` at `8e76a1ae3` was merged in with a normal merge, which had no conflicts. Product code is unchanged; only tests and specs changed.
+
+**Carry test.** Two rows were added inside `a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders`, with no sibling test. Each row starts from a bank prepared unmuted at 0 dB.
+- Row (a): `set_mute(Right, true, 0)`, with the left channel open.
+- Row (b): `set_mute(Both, true, 0)`, then `set_mute(Right, false, 4 * FRAMES)`.
+
+Each row is exported from lane 0 and imported into lane 2 of another bank. The test then asserts, per channel, that `is_muted` and `gain_held` equal the source's. Next it applies the same timed `SetGain { gain: 0.5 }` to both lanes and compares two blocks of `run_fader` words.
+
+Test value: an export or import that takes one channel's phase or countdown for the other's un-mutes a muted right channel across a plan swap, or drops a right channel's unmute hold, so a fader move then steps the ramp. No earlier test carries a lane whose channels differ.
+
+**Fade-in case.** The mute-during-fade-in case stays. It goes through the same `Unmuting -> Muted` transition as the mute-during-unmute case, and it kills no mutant on its own: in the review's run, F5, G1, G8 and G9 are each also red in the unmute test. It is kept as the arm path's own statement of the contract.
+
+**Mutants**, each against `-p builtins --features test-support --lib`, using the reviewer's table (`i2354/muts.py`). All are red.
+- F8 and F14 fail on `right muted: channel 1's mute carries`.
+- G3 and G5 fail on `right mid-unmute: channel 1's hold carries`.
+- All four fail in `a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders`.
+- F5 fails both mute tests.
+- The 18 table mutants all fail: A, C, D, M2, N10, N17, N21, N24, N26, P4, X12, X4, X9, Y14, Y2, Y7, Y8, Y9. N21, P4 and X9 now also fail the carry test.
+- F7 is still #2355's.
+
+**No bit moved.** `gr1_bits` on the merged tree gives simd4 `c50ab7ba3c148cb5`, simd8 `c632900598d806ce` and scalar `1d4ee1dfcd9290db`.
+
+**Gates.** Each crate was run on its own.
+- `cargo test --locked -p builtins --features test-support`: 160 passed.
+- `cargo test --locked -p builtins-compiler --features test-support`: 58 passed.
+- `cargo test --locked -p graph-compiler`: 206 passed.
+- `cargo test --locked -p host-core`: 294 passed.
+- clippy `-D warnings` (builtins, all targets and features), `cargo fmt --check` and rustdoc `-D warnings`: clean.
+- Workspace policy: ok.
+- Realtime policy: ok (298 marked regions in 48 files).
+
+**Spec hygiene.** #2280's spec is deleted. It was never on `main`, and its text is kept at `f82131236`.
