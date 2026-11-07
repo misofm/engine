@@ -5,7 +5,7 @@
 //! width the build has (`lane::each_vector_lane!`), which the factory's D4 width check does not.
 //!
 //! The compressor has no clocks (`rest_tests`): its `advance_clocks` moves no state or payload
-//! word (it only sets the bank flag `silent_fixed_point` on a whole-bank mask), so only the lane
+//! word (it only earns the bank's silent claim on a whole-bank mask), so only the lane
 //! swap is tested here.
 
 use super::padding_tests::{
