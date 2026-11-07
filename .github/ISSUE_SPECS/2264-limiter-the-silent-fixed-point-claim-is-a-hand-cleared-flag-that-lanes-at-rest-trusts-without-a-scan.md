@@ -138,7 +138,33 @@ count after every step.
   The render change adds no call, allocation or lock: `SilentClaim` is two `bool`s with `const fn`
   methods, and the assertions are debug-only.
 
+**Verdict (attempt 1): PASS, with three minors folded.**
+- The adversarial review found no missed writer. That includes the trait defaults and the
+  lane-swap undo path.
+- It reproduced all 96 no-bit-moved digests exactly on base and head.
+- It confirmed that checking only in debug builds is right under the realtime rules: a scan in
+  release would bring back the cost #1107 removed.
+- The three minors, folded:
+  - the long-term model is recorded under the follow-ups below;
+  - row 182-14 of `tests/MUTATIONS.md` now points at row 2264-4;
+  - three doc comments in `lib.rs` were rewrapped at 100 columns.
+- One more reviewer note: the scratch harness's doc comment claimed it drove a scalar instance.
+  It drives banks only, at W4 and W8, as the No-bit-moved paragraph above says. The scratch copy
+  was corrected; it was never committed.
+
 **Follow-ups (not in this issue).**
 - Compressor, parametric EQ and multiband carry the same hand-cleared `silent_fixed_point` +
   `silent_bypass` pair (#2258 FX-1). There the flag only buys speed, but the same newtype and
   debug assertion would apply.
+- The long-term model the reviewer recommends, not implemented here. `SilentClaim` keeps the
+  claim's words private, but it does not stop a new between-block writer from forgetting to call
+  `withdraw`. The model:
+  - All between-block writes to the channel words go through a guard, such as `channels_mut()`,
+    that withdraws the claim. Forgetting becomes impossible rather than caught in debug.
+  - The silent fast path, `advance_clocks` and the slow body get a non-withdrawing accessor,
+    because they settle the claim themselves.
+  - It moves a flag value: `retarget_link(samples = 0)` would then withdraw where today it keeps
+    the claim. No rendered bit moves, since the fast path and the body agree bit for bit. The
+    successor needs its own no-bit-moved comparison and a ruling that the flag change is
+    acceptable.
+  - The coordinator tracks it alongside the compressor, parametric EQ and multiband follow-up.

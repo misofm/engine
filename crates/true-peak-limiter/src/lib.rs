@@ -4816,7 +4816,8 @@ impl<L: Lane> LimiterCore<L> {
     }
 
     /// Every limit and release ramp of the rendered channels is stationary: the left channel's
-    /// alone when `mono`. The ramp legs of the claim and of [`block_is_quiet`](Self::block_is_quiet).
+    /// alone when `mono`. The ramp legs of the claim and of
+    /// [`block_is_quiet`](Self::block_is_quiet).
     fn ramps_settled(&self, mono: bool) -> bool {
         ramps_are_stationary(&self.left.limit)
             && ramps_are_stationary(&self.left.release)
@@ -4841,10 +4842,10 @@ impl<L: Lane> LimiterCore<L> {
     /// Strict `+0.0`, never `== 0.0`. This crate is the one where the distinction is audible
     /// rather than academic: a `-0.0` input sample is written into `main_ring` and emerges
     /// `B = N + 6` samples later, and `select(bypass, delayed, delayed * gain)` preserves its sign
-    /// on both arms (`-0.0 * 1.0` is `-0.0`). A fast path that counted `-0.0` as silence would never
-    /// write it into the line, and the sample that should have come out of the line four blocks
-    /// later would be `+0.0` instead. That is the compressor's input-side argument (#163 phase 4,
-    /// adversarial pass) at a kernel that also has a delay line to carry it.
+    /// on both arms (`-0.0 * 1.0` is `-0.0`). A fast path that counted `-0.0` as silence would
+    /// never write it into the line, and the sample that should have come out of the line four
+    /// blocks later would be `+0.0` instead. That is the compressor's input-side argument (#163
+    /// phase 4, adversarial pass) at a kernel that also has a delay line to carry it.
     fn block_is_quiet(&self, glide: usize, left: &[f32], right: Option<&[f32]>) -> bool {
         glide == 0
             && self.silent.bypass_held(self.coefficients.bypass)
@@ -5409,9 +5410,9 @@ impl<L: Lane> LimiterCore<L> {
     /// lane's link mode as one word (issue #1368, `effect_contract::exchange_lane_link_word`). The
     /// values are what `reset(FullToDefaults)` and the D7 recovery re-seed a lane from, and the
     /// mode re-derives the link mask and the all-`Maximum` leg; the #182 S2 claim is withdrawn
-    /// (#2264), and nothing else in the core changes. The #990 record needs no update: it is a statement about gain words, and the linked-pair
-    /// decision re-reads the all-`Maximum` leg every block. `false`, changing nothing, for a lane
-    /// out of range or a wrong length.
+    /// (#2264), and nothing else in the core changes. The #990 record needs no update: it is a
+    /// statement about gain words, and the linked-pair decision re-reads the all-`Maximum` leg
+    /// every block. `false`, changing nothing, for a lane out of range or a wrong length.
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         if lane >= L::WIDTH
             || lane >= self.left_defaults.len()
