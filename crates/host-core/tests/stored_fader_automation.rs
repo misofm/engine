@@ -382,7 +382,8 @@ fn fader_arrival(prepared: &PreparedHost, model: &SessionModel, track: usize) ->
         .map_or(0, |(_, arrival)| *arrival)
 }
 
-/// #1647a (R17-2, R17-3): two automated fader lanes, the first behind a latent insert. At every
+/// #1647a (R17-2, R17-3): two automated fader lanes of one bank, the first behind a latent insert
+/// and the second behind a latency-free one (which keeps its fader at the same level). At every
 /// block each lane's bank holds its `a(n)` (the plan's floored arrival), the node-time mapping
 /// `timeline_block(r + ΣP - a(n))` (`-a(n)` at render sample 0 of a fresh plan, then the render
 /// clock behind by `a(n)`, with no step) and the fader row's jump length from the session's
@@ -396,6 +397,19 @@ fn fader_arrival(prepared: &PreparedHost, model: &SessionModel, track: usize) ->
 fn each_automated_fader_lane_takes_its_arrival_and_node_time_per_block() {
     const PROBED: usize = 12;
     let mut model = with_limiter(bank_model(), 0);
+    // A latency-free insert on track 1 puts its fader at track 0's dependency level, so both
+    // faders are lanes of one bank (#2362): each lane must take its own member's `a(n)`.
+    model.tracks[1].inserts.effects.push(Effect {
+        id: id("compressor-1"),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.compressor"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::Maximum,
+        params: Vec::new(),
+        sidechain: SidechainDeclaration::None,
+    });
     model.control_smoothing = Some(ControlSmoothing {
         mute_ms: 5.0,
         fader_ms: 20.0,
@@ -454,6 +468,13 @@ fn each_automated_fader_lane_takes_its_arrival_and_node_time_per_block() {
             times.len(),
             2,
             "block {block}: one entry per automated lane"
+        );
+        let mut lanes: Vec<usize> = times.iter().map(|time| time.lane).collect();
+        lanes.sort_unstable();
+        assert_eq!(
+            lanes,
+            [0, 1],
+            "block {block}: both faders are lanes of one bank"
         );
         let mut arrivals: Vec<u64> = times.iter().map(|time| time.arrival).collect();
         arrivals.sort_unstable();
@@ -2381,8 +2402,19 @@ fn a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold() {
 /// of the repeated unmute). From 1,024 both lanes equal the never-muted session that
 /// takes the same offsets write at 1,024, at quantum 128, 64 and 37, on every render form.
 ///
+/// The contrast (#2362, `HoldAtBlockEnd::EndsAtBlockEnd`): a hold that ended by itself is not
+/// freed by a write at the entry. A live unmute drained at 0 whose window `W` (the first multiple
+/// of the quantum at or after 1,200) ends the ramp on the last sample of a block, over the fade's
+/// grid events from 1,100 (remembered, so a move is owed), makes the move due at the entry `W`;
+/// an offsets write `S = -6` dB at `W` does not cancel it. The due move lands at `W` over the
+/// fader length and replaces the jump's ramp, so from `W` the output is the same, bit for bit,
+/// whether that ramp is 1 or 480 samples. (This pins the base rule; whether the due move should
+/// override a jump whose own hold is newer is an open question for the owner, #2362.)
+///
 /// Test value: red if the R17-10 release of the ended unmute overwrites the hold the offsets
-/// jump set at the same entry (the fade's grid events from 1,100 cut the 480-sample ramp).
+/// jump set at the same entry (the fade's grid events from 1,100 cut the 480-sample ramp); and
+/// red if an offsets jump at an entry where an owed held ramp ended on the previous block's last
+/// sample cancels the due move.
 #[cfg(feature = "test-support")]
 #[test]
 fn an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp() {
@@ -2440,6 +2472,41 @@ fn an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp() {
                      lane from {free}"
                 );
             }
+        }
+        // The contrast: the unmute ramp ends on a block's last sample with a move owed, and the
+        // offsets write lands at the next entry, where the move is due.
+        let window = 1_200_u32.div_ceil(quantum) * quantum;
+        let due = |ramp: u32| {
+            let (out, entries) = acted(
+                &model,
+                quantum,
+                FRAMES,
+                &[
+                    Act {
+                        mute: Some((Both, false, window)),
+                        ..act(0)
+                    },
+                    Act {
+                        offsets: Some((-6.0, ramp)),
+                        ..act(u64::from(window))
+                    },
+                ],
+            );
+            assert_eq!(
+                entries,
+                [0, u64::from(window)],
+                "quantum {quantum}: each act lands at its own entry"
+            );
+            out
+        };
+        let (short, long) = (due(1), due(480));
+        let w = window as usize;
+        for plane in 0..2 {
+            assert_eq!(
+                first_difference(&long[plane][w..], &short[plane][w..]).map(|at| at + w),
+                None,
+                "quantum {quantum}: plane {plane}: the move due at {w} replaces the jump's ramp"
+            );
         }
     }
 }
