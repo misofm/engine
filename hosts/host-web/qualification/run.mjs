@@ -1632,6 +1632,12 @@ function suspendResumeFailureProofs() {
     renderAllocations: 0,
   });
   const green = () => ({ cycles: Array.from({ length: suspendResumeCycles }, (_, index) => cycle(index)) });
+  const last = suspendResumeCycles - 1;
+  const wedgedAt = {
+    suspend: `suspend the first segment's suspend (suspend-resume cycle ${last})`,
+    suspended: `suspended the first segment's suspend (suspend-resume cycle ${last})`,
+    again: `resume suspend-resume cycle ${last} again (click)`,
+  };
   const lastCycle = (change) => {
     const run = green();
     Object.assign(run.cycles[run.cycles.length - 1], change);
@@ -1652,16 +1658,34 @@ function suspendResumeFailureProofs() {
       ["resume-render"]],
     ["render result", lastCycle({ resumed: { ...cycle(0).resumed, lastResult: 6 } }), ["resume-render"]],
     ["stalled", lastCycle({ stall: { full: true } }), ["stall"]],
-    // Issue #2353: a wedged cycle is held to the steps it reached and no further.
-    ["wedged in the page", lastCycle({
-      wedge: { by: "page", awaiting: "suspend the first segment's suspend" }, suspended: null, resumed: null, capturePeak: null,
+    // Issue #2353: a wedged cycle is held to every check whose field it filled, and no further.
+    ["wedged at the first suspend", lastCycle({
+      wedge: { by: "page", awaiting: wedgedAt.suspend }, suspended: null, resumed: null, capturePeak: null,
     }), ["wedge"]],
+    ["wedged at the first suspend, empty first segment", lastCycle({
+      wedge: { by: "page", awaiting: wedgedAt.suspend }, quantaAtSuspendCall: "0", suspended: null, resumed: null,
+      capturePeak: null,
+    }), ["wedge", "first-segment"]],
+    ["wedged at the second click, not suspended", lastCycle({
+      wedge: { by: "page", awaiting: wedgedAt.again }, suspended: { ...cycle(0).suspended, state: "running" },
+      resumed: null, capturePeak: null,
+    }), ["wedge", "suspended"]],
     ["wedged in the page, context running", lastCycle({
-      wedge: { by: "page", awaiting: "resume the first click" }, contextStateBeforeBoot: "running", quantaAtSuspendCall: null,
+      wedge: { by: "page", awaiting: wedgedAt.suspended }, contextStateBeforeBoot: "running",
       suspended: null, resumed: null, capturePeak: null,
     }), ["wedge", "context"]],
-    ["wedged in the page at the close", lastCycle({ wedge: { by: "page", awaiting: "await close" } }), ["wedge"]],
+    // A timeout the evidence does not cover is no wedge: the cycle throws it, and a record that
+    // names one anyway is a gated failure.
+    ["a close timeout recorded as a wedge", lastCycle({
+      wedge: { by: "page", awaiting: `await close (suspend-resume cycle ${suspendResumeCycles - 1})` },
+    }), ["wedge", "wedge-step"]],
+    ["a first-segment stall recorded as a wedge", lastCycle({
+      wedge: { by: "page", awaiting: `render suspend-resume cycle ${suspendResumeCycles - 1} first` },
+      quantaAtSuspendCall: null, suspended: null, resumed: null, capturePeak: null,
+    }), ["wedge", "wedge-step"]],
     ["wedged by the harness", lastCycle(harnessWedgedCycle(suspendResumeCycles - 1, { by: "harness" }, 1)), ["wedge"]],
+    ["every cycle wedged", { cycles: green().cycles.map((each) => harnessWedgedCycle(each.cycle, { by: "harness" }, 1)) },
+      ["wedge-all", "wedge"]],
     ["silent capture", lastCycle({ capturePeak: 0 }), ["capture"]],
     ["capture at the floor", lastCycle({ capturePeak: 0.01 }), ["capture"]],
     ["NaN capture", lastCycle({ capturePeak: Number.NaN }), ["capture"]],
@@ -2106,12 +2130,22 @@ function harnessWedgedCycle(cycle, wedge, clicks) {
 /// page that stops after the cycle's first click is the cycle's `wedge` (`by: "harness"`, with what
 /// the page last said it awaited), the browser is closed, and the next cycle runs on a new page in a
 /// new browser: the row keeps every cycle and the job does not hang on one. A page that stops
-/// before the cycle's first click, or any other failure, fails the leg by name. Returns the cycles
-/// and the page errors the last page holds that the leg's first read did not.
+/// before the cycle's first click, or any other failure, fails the leg by name. The page's error list
+/// is read after every cycle it finishes, so a page the harness later abandons keeps nothing back.
+/// Returns the cycles and the window errors the leg's first read did not see.
 async function runSuspendResumeCycles(label, engine, launchOptions, origin, sdkEnabled, browsers, first, sink) {
   let current = first;
   let specifier = qualificationModule(sdkEnabled);
   const cycles = [];
+  const windowErrors = [];
+  const readErrors = async (cycle) => {
+    const errorRead = await readPageErrors(current.page);
+    if (errorRead.kind !== "read") {
+      throw new Error(`${label}: page-errors: the error read after suspend-resume cycle ${cycle} ${errorRead.kind === "timeout" ? "was not answered within 10 s" : `failed: ${errorRead.error?.message ?? String(errorRead.error)}`}; page diagnostics: ${sink.diagnostics.join("; ")}`);
+    }
+    windowErrors.push(...errorRead.list.slice(current.windowErrorsRead));
+    current.windowErrorsRead = errorRead.list.length;
+  };
   for (let cycle = 0; cycle < qualificationConstants.suspendResumeCycles; cycle += 1) {
     const outcome = await runSuspendResumeCycleOnPage(current, cycle, specifier);
     const where = `${label}: suspend-resume cycle ${cycle}`;
@@ -2119,6 +2153,7 @@ async function runSuspendResumeCycles(label, engine, launchOptions, origin, sdkE
       gate(label, "browser-execution", outcome.value?.qualificationError === undefined,
         `suspend-resume cycle ${cycle}: ${JSON.stringify(outcome.value?.qualificationError)}${sink.diagnostics.length === 0 ? "" : `; ${sink.diagnostics.join("; ")}`}`);
       cycles.push({ ...outcome.value, clicks: outcome.clicks });
+      await readErrors(cycle);
       continue;
     }
     if (outcome.kind !== "wedged" || outcome.clicks === 0) {
@@ -2139,12 +2174,10 @@ async function runSuspendResumeCycles(label, engine, launchOptions, origin, sdkE
     process.stdout.write(`${where}: the page stopped after ${outcome.clicks} of 2 clicks (${outcome.reason}; ${current.watch.describe()}); recorded as the cycle's wedge, and the next cycle runs in a new browser\n`);
     await browsers.current.close();
     browsers.current = await engine.launch(launchOptions);
-    current = await openQualificationPage(browsers.current, origin, sink);
+    current = { ...(await openQualificationPage(browsers.current, origin, sink)), windowErrorsRead: 0 };
     specifier = qualificationModule(false);
   }
-  const errorRead = await readPageErrors(current.page);
-  if (errorRead.kind === "read" && current === first) errorRead.list = errorRead.list.slice(first.windowErrorsRead);
-  return { cycles, errorRead };
+  return { cycles, windowErrors };
 }
 
 async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, sdkEnabled, protocolReference, structuralReference) {
@@ -2246,11 +2279,8 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
       const row = await runSuspendResumeCycles(label, engine, launchOptions, origin, sdkEnabled, browsers,
         { page, watch, windowErrorsRead: errorRead.list.length }, sink);
       result.suspendResume = { cycles: row.cycles };
-      if (row.errorRead.kind !== "read") {
-        throw new Error(`${label}: page-errors: the error read after the suspend-resume cycles ${row.errorRead.kind === "timeout" ? "was not answered within 10 s" : `failed: ${row.errorRead.error?.message ?? String(row.errorRead.error)}`}; page diagnostics: ${diagnostics.join("; ")}`);
-      }
       result.pageErrors.playwright = [...pageErrors];
-      result.pageErrors.window.push(...row.errorRead.list);
+      result.pageErrors.window.push(...row.windowErrors);
       result.renderAllocations.push(...row.cycles.filter((cycle) => cycle.renderAllocations !== null)
         .map((cycle) => ({ workload: `suspend-resume-${cycle.cycle}`, count: cycle.renderAllocations })));
     }

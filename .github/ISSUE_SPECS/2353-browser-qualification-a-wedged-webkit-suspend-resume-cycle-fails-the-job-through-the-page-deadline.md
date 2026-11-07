@@ -77,11 +77,14 @@ the page when it stops.
    two-click plan (`suspendResumeCycleClickPlan`). A page that stops can lose only the cycle in
    flight: every earlier row and cycle has already returned.
 3. **A wedge is bounded and recorded, never a hang.**
-   - In the page: a timeout from the cycle's first click on (a resume that never resolves, a
-     suspend that never settles, a first segment that never renders, a dispose or close that never
-     returns) is the cycle's `wedge` (`by: "page"`, the step and the message). The cycle still
-     reads its render-allocation count, disposes its host and closes its context, each bounded.
-     A timeout before the first click still fails the leg, as before.
+   - In the page (narrowed in attempt 2): only a timeout at a step the evidence covers is the
+     cycle's `wedge` (`by: "page"`, the step and the message). The covered steps
+     (`wedgeStepCovered`) are the first segment's `suspend()` and its suspended poll (CI's three
+     wedges, and #2245's page-hanging `suspend()`), and the second resume's click (#2245's ruled
+     stop after the second resume). The cycle then still reads its render-allocation count,
+     disposes its host and closes its context. Every other timeout throws and fails the leg, as on
+     base: the first click, the first segment's render wait, the allocation read, the dispose and
+     the close.
    - In the harness: once a cycle's first control is clicked, a page that logs nothing (no step,
      no heartbeat) for `SUSPEND_RESUME_SILENCE_MS` = 20 s, or runs one cycle past
      `SUSPEND_RESUME_CYCLE_DEADLINE_MS` = 120 s, is the cycle's `wedge` (`by: "harness"`, with the
@@ -89,12 +92,69 @@ the page when it stops.
      on a new page in a new browser. A page that stops before the cycle's first click fails the
      leg by name. A healthy cycle takes about 3 s, a stalled one about 13 s (measured on WebKit).
 4. **`wedge` is a row check outside the setup checks.** `suspendResumeFailures` adds `wedge` and
-   holds a wedged cycle to nothing past the steps it reached (a page record still to `context`).
-   So Chromium fails on it, and WebKit reports it (owner ruling 2026-11-05). The per-cycle host
+   holds a wedged page record to every check whose field it filled (`null` is a step it did not
+   reach); a harness record has no field to hold. So Chromium fails on a wedge, and WebKit reports
+   it (owner ruling 2026-11-05). Two setup checks, gated on both browsers, bound the exemption
+   (attempt 2): `wedge-step`, a page record naming a step the evidence does not cover, and
+   `wedge-all`, every cycle of the leg wedged, so the setup checks were held by no cycle. CI and
+   the local runs saw at most one wedge per leg. The per-cycle host
    mode, render-allocation count and resumes are held by the `instance-mode`,
    `render-allocations` and `resume-clicks` gates as before, from the cycle's own record; a cycle
    whose page the harness lost has none, and only its `wedge` speaks for it.
 5. No engine change: the engine is not implicated (the #2245 no-engine repro stands).
+
+## Attempt record
+
+- **Attempt 1** (`fa09bb840`, `7c53fb4eb`): **FAIL**, one MAJOR. The diagnosis, the step and
+  heartbeat diagnostics, the per-cycle evaluates and the fresh-browser recovery were confirmed,
+  and so were the red and green logs. MAJOR: the WebKit exemption was wider than the ruling and
+  the evidence, and uncapped. Every timeout after the first click became a `wedge`, including the
+  first-segment render stall and the allocation-read, dispose and close timeouts, and a leg whose
+  10 cycles all wedged returned only `["wedge"]`, so WebKit gated nothing. MINORs: hold each
+  check whose field a wedged cycle filled, not only `context`; read the page errors after each
+  cycle, so an abandoned page loses none; arm the heartbeat before a fresh page's import; the
+  "wedged in the page at the close" table row was redundant.
+- **Attempt 2**: the decision above as narrowed (items 3 and 4); every attempt-1 finding addressed.
+  Evidence below.
+
+## Evidence (attempt 2)
+
+Tree: this branch after merging `origin/main` (`9dacfad89`) plus the attempt-2 change; the same
+local stack and the CI command as attempt 1, one run each, single leg. The scratch mutations are at
+cycle 3. *frozen* is unchanged. *resume* now targets the second click, the covered step (attempt
+1's first-click variant is now a hard failure by design). *norender* is new: the first segment
+never reports a rendered quantum.
+
+| Mutation | Browser | Result |
+|---|---|---|
+| frozen | WebKit | **passes** (129 s): harness wedge at `"suspend the first segment's suspend (suspend-resume cycle 3)"`; cycles 4 to 9 ran in a new browser; `1 wedged`, reported |
+| frozen | Chromium | **fails** (65 s): `chromium single: suspend-resume: wedge` |
+| resume | WebKit | **passes** (105 s): the WebKit page stopped its event loop inside the unresolved second resume (no heartbeat for 20 s), so the harness recorded the wedge, at `"resume suspend-resume cycle 3 again (click)"` |
+| resume | Chromium | **fails** (52 s): `suspend-resume: wedge`, the page's own record (`resume timeout at suspend-resume cycle 3 again (click) after 10000 ms`) |
+| norender | WebKit | **fails** (90 s): `webkit single: browser-execution: suspend-resume cycle 3: {"message":"stall timeout at suspend-resume cycle 3 first after 10000 ms: ...` (an uncovered step throws, as on base) |
+
+- `--self-test-mutations` table, new and changed rows. `wedged at the first suspend` gives
+  `["wedge"]`. `..., empty first segment` gives `["wedge", "first-segment"]`.
+  `wedged at the second click, not suspended` gives `["wedge", "suspended"]`.
+  `wedged in the page, context running` gives `["wedge", "context"]`. Both
+  `a close timeout recorded as a wedge` and `a first-segment stall recorded as a wedge` give
+  `["wedge", "wedge-step"]`. `wedged by the harness` gives `["wedge"]`. `every cycle wedged` gives
+  `["wedge-all", "wedge"]`. The redundant "at the close" row became the close-timeout row.
+- Self-mutations (scratch, reverted; each run of the table before any browser starts):
+  - dropping `failures.add("wedge")` turns `wedged at the first suspend` red;
+  - holding a wedged record to nothing (`reached` always false) turns `..., empty first segment` red;
+  - accepting every step in `wedgeStepCovered` turns `a close timeout recorded as a wedge` red;
+  - dropping the `wedge-all` check turns `every cycle wedged` red.
+- Test value of the new rows:
+  - `wedge-step` defends against a cycle or record path that lets an uncovered timeout through as a
+    reported wedge on WebKit;
+  - `wedge-all` defends against a WebKit leg whose every cycle wedged and so held no setup check;
+  - the filled-field rows defend against a wedged cycle whose reached steps go unchecked.
+- Page errors are now read after every completed cycle (`readErrors`), so a page the harness later
+  abandons keeps none back. The heartbeat is armed at the top of `runSuspendResumeCyclePage`, so
+  the 20 s silence bound also covers a fresh page's import and fetch.
+- Gates: `scripts/test-web-audioworklet.sh` passes; `scripts/check-workspace-policy.sh` gives
+  `workspace policy: ok`; `--self-test-mutations` passes on the two mutated WebKit runs above.
 
 ## Evidence (attempt 1)
 

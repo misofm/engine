@@ -1337,13 +1337,15 @@ export const HEARTBEAT_MESSAGE = "qualification heartbeat";
 const HEARTBEAT_INTERVAL_MS = 1_000;
 let awaitedStep = null;
 let heartbeat = null;
+function armHeartbeat() {
+  if (heartbeat !== null) return;
+  heartbeat = setInterval(() => console.debug(HEARTBEAT_MESSAGE), HEARTBEAT_INTERVAL_MS);
+  // The hermetic boot-contract test runs these waits in Node, where an armed interval would keep
+  // the process alive; a browser's timer id is a number and has no `unref`.
+  heartbeat.unref?.();
+}
 function awaiting(step) {
-  if (heartbeat === null) {
-    heartbeat = setInterval(() => console.debug(HEARTBEAT_MESSAGE), HEARTBEAT_INTERVAL_MS);
-    // The hermetic boot-contract test runs these waits in Node, where an armed interval would keep
-    // the process alive; a browser's timer id is a number and has no `unref`.
-    heartbeat.unref?.();
-  }
+  armHeartbeat();
   if (step === awaitedStep) return;
   awaitedStep = step;
   console.debug(`${AWAITING_PREFIX}${step}`);
@@ -1825,15 +1827,28 @@ function suspendResumeLabel(cycle, which) {
   return `suspend-resume cycle ${cycle} ${which}`;
 }
 
-/// Issue #2353: the record of a cycle that timed out from its first click on, or `null` for any
-/// other error, which the cycle throws. A bounded wait's timeout carries the step it timed out at
-/// (`timeoutError`), and a stall timeout its signature too. Linux WebKit's audio output can leave
-/// any wait of the resume path unresolved (#2245: a resume whose render never restarts, a
-/// `suspend()` that never settles), so a timeout there is the row's `wedge`: recorded in the cycle,
-/// which goes on to dispose its host and close its context, and reported, not gated, on WebKit
-/// (owner ruling 2026-11-05).
+/// Issue #2353: the steps of a cycle a page timeout may stop as the cycle's `wedge`, the ones the
+/// evidence covers: the first segment's `suspend()` and its suspended poll (#2245: a WebKit
+/// `suspend()` on a stalled output hangs the page; CI's three wedges stopped there), and the second
+/// resume's click (#2245's stall after the second resume, the ruled row). Every other timeout of a
+/// cycle (the first click, the first segment's render, the allocation read, the dispose, the close)
+/// fails the leg, as before #2353.
+const WEDGE_STEPS = Object.freeze([
+  /^suspend the first segment's suspend \(suspend-resume cycle \d+\)$/,
+  /^suspended the first segment's suspend \(suspend-resume cycle \d+\)$/,
+  /^resume suspend-resume cycle \d+ again \(click\)$/,
+]);
+export function wedgeStepCovered(step) {
+  return typeof step === "string" && WEDGE_STEPS.some((pattern) => pattern.test(step));
+}
+
+/// Issue #2353: the record of a cycle stopped at a covered step (`wedgeStepCovered`), or `null` for
+/// any other error, which the cycle throws. A bounded wait's timeout carries the step it timed out at
+/// (`timeoutError`). A wedge is recorded in the cycle, which goes on to read its allocation count,
+/// dispose its host and close its context, and is reported, not gated, on WebKit (owner ruling
+/// 2026-11-05).
 function wedgeOf(error) {
-  if (typeof error?.awaiting !== "string") return null;
+  if (!wedgeStepCovered(error?.awaiting)) return null;
   return { by: "page", awaiting: error.awaiting, message: error.message, stallSignature: error.stallSignature ?? null };
 }
 
@@ -1846,8 +1861,9 @@ function wedgeOf(error) {
 /// the wait. After a good resume they were all rendered after it, so the capture check proves that
 /// audio is present there. It does not detect a stall: a stalled context's analyser keeps the audio
 /// from before the suspend (a WebKit stall read a peak of 0.462). The clock, render and stall checks
-/// catch a stall. A timeout before the first click throws; from the first click on it is the
-/// cycle's `wedge` (`wedgeOf`), and the fields the cycle did not reach stay `null`.
+/// catch a stall. A timeout at a covered step is the cycle's `wedge` (`wedgeOf`): the cycle skips to
+/// its allocation read, dispose and close, and the fields it did not reach stay `null`. Any other
+/// timeout or error throws, the allocation read, dispose and close included.
 async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
   const step = (what) => `${what} (suspend-resume cycle ${cycle})`;
   const context = new AudioContext({ sampleRate: SAMPLE_RATE });
@@ -1981,6 +1997,8 @@ async function runSuspendResumeCycle(createHost, sessionDocument, cycle) {
 /// and runs the next cycle in a new browser. Returns the cycle record (`runSuspendResumeCycle`),
 /// with the mode its host reported and the page's resumes during the cycle (`resumes`).
 export async function runSuspendResumeCyclePage(cycle) {
+  // A fresh page's import and fetch run before the first wait: the heartbeat covers them too.
+  armHeartbeat();
   const resumeRecord = countResumes();
   const before = { ...resumeRecord };
   const [{ createMisoAudioWorkletHost }, sessionResponse] = await Promise.all([
@@ -2010,43 +2028,54 @@ export async function runSuspendResumeCyclePage(cycle) {
 /// the second resume the context was not "running", its clock did not move, or the engine did not
 /// render `SUSPEND_RESUME_AFTER_QUANTA` more quanta with result 0), `stall` (the wait after the
 /// second resume timed out; the cycle carries its stall signature), and `capture` (the output after
-/// the resume was silent or not finite). `wedge` (#2353): a wait from the cycle's first click on did
-/// not settle within its bound (the page's own record, `wedgeOf`), or the page stopped and the
-/// harness recorded the cycle (`by: "harness"`, with the step the page last said it awaited). A
-/// wedged cycle is held to nothing past the steps it reached: a page record still to `context`, a
-/// harness record to nothing else. `SUSPEND_RESUME_SETUP_CHECKS` are the checks of the boot and the
-/// first segment; the others are the checks of the second resume, and `wedge`.
-export const SUSPEND_RESUME_SETUP_CHECKS = Object.freeze(["result", "count", "context", "first-segment", "suspended"]);
+/// the resume was silent or not finite). Issue #2353: `wedge`, a cycle stopped at a covered step
+/// (`wedgeStepCovered`, the page's record) or whose page stopped after its first click (`by:
+/// "harness"`, with the step the page last said it awaited); `wedge-step`, a page record that names
+/// a step the evidence does not cover; `wedge-all`, every cycle wedged, so no cycle held the setup
+/// checks. A wedged page record is held to every check whose field it filled (`null` is a step it
+/// did not reach); a harness record has no field to hold. `SUSPEND_RESUME_SETUP_CHECKS` are the
+/// checks of the boot and the first segment, and the two wedge-integrity checks; the others are the
+/// checks of the second resume, and `wedge`.
+export const SUSPEND_RESUME_SETUP_CHECKS = Object.freeze([
+  "result", "count", "context", "first-segment", "suspended", "wedge-step", "wedge-all",
+]);
 
 export function suspendResumeFailures(run) {
   if (run === null || typeof run !== "object" || !Array.isArray(run.cycles)) return ["result"];
   const failures = new Set();
   if (run.cycles.length !== SUSPEND_RESUME_CYCLES) failures.add("count");
   const quanta = (value) => (typeof value === "string" && /^[0-9]+$/.test(value) ? BigInt(value) : null);
+  if (run.cycles.length > 0 && run.cycles.every((cycle) => cycle?.wedge !== null)) failures.add("wedge-all");
   for (const cycle of run.cycles) {
     const wedged = cycle?.wedge !== null;
     if (wedged) {
       failures.add("wedge");
       if (cycle?.wedge?.by !== "page") continue;
+      if (!wedgeStepCovered(cycle.wedge.awaiting)) failures.add("wedge-step");
     }
+    const reached = (field) => !wedged || (cycle?.[field] !== null && cycle?.[field] !== undefined);
     if (cycle?.contextStateBeforeBoot !== "suspended" || cycle?.meterLeaseResult !== RESULT_OK) {
       failures.add("context");
     }
-    if (wedged) continue;
     const first = quanta(cycle?.quantaAtSuspendCall);
-    if (first === null || first < 1n) failures.add("first-segment");
+    if (reached("quantaAtSuspendCall") && (first === null || first < 1n)) failures.add("first-segment");
     const suspendedQuanta = quanta(cycle?.suspended?.renderedQuanta);
     const resumedQuanta = quanta(cycle?.resumed?.renderedQuanta);
-    if (cycle?.suspended?.state !== "suspended" || suspendedQuanta === null) failures.add("suspended");
-    if (cycle?.resumed?.state !== "running") failures.add("resume-state");
-    if (cycle?.stall !== null) failures.add("stall");
-    if (!(cycle?.resumed?.currentTime > cycle?.suspended?.currentTime)) failures.add("resume-clock");
-    if (resumedQuanta === null || suspendedQuanta === null
-        || resumedQuanta < suspendedQuanta + SUSPEND_RESUME_AFTER_QUANTA
-        || cycle?.resumed?.lastResult !== RESULT_OK) {
-      failures.add("resume-render");
+    if (reached("suspended") && (cycle?.suspended?.state !== "suspended" || suspendedQuanta === null)) {
+      failures.add("suspended");
     }
-    if (!(Number.isFinite(cycle?.capturePeak) && cycle.capturePeak > SUSPEND_RESUME_PEAK_FLOOR)) {
+    if (reached("resumed")) {
+      if (cycle?.resumed?.state !== "running") failures.add("resume-state");
+      if (cycle?.stall !== null) failures.add("stall");
+      if (!(cycle?.resumed?.currentTime > cycle?.suspended?.currentTime)) failures.add("resume-clock");
+      if (resumedQuanta === null || suspendedQuanta === null
+          || resumedQuanta < suspendedQuanta + SUSPEND_RESUME_AFTER_QUANTA
+          || cycle?.resumed?.lastResult !== RESULT_OK) {
+        failures.add("resume-render");
+      }
+    }
+    if (reached("capturePeak")
+        && !(Number.isFinite(cycle?.capturePeak) && cycle.capturePeak > SUSPEND_RESUME_PEAK_FLOOR)) {
       failures.add("capture");
     }
   }
