@@ -464,8 +464,10 @@ the result code authoritative. Now a refused `render_f32_planar` or `plan_prepar
 `RESULT_BUSY` and writes no diagnostic, so the plan's `last_error` always names the last call that
 held the plan, and one code means "another call holds this handle" on the plan and the session
 alike. `render.busy` (plan diagnostic 9) is retired; no symbol, struct, size, feature bit or
-`ABI_VERSION` changes. A host that matched `RENDER_REJECTED` for a concurrent render-side call now
-sees `BUSY`, which only a host that breaks the plan's thread rule receives. The gate:
+`ABI_VERSION` changes. It is an in-place V1 amendment (prelaunch V1): only a host that breaks the
+plan's thread rule receives the refusal, and a host built against 0.10.4's header sees `BUSY` as a
+code it does not know, which the growth rule below requires it to treat as a failure. That is the
+disposition `RENDER_REJECTED` gave the refusal, so no `ABI_VERSION` bump is needed. The gate:
 `capi` `session_seek::a_render_side_call_during_render_is_refused_not_raced` (a held claim refuses
 both calls with `BUSY` and leaves the holder's `render.time.discontinuity`); the claim itself is
 unchanged, so `handle_claim_loom` covers it as before.

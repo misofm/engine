@@ -62,6 +62,20 @@ mention `render.busy` as 0.10.4 history and stay as written.
 - The engine handle's `RefCell` diagnostic under concurrent calls (the other #2276 follow-up).
 - The render path's arithmetic; `hosts/host-web` (its render path has no claim word).
 
+## Release note
+If this merges before release #2253 (0.10.5) pins the engine, that release's "Upgrading from
+0.10.4" section in `sdk/README.md` must carry this bullet:
+
+> Changed: `miso_engine_v1_render_f32_planar` and `miso_engine_v1_plan_prepare_seek` refuse a
+> concurrent call on the same plan with `MISO_ENGINE_V1_BUSY` and write no diagnostic (issue
+> #2293). In 0.10.4 they returned `MISO_ENGINE_V1_RENDER_REJECTED` with `render.busy`, which is
+> retired. The plan's last error now stays the one the last call that held the plan left. No
+> symbol, struct, size, feature bit or `ABI_VERSION` changes.
+
+#2276's added result code needs the same treatment: the same section must also carry its "Added:
+`MISO_ENGINE_V1_BUSY`" bullet (a session call made while another holds the session is refused
+with it), which #2276's spec does not record.
+
 ## Gates
 - `session_seek::a_render_side_call_during_render_is_refused_not_raced`, amended and red on base:
   after a refused render leaves `render.time.discontinuity`, a held claim refuses both render-side
@@ -139,3 +153,18 @@ the plan without taking `render_busy`; refuse-and-leak as `session_destroy` does
 shape); the engine handle's `RefCell` diagnostic under concurrent calls. The next release's SDK
 upgrade notes should say a concurrent render-side call now returns `BUSY` instead of
 `RENDER_REJECTED` with `render.busy`.
+
+## Verdict (attempt 1)
+**PASS**, with two minors folded on the branch. The reviewer confirmed that only the claim holder
+writes the plan's diagnostic at head, and that the header's added `render.fp_environment.invalid`
+is a correction of an omission, kept.
+
+The minors, folded:
+1. *Release note*: the "Release note" section above, with the 0.10.5 "Changed" bullet conditional
+   on merging before #2253's pin, and #2276's "Added `BUSY`" bullet noted as needing the same.
+2. *ABI disposition*: `docs/C_ABI_V1_QUALIFICATION.md`'s #2293 paragraph now says this is an
+   in-place V1 amendment (prelaunch V1): a host built against 0.10.4's header sees `BUSY` as an
+   unknown code, which the growth rule requires it to treat as a failure, the same disposition
+   `RENDER_REJECTED` gave it, so no `ABI_VERSION` bump is needed.
+
+The `plan_destroy` follow-up is filed by the coordinator.
