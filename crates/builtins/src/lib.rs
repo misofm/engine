@@ -7627,7 +7627,9 @@ mod lane_state {
     /// four keeps the unmute ramp's hold (for the import: if it copies the phase verbatim, as it
     /// copied four flags before #2280): the gain is then held, every timed fader move only
     /// remembers its gain, and the rest claim declines the lane. Red, too, if an import or a block
-    /// settles an unmute ramp that still runs, so a timed move fights the unmute.
+    /// settles an unmute ramp that still runs, so a timed move fights the unmute. Red, too (issue
+    /// #2354), if a mute during an unmute ramp is taken for a repeat because the gain is already
+    /// held: the strip then stays audible while the model says muted.
     #[test]
     fn an_unmute_holds_the_gain_only_while_its_countdown_runs() {
         let ended = FaderChannelState {
@@ -7743,6 +7745,32 @@ mod lane_state {
                 Some(true),
                 "{backend:?}: an unmute ramp outlives a block"
             );
+            // Issue #2354: a mute in the middle of an unmute ramp lands, with no window and with
+            // one: the lane reads muted, and once the mute has landed it renders exact `+0.0`.
+            for window in [0, 16] {
+                bank.set_mute(0, BuiltinLaneSelector::Both, true, 0)
+                    .expect("lane");
+                bank.set_mute(0, BuiltinLaneSelector::Both, false, FRAMES as u32)
+                    .expect("lane");
+                bank.set_mute(0, BuiltinLaneSelector::Both, true, window)
+                    .expect("lane");
+                for channel in 0..2 {
+                    assert_eq!(
+                        bank.is_muted(0, channel),
+                        Some(true),
+                        "{backend:?}: a mute over {window} frames during an unmute ramp"
+                    );
+                }
+                if window > 0 {
+                    run_fader(&mut bank, 0, 1, 1.0);
+                }
+                assert!(
+                    run_fader(&mut bank, 0, 1, 1.0)
+                        .iter()
+                        .all(|&word| word == 0),
+                    "{backend:?}: a mute over {window} frames during an unmute ramp renders +0.0"
+                );
+            }
         }
     }
 
@@ -7758,7 +7786,8 @@ mod lane_state {
     /// stays silent for good), if a fire that stays muted keeps the arm (a later unmute then only
     /// retargets a fire that never comes, and the lane stays silent), or if it leaves the lane
     /// anything but muted (the readback then reports a muted strip unmuted, and the next mute mask
-    /// a peer's mute re-derives lets the lane play).
+    /// a peer's mute re-derives lets the lane play), or if a mute during an opening fire's fade-in
+    /// is dropped (issue #2354: the fading-in strip then stays audible while the model says muted).
     #[test]
     fn an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset() {
         let both = BuiltinLaneSelector::Both;
@@ -7803,6 +7832,32 @@ mod lane_state {
                 Some(true),
                 "{backend:?}: an opening fire holds the gain while its fade-in runs"
             );
+            // Issue #2354: a mute during an opening fire's fade-in lands, with no window and with
+            // one, as a mute during an unmute ramp does.
+            for window in [0, 16] {
+                if window > 0 {
+                    bank.set_mute(0, both, false, 0).expect("lane");
+                    bank.arm_fade_in(0).expect("lane");
+                    bank.fire_fade_in(0, 64);
+                }
+                bank.set_mute(0, both, true, window).expect("lane");
+                for channel in 0..2 {
+                    assert_eq!(
+                        bank.is_muted(0, channel),
+                        Some(true),
+                        "{backend:?}: a mute over {window} frames during a fade-in"
+                    );
+                }
+                if window > 0 {
+                    run_fader(&mut bank, 0, 1, 1.0);
+                }
+                assert!(
+                    run_fader(&mut bank, 0, 1, 1.0)
+                        .iter()
+                        .all(|&word| word == 0),
+                    "{backend:?}: a mute over {window} frames during a fade-in renders +0.0"
+                );
+            }
             // A lane armed muted, whose fire stays muted: the fire ends the arm, so a later
             // unmute opens the lane.
             bank.set_mute(1, both, true, 0).expect("lane");
