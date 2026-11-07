@@ -24,5 +24,10 @@ conformance.workspace = true
 # lists), which only `test-support` builds.
 protocol = { workspace = true, features = ["test-support"] }
 
+# Issue #2359: the token lease model (`token_lease_loom`) runs under `--cfg loom`, in this crate's
+# own test build alone (`cfg(all(loom, test))`); a dependent's loom build keeps `std`'s atomics.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "=0.7.2"
+
 [lints]
 workspace = true

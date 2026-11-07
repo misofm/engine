@@ -3084,8 +3084,8 @@ struct InputSectionState {
 /// predecessor's lane to the successor's (issue #1277 D7).
 ///
 /// Plain data, fixed size, no heap: per channel the gain in use, the ramp's target and per-sample
-/// step, the authoritative countdown, the gain the fader holds independent of mute, and the mute
-/// flag, and whether a mute ramp holds the gain (#1638 D2). In-memory state handed across a plan
+/// step, the authoritative countdown, the gain the fader holds independent of mute, and the
+/// channel's mute and arm phase (#1638 D2, #1288 D2, #2280). In-memory state handed across a plan
 /// replacement, never persisted (AGENTS.md, R6b).
 #[derive(Clone, Copy, Debug)]
 pub struct FaderLaneState {
@@ -3104,14 +3104,77 @@ struct FaderChannelState {
     remaining: u32,
     /// The fader gain independent of mute, which an unmute retargets back to.
     fader_gain: f32,
-    /// Whether the lane is muted.
-    muted: bool,
-    /// Whether a mute or unmute ramp is in flight (issue #1638 D2).
-    mute_ramp: bool,
-    /// Whether the lane waits, muted, for the fade-in a plan swap armed (issue #1288 D2).
-    armed: bool,
-    /// Whether the armed fade-in's fire unmutes the lane (issue #2080 R1).
-    opens: bool,
+    /// The channel's mute and arm phase. [`FaderRampStage::import_lane`] re-derives it with the
+    /// countdown ([`FaderPhase::at_countdown`]), so an unmute ramp with no frames left imports as
+    /// the open lane its countdown's end makes it.
+    phase: FaderPhase,
+}
+
+/// One fader lane's mute and arm phase on one channel (issues #1638 D2, #1288 D2, #2080 R1,
+/// #2280): one byte beside the lane's ramp words, in place of four parallel flags whose
+/// combinations no transition produces (`armed` without a mute, an arm's target without an arm,
+/// a mute ramp with no countdown).
+///
+/// The phase is control bookkeeping. The ramp itself stays in the branch-free lane words and the
+/// `u32` countdown [`FaderRampStage::remaining`], which the phase never replaces: a nonzero
+/// countdown is a gain ramp on an [`Self::Open`] lane, the unmute ramp of an [`Self::Unmuting`]
+/// one, and the mute ramp toward `+0.0` of a muted one (a muted lane's countdown is set only by its
+/// own mute change, because its gain is held).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FaderPhase {
+    /// Unmuted, and the gain is free: a fader move retargets it.
+    Open,
+    /// Unmuted, with an unmute ramp in flight: the gain is held until the countdown ends, when the
+    /// lane is [`Self::Open`] ([`Self::settled`]).
+    Unmuting,
+    /// Muted, the gain held. A nonzero countdown is the mute ramp toward `+0.0`.
+    Muted,
+    /// Muted and held at `+0.0` until the fire of the fade-in a plan swap armed (issue #1288 D2).
+    /// Only [`FaderRampStage::fire_fade_in`] ends it (a lane move or carry moves it with the
+    /// lane); a mute or unmute record before the fire retargets `opens` and keeps the arm (#2080
+    /// R1).
+    Armed {
+        /// Whether the fire unmutes the lane: the model's mute state, inverted, while the stage
+        /// holds the lane at `+0.0`.
+        opens: bool,
+    },
+}
+
+const _: () = assert!(core::mem::size_of::<FaderPhase>() == 1);
+
+impl FaderPhase {
+    /// The phase of a lane prepared muted or not.
+    const fn prepared(muted: bool) -> Self {
+        if muted { Self::Muted } else { Self::Open }
+    }
+
+    /// Whether the lane is muted: its mute mask bit, and the target of every gain change it takes.
+    const fn muted(self) -> bool {
+        matches!(self, Self::Muted | Self::Armed { .. })
+    }
+
+    /// Whether the lane's gain is held: muted, or in an unmute ramp (#1638 D2). A held lane's
+    /// timed gain move only remembers the gain.
+    const fn gain_held(self) -> bool {
+        !matches!(self, Self::Open)
+    }
+
+    /// The phase once the lane's countdown has ended: an unmute ramp is over, so the lane is open.
+    /// Every other phase outlives its countdown.
+    const fn settled(self) -> Self {
+        match self {
+            Self::Unmuting => Self::Open,
+            other => other,
+        }
+    }
+
+    /// The phase a lane holds with `remaining` frames left in its ramp: [`Self::settled`] when
+    /// the countdown is `0`, else `self`. The countdown's end, [`FaderRampStage::reset`] and
+    /// [`FaderRampStage::import_lane`] all go through it, so no lane keeps an unmute ramp with no
+    /// frames left, which would hold its gain for good.
+    const fn at_countdown(self, remaining: u32) -> Self {
+        if remaining == 0 { self.settled() } else { self }
+    }
 }
 
 /// One matrix bank lane's whole state: what a plan swap hands from the predecessor's lane to the
@@ -3211,27 +3274,20 @@ pub(crate) struct FaderRampStage<L: Lane> {
     ramp: [GainMuteRamp<L>; 2],
     /// Each lane's fader gain, independent of mute, `[channel][lane]`.
     fader_gain: [[f32; MAX_BANK_LANES]; 2],
-    /// Each lane's mute flag, `[channel][lane]`.
-    muted: [[bool; MAX_BANK_LANES]; 2],
     /// Frames left in each lane's ramp, `[channel][lane]`.
     remaining: [[u32; MAX_BANK_LANES]; 2],
-    /// Whether a mute or unmute ramp is in flight on each lane, `[channel][lane]` (issue #1638
-    /// D2). Set by a mute change with a nonzero window; cleared in the bookkeeping step that ends
-    /// the lane's countdown, by a zero-window mute change, by a live gain retarget and by
-    /// [`Self::reset`]. While it is set, or while the lane is muted, the lane's gain is *held*: a
-    /// timed gain operation only remembers the gain.
-    mute_ramp: [[bool; MAX_BANK_LANES]; 2],
-    /// Whether each lane waits, muted, for the fade-in a plan swap armed, `[channel][lane]` (issue
-    /// #1288 D2). Set only by [`Self::arm_fade_in`] and cleared only by [`Self::fire_fade_in`]
-    /// (a lane move or carry moves it with the lane's state): a mute or unmute record before the
-    /// fire retargets [`Self::opens`] and keeps the arm (#2080 R1, the rule #2069 gave routes).
-    /// The graph's fade entry for the lane reports fired only once its fire reached this lane
-    /// (#2257), so an entry the lane has is fired exactly when this flag is clear.
-    armed: [[bool; MAX_BANK_LANES]; 2],
-    /// Whether each armed lane's fire unmutes it, `[channel][lane]` (#2080 R1): the model's mute
-    /// state of an armed lane, inverted, while the stage holds the lane at `+0.0`. Meaningless on
-    /// a lane that is not armed.
-    opens: [[bool; MAX_BANK_LANES]; 2],
+    /// Each lane's mute and arm phase, `[channel][lane]` (issues #1638 D2, #1288 D2, #2280).
+    ///
+    /// An unmute ramp ([`FaderPhase::Unmuting`]) starts only with a nonzero window and ends, as
+    /// [`FaderPhase::settled`] says, in the bookkeeping step that ends the lane's countdown, at
+    /// [`Self::reset`], at an import with no countdown, or when a live gain move or a mute takes
+    /// the lane over. An arm ([`FaderPhase::Armed`]) is set only by [`Self::arm_fade_in`] and
+    /// ended only by [`Self::fire_fade_in`] (a lane move or carry moves it with the lane's state):
+    /// a mute or unmute record before the fire retargets its `opens` and keeps the arm (#2080 R1,
+    /// the rule #2069 gave routes). The graph's fade entry for the lane reports fired only once
+    /// its fire reached this lane (#2257), so an entry the lane has is fired exactly when the
+    /// lane is not armed.
+    phase: [[FaderPhase; MAX_BANK_LANES]; 2],
 }
 
 /// Largest ramp countdown that is exact in `f32`.
@@ -3252,12 +3308,12 @@ impl<L: Lane> FaderRampStage<L> {
     fn new(lanes: &[(FaderLane, FaderLane)]) -> Self {
         let mut settled = UNIT_WORDS;
         let mut fader_gain = UNIT_WORDS;
-        let mut muted = [[false; MAX_BANK_LANES]; 2];
+        let mut phase = [[FaderPhase::Open; MAX_BANK_LANES]; 2];
         let mut flags = [[0.0_f32; MAX_BANK_LANES]; 2];
         for (lane, pair) in lanes.iter().enumerate().take(L::WIDTH) {
             for (channel, fader) in [pair.0, pair.1].into_iter().enumerate() {
                 fader_gain[channel][lane] = fader.gain;
-                muted[channel][lane] = fader.muted;
+                phase[channel][lane] = FaderPhase::prepared(fader.muted);
                 settled[channel][lane] = if fader.muted { 0.0 } else { fader.gain };
                 flags[channel][lane] = f32::from(u8::from(fader.muted));
             }
@@ -3275,11 +3331,8 @@ impl<L: Lane> FaderRampStage<L> {
         Self {
             ramp,
             fader_gain,
-            muted,
             remaining: [[0; MAX_BANK_LANES]; 2],
-            mute_ramp: [[false; MAX_BANK_LANES]; 2],
-            armed: [[false; MAX_BANK_LANES]; 2],
-            opens: [[false; MAX_BANK_LANES]; 2],
+            phase,
         }
     }
 
@@ -3287,17 +3340,21 @@ impl<L: Lane> FaderRampStage<L> {
     /// control thread before the plan is published. Both channels are armed (#2080 R1): one that
     /// is not muted becomes muted at once -- the settled exact `+0.0` a prepared mute is, its
     /// fader gain remembered -- and its fire opens it; one the session mutes stays muted and its
-    /// fire, unless a record before it unmutes the channel, ramps nowhere. Returns `true`.
+    /// fire, unless a record before it unmutes the channel, ramps nowhere. A channel already
+    /// armed keeps its arm as it is. Returns `true`.
     fn arm_fade_in(&mut self, lane: usize) -> bool {
         for channel in 0..2 {
-            let opens = if self.armed[channel][lane] {
-                self.opens[channel][lane]
-            } else {
-                !self.muted[channel][lane]
-            };
+            let phase = self.phase[channel][lane];
+            // Defensive, and unreachable from a plan: `graph::install_fade_arms` arms each lane
+            // once per plan and refuses a repeated target, so no lane is armed twice. Were one,
+            // its arm (and the fire target its records set) would stand.
+            if matches!(phase, FaderPhase::Armed { .. }) {
+                continue;
+            }
             self.mute_channel(lane, channel, true, 0);
-            self.armed[channel][lane] = true;
-            self.opens[channel][lane] = opens;
+            self.phase[channel][lane] = FaderPhase::Armed {
+                opens: !phase.muted(),
+            };
         }
         true
     }
@@ -3309,9 +3366,9 @@ impl<L: Lane> FaderRampStage<L> {
     /// armed channel that stays muted does no work; one that is not armed is not touched.
     fn fire_fade_in(&mut self, lane: usize, ramp_samples: u32) {
         for channel in 0..2 {
-            if self.armed[channel][lane] {
-                self.armed[channel][lane] = false;
-                if self.opens[channel][lane] {
+            if let FaderPhase::Armed { opens } = self.phase[channel][lane] {
+                self.phase[channel][lane] = FaderPhase::Muted;
+                if opens {
                     self.mute_channel(lane, channel, false, ramp_samples);
                 }
             }
@@ -3323,14 +3380,14 @@ impl<L: Lane> FaderRampStage<L> {
     /// opens it, so the stage holds it at `+0.0` while the model holds it unmuted. An armed
     /// channel whose fire stays muted reports `false`, as its model mute is the stage's.
     const fn is_armed(&self, lane: usize, channel: usize) -> bool {
-        self.armed[channel][lane] && self.opens[channel][lane]
+        matches!(self.phase[channel][lane], FaderPhase::Armed { opens: true })
     }
 
-    /// Recomputes one channel's mute mask from the per-lane flags.
+    /// Recomputes one channel's mute mask from the per-lane phases.
     fn sync_mute(&mut self, channel: usize) {
         let mut flags = [0.0_f32; MAX_BANK_LANES];
         for (lane, flag) in flags.iter_mut().enumerate() {
-            *flag = f32::from(u8::from(self.muted[channel][lane]));
+            *flag = f32::from(u8::from(self.phase[channel][lane].muted()));
         }
         self.ramp[channel].mute = mask_from_flags::<L>(&flags[..L::WIDTH]);
     }
@@ -3380,11 +3437,11 @@ impl<L: Lane> FaderRampStage<L> {
     /// One channel of [`Self::set_fader_gain`].
     fn live_gain(&mut self, lane: usize, channel: usize, gain: f32, smoothing_samples: u32) {
         self.fader_gain[channel][lane] = gain;
-        if self.muted[channel][lane] {
+        if self.phase[channel][lane].muted() {
             return;
         }
         self.retarget(lane, channel, gain, smoothing_samples);
-        self.mute_ramp[channel][lane] = false;
+        self.phase[channel][lane] = FaderPhase::Open;
     }
 
     /// Sets or clears one lane's mute on the channels `channels` covers, as a retarget.
@@ -3405,8 +3462,8 @@ impl<L: Lane> FaderRampStage<L> {
     /// One channel of [`Self::set_mute`]. A nonzero window starts a mute ramp (D2).
     ///
     /// A call whose `muted` equals the channel's current mute state changes nothing (issue #1651,
-    /// batch 13b ruling): no retarget, and the mute ramp flag and the ramp's remaining frames stay
-    /// as they were. So a repeated mute never restarts a fader ramp in flight or a mute ramp, and
+    /// batch 13b ruling): no retarget, and the phase and the ramp's remaining frames stay as they
+    /// were. So a repeated mute never restarts a fader ramp in flight or a mute ramp, and
     /// never holds the gain for a window.
     ///
     /// An armed channel (issue #1288 D2; #2080 R1, which supersedes #1288 attempt 2's "a mute
@@ -3415,27 +3472,33 @@ impl<L: Lane> FaderRampStage<L> {
     /// when the last such record unmutes it. So an unmute before the source plays, after a mute
     /// or after a prepared mute, cannot turn the fade into a step.
     fn mute_channel(&mut self, lane: usize, channel: usize, muted: bool, smoothing_samples: u32) {
-        if self.armed[channel][lane] {
-            self.opens[channel][lane] = !muted;
+        let phase = &mut self.phase[channel][lane];
+        if let FaderPhase::Armed { opens } = phase {
+            *opens = !muted;
             return;
         }
-        if self.muted[channel][lane] == muted {
+        if phase.muted() == muted {
             return;
         }
-        self.muted[channel][lane] = muted;
+        // A mute holds the gain however long its ramp is; an unmute holds it only while its ramp
+        // runs, so an unmute with no window opens the lane at once.
+        *phase = match (muted, smoothing_samples) {
+            (true, _) => FaderPhase::Muted,
+            (false, 0) => FaderPhase::Open,
+            (false, _) => FaderPhase::Unmuting,
+        };
         let target = if muted {
             0.0
         } else {
             self.fader_gain[channel][lane]
         };
         self.retarget(lane, channel, target, smoothing_samples);
-        self.mute_ramp[channel][lane] = smoothing_samples != 0;
         self.sync_mute(channel);
     }
 
     /// Whether one lane's gain is held: muted, or in a mute or unmute ramp (issue #1638 D2).
     const fn gain_held(&self, lane: usize, channel: usize) -> bool {
-        self.muted[channel][lane] || self.mute_ramp[channel][lane]
+        self.phase[channel][lane].gain_held()
     }
 
     /// Frames left in one lane's ramp: `0` when the lane is settled.
@@ -3475,9 +3538,10 @@ impl<L: Lane> FaderRampStage<L> {
     /// one block of exact `+0.0` would leave every state word of the lane bit-identical and write
     /// exact `+0.0` on both planes. The stage has no clock.
     ///
-    /// A lane is at rest when, on both channels, no gain or mute ramp is in flight (`remaining`
-    /// is `0` and no mute ramp is set) and the settled path writes `+0.0` for a `+0.0` input:
-    /// a muted lane writes the `andnot`'s exact `+0.0`; an unmuted one writes `+0.0 * gain`,
+    /// A lane is at rest when, on both channels, no gain, mute or unmute ramp is in flight
+    /// (`remaining` is `0`: an unmute ramp never outlives its countdown,
+    /// [`FaderPhase::at_countdown`]) and the settled path writes `+0.0` for a `+0.0` input: a
+    /// muted lane writes the `andnot`'s exact `+0.0`; an unmuted one writes `+0.0 * gain`,
     /// which carries the sign of `gain`, so a lane whose current gain has the sign bit set
     /// declines.
     ///
@@ -3493,9 +3557,8 @@ impl<L: Lane> FaderRampStage<L> {
         for channel in 0..2 {
             let current = lane_read::<L>(self.ramp[channel].current);
             for (lane, gain) in current.iter().enumerate().take(L::WIDTH) {
-                // `!mute_ramp` is defensive: the bookkeeping that ends a countdown clears it too.
-                let settled = self.remaining[channel][lane] == 0 && !self.mute_ramp[channel][lane];
-                let zero_out = self.muted[channel][lane] || !gain.is_sign_negative();
+                let settled = self.remaining[channel][lane] == 0;
+                let zero_out = self.phase[channel][lane].muted() || !gain.is_sign_negative();
                 if !(settled && zero_out) {
                     rest &= !(1 << lane);
                 }
@@ -3507,7 +3570,7 @@ impl<L: Lane> FaderRampStage<L> {
 
     /// Whether one lane and channel is muted.
     const fn is_muted(&self, lane: usize, channel: usize) -> bool {
-        self.muted[channel][lane]
+        self.phase[channel][lane].muted()
     }
 
     // REALTIME_POLICY_BEGIN
@@ -3558,8 +3621,8 @@ impl<L: Lane> FaderRampStage<L> {
                 if *remaining == 0 {
                     current[lane] = target[lane];
                     steps[lane] = 0.0;
-                    // D2: a mute ramp ends in the same step that assigns its target.
-                    self.mute_ramp[channel][lane] = false;
+                    // D2: an unmute ramp ends in the same step that assigns its target.
+                    self.phase[channel][lane] = self.phase[channel][lane].settled();
                 }
             }
             self.ramp[channel].current = lane_words::<L>(&current);
@@ -3674,10 +3737,7 @@ impl<L: Lane> FaderRampStage<L> {
                 step: lane_read::<L>(self.ramp[channel].step)[lane],
                 remaining: self.remaining[channel][lane],
                 fader_gain: self.fader_gain[channel][lane],
-                muted: self.muted[channel][lane],
-                mute_ramp: self.mute_ramp[channel][lane],
-                armed: self.armed[channel][lane],
-                opens: self.opens[channel][lane],
+                phase: self.phase[channel][lane],
             }),
         }
     }
@@ -3685,6 +3745,11 @@ impl<L: Lane> FaderRampStage<L> {
     /// Overwrite one populated lane with `state`, word for word, and re-derive the two words the
     /// kernel loads from them: the lane's bit of the mute mask and the countdown the ramp kernel
     /// reads. The lane then renders exactly what the lane it was exported from would have.
+    ///
+    /// The phase is re-derived with the countdown ([`FaderPhase::at_countdown`], issue #2280), not
+    /// copied: an unmute ramp with no frames left imports as the open lane the countdown's end
+    /// makes it, so no record can leave the lane's gain held for good. A record
+    /// [`Self::export_lane`] wrote always holds such a pair already, so this changes no carry.
     fn import_lane(&mut self, lane: usize, state: &FaderLaneState) {
         debug_assert!(lane < L::WIDTH);
         for (channel, carried) in state.channels.iter().enumerate() {
@@ -3698,16 +3763,14 @@ impl<L: Lane> FaderRampStage<L> {
             );
             self.remaining[channel][lane] = carried.remaining;
             self.fader_gain[channel][lane] = carried.fader_gain;
-            self.muted[channel][lane] = carried.muted;
-            self.mute_ramp[channel][lane] = carried.mute_ramp;
-            self.armed[channel][lane] = carried.armed;
-            self.opens[channel][lane] = carried.opens;
+            self.phase[channel][lane] = carried.phase.at_countdown(carried.remaining);
             self.sync_mute(channel);
         }
     }
     // REALTIME_POLICY_END
 
-    /// Snaps every lane to its target and cancels any ramp in flight.
+    /// Snaps every lane to its target and cancels any ramp in flight. An unmute ramp ends with
+    /// its countdown; an arm stays, as only its fire ends it.
     fn reset(&mut self) {
         for channel in 0..2 {
             self.ramp[channel].current = self.ramp[channel].target;
@@ -3715,7 +3778,9 @@ impl<L: Lane> FaderRampStage<L> {
             self.ramp[channel].remaining = L::zero();
         }
         self.remaining = [[0; MAX_BANK_LANES]; 2];
-        self.mute_ramp = [[false; MAX_BANK_LANES]; 2];
+        for phase in self.phase.iter_mut().flatten() {
+            *phase = phase.at_countdown(0);
+        }
     }
 }
 
@@ -7325,8 +7390,8 @@ pub mod test_support {
             out[base + 4] = stage.remaining[channel][0];
             out[base + 5] = stage.fader_gain[channel][0].to_bits();
         }
-        out[12] = u32::from(stage.muted[0][0]);
-        out[13] = u32::from(stage.muted[1][0]);
+        out[12] = u32::from(stage.phase[0][0].muted());
+        out[13] = u32::from(stage.phase[1][0].muted());
         out
     }
 
@@ -7372,8 +7437,8 @@ pub mod test_support {
                 out[base + 4] = stage.remaining[channel][lane];
                 out[base + 5] = stage.fader_gain[channel][lane].to_bits();
             }
-            out[12] = u32::from(stage.muted[0][lane]);
-            out[13] = u32::from(stage.muted[1][lane]);
+            out[12] = u32::from(stage.phase[0][lane].muted());
+            out[13] = u32::from(stage.phase[1][lane].muted());
             out
         }
         per_width!(FaderStageKernel(stage) in &bank.stage => words(stage, lane))
@@ -7497,7 +7562,10 @@ mod lane_state {
     /// imported into a lane of a bank prepared with other values (unmuted, another gain). Both
     /// then render the rest of the fade, a settled mute that is exactly `+0.0` on a negative
     /// input, and the unmute, which returns to the remembered gain. Red if the countdown, the
-    /// ramp words, the mute flag or the remembered gain is not imported.
+    /// ramp words, the mute flag or the remembered gain is not imported. Red, too (issue #2354),
+    /// if an export or import takes one channel's phase or countdown for the other's: a plan swap
+    /// then un-mutes a muted right channel, or drops a right channel's unmute hold so that a
+    /// fader move cuts its ramp into a step.
     #[test]
     fn a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders() {
         for (backend, width) in banks() {
@@ -7549,6 +7617,303 @@ mod lane_state {
             // A padding lane or one past the bank is refused.
             assert!(destination.export_lane(members).is_none());
             assert!(destination.import_lane(members, &state).is_err());
+            // Issue #2354: a dual-mono lane whose channels differ carries each channel's own
+            // phase and countdown: (a) the right channel muted, the left open; (b) both muted,
+            // then the right in an unmute ramp longer than a block.
+            for row in ["right muted", "right mid-unmute"] {
+                let mut source =
+                    BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false); 3])
+                        .expect("source bank");
+                let mut destination =
+                    BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false); 3])
+                        .expect("destination bank");
+                if row == "right muted" {
+                    source
+                        .set_mute(0, BuiltinLaneSelector::Right, true, 0)
+                        .expect("lane");
+                } else {
+                    source
+                        .set_mute(0, BuiltinLaneSelector::Both, true, 0)
+                        .expect("lane");
+                    source
+                        .set_mute(0, BuiltinLaneSelector::Right, false, 4 * FRAMES as u32)
+                        .expect("lane");
+                }
+                destination
+                    .import_lane(2, &source.export_lane(0).expect("a member lane"))
+                    .expect("a member lane");
+                for channel in 0..2 {
+                    assert_eq!(
+                        destination.is_muted(2, channel),
+                        source.is_muted(0, channel),
+                        "{backend:?}: {row}: channel {channel}'s mute carries"
+                    );
+                    assert_eq!(
+                        destination.gain_held(2, channel),
+                        source.gain_held(0, channel),
+                        "{backend:?}: {row}: channel {channel}'s hold carries"
+                    );
+                }
+                // The same timed fader move on both: a carried mute or unmute hold only
+                // remembers it, so neither lane steps or plays a muted channel.
+                for (bank, lane) in [(&mut source, 0), (&mut destination, 2)] {
+                    bank.apply_fader_operation(
+                        lane,
+                        BuiltinLaneSelector::Both,
+                        FaderOperation::SetGain { gain: 0.5 },
+                    )
+                    .expect("lane");
+                }
+                assert_eq!(
+                    run_fader(&mut source, 0, 2, -0.5),
+                    run_fader(&mut destination, 2, 2, -0.5),
+                    "{backend:?}: {row}: the carried lane renders what the exported lane renders"
+                );
+            }
+        }
+    }
+
+    /// Issue #2280: an unmute holds the lane's gain only while its countdown runs. An unmute with
+    /// no window, a reset in the middle of an unmute ramp, a live fader move in the middle of one
+    /// (which takes the lane over, window or not: a windowed move is the case that must not keep
+    /// the hold), and a lane record whose unmute ramp has no frames left (imported, as a plan
+    /// swap's carry imports it) each leave the lane open, so a timed fader move retargets it; a
+    /// lane imported in the middle of an unmute ramp, and one an unmute ramp longer than a block
+    /// has rendered for a block, keep holding their gain until the ramp ends. Red if any of the
+    /// four keeps the unmute ramp's hold (for the import: if it copies the phase verbatim, as it
+    /// copied four flags before #2280): the gain is then held, every timed fader move only
+    /// remembers its gain, and the rest claim declines the lane. Red, too, if an import or a block
+    /// settles an unmute ramp that still runs, so a timed move fights the unmute. Red, too (issue
+    /// #2354), if a mute during an unmute ramp is taken for a repeat because the gain is already
+    /// held: the strip then stays audible while the model says muted.
+    #[test]
+    fn an_unmute_holds_the_gain_only_while_its_countdown_runs() {
+        let ended = FaderChannelState {
+            current: 1.0,
+            target: 1.0,
+            step: 0.0,
+            remaining: 0,
+            fader_gain: 1.0,
+            phase: FaderPhase::Unmuting,
+        };
+        for (backend, width) in banks() {
+            let mut bank =
+                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], true); 4])
+                    .expect("bank");
+            bank.set_mute(1, BuiltinLaneSelector::Both, false, 64)
+                .expect("lane");
+            assert_eq!(
+                bank.gain_held(1, 0),
+                Some(true),
+                "{backend:?}: an unmute ramp holds"
+            );
+            // A plan swap carries the running unmute ramp: the gain stays held.
+            let mut carried =
+                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false)])
+                    .expect("bank");
+            carried
+                .import_lane(0, &bank.export_lane(1).expect("a member lane"))
+                .expect("a member lane");
+            assert_eq!(
+                carried.gain_held(0, 0),
+                Some(true),
+                "{backend:?}: an imported unmute ramp holds"
+            );
+            carried
+                .apply_fader_operation(
+                    0,
+                    BuiltinLaneSelector::Both,
+                    FaderOperation::SetGain { gain: 0.5 },
+                )
+                .expect("lane");
+            assert_eq!(
+                carried.ramp_target(0, 1),
+                Some(1.0),
+                "{backend:?}: an imported unmute ramp only remembers a timed move"
+            );
+            bank.reset();
+            // After the reset, so that the reset cannot settle it.
+            bank.set_mute(0, BuiltinLaneSelector::Both, false, 0)
+                .expect("lane");
+            bank.set_mute(3, BuiltinLaneSelector::Both, false, 64)
+                .expect("lane");
+            bank.set_fader_db(3, BuiltinLaneSelector::Both, -6.0, 16)
+                .expect("lane");
+            bank.import_lane(
+                2,
+                &FaderLaneState {
+                    channels: [ended; 2],
+                },
+            )
+            .expect("a member lane");
+            for (lane, how) in [
+                (0, "an instant unmute"),
+                (1, "a reset"),
+                (2, "an import"),
+                (3, "a live fader move"),
+            ] {
+                assert_eq!(bank.gain_held(lane, 0), Some(false), "{backend:?}: {how}");
+                bank.apply_fader_operation(
+                    lane,
+                    BuiltinLaneSelector::Both,
+                    FaderOperation::SetGain { gain: 0.5 },
+                )
+                .expect("lane");
+                assert_eq!(
+                    bank.ramp_target(lane, 1),
+                    Some(0.5),
+                    "{backend:?}: {how} retargets"
+                );
+            }
+            // The same live fader move with no window (a `fader_ms` of 0): it ends the unmute
+            // ramp's hold too, and leaves no countdown to end it later.
+            bank.set_mute(3, BuiltinLaneSelector::Both, true, 0)
+                .expect("lane");
+            bank.set_mute(3, BuiltinLaneSelector::Both, false, 64)
+                .expect("lane");
+            bank.set_fader_db(3, BuiltinLaneSelector::Both, -6.0, 0)
+                .expect("lane");
+            assert_eq!(
+                bank.gain_held(3, 0),
+                Some(false),
+                "{backend:?}: a live fader move with no window"
+            );
+            bank.apply_fader_operation(
+                3,
+                BuiltinLaneSelector::Both,
+                FaderOperation::SetGain { gain: 0.25 },
+            )
+            .expect("lane");
+            assert_eq!(
+                bank.ramp_target(3, 1),
+                Some(0.25),
+                "{backend:?}: a live fader move with no window retargets"
+            );
+            // An unmute ramp longer than a block still holds after the block: only the block
+            // that ends its countdown ends it.
+            bank.set_mute(0, BuiltinLaneSelector::Both, true, 0)
+                .expect("lane");
+            bank.set_mute(0, BuiltinLaneSelector::Both, false, 4 * FRAMES as u32)
+                .expect("lane");
+            run_fader(&mut bank, 0, 1, 0.0);
+            assert_eq!(
+                bank.gain_held(0, 0),
+                Some(true),
+                "{backend:?}: an unmute ramp outlives a block"
+            );
+            // Issue #2354: a mute in the middle of an unmute ramp lands, with no window and with
+            // one: the lane reads muted, and once the mute has landed it renders exact `+0.0`.
+            for window in [0, 16] {
+                bank.set_mute(0, BuiltinLaneSelector::Both, true, 0)
+                    .expect("lane");
+                bank.set_mute(0, BuiltinLaneSelector::Both, false, FRAMES as u32)
+                    .expect("lane");
+                bank.set_mute(0, BuiltinLaneSelector::Both, true, window)
+                    .expect("lane");
+                for channel in 0..2 {
+                    assert_eq!(
+                        bank.is_muted(0, channel),
+                        Some(true),
+                        "{backend:?}: a mute over {window} frames during an unmute ramp"
+                    );
+                }
+                if window > 0 {
+                    run_fader(&mut bank, 0, 1, 1.0);
+                }
+                assert!(
+                    run_fader(&mut bank, 0, 1, 1.0)
+                        .iter()
+                        .all(|&word| word == 0),
+                    "{backend:?}: a mute over {window} frames during an unmute ramp renders +0.0"
+                );
+            }
+        }
+    }
+
+    /// Issue #2280: an armed lane (issue #1288 D2, #2080 R1) holds its gain at `+0.0` until its
+    /// fire, keeps its arm across a plan swap's carry and a reset, and a fire ends the arm whether
+    /// it opens the lane or not; one that opens it holds the gain while its fade-in runs, and one
+    /// that does not open it leaves it muted. An armed lane is at exact rest. Red if the rest
+    /// claim declines an armed lane (a strip waiting for its source is then rendered on every
+    /// silent block instead of skipped), if an opening fire leaves the gain free during
+    /// the fade-in (a timed move then fights it), if a timed fader move retargets an armed lane
+    /// (the fire's fade-in then starts from the move, a step), if an import or a reset ends an
+    /// unfired arm (the lane, muted with no fire left to open it, then
+    /// stays silent for good), if a fire that stays muted keeps the arm (a later unmute then only
+    /// retargets a fire that never comes, and the lane stays silent), or if it leaves the lane
+    /// anything but muted (the readback then reports a muted strip unmuted, and the next mute mask
+    /// a peer's mute re-derives lets the lane play).
+    #[test]
+    fn an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset() {
+        let both = BuiltinLaneSelector::Both;
+        for (backend, width) in banks() {
+            let mut bank =
+                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false); 3])
+                    .expect("bank");
+            bank.arm_fade_in(0).expect("lane");
+            // An armed lane waits as a settled mute: at exact rest, so a silent block may skip it.
+            assert_ne!(
+                bank.lanes_at_rest() & 1,
+                0,
+                "{backend:?}: an armed lane is at rest"
+            );
+            bank.apply_fader_operation(0, both, FaderOperation::SetGain { gain: 0.5 })
+                .expect("lane");
+            assert_eq!(
+                bank.ramp_target(0, 0),
+                Some(0.0),
+                "{backend:?}: a timed move on an armed lane only remembers"
+            );
+            let mut next =
+                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false)])
+                    .expect("bank");
+            next.import_lane(0, &bank.export_lane(0).expect("a member lane"))
+                .expect("a member lane");
+            assert_eq!(
+                next.is_armed(0, 0),
+                Some(true),
+                "{backend:?}: a carried arm stays armed"
+            );
+            bank.reset();
+            assert_eq!(
+                bank.is_armed(0, 0),
+                Some(true),
+                "{backend:?}: a reset keeps the arm"
+            );
+            // A fire that opens the lane is an unmute ramp: the gain stays held while it runs.
+            bank.fire_fade_in(0, 64);
+            assert_eq!(
+                bank.gain_held(0, 0),
+                Some(true),
+                "{backend:?}: an opening fire holds the gain while its fade-in runs"
+            );
+            // A lane armed muted, whose fire stays muted: the fire ends the arm, so a later
+            // unmute opens the lane.
+            bank.set_mute(1, both, true, 0).expect("lane");
+            bank.arm_fade_in(1).expect("lane");
+            bank.fire_fade_in(1, 64);
+            assert_eq!(
+                bank.is_muted(1, 0),
+                Some(true),
+                "{backend:?}: a fire that stays muted leaves the lane muted"
+            );
+            // Still muted, not merely silent: a timed move is only remembered, and a peer's mute
+            // (which re-derives the bank's mute mask) leaves the lane at exact `+0.0`.
+            bank.apply_fader_operation(1, both, FaderOperation::SetGain { gain: 0.5 })
+                .expect("lane");
+            bank.set_mute(2, both, true, 0).expect("lane");
+            assert!(
+                run_fader(&mut bank, 1, 2, 1.0)
+                    .iter()
+                    .all(|&word| word == 0),
+                "{backend:?}: a lane whose fire stays muted renders exact +0.0"
+            );
+            bank.set_mute(1, both, false, 0).expect("lane");
+            assert_eq!(
+                bank.is_muted(1, 0),
+                Some(false),
+                "{backend:?}: a fire that stays muted ends the arm"
+            );
         }
     }
 

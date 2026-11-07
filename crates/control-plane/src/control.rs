@@ -3132,9 +3132,9 @@ pub(crate) fn map_event_egress_error(error: EventEgressError) -> EventError {
                 required: u64::try_from(required).unwrap_or(u64::MAX),
             }
         }
-        EventEgressError::ReliableQueueFull(_) | EventEgressError::ResponseReadyOccupied => {
-            EventError::Backpressure
-        }
+        EventEgressError::ReliableQueueFull(_)
+        | EventEgressError::ResponseReadyOccupied
+        | EventEgressError::PreparedCommandOutstanding => EventError::Backpressure,
         EventEgressError::Disabled
         | EventEgressError::DiagnosticStorageFull
         | EventEgressError::ObservationEndedCellMissing
@@ -3447,7 +3447,13 @@ where
             .controller
             .reliable_events_delivered()
             .saturating_add(self.controller.reliable_backlog());
-        let Ok(reservation) = self.controller.queues_mut().reserve_reliable_event() else {
+        // No token outlives a session call, so the controller is idle here; were it not, the
+        // diagnostic waits for the next service, as it does for a full queue.
+        let Some(Ok(reservation)) = self
+            .controller
+            .idle()
+            .map(|mut idle| idle.queues_mut().reserve_reliable_event())
+        else {
             return;
         };
         let sample = self.observed_render_sample;
@@ -9452,6 +9458,8 @@ mod tests {
             children
                 .session
                 .controller
+                .idle()
+                .expect("idle")
                 .queues_mut()
                 .try_enqueue_event(protocol::ReliableSlot {
                     header: protocol::ReliableHeader::Event,
@@ -9508,6 +9516,8 @@ mod tests {
             children
                 .session
                 .controller
+                .idle()
+                .expect("idle")
                 .queues_mut()
                 .try_dequeue_event()
                 .expect("the transport event");
