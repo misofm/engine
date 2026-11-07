@@ -149,6 +149,48 @@ Out of scope, and filed separately by the coordinator: a staged diagnostic's res
 later structural commit fail with `Internal` instead of `BACKPRESSURE`. The structural precheck
 (`controller.rs:3001-3010`) ignores reservations. This issue does not change it.
 
+## Attempt 3 (14c8be408): PASS, one MINOR folded in attempt 4
+The review found no FIFO violation, and passed attempt 3 with one MINOR.
+
+**MINOR: the counting rules were tested only outside the crate that owns them.** The reviewer's
+mutations M1, M3, M8 and M9 (the backlog's pending term, the delivered count's increment, an
+error counted as a delivery, the backlog's occupancy term) left
+`cargo test -p protocol --features test-support --lib` green. The control-plane tests caught each
+one, and M9 only through the debug-only `should_panic` test.
+
+**Folded (attempt 4).** One protocol unit test,
+`controller::tests::the_reliable_backlog_and_delivered_count_follow_each_dequeue_outcome`. It
+queues `SESSION_COMMITTED` and `TRANSPORT_STATE`, then dequeues:
+- with a short buffer;
+- successfully;
+- successfully again, after queuing an `EmptyResponse` slot;
+- once more, which fails with `MessageKindMismatch`.
+
+It asserts `(reliable_backlog(), reliable_events_delivered())` after each step: `(2, 0)` queued,
+`(2, 0)`, `(1, 1)`, `(1, 2)`, `(1, 2)`. Each of these mutations, applied alone, turns it red in a
+plain test run, so not only in debug builds:
+- n1, no pending term: `(1, 0)` against `(2, 0)`.
+- n3, no increment: `(1, 0)` against `(1, 1)`.
+- n8, an error counted: `(2, 1)` against `(2, 0)`.
+- n9 (M9), no occupancy term: `(0, 0)` against `(2, 0)`.
+
+**The reviewer's attempt-3 mutation table** (n1-n8 rerun as M1-M8, plus M9-M23), in summary:
+- **Red through the control-plane order test:** M1-M4, M8, M10, M23.
+- **Red through the `should_panic` test:** M6 and M7 (both checks removed; follow, or base's
+  stall), and M9 (no occupancy term). M9 is now also red in `protocol`, as above.
+- **Red through the #2198 slot test and the order test:** M12, M12b, M16, M17. M17 also turns the
+  `warm_successor` tests red.
+- **Red only in capi:** M14 (the slot freed before the encode's error check), through
+  `runtime::tests::all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes`.
+- **Green, each equivalent or out of scope:**
+  - M5, the entry invariant check removed: the `Ok(None)` arm's check fires with the same message.
+  - M13, `sample_time`/`provider_sequence` not reset after the encode: they are written again
+    before every encode, and nothing else reads them.
+  - M15, the provider's `DIAGNOSTICS_GET` projection not cleared: a non-goal.
+  - M18, the `render_diagnostic_len != 0` guard dropped: a `Free` head and `len == 0` coincide.
+  - M19, the `Ok(None)` arm returning `Ok(None)` while the entry check remains: the arm is
+    unreachable while the invariant holds, and the entry check stops a debug build first.
+
 ## Evidence (attempts 2 and 3)
 
 Attempt 3 (this head) extends both cases of the order test. It also documents the counter's
@@ -164,8 +206,9 @@ saturation in the field doc and the accessor doc.
     block 1. It drains two events, then sends `TRANSPORT_SET`, then drains the rest. The order must
     be committed, diagnostic, diagnostic, transport.
   - **An injected `EmptyResponse` at the head** (defect 1's non-short-buffer error). After a
-    block, the next two dequeues must both fail rather than deliver the diagnostic. Attempt 3
-    added the second one.
+    block, the next dequeue must fail again rather than deliver the diagnostic. Attempt 3 added a
+    second dequeue here. Attempt 4 removed it: the counting rule it checked is now tested once,
+    in `protocol`, so this case keeps only the FIFO claim.
 - **`a_diagnostic_waiting_for_events_the_controller_lost_stops_a_debug_build`** (debug builds
   only, `should_panic`). A `TRANSPORT_STATE` is queued and a diagnostic staged behind it. The event
   is then popped from the queue directly, which no product path does, so the controller no longer
@@ -224,6 +267,16 @@ and `dequeue_reliable_event` run in the control thread's service step and egress
 control thread, so no loom model is needed.
 
 The red-on-base check was re-run with attempt 3's tests, and gave the same two failures.
+
+**Gates (attempt-4 head):**
+- `cargo test --locked --all-targets -p protocol -p control-plane --features protocol/test-support,control-plane/test-support`:
+  23 test binaries, 317 tests, all pass.
+- `cargo test --locked --doc` for both crates: pass.
+- `cargo clippy --locked -p protocol -p control-plane -p capi -p host-web --all-targets --all-features -- -D warnings`:
+  clean.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps -p protocol -p control-plane`: clean.
+- `cargo fmt --check`: clean.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 
 **Gates (attempt-3 head):**
 - `cargo test --locked --all-targets -p protocol -p control-plane -p capi -p host-web --features protocol/test-support,control-plane/test-support,host-web/test-support,host-web/render-lock-probe,host-core/test-support`:

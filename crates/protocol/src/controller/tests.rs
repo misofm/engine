@@ -4377,6 +4377,70 @@ fn counter_egress_splits_nonascending_staged_snapshots_without_stalling() {
     assert_eq!(controller.dequeue_lossy_event_frame_into(&mut []), Ok(None));
 }
 
+/// #2268: the reliable backlog counts the queued events and the one a failed dequeue keeps
+/// pending, and the delivered count rises by one for each frame that reaches caller output and
+/// for nothing else, a short buffer or any other egress error included.
+///
+/// Red if the backlog drops its queued or its pending term, or if the delivered count misses a
+/// delivery or counts a failed dequeue: a host that places its own events by these counts (the
+/// control plane's render diagnostics) would reorder them against the controller's.
+#[test]
+fn the_reliable_backlog_and_delivered_count_follow_each_dequeue_outcome() {
+    let mut controller = egress_controller(4, 1);
+    let revision = controller.session().revision();
+    let counts = |controller: &ProtocolController<MockProvider>| {
+        (
+            controller.reliable_backlog(),
+            controller.reliable_events_delivered(),
+        )
+    };
+    for slot in [
+        ReliableSlot::session_committed(revision, 1, id(1), SessionRevision(6), 1),
+        ReliableSlot::transport_state(revision, 2, TransportState::Stopped, SampleTime(0), None),
+    ] {
+        controller
+            .queues_mut()
+            .try_enqueue_event(slot)
+            .expect("room for the event");
+    }
+    assert_eq!(counts(&controller), (2, 0), "two queued");
+    assert!(matches!(
+        controller.dequeue_reliable_event_frame_into(&mut [0_u8; 1]),
+        Err(EventEgressError::Encode(EncodeError::OutputTooSmall { .. }))
+    ));
+    assert_eq!(counts(&controller), (2, 0), "one pending, one queued");
+    let mut output = [0_u8; 256];
+    assert!(matches!(
+        controller.dequeue_reliable_event_frame_into(&mut output),
+        Ok(Some(_))
+    ));
+    assert_eq!(counts(&controller), (1, 1), "the pending one delivered");
+    // A slot no frame encodes: it fails, and stays pending, at every dequeue.
+    controller
+        .queues_mut()
+        .try_enqueue_event(ReliableSlot {
+            header: crate::ReliableHeader::Event,
+            revision,
+            message_id: MessageId::SessionCommitted,
+            payload: crate::ReliablePayload::EmptyResponse,
+        })
+        .expect("room for the undeliverable event");
+    assert!(matches!(
+        controller.dequeue_reliable_event_frame_into(&mut output),
+        Ok(Some(_))
+    ));
+    assert_eq!(counts(&controller), (1, 2), "the queued one delivered");
+    assert!(matches!(
+        controller.dequeue_reliable_event_frame_into(&mut output),
+        Err(EventEgressError::Encode(EncodeError::MessageKindMismatch))
+    ));
+    assert_eq!(
+        counts(&controller),
+        (1, 2),
+        "the failed one pending, uncounted"
+    );
+}
+
 #[test]
 fn c2b2_short_buffers_retain_pending_reliable_order_and_diagnostic_storage() {
     let mut controller = egress_controller(1, 1);

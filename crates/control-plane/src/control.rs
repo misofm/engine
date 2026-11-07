@@ -9202,13 +9202,11 @@ mod tests {
                 Err(EventError::Internal)
             ));
             render(&mut children, 2);
-            for _ in 0..2 {
-                let next = children.session.dequeue_event(EventLane::Reliable, 4_096);
-                assert!(
-                    matches!(next, Err(EventError::Internal)),
-                    "the pending event still heads the lane, so the diagnostic waits: {next:?}"
-                );
-            }
+            let next = children.session.dequeue_event(EventLane::Reliable, 4_096);
+            assert!(
+                matches!(next, Err(EventError::Internal)),
+                "the pending event still heads the lane, so the diagnostic waits: {next:?}"
+            );
         }
 
         /// #2268: a staged render diagnostic waits only for events the controller still holds.
