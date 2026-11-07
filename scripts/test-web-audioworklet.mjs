@@ -4248,6 +4248,82 @@ async function testProcessor() {
       }
     }
 
+    // Issue #2291: a trap in an export a message handler calls is contained at the handler, as
+    // #2256 contained render's and dispose's. The fake models the shipped module: once any export
+    // trapped, render and dispose refuse with 1, as the `LIVE_HOST` borrow the trap left does. Each
+    // row traps one export through the real `port.onmessage`, at a different place: inside
+    // `receive` (unanswered: the answer is the request's, with its planes for a source), and after
+    // the answer, in the service step of a tick (request 0). Red if the throw escapes the handler,
+    // goes unanswered, or leaves the trap unrecorded: the next block calls render on the trapped
+    // instance and the dispose calls its export, whose refusal the host retries for ever.
+    {
+      const sourcePlane = () => new Float32Array(64).fill(0.5);
+      const rows = [
+        {
+          export: "control_command",
+          message: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1, 2, 3]) },
+          answer: { tag: "miso.error.v1", requestId: 1, result: 255 },
+        },
+        {
+          export: "source_submit",
+          message: {
+            tag: "miso.source.v1", requestId: 1, sourceId: "drums", generation: 1n,
+            startFrame: 0n, sampleRateHz: 48000, frames: 64, endOfRegion: false,
+            planes: [sourcePlane(), sourcePlane()],
+          },
+          answer: {
+            tag: "miso.error.v1", requestId: 1, result: 255, planes: [sourcePlane(), sourcePlane()],
+          },
+        },
+        {
+          export: "session_seek",
+          message: {
+            tag: "miso.session-seek.v1", requestId: 1, generation: 2n, sourceFrame: 0n,
+            anchorSample: -1n, atOnce: false,
+          },
+          answer: { tag: "miso.error.v1", requestId: 1, result: 255 },
+        },
+        {
+          export: "service",
+          message: { tag: "miso.service.v1" },
+          answer: { tag: "miso.error.v1", requestId: 0, result: 255 },
+        },
+      ];
+      for (const row of rows) {
+        const { processor, fake } = makeProcessor();
+        let trapped = false;
+        const name = `miso_engine_web_v1_${row.export}`;
+        fake.exports[name] = () => {
+          trapped = true;
+          throw new Error(`synthetic wasm trap from the ${row.export} export`);
+        };
+        const render = fake.exports.miso_engine_web_v1_render;
+        let renderCalls = 0;
+        fake.exports.miso_engine_web_v1_render = (...args) => {
+          renderCalls += 1;
+          return trapped ? 1 : render(...args);
+        };
+        fake.exports.miso_engine_web_v1_dispose = () => {
+          fake.calls.dispose += 1;
+          return trapped ? 1 : 0;
+        };
+        assert.doesNotThrow(() => processor.port.onmessage({ data: row.message }),
+          `a ${row.export} trap stays inside the handler`);
+        assert.deepEqual(processor.port.posts.at(-1)?.message, row.answer,
+          `a ${row.export} trap: the typed answer`);
+        assert.equal(processor.stickyResult, 255, `a ${row.export} trap is sticky 255`);
+        const block = () => processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+        block();
+        assert.equal(renderCalls, 0,
+          `a ${row.export} trap: no render on the trapped instance`);
+        processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 2 } });
+        assert.deepEqual(processor.port.posts.at(-1).message,
+          { tag: "miso.ack.v1", requestId: 2, result: 255 }, `a ${row.export} trap: the dispose is final`);
+        assert.equal(fake.calls.dispose, 0, `a ${row.export} trap: no dispose export runs`);
+        assert.equal(block(), false, `a ${row.export} trap: the instance ends`);
+      }
+    }
+
     {
       const { processor } = makeProcessor();
       const storage = new ArrayBuffer(16);
@@ -4625,6 +4701,29 @@ async function testProcessor() {
       const { processor: strict } = constructWorkerMode(createFakeExports(64));
       strict.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
       assert.equal(strict.port.posts.at(-1).message.tag, "miso.error.v1");
+    }
+    // Issue #2291, the `worker`-mode row: its page-port handler is its own entry. A trap in the
+    // meter lease export is answered 255 to its request and recorded, so render is not called on
+    // the trapped half and its release answers no token without calling `host_release`. Red if the
+    // throw escapes `receiveWorkerMode`.
+    {
+      const fake = createFakeExports(64);
+      const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
+      fake.exports.miso_engine_web_v1_meter_lease = () => {
+        throw new Error("synthetic wasm trap from the meter lease export");
+      };
+      assert.doesNotThrow(() => processor.port.onmessage({
+        data: { tag: "miso.meters.v1", requestId: 1, enabled: true },
+      }), "a worker-mode trap stays inside the handler");
+      assert.deepEqual(processor.port.posts.at(-1).message,
+        { tag: "miso.error.v1", requestId: 1, result: 255 }, "a worker-mode trap: the typed answer");
+      const rendered = fake.calls.render.length;
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      assert.equal(fake.calls.render.length, rendered, "a worker-mode trap: no render after it");
+      fromWorker({ tag: "miso.release.v1" });
+      assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: 0n },
+        "a worker-mode trap: the release answers no token");
+      assert.deepEqual(fake.calls.release, [], "a worker-mode trap: no release export runs");
     }
     // R-S7-meters (3): `process()` switches to the pre-cut set only when the header render reports,
     // its frame pointer and its strip counts all match; otherwise it skips the frame and counts it.
