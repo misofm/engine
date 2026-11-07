@@ -1110,26 +1110,27 @@ pub(crate) struct InputStage<L: Lane> {
     /// channel `0`'s integrators and leaves channel `1`'s frozen at the values they held when the
     /// collapse engaged, and only the disengage copy repairs them. So no decision may read
     /// channel `1`'s state while this is set, and every `Both` record applies channel `0`'s
-    /// decision to both channels. The reads that would otherwise see the frozen words go through
-    /// [`InputStage::live_state_channel`]: the live filter retarget's rule-3 predicate and the
-    /// elision plan. The lane export and `channels_agree` also read channel `1`'s integrators, and
-    /// neither is reached collapsed: a carry disengages first (`disengage_for_carry`), and the M3
-    /// proof is asked only of a chain rendering dual. The coefficient, target, step and countdown
-    /// records need no such redirection, because `process_mono` mirrors them onto channel `1` at
-    /// the bottom of every collapsed block, so at a drain they are what the dual run would hold.
+    /// decision to both channels. Every read that would otherwise see the frozen words goes
+    /// through [`InputStage::live_state_channel`]: the live filter retarget's rule-3 predicate,
+    /// the elision plan, the rest mask, the silence clock, the lane export and `channels_agree`.
+    /// The coefficient, target, step and countdown records need no such redirection, because
+    /// `process_mono` mirrors them onto channel `1` at the bottom of every collapsed block, so at a
+    /// drain they are what the dual run would hold.
     ///
     /// # Every way out (issue #2274)
     ///
     /// The stage owns this flag's transitions, so no caller's ordering can leave it set under a
-    /// dual body. Only `process_mono` sets it. Three things clear it, and each leaves both
-    /// channels holding the counterfactual dual run's state:
+    /// dual body or a per-channel write. Only `process_mono` sets it. These clear it, and each
+    /// leaves both channels holding the counterfactual dual run's state:
     ///
     /// * [`InputStage::desymmetrize`], the disengage copy, which `rack::BankChain` calls on every
     ///   prefix stage at its documented boundary;
-    /// * [`InputStage::process`] entered collapsed, which takes that same copy before its body
-    ///   (never reached from the chain, which has always copied first; reachable through the
-    ///   bank's own public surface);
-    /// * a reset, which writes one state onto both channels.
+    /// * every entry that would read or write channel `1`'s retained state as real state --
+    ///   [`InputStage::process`] and [`InputStage::import_lane`], and so
+    ///   [`InputStage::swap_lanes`] -- which takes that same copy first (never reached collapsed
+    ///   from the chain, which has always copied first; reachable through the bank's own public
+    ///   surface);
+    /// * a reset, which writes one state onto both channels and clocks.
     ///
     /// One byte beside `ramping` and `symmetry`, in padding the struct already had: no sealed
     /// size moves.
@@ -2376,10 +2377,15 @@ impl<L: Lane> InputStage<L> {
     ///
     /// It is asked only inside a recovery window (`rack::BankChain::run`), so a
     /// session that never drives its channels apart never pays for it.
+    ///
+    /// A collapsed stage answers channel `1`'s integrators and silence counter from channel `0`
+    /// ([`InputStage::live_state_channel`]): its own words are frozen, and the counterfactual dual
+    /// run's are the left channel's, which is what the disengage copy writes (issue #2274).
     fn channels_agree(&self) -> bool {
+        let right_state = self.live_state_channel(1);
         for section in 0..2 {
             let left = &self.state.section[0][section];
-            let right = &self.state.section[1][section];
+            let right = &self.state.section[right_state][section];
             for (left_word, right_word) in [(left.ic1, right.ic1), (left.ic2, right.ic2)] {
                 let left_words = lane_read::<L>(left_word);
                 let right_words = lane_read::<L>(right_word);
@@ -2397,7 +2403,7 @@ impl<L: Lane> InputStage<L> {
         // channel `0`'s for both, so the two must already be equal.
         let (left_run, right_run) = (
             lane_read::<L>(self.state.silence[0]),
-            lane_read::<L>(self.state.silence[1]),
+            lane_read::<L>(self.state.silence[right_state]),
         );
         for lane in 0..L::WIDTH {
             if left_run[lane].to_bits() != right_run[lane].to_bits() {
@@ -2819,6 +2825,9 @@ impl<L: Lane> InputStage<L> {
     /// load-bearing rather than defensive: identity coefficients over an injected `-0.0`
     /// integrator emit `-0.0` where the elided form emits `+0.0`, so a plan left standing here
     /// would move bits.
+    ///
+    /// Raw, like [`Self::lane_state_words`]: on a collapsed stage the channel-`1` words it writes
+    /// are frozen words, which the disengage copy overwrites.
     fn set_lane_state_words(&mut self, lane: usize, words: [u32; 8]) {
         for channel in 0..2 {
             for section in 0..2 {
@@ -2836,6 +2845,11 @@ impl<L: Lane> InputStage<L> {
 
     // REALTIME_POLICY_BEGIN
     /// One populated lane's whole per-lane state ([`InputLaneState`], issue #1276 D2).
+    ///
+    /// A collapsed stage exports channel `1`'s integrators and silence counter from channel `0`
+    /// ([`InputStage::live_state_channel`]), the counterfactual dual run's state, so the payload is
+    /// the one the disengage copy would have left (issue #2274). Every other per-channel word is
+    /// mirrored by `process_mono` and read as it stands.
     fn export_lane(&self, lane: usize) -> InputLaneState {
         debug_assert!(lane < self.members && lane < L::WIDTH);
         let read = |value: L| lane_read::<L>(value)[lane];
@@ -2859,15 +2873,15 @@ impl<L: Lane> InputStage<L> {
                     read(self.ramp.remaining[channel]),
                 ],
                 remaining: self.remaining[channel][lane],
-                silence: read(self.state.silence[channel]),
+                silence: read(self.state.silence[self.live_state_channel(channel)]),
                 sections: core::array::from_fn(|section| InputSectionState {
                     coef: words(&self.coef.section[channel][section]),
                     target: words(&self.filter_target[channel][section]),
                     step: words(&self.filter_step[channel][section]),
                     remaining: self.filter_remaining[channel][section][lane],
                     integrators: [
-                        read(self.state.section[channel][section].ic1),
-                        read(self.state.section[channel][section].ic2),
+                        read(self.state.section[self.live_state_channel(channel)][section].ic1),
+                        read(self.state.section[self.live_state_channel(channel)][section].ic2),
                     ],
                 }),
             }),
@@ -2880,8 +2894,15 @@ impl<L: Lane> InputStage<L> {
     ///
     /// The prepared endpoint (`filter_initial`) is this stage's own and stays: a full reset
     /// returns to what *this* plan prepared.
+    ///
+    /// A collapsed stage takes the disengage copy first (issue #2274): the imported lane carries
+    /// real state on both channels, and a copy taken after it -- the dual body's, or the chain's --
+    /// would overwrite the lane's right channel with its left.
     fn import_lane(&mut self, lane: usize, state: &InputLaneState) {
         debug_assert!(lane < self.members && lane < L::WIDTH);
+        if self.collapsed {
+            self.desymmetrize();
+        }
         fn put<L: Lane>(value: &mut L, lane: usize, word: f32) {
             let mut words = lane_read::<L>(*value);
             words[lane] = word;
@@ -2945,13 +2966,10 @@ impl<L: Lane> InputStage<L> {
     /// then the prepared endpoint a full reset returns to (`filter_initial`), which the payload
     /// leaves with the stage and a swap moves with the strip. Allocation-free.
     ///
-    /// Never called on a collapsed stage: the chain takes the disengage boundary first, so both
-    /// channels' integrators are real state when they are exported.
+    /// The chain takes the disengage boundary first. A stage reached collapsed through the bank's
+    /// own surface needs nothing extra (issue #2274): the export answers the counterfactual dual
+    /// state, and the first import takes the disengage copy before it writes, on each stage.
     fn swap_lanes(&mut self, lane: usize, peer: Option<&mut Self>, peer_lane: usize) {
-        debug_assert!(
-            !self.collapsed,
-            "a lane swap follows the disengage boundary"
-        );
         let own = self.export_lane(lane);
         match peer {
             None => {
@@ -2969,10 +2987,6 @@ impl<L: Lane> InputStage<L> {
                 }
             }
             Some(other) => {
-                debug_assert!(
-                    !other.collapsed,
-                    "a lane swap follows the disengage boundary"
-                );
                 let theirs = other.export_lane(peer_lane);
                 self.import_lane(lane, &theirs);
                 other.import_lane(peer_lane, &own);
