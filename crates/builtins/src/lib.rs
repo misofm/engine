@@ -7618,15 +7618,16 @@ mod lane_state {
     }
 
     /// Issue #2280: an unmute holds the lane's gain only while its countdown runs. An unmute with
-    /// no window, a reset in the middle of an unmute ramp, a live fader move with no window in the
-    /// middle of one (which takes the lane over and ends its countdown), and a lane record whose
-    /// unmute ramp has no frames left (imported, as a plan swap's carry imports it) each leave the
-    /// lane open, so a timed fader move retargets it; a lane imported in the middle of an unmute
-    /// ramp keeps holding its gain until the ramp ends. Red if any of the four keeps the unmute
-    /// ramp's hold with no countdown left (for the import: if it copies the phase verbatim, as it
-    /// copied four flags before #2280): the gain is then held for good, every timed fader move
-    /// only remembers its gain, and the rest claim declines the lane forever. Red, too, if an
-    /// import settles an unmute ramp that still runs, so a timed move fights the unmute.
+    /// no window, a reset in the middle of an unmute ramp, a live fader move in the middle of one
+    /// (which takes the lane over, window or not: a windowed move is the case that must not keep
+    /// the hold), and a lane record whose unmute ramp has no frames left (imported, as a plan
+    /// swap's carry imports it) each leave the lane open, so a timed fader move retargets it; a
+    /// lane imported in the middle of an unmute ramp, and one an unmute ramp longer than a block
+    /// has rendered for a block, keep holding their gain until the ramp ends. Red if any of the
+    /// four keeps the unmute ramp's hold (for the import: if it copies the phase verbatim, as it
+    /// copied four flags before #2280): the gain is then held, every timed fader move only
+    /// remembers its gain, and the rest claim declines the lane. Red, too, if an import or a block
+    /// settles an unmute ramp that still runs, so a timed move fights the unmute.
     #[test]
     fn an_unmute_holds_the_gain_only_while_its_countdown_runs() {
         let ended = FaderChannelState {
@@ -7678,7 +7679,7 @@ mod lane_state {
                 .expect("lane");
             bank.set_mute(3, BuiltinLaneSelector::Both, false, 64)
                 .expect("lane");
-            bank.set_fader_db(3, BuiltinLaneSelector::Both, -6.0, 0)
+            bank.set_fader_db(3, BuiltinLaneSelector::Both, -6.0, 16)
                 .expect("lane");
             bank.import_lane(
                 2,
@@ -7723,17 +7724,19 @@ mod lane_state {
 
     /// Issue #2280: an armed lane (issue #1288 D2, #2080 R1) holds its gain at `+0.0` until its
     /// fire, keeps its arm across a plan swap's carry and a reset, and a fire ends the arm whether
-    /// it opens the lane or not. Red if a timed fader move retargets an armed lane (the fire's
-    /// fade-in then starts from the move, a step), if an import or a reset ends an unfired arm
-    /// (the lane, muted with no fire left to open it, then stays silent for good), or if a fire
-    /// that stays muted keeps the arm (a later unmute then only retargets a fire that never
-    /// comes, and the lane stays silent).
+    /// it opens the lane or not; one that does not open it leaves it muted. Red if a timed fader
+    /// move retargets an armed lane (the fire's fade-in then starts from the move, a step), if an
+    /// import or a reset ends an unfired arm (the lane, muted with no fire left to open it, then
+    /// stays silent for good), if a fire that stays muted keeps the arm (a later unmute then only
+    /// retargets a fire that never comes, and the lane stays silent), or if it leaves the lane
+    /// anything but muted (the readback then reports a muted strip unmuted, and the next mute mask
+    /// a peer's mute re-derives lets the lane play).
     #[test]
     fn an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset() {
         let both = BuiltinLaneSelector::Both;
         for (backend, width) in banks() {
             let mut bank =
-                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false); 2])
+                BuiltinFaderBank::new(backend, width, vec![fader_params([0.0; 2], false); 3])
                     .expect("bank");
             bank.arm_fade_in(0).expect("lane");
             bank.apply_fader_operation(0, both, FaderOperation::SetGain { gain: 0.5 })
@@ -7764,6 +7767,22 @@ mod lane_state {
             bank.set_mute(1, both, true, 0).expect("lane");
             bank.arm_fade_in(1).expect("lane");
             bank.fire_fade_in(1, 64);
+            assert_eq!(
+                bank.is_muted(1, 0),
+                Some(true),
+                "{backend:?}: a fire that stays muted leaves the lane muted"
+            );
+            // Still muted, not merely silent: a timed move is only remembered, and a peer's mute
+            // (which re-derives the bank's mute mask) leaves the lane at exact `+0.0`.
+            bank.apply_fader_operation(1, both, FaderOperation::SetGain { gain: 0.5 })
+                .expect("lane");
+            bank.set_mute(2, both, true, 0).expect("lane");
+            assert!(
+                run_fader(&mut bank, 1, 2, 1.0)
+                    .iter()
+                    .all(|&word| word == 0),
+                "{backend:?}: a lane whose fire stays muted renders exact +0.0"
+            );
             bank.set_mute(1, both, false, 0).expect("lane");
             assert_eq!(
                 bank.is_muted(1, 0),

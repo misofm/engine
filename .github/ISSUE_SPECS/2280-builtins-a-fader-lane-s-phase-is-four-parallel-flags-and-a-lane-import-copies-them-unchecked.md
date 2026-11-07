@@ -267,7 +267,8 @@ and no-bit-moved, and accepted R1 (unreachable) and R9 (equivalent).
 - *MINOR.* The attempt-2 merge SHA was stale after the re-merge.
 
 ## Evidence (attempt 3)
-`origin/main` (`fd33447dc`, including #2274 as `97a45db0a`) was merged first (`8d181a6cb`); then
+`origin/main` (`10ce797ca`, the merge's second parent, including #2274 as `97a45db0a`) was merged
+first (`8d181a6cb`); then
 one commit.
 
 **Changes (tests only).**
@@ -297,6 +298,12 @@ to `armed_fade_in`.
 | W2b | `arm_fade_in` | `Armed` never written | `armed_fade_in`, `ls::an_arm_holds_…` |
 | W3 | `fire_fade_in` | arm not ended | `armed_fade_in`, `ls::an_arm_holds_…` |
 | X2 (new) | `fire_fade_in` | arm ended only when it opens | `ls::an_arm_holds_…` |
+
+_Correction (attempt 4): W3 and X2 did not cover the value the closed fire writes (`Muted`); N26
+replaces it and survived. Likewise W4 did not cover a windowed live move (N24). See attempt 4._
+
+| Id | Site | Mutation | Killed by |
+|---|---|---|---|
 | W4 (M2) | `live_gain` | `Unmuting` not ended | `ls::an_unmute_holds_…` |
 | W5 | `mute_channel`, armed | `opens = muted` | `armed_fade_in` |
 | W5b | `mute_channel`, armed | `opens` not written | `armed_fade_in` |
@@ -343,14 +350,16 @@ to `armed_fade_in`.
 | P4 | `FaderPhase::at_countdown` | settles a live countdown | `ls::an_unmute_holds_…` |
 | A2 (new) | `at_countdown` | never settles | `ls::an_unmute_holds_…` |
 
-So 48 of 50 mutants are killed, each by a named test, and R1 and R9 survive with the reasons the
+So 48 of 50 mutants are killed (the attempt-3 review then found N26 and N24, which this table
+missed; attempt 4), each by a named test, and R1 and R9 survive with the reasons the
 attempt-2 review accepted. Every arm of every `FaderPhase` method (`prepared` 2, `muted` 4,
 `gain_held` 4, `settled` 4, `at_countdown` 2) and of `is_armed` (2) has a mutant that a named
 test turns red.
 
 **No bit moved, on the merged tree.** The attempt-1 harness (`gr1_bits.rs`, scratch, never
 committed) was run on the merged tree twice: at head, and with `origin/main`'s
-`crates/builtins/src/lib.rs` and `rest_tests.rs` (`fd33447dc`) in their place. Both give simd4
+`crates/builtins/src/lib.rs` and `rest_tests.rs` in their place (read from `origin/main`, which another
+worktree's fetch had by then moved to `fd33447dc`; neither file differs between `10ce797ca` and `fd33447dc`). Both give simd4
 `c50ab7ba3c148cb5`, simd8 `c632900598d806ce`, scalar `1d4ee1dfcd9290db`, the attempt-1 values.
 
 **Gates (head).** 
@@ -362,3 +371,65 @@ committed) was run on the merged tree twice: at head, and with `origin/main`'s
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (295 marked regions in
   46 files)` (the count rose with `origin/main`, not with this change).
+
+## Verdict (attempt 3)
+**FAIL**, on one MAJOR. The refactor still holds: no bit moved, and every attempt-2 mutant is
+killed. But two new mutants survived builtins, builtins-compiler, graph and rack.
+- *MAJOR, N26.* `fire_fade_in` writes `FaderPhase::Muted` for every fire. N26 writes `Open`
+  instead for a fire that does not open the lane. Then:
+  - `is_muted` reads `Some(false)`, so the control-plane readback reports a muted strip as unmuted;
+  - a timed `SetGain` retargets the lane;
+  - a peer lane's mute re-derives the mask (`sync_mute`), which clears the lane's bit, so the lane
+    plays.
+
+  The attempt-3 table had counted this write as covered by W3 and X2. Neither test checks the
+  value the fire writes.
+- *MINOR, N24.* `live_gain` ends `Unmuting` for every move. N24 ends it only for a move with no
+  window, so a windowed live fader move during an unmute ramp keeps the hold. The tests moved the
+  fader only with a window of `0`.
+- *MINOR.* The attempt-3 evidence named the merged `origin/main` as `fd33447dc`; the merge's
+  second parent is `10ce797ca`. Corrected above.
+
+## Evidence (attempt 4)
+`origin/main` at `de3263034` (the merge's second parent) was merged first, as `7a0e79c14`; then
+one commit. `crates/builtins` is identical at `10ce797ca`, `fd33447dc` and `de3263034`.
+
+**Changes (tests only).**
+- `lane_state::an_arm_holds_the_lane_until_its_fire_across_a_carry_and_a_reset`. Right after a
+  fire that stays muted, it now asserts that the lane is still muted
+  (`is_muted(1, 0) == Some(true)`). It then applies a timed `SetGain`, mutes a peer lane (which
+  re-derives the mask), and asserts that two rendered blocks of the lane are exact `+0.0`. The
+  bank grows from two lanes to three, so the peer is a lane that is not armed. This kills N26.
+- `an_unmute_holds_the_gain_only_while_its_countdown_runs`: lane 3's live fader move during its
+  unmute ramp now has a window of 16 frames instead of 0. This kills N24, and M2 (W4) stays
+  killed.
+
+**Mutants, attempt 4** (`-p builtins --lib`, each alone and reverted):
+
+| Id | Site | Mutation | Killed by |
+|---|---|---|---|
+| N26 | `fire_fade_in` | a closed fire writes `Open` | `ls::an_arm_holds_…` |
+| N24 | `live_gain` | only a move with no window ends `Unmuting` | `ls::an_unmute_holds_…` |
+| W3, X2, W4 | (re-run) | as above | `ls::an_arm_holds_…`; `ls::an_arm_holds_…`; `ls::an_unmute_holds_…` |
+| W2, W2b, W7, W8, W10, W11b, W12, X3, X4, X5, X6, A2, I2 | (re-run after the edits) | as in attempt 3 | each still red, in `ls::an_arm_holds_…` or `ls::an_unmute_holds_…` |
+
+**Follow-up, not part of this issue.** The wrapper channel-index mutants N12, N15 and N16 survive
+because no dual-mono test arms or holds only one channel. That code predates #2280.
+
+**No bit moved, on the merged tree.** `gr1_bits.rs` (scratch, never committed) gives
+simd4 `c50ab7ba3c148cb5`, simd8
+`c632900598d806ce` and scalar `1d4ee1dfcd9290db`. That holds at head, and also with
+`de3263034`'s `crates/builtins/src/lib.rs` and `rest_tests.rs` in their place. These are the
+attempt-1 values.
+
+**Gates (head).** Each crate run on its own:
+- `cargo test --locked -p builtins --features builtins/test-support`: 18 binaries ok.
+- `cargo test --locked -p builtins-compiler --features builtins-compiler/test-support`: 8 ok.
+- `cargo test --locked -p graph`: 9 ok.
+- `cargo test --locked -p rack`: 7 ok.
+- `cargo clippy --locked -p builtins --all-targets --all-features -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p builtins`: clean.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (298 marked regions in
+  48 files)`. The count rose with `origin/main`.
