@@ -29,7 +29,7 @@
 
 use core::mem::{MaybeUninit, size_of};
 use core::num::NonZeroUsize;
-use core::sync::atomic::{AtomicU32, Ordering};
+use lifecycle::{Ending, SessionLifecycle};
 use std::sync::{Arc, Mutex};
 
 use builtins_compiler::MeterConsumer;
@@ -933,10 +933,11 @@ fn master_index(model: &session::SessionModel, master: Option<&session::StableId
 }
 
 /// The session's lifecycle word (#1332 S5): [`STATE_READY`] until either half records a sticky
-/// failure ([`STATE_FAILED`]). Shared by the two halves, so the control half refuses after a
-/// render failure and the render half silences after a control failure, without either reading
-/// the other's memory. One `Release` store to fail, one `Acquire` load to check.
-type Lifecycle = Arc<AtomicU32>;
+/// failure ([`STATE_FAILED`]) or the control half disposes ([`STATE_DISPOSED`]). Shared by the two
+/// halves, so the control half refuses after a render failure and the render half silences after
+/// a control failure or a dispose, without either reading the other's memory. Its transitions
+/// only move forward, and only the first failure is the session's (#2298, [`SessionLifecycle`]).
+type Lifecycle = Arc<SessionLifecycle>;
 
 /// What a preparation leaves for the commit that may publish its plan (#1290a, #1332 S4, S5).
 struct PreparedSuccessor {
@@ -1165,7 +1166,7 @@ impl ControlHalf {
 
     /// Whether the session is ready, as the lifecycle word says (#1332 S5).
     fn ready(&self) -> bool {
-        self.lifecycle.load(Ordering::Acquire) == STATE_READY
+        self.lifecycle.is_ready()
     }
 }
 
@@ -2715,6 +2716,12 @@ impl AudioWorkletEngineHost {
     }
 
     /// Mark an observed browser output-shape mismatch as sticky reprepare-required.
+    ///
+    /// [`RESULT_REPREPARE_REQUIRED`] for the session's first failure. A session that had already
+    /// failed or been disposed (#2298: the control half ended it before the render half's next
+    /// block) keeps its first failure: the call refuses with [`RESULT_WRONG_STATE`] and records
+    /// no failure of its own. The status shell a release leaves refuses with
+    /// [`RESULT_WRONG_STATE`] too.
     pub fn reject_output_quantum(&mut self, actual_frames: u32) -> u32 {
         let code = self.render.reject_output_quantum(actual_frames);
         self.record(code)
@@ -2734,7 +2741,7 @@ impl AudioWorkletEngineHost {
     /// half silences from its next block, and what it owns stays with it (#1332 S6).
     pub fn dispose(&mut self) -> u32 {
         if let Some(control) = self.control.as_ref() {
-            control.lifecycle.store(STATE_DISPOSED, Ordering::Release);
+            control.lifecycle.dispose();
         }
         self.control = None;
         self.render.ready = None;
@@ -2755,16 +2762,19 @@ impl AudioWorkletEngineHost {
     /// [`RESULT_WRONG_STATE`] when the session is not ready (failed already, disposed, or no
     /// control half here). A refusal changes nothing, the last result included, so a failure
     /// either half recorded first keeps its code and diagnostic, and a disposed session stays
-    /// [`STATE_DISPOSED`].
+    /// [`STATE_DISPOSED`]. The refusal and the failure are one transition of the lifecycle word
+    /// (#2298), so a render failure on another thread cannot land between them.
     pub fn fail_session(&mut self, code: u32) -> u32 {
         if code == RESULT_OK {
             return RESULT_INVALID_ARGUMENT;
         }
-        if !self.control_ready() {
+        if self.control.is_none() {
             return RESULT_WRONG_STATE;
         }
-        self.fail(code, b"web.host.failed\t$\n");
-        RESULT_OK
+        match self.end_session(code, b"web.host.failed\t$\n") {
+            Ending::First => RESULT_OK,
+            Ending::AlreadyEnded => RESULT_WRONG_STATE,
+        }
     }
 
     /// Release the render half to the thread that will render it (#1332 S5, the Rust form of
@@ -2863,11 +2873,11 @@ impl AudioWorkletEngineHost {
 
     /// Set the lifecycle state of both halves, for the tests that drive a refusal of a host that
     /// is not ready (#1332 S5).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "test-support"))]
     pub(crate) fn set_state_for_test(&mut self, state: u32) {
         self.render.status.state = state;
         if let Some(control) = self.control.as_ref() {
-            control.lifecycle.store(state, Ordering::Release);
+            control.lifecycle.force_for_test(state);
         }
     }
 
@@ -2882,7 +2892,7 @@ impl AudioWorkletEngineHost {
             // #1332 S6: with the render half away, the shell's state is the lifecycle word's, so
             // the Worker's status shows a failure of either half.
             if self.render.released {
-                self.render.status.state = control.lifecycle.load(Ordering::Acquire);
+                self.render.status.state = control.lifecycle.state();
             }
         }
         self.render.status.last_result = code;
@@ -2890,17 +2900,35 @@ impl AudioWorkletEngineHost {
         code
     }
 
-    /// Record a sticky failure of a control call without ever releasing ownership (#1332 S5): the
-    /// lifecycle word, which a render half on another thread reads before its next block, and
-    /// the control half's diagnostic; with the render half here, its status and silence at once
-    /// ([`RenderHalf::silence`]); then the control half's record.
+    /// Record a sticky failure of a control call without ever releasing ownership (#1332 S5), and
+    /// return `code`; or [`RESULT_WRONG_STATE`] when the session had already ended
+    /// ([`Self::end_session`]).
     fn fail(&mut self, code: u32, diagnostic: &[u8]) -> u32 {
-        if let Some(control) = self.control.as_mut() {
-            control.lifecycle.store(STATE_FAILED, Ordering::Release);
-            control.staging.write_diagnostic(diagnostic);
+        match self.end_session(code, diagnostic) {
+            Ending::First => code,
+            Ending::AlreadyEnded => RESULT_WRONG_STATE,
         }
+    }
+
+    /// The control half's sticky failure (#1332 S5): the lifecycle word, which a render half on
+    /// another thread reads before its next block, and the control half's diagnostic; with the
+    /// render half here, its status and silence at once ([`RenderHalf::silence`]); then the
+    /// control half's record of `code`. A session that had already failed or been disposed
+    /// ([`Ending::AlreadyEnded`], #2298: the render half on another thread failed it after this
+    /// call's readiness check) keeps its first failure: nothing is written, the last result
+    /// included. A host with no control half has no session to end (it was disposed, or never
+    /// booted one): [`Ending::AlreadyEnded`], and nothing is written either.
+    fn end_session(&mut self, code: u32, diagnostic: &[u8]) -> Ending {
+        let Some(control) = self.control.as_mut() else {
+            return Ending::AlreadyEnded;
+        };
+        if control.lifecycle.fail() == Ending::AlreadyEnded {
+            return Ending::AlreadyEnded;
+        }
+        control.staging.write_diagnostic(diagnostic);
         self.render.silence();
-        self.record(code)
+        self.record(code);
+        Ending::First
     }
 }
 
@@ -3180,17 +3208,20 @@ impl RenderHalf {
 
     /// [`AudioWorkletEngineHost::reject_output_quantum`] on this half.
     fn reject_output_quantum(&mut self, actual_frames: u32) -> u32 {
-        if self.status.state != STATE_READY {
+        // #2298: the shell a release leaves renders nothing, so it records no failure the
+        // lifecycle word does not have (as `render_next` on it refuses).
+        if self.status.state != STATE_READY || self.released {
             return self.record(RESULT_WRONG_STATE);
         }
         if actual_frames == self.status.quantum_frames {
             return self.record(RESULT_OK);
         }
+        let ending = self.end();
         self.status.state = STATE_FAILED;
-        if let Some(ready) = self.ready.as_ref() {
-            ready.lifecycle.store(STATE_FAILED, Ordering::Release);
+        match ending {
+            Ending::First => self.record(RESULT_REPREPARE_REQUIRED),
+            Ending::AlreadyEnded => self.record(RESULT_WRONG_STATE),
         }
-        self.record(RESULT_REPREPARE_REQUIRED)
     }
     // REALTIME_POLICY_END
 
@@ -3214,7 +3245,7 @@ impl RenderHalf {
         };
         // #1332 S5: a sticky failure the control half recorded, on whatever thread it runs, is
         // this half's from this block: silence, as the single instance's failure makes it at once.
-        if ready.lifecycle.load(Ordering::Acquire) != STATE_READY {
+        if !ready.lifecycle.is_ready() {
             self.silence();
             return self.record(RESULT_WRONG_STATE);
         }
@@ -3353,13 +3384,28 @@ impl RenderHalf {
     /// The diagnostic is a fixed text the half keeps (#1332 S5): the single instance copies it
     /// into the control half's diagnostic after the call, and the lifecycle word tells the
     /// control half, on whatever thread it runs, that the session failed.
+    ///
+    /// A session that had already failed or been disposed (#2298: the control half ended it
+    /// before this half's next block) keeps its first failure: the half silences and refuses with
+    /// [`RESULT_WRONG_STATE`], and keeps no diagnostic for the adoption to copy.
     fn fail(&mut self, code: u32, diagnostic: &'static [u8]) -> u32 {
-        if let Some(ready) = self.ready.as_ref() {
-            ready.lifecycle.store(STATE_FAILED, Ordering::Release);
-        }
+        let ending = self.end();
         self.silence();
-        self.failure = Some(diagnostic);
-        self.record(code)
+        match ending {
+            Ending::First => {
+                self.failure = Some(diagnostic);
+                self.record(code)
+            }
+            Ending::AlreadyEnded => self.record(RESULT_WRONG_STATE),
+        }
+    }
+
+    /// The lifecycle word's failure transition from this half (#2298). A half with no prepared
+    /// session shares no word, so its failure is its own and the first.
+    fn end(&self) -> Ending {
+        self.ready
+            .as_ref()
+            .map_or(Ending::First, |ready| ready.lifecycle.fail())
     }
 
     /// The sticky failed state and positive-zero silence (#1332 S5), without a diagnostic: what
@@ -3443,6 +3489,11 @@ impl RenderHost {
 
     /// Record a sticky failure of this half with its fixed diagnostic (#1332 S6: the instance's
     /// stack canary found overwritten at the release). The lifecycle word tells the control half.
+    ///
+    /// Returns `code` for the session's first failure. A session that had already failed or been
+    /// disposed (#2298: the control half ended it before this half's next block) keeps its first
+    /// failure: the half silences and refuses with [`RESULT_WRONG_STATE`], and keeps no diagnostic
+    /// for the adoption to copy.
     pub fn fail(&mut self, code: u32, diagnostic: &'static [u8]) -> u32 {
         self.half.fail(code, diagnostic)
     }
@@ -5208,7 +5259,7 @@ fn cross_thread_bytes(ring: u64) -> Option<u64> {
     struct SharedWord {
         strong: usize,
         weak: usize,
-        word: AtomicU32,
+        word: SessionLifecycle,
     }
     let successor = u64::try_from(engine::realtime::published_words_retained_bytes::<2>()).ok()?;
     let lifecycle = u64::try_from(size_of::<SharedWord>()).ok()?;
@@ -5532,7 +5583,7 @@ fn compile_ready(
             engine::realtime::QueueGeneration(0),
         )
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    let lifecycle: Lifecycle = Arc::new(AtomicU32::new(STATE_READY));
+    let lifecycle: Lifecycle = Arc::new(SessionLifecycle::new());
     let shared_bytes = cross_thread_bytes(retired_consumer.retained_bytes())
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_metadata_bytes = report
@@ -5656,6 +5707,7 @@ fn boxed_uninit_planes(channels: u32) -> Result<Box<[MaybeUninit<&'static [f32]>
 
 mod ffi;
 mod handoff;
+mod lifecycle;
 mod render_lock;
 
 pub use ffi::*;

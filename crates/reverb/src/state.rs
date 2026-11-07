@@ -17,26 +17,27 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
     RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, read_u32, write_f32, write_ramp, write_u32,
 };
+use effect_runtime::tap_crossfade::TapCrossfade;
 
 use crate::{
     COMMON_HEADER_WORDS, DIFFUSERS, GainRamps, LANE_HEADER_WORDS, LINES, PARAMETER_COUNT,
     PARAMETER_SPECS, PRE_DELAY, PreparedReverb, RAMP_SAMPLES, REVERB_DESCRIPTOR, SCALAR_RAMPS,
-    SIZE, TRANSITION_SAMPLES, damping_coefficient, damping_cutoff_max_hz, diffusion_coefficient,
-    line_lengths, low_cut_coefficient, pre_delay_samples, tpt_coefficient,
+    SIZE, damping_coefficient, damping_cutoff_max_hz, diffusion_coefficient, line_lengths,
+    low_cut_coefficient, pre_delay_samples, tpt_coefficient,
 };
 
 const C_HISTORY: usize = 0;
-const C_LINE_FADE: usize = 1;
-const C_PRE_FADE: usize = 2;
+pub(crate) const C_LINE_FADE: usize = 1;
+pub(crate) const C_PRE_FADE: usize = 2;
 const C_PRE_ACTIVE: usize = 3;
-const C_PRE_TRANSITION: usize = 4;
+pub(crate) const C_PRE_TRANSITION: usize = 4;
 const C_PRE_PENDING: usize = 5;
 const C_PRE_CURSOR: usize = 6;
 const C_GAIN_REMAINING: usize = 7;
 const C_TARGETS: usize = 8;
 const C_RAMPS: usize = C_TARGETS + PARAMETER_COUNT;
 const C_LINE_ACTIVE: usize = C_RAMPS + SCALAR_RAMPS * RAMP_WORDS;
-const C_LINE_TRANSITION: usize = C_LINE_ACTIVE + LINES;
+pub(crate) const C_LINE_TRANSITION: usize = C_LINE_ACTIVE + LINES;
 const C_LINE_PENDING: usize = C_LINE_TRANSITION + LINES;
 const C_LINE_CURSOR: usize = C_LINE_PENDING + LINES;
 const C_GAIN_CURRENT: usize = C_LINE_CURSOR + LINES;
@@ -143,17 +144,11 @@ fn read_carried_ramp(
 /// A validated common header, held until every section has been accepted.
 struct CommonHeader {
     history: u32,
-    line_fade: u32,
-    pre_fade: u32,
-    pre_active: u32,
-    pre_transition: u32,
-    pre_pending: u32,
+    pre_tap: TapCrossfade<u32>,
     pre_cursor: u32,
     targets: [f32; PARAMETER_COUNT],
     ramps: [LinearRamp; SCALAR_RAMPS],
-    line_active: [u32; LINES],
-    line_transition: [u32; LINES],
-    line_pending: [u32; LINES],
+    line_taps: TapCrossfade<[u32; LINES]>,
     line_cursor: [u32; LINES],
     gains: GainRamps,
     lp: [f32; LINES],
@@ -179,11 +174,11 @@ impl PreparedReverb {
         let g = &self.geometry;
         let common = output.common;
         write_u32(common, C_HISTORY, self.history);
-        write_u32(common, C_LINE_FADE, self.line_fade);
-        write_u32(common, C_PRE_FADE, self.pre_fade);
-        write_u32(common, C_PRE_ACTIVE, self.pre_active);
-        write_u32(common, C_PRE_TRANSITION, self.pre_transition);
-        write_u32(common, C_PRE_PENDING, self.pre_pending);
+        write_u32(common, C_LINE_FADE, self.line_taps.remaining());
+        write_u32(common, C_PRE_FADE, self.pre_tap.remaining());
+        write_u32(common, C_PRE_ACTIVE, *self.pre_tap.active());
+        write_u32(common, C_PRE_TRANSITION, *self.pre_tap.transition());
+        write_u32(common, C_PRE_PENDING, *self.pre_tap.pending());
         write_u32(common, C_PRE_CURSOR, self.pre_cursor);
         write_u32(common, C_GAIN_REMAINING, self.gains.remaining);
         for i in 0..PARAMETER_COUNT {
@@ -193,9 +188,13 @@ impl PreparedReverb {
             write_ramp(common, C_RAMPS + i * RAMP_WORDS, *ramp);
         }
         for i in 0..LINES {
-            write_u32(common, C_LINE_ACTIVE + i, self.line_active[i]);
-            write_u32(common, C_LINE_TRANSITION + i, self.line_transition[i]);
-            write_u32(common, C_LINE_PENDING + i, self.line_pending[i]);
+            write_u32(common, C_LINE_ACTIVE + i, self.line_taps.active()[i]);
+            write_u32(
+                common,
+                C_LINE_TRANSITION + i,
+                self.line_taps.transition()[i],
+            );
+            write_u32(common, C_LINE_PENDING + i, self.line_taps.pending()[i]);
             write_u32(common, C_LINE_CURSOR + i, self.line_cursor[i]);
             write_f32(common, C_GAIN_CURRENT + i, self.gains.current[i]);
             write_f32(common, C_GAIN_STEP + i, self.gains.step[i]);
@@ -251,19 +250,35 @@ impl PreparedReverb {
         let g = &self.geometry;
         let rate = self.sample_rate;
         let lane_error = || state_error("effect.state.lane");
+        let targets: [f32; PARAMETER_COUNT] = read_floats(bytes, C_TARGETS);
+        for (index, target) in targets.iter().enumerate() {
+            if !parameter_value_valid(&PARAMETER_SPECS[index], *target) || is_negative_zero(*target)
+            {
+                return Err(state_error("effect.state.parameter"));
+            }
+        }
+        // The two crossfades' phases; each tap's domain is checked below.
+        let pre_tap = TapCrossfade::from_words(
+            read_u32(bytes, C_PRE_ACTIVE),
+            read_u32(bytes, C_PRE_TRANSITION),
+            read_u32(bytes, C_PRE_PENDING),
+            read_u32(bytes, C_PRE_FADE),
+        )
+        .ok_or_else(lane_error)?;
+        let line_taps = TapCrossfade::from_words(
+            read_words(bytes, C_LINE_ACTIVE),
+            read_words(bytes, C_LINE_TRANSITION),
+            read_words(bytes, C_LINE_PENDING),
+            read_u32(bytes, C_LINE_FADE),
+        )
+        .ok_or_else(lane_error)?;
         let header = CommonHeader {
             history: read_u32(bytes, C_HISTORY),
-            line_fade: read_u32(bytes, C_LINE_FADE),
-            pre_fade: read_u32(bytes, C_PRE_FADE),
-            pre_active: read_u32(bytes, C_PRE_ACTIVE),
-            pre_transition: read_u32(bytes, C_PRE_TRANSITION),
-            pre_pending: read_u32(bytes, C_PRE_PENDING),
+            pre_tap,
             pre_cursor: read_u32(bytes, C_PRE_CURSOR),
-            targets: read_floats(bytes, C_TARGETS),
+            targets,
             ramps: [LinearRamp::fixed(0.0); SCALAR_RAMPS],
-            line_active: read_words(bytes, C_LINE_ACTIVE),
-            line_transition: read_words(bytes, C_LINE_TRANSITION),
-            line_pending: read_words(bytes, C_LINE_PENDING),
+            line_taps,
             line_cursor: read_words(bytes, C_LINE_CURSOR),
             gains: GainRamps {
                 current: read_floats(bytes, C_GAIN_CURRENT),
@@ -274,30 +289,21 @@ impl PreparedReverb {
             lp: read_floats(bytes, C_LP),
             hp: read_floats(bytes, C_HP),
         };
-        for (index, target) in header.targets.iter().enumerate() {
-            if !parameter_value_valid(&PARAMETER_SPECS[index], *target) || is_negative_zero(*target)
-            {
-                return Err(state_error("effect.state.parameter"));
-            }
-        }
         let pre_ok = |d: u32| d <= g.pre_max;
+        let (pre, lines) = (&header.pre_tap, &header.line_taps);
         if header.history > g.history_cap
-            || header.line_fade > TRANSITION_SAMPLES
-            || header.pre_fade > TRANSITION_SAMPLES
             || header.pre_cursor >= g.pre_len
-            || !pre_ok(header.pre_active)
-            || !pre_ok(header.pre_transition)
-            || (header.pre_fade == 0 && header.pre_active != header.pre_transition)
-            || pre_delay_samples(header.targets[PRE_DELAY], rate) != Some(header.pre_pending)
-            || line_lengths(header.targets[SIZE], rate, &self.sieve) != Some(header.line_pending)
-            || (header.line_fade == 0 && header.line_active != header.line_transition)
+            || !pre_ok(*pre.active())
+            || !pre_ok(*pre.transition())
+            || pre_delay_samples(header.targets[PRE_DELAY], rate) != Some(*pre.pending())
+            || line_lengths(header.targets[SIZE], rate, &self.sieve) != Some(*lines.pending())
         {
             return Err(lane_error());
         }
         for line in 0..LINES {
             let in_range = |d: u32| (self.min_lengths[line]..=self.max_lengths[line]).contains(&d);
-            if !in_range(header.line_active[line])
-                || !in_range(header.line_transition[line])
+            if !in_range(lines.active()[line])
+                || !in_range(lines.transition()[line])
                 || header.line_cursor[line] >= g.line_len[line]
                 || !normal_or_zero(header.lp[line])
                 || !normal_or_zero(header.hp[line])
@@ -396,19 +402,12 @@ impl PreparedReverb {
 
         // Commit: every section has been accepted.
         self.history = header.history;
-        self.line_fade = header.line_fade;
-        self.pre_fade = header.pre_fade;
-        self.pre_active = header.pre_active;
-        self.pre_transition = header.pre_transition;
-        self.pre_pending = header.pre_pending;
+        self.pre_tap = header.pre_tap;
         self.pre_cursor = header.pre_cursor;
         self.targets = header.targets;
         self.ramps = header.ramps;
-        self.line_active = header.line_active;
-        self.line_transition = header.line_transition;
-        self.line_pending = header.line_pending;
+        self.line_taps = header.line_taps;
         self.line_cursor = header.line_cursor;
-        self.line_queued = header.line_pending != header.line_active;
         self.gains = header.gains;
         self.lp = header.lp;
         self.hp = header.hp;

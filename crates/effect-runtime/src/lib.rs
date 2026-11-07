@@ -27,6 +27,8 @@
 //! * [`params`] — domain validation and clamping driven by a descriptor, in the D8 select form.
 //! * [`silent`] — the silent fixed-point claim a quiet block trusts to skip the kernel, checked
 //!   against the effect's rest scan in debug builds wherever it is trusted.
+//! * [`tap_crossfade`] — the queued tap crossfade of the delay and the reverb: its phases, its
+//!   transitions and the one validator a restore applies (#2309). The blend stays in each kernel.
 //!
 //! # Realtime rules
 //!
@@ -56,5 +58,6 @@ pub mod silent;
 pub mod state_payload;
 pub mod svf;
 pub mod tail;
+pub mod tap_crossfade;
 
 pub mod corpus;

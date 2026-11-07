@@ -54,6 +54,7 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
     RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, read_u32, write_f32, write_ramp, write_u32,
 };
+use effect_runtime::tap_crossfade::TapCrossfade;
 use lane::kernels::ramp_toward;
 use lane::{Lane, flush};
 
@@ -63,7 +64,7 @@ const PER_LANE_PARAMETER_COUNT: usize = 4;
 const ORDINARY_RAMP_COUNT: usize = 3;
 const PARAMETER_COUNT: usize = 5;
 const RAMP_SAMPLES: u32 = 64;
-const TRANSITION_SAMPLES: u32 = 128;
+const TRANSITION_SAMPLES: u32 = effect_runtime::tap_crossfade::TRANSITION_SAMPLES;
 /// The common state section: the ring cursor word and the cross-feedback ramp.
 const COMMON_BYTES: u32 = (1 + RAMP_WORDS as u32) * 4;
 const FIXED_BYTES: u64 = 36;
@@ -291,7 +292,7 @@ const EVAL: f64 = 1.0 / 16_777_216.0;
 
 /// Samples after the last control event by which every ramp and crossfade has settled: a ramp
 /// takes [`RAMP_SAMPLES`], and a crossfade in flight plus the one queued behind it take
-/// `2 * TRANSITION_SAMPLES` (`begin_transition` starts the queued one at the next chunk).
+/// `2 * TRANSITION_SAMPLES` (`TapCrossfade::begin` starts the queued one at the next chunk).
 const SETTLE_SAMPLES: u64 = if RAMP_SAMPLES > 2 * TRANSITION_SAMPLES {
     RAMP_SAMPLES as u64
 } else {
@@ -708,16 +709,10 @@ impl LaneDefaults {
 struct DelayLane {
     /// Recursive damping state (the TPT integrator). D7-flushed once per sample.
     damping_state: f32,
-    /// Last accepted delay time in milliseconds; `pending_delay` is its sample mapping.
+    /// Last accepted delay time in milliseconds; the pending tap of `taps` is its sample mapping.
     delay_target_ms: f32,
-    /// Tap the lane reads when no crossfade is running.
-    active_delay: u32,
-    /// Tap the lane is crossfading towards; equals `active_delay` when idle.
-    transition_delay: u32,
-    /// Tap the next crossfade will start towards.
-    pending_delay: u32,
-    /// Updates left in the running crossfade; `0` when idle.
-    transition_remaining: u32,
+    /// The tap the lane reads, the one it crossfades towards and the one queued behind it.
+    taps: TapCrossfade<u32>,
     /// Samples of ring history that are readable, saturating at the ring length.
     valid_history: u32,
     /// Feedback, damping coefficient `g`, wet mix.
@@ -731,10 +726,7 @@ impl DelayLane {
         Self {
             damping_state: 0.0,
             delay_target_ms: defaults.delay_ms,
-            active_delay: defaults.delay,
-            transition_delay: defaults.delay,
-            pending_delay: defaults.delay,
-            transition_remaining: 0,
+            taps: TapCrossfade::settled(defaults.delay),
             valid_history: 0,
             ramps: defaults.ramps(),
             ring: vec![0.0; ring_words].into_boxed_slice(),
@@ -753,10 +745,7 @@ impl DelayLane {
     ) {
         self.damping_state = 0.0;
         self.delay_target_ms = delay_target_ms;
-        self.active_delay = delay;
-        self.transition_delay = delay;
-        self.pending_delay = delay;
-        self.transition_remaining = 0;
+        self.taps = TapCrossfade::settled(delay);
         self.valid_history = 0;
         self.ramps = ramps;
     }
@@ -770,21 +759,9 @@ impl DelayLane {
         for ramp in &mut ramps {
             ramp.snap();
         }
-        // `pending_delay` is `delay_samples(delay_target_ms)` by invariant: automation writes the
+        // The pending tap is `delay_samples(delay_target_ms)` by invariant: automation writes the
         // two together and restore validates the pair, so no reset re-derives it.
-        self.reset_to(self.pending_delay, self.delay_target_ms, ramps);
-    }
-
-    /// Starts the queued crossfade if one is queued and none is running.
-    ///
-    /// Called at a chunk boundary only. `pending_delay` changes at block start and `active_delay`
-    /// at a chunk end, so a chunk boundary is the only sample index at which this can fire — which
-    /// is what keeps the tap set constant inside a chunk.
-    fn begin_transition(&mut self) {
-        if self.transition_remaining == 0 && self.pending_delay != self.active_delay {
-            self.transition_delay = self.pending_delay;
-            self.transition_remaining = TRANSITION_SAMPLES;
-        }
+        self.reset_to(*self.taps.pending(), self.delay_target_ms, ramps);
     }
 
     /// Copies `n` samples of tap history at delay `d` into `destination`.
@@ -819,9 +796,9 @@ impl DelayLane {
     /// tap whose delay exceeds the valid history is written as zeros — the lazy-reset semantics of
     /// the per-sample path, resolved once per chunk instead of once per sample.
     fn fill_windows(&self, cursor: usize, old: &mut [f32], new: &mut [f32]) {
-        self.fill_tap(cursor, self.active_delay, old);
-        if self.transition_remaining > 0 {
-            self.fill_tap(cursor, self.transition_delay, new);
+        self.fill_tap(cursor, *self.taps.active(), old);
+        if self.taps.remaining() > 0 {
+            self.fill_tap(cursor, *self.taps.transition(), new);
         }
     }
 
@@ -1081,7 +1058,7 @@ struct LaneChunk<'a> {
     fading: bool,
     /// This chunk consumes the final (128th) update of the crossfade.
     fade_last: bool,
-    /// `(129 - transition_remaining) / 128 - 1/128`, so the first `+=` inside the kernel lands on
+    /// `(129 - remaining) / 128 - 1/128`, so the first `+=` inside the kernel lands on
     /// update `j`'s exact weight `j / 128`.
     alpha: f32,
     /// `(first value, per-sample step, target)` of the damping coefficient ramp.
@@ -1141,8 +1118,8 @@ impl PreparedDelay {
     /// |---|---|
     /// | `frames`, `chunk_cap` | block end; stack window size |
     /// | `R - cursor` | the write window stays one contiguous run |
-    /// | `active_delay`, and `transition_delay` while fading | the non-overlap proof above |
-    /// | `transition_remaining` while fading | a crossfade ends exactly at a chunk end |
+    /// | the active tap, and the transition tap while fading | the non-overlap proof above |
+    /// | the crossfade's `remaining` while fading | a crossfade ends exactly at a chunk end |
     /// | `D - valid_history` when `D > valid_history` | the tap is all-zero or all-valid |
     /// | `remaining - 1` per running ramp (`1` at `remaining == 1`) | the D11 snap is its own frame |
     ///
@@ -1151,14 +1128,15 @@ impl PreparedDelay {
         let ring_words = self.left.ring.len();
         let mut frames = remaining_in_block.min(cap).min(ring_words - self.cursor);
         for lane in [&self.left, &self.right] {
-            frames = frames
-                .min(lane.active_delay as usize)
-                .min(lane.history_bound(lane.active_delay));
-            if lane.transition_remaining > 0 {
+            let active = *lane.taps.active();
+            frames = frames.min(active as usize).min(lane.history_bound(active));
+            let remaining = lane.taps.remaining();
+            if remaining > 0 {
+                let transition = *lane.taps.transition();
                 frames = frames
-                    .min(lane.transition_delay as usize)
-                    .min(lane.history_bound(lane.transition_delay))
-                    .min(lane.transition_remaining as usize);
+                    .min(transition as usize)
+                    .min(lane.history_bound(transition))
+                    .min(remaining as usize);
             }
             for ramp in &lane.ramps {
                 frames = frames.min(ramp_bound(ramp));
@@ -1257,12 +1235,7 @@ impl PreparedDelay {
         let ring_limit = ring_words as u32;
         for lane in [&mut self.left, &mut self.right] {
             lane.valid_history = lane.valid_history.saturating_add(advanced).min(ring_limit);
-            if lane.transition_remaining > 0 {
-                lane.transition_remaining -= advanced;
-                if lane.transition_remaining == 0 {
-                    lane.active_delay = lane.transition_delay;
-                }
-            }
+            lane.taps.advance(advanced);
         }
         self.cursor += frames;
         if self.cursor == ring_words {
@@ -1343,7 +1316,7 @@ fn chunk_of<'a>(
     /// so the iterated addition below is the same value the closed form gives.
     const STEP_ALPHA: f32 = 1.0 / 128.0;
 
-    let remaining = lane.transition_remaining;
+    let remaining = lane.taps.remaining();
     let feedback = lane.ramps[0].advance_block::<f32>(frames);
     let damping = lane.ramps[1].advance_block::<f32>(frames);
     let mix = lane.ramps[2].advance_block::<f32>(frames);
@@ -1556,9 +1529,9 @@ fn mix_sample(dry: f32, wet: f32, mix: f32, bypass: Mask) -> f32 {
 ///
 /// * `ramps[0..3]` -- feedback, damping `g` and wet mix, all four `LinearRamp` fields each;
 ///   `chunk_of` advances them per chunk and `chunk_frames` reads `remaining` to size the chunk.
-/// * `active_delay`, `transition_delay`, `pending_delay`, `transition_remaining` -- the tap
+/// * `taps` -- the active, transition and pending taps and the crossfade's `remaining`: the tap
 ///   geometry `fill_windows` and `fill_tap` materialise, and the crossfade alpha `chunk_of`
-///   derives from `transition_remaining`.
+///   derives from `remaining`.
 /// * `valid_history` -- read by `tap_is_valid`, which decides whether a tap reads audio or the
 ///   zero fill.
 /// * `delay_target_ms` -- the last accepted delay time. The frame loop does not read it, but it is
@@ -1590,10 +1563,7 @@ fn lanes_symmetric(left: &DelayLane, right: &DelayLane) -> bool {
         }
     }
     left.delay_target_ms.to_bits() == right.delay_target_ms.to_bits()
-        && left.active_delay == right.active_delay
-        && left.transition_delay == right.transition_delay
-        && left.pending_delay == right.pending_delay
-        && left.transition_remaining == right.transition_remaining
+        && left.taps == right.taps
         && left.valid_history == right.valid_history
 }
 
@@ -1656,11 +1626,11 @@ impl PreparedNativeEffect for PreparedDelay {
 
         let mut offset = 0;
         while offset < frames {
-            // The only place a queued crossfade may start: `pending_delay` moves at block start and
-            // `active_delay` at a chunk end, so a chunk boundary is the only sample index at which
+            // The only place a queued crossfade may start: the pending tap moves at block start and
+            // the active tap at a chunk end, so a chunk boundary is the only sample index at which
             // the tap set can change.
-            self.left.begin_transition();
-            self.right.begin_transition();
+            self.left.taps.begin();
+            self.right.taps.begin();
             let chunk = self.chunk_frames(frames - offset, cap);
             self.process_chunk(
                 &mut io_left[offset..offset + chunk],
@@ -1751,10 +1721,7 @@ impl PreparedNativeEffect for PreparedDelay {
 struct LaneHeader {
     damping_state: f32,
     delay_target_ms: f32,
-    active_delay: u32,
-    transition_delay: u32,
-    pending_delay: u32,
-    transition_remaining: u32,
+    taps: TapCrossfade<u32>,
     valid_history: u32,
     ramps: [LinearRamp; ORDINARY_RAMP_COUNT],
 }
@@ -1764,10 +1731,7 @@ impl LaneHeader {
     fn apply(&self, lane: &mut DelayLane, bytes: &[u8]) {
         lane.damping_state = self.damping_state;
         lane.delay_target_ms = self.delay_target_ms;
-        lane.active_delay = self.active_delay;
-        lane.transition_delay = self.transition_delay;
-        lane.pending_delay = self.pending_delay;
-        lane.transition_remaining = self.transition_remaining;
+        lane.taps = self.taps;
         lane.valid_history = self.valid_history;
         lane.ramps = self.ramps;
         for (index, value) in lane.ring.iter_mut().enumerate() {
@@ -1832,7 +1796,7 @@ fn apply_automation(
             && let Some(delay) = delay_samples(value, sample_rate, maximum_delay)
         {
             lane.delay_target_ms = value;
-            lane.pending_delay = delay;
+            lane.taps.queue(delay);
         }
         for ramp_index in 0..ORDINARY_RAMP_COUNT {
             if let Some(value) = pending[(ramp_index + 1) * 2 + lane_index] {
@@ -1870,10 +1834,10 @@ fn validate_state_lengths(
 fn write_lane(bytes: &mut [u8], lane: &DelayLane, cursor: usize) {
     write_f32(bytes, 0, lane.damping_state);
     write_f32(bytes, 1, lane.delay_target_ms);
-    write_u32(bytes, 2, lane.active_delay);
-    write_u32(bytes, 3, lane.transition_delay);
-    write_u32(bytes, 4, lane.pending_delay);
-    write_u32(bytes, 5, lane.transition_remaining);
+    write_u32(bytes, 2, *lane.taps.active());
+    write_u32(bytes, 3, *lane.taps.transition());
+    write_u32(bytes, 4, *lane.taps.pending());
+    write_u32(bytes, 5, lane.taps.remaining());
     write_u32(bytes, 6, lane.valid_history);
     for (index, ramp) in lane.ramps.iter().enumerate() {
         write_ramp(bytes, LANE_RAMP_WORD + index * RAMP_WORDS, *ramp);
@@ -1910,14 +1874,18 @@ fn read_lane_header(
         || !valid_delay(active_delay, resources.max_delay)
         || !valid_delay(transition_delay, resources.max_delay)
         || !valid_delay(pending_delay, resources.max_delay)
-        || transition_remaining > TRANSITION_SAMPLES
         || valid_history > resources.ring_words as u32
-        || (transition_remaining == 0 && active_delay != transition_delay)
-        || (transition_remaining != 0 && active_delay == transition_delay)
         || delay_samples(delay_target_ms, sample_rate, resources.max_delay) != Some(pending_delay)
     {
         return Err(state_error("effect.state.lane"));
     }
+    let taps = TapCrossfade::from_words(
+        active_delay,
+        transition_delay,
+        pending_delay,
+        transition_remaining,
+    )
+    .ok_or(state_error("effect.state.lane"))?;
     // The damping ramp holds the mapped coefficient, so its domain is the coefficient's, not the
     // control's; the other two hold their descriptor values.
     let damping_domain = ParameterSpec::continuous(0.0, damping_coefficient_max(sample_rate), 0.0);
@@ -1929,10 +1897,7 @@ fn read_lane_header(
     Ok(LaneHeader {
         damping_state,
         delay_target_ms,
-        active_delay,
-        transition_delay,
-        pending_delay,
-        transition_remaining,
+        taps,
         valid_history,
         ramps,
     })
@@ -2496,12 +2461,12 @@ mod tests {
         // Update 128 delivers the new tap's bits, not `old + 1 * (new - old)`, which for this pair
         // rounds to `+0.0`.
         assert_eq!(left[127].to_bits(), final_tap.to_bits());
-        assert_eq!(effect.left.active_delay, 96);
+        assert_eq!(*effect.left.taps.active(), 96);
         // 128 updates of the queued fade, less the 64 frames of the last block.
-        assert_eq!(effect.left.transition_remaining, 64);
+        assert_eq!(effect.left.taps.remaining(), 64);
         // The queued retarget starts on the sample after the fade completed, at weight 1/128.
         assert_eq!(left[128].to_bits(), (127.0_f32 / 256.0).to_bits());
-        assert_eq!(effect.left.transition_delay, 48);
+        assert_eq!(*effect.left.taps.transition(), 48);
     }
 
     /// Deterministic noise plus impulses, from an integer generator so every partition sees the

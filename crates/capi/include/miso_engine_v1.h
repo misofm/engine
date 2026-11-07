@@ -14,7 +14,13 @@ extern "C" {
  *                and may be called from any thread at any time.
  *   engine       Control thread. At most one thread at a time calls any function taking the engine
  *                (miso_engine_v1_engine_create, miso_engine_v1_compile_session, and
- *                miso_engine_v1_last_error on the engine).
+ *                miso_engine_v1_last_error on the engine). miso_engine_v1_compile_session and
+ *                miso_engine_v1_last_error on the engine claim the engine on entry with one atomic
+ *                compare-exchange and release it on return (issue 2321); a call that finds it
+ *                claimed does not wait, touches no engine state, writes no diagnostic and no
+ *                bytes output, and returns MISO_ENGINE_V1_BUSY, as a refused session call does.
+ *                A refused compile still writes null into out_session and out_plan, as every
+ *                compile rejection does.
  *   session      Control thread. At most one thread at a time calls
  *                miso_engine_v1_source_submit_planar_f32, miso_engine_v1_source_seek,
  *                miso_engine_v1_source_seek_at, miso_engine_v1_source_seek_report,
@@ -40,9 +46,10 @@ extern "C" {
  *                concurrently with miso_engine_v1_render_f32_planar or with itself. Each of the
  *                two calls claims the render state on entry with one atomic compare-exchange and
  *                releases it on return; a call that finds it claimed does not wait, touches no
- *                plan state, and returns MISO_ENGINE_V1_RENDER_REJECTED with "render.busy". A
- *                refused render writes nothing into its output, so the host writes silence. The
- *                result code is authoritative: the winner may overwrite the plan's last error.
+ *                plan state, writes no diagnostic, and returns MISO_ENGINE_V1_BUSY (issue 2293),
+ *                as a refused session call does. A refused render writes nothing into its output,
+ *                so the host writes silence. The plan's last error stays the one the last call
+ *                that held the plan left.
  *                miso_engine_v1_plan_resources, miso_engine_v1_plan_watermark and
  *                miso_engine_v1_last_error on a plan: any thread, at any time while the plan is
  *                live, including concurrently with a render call. They are pure with respect to
@@ -53,12 +60,17 @@ extern "C" {
  *   *_destroy    miso_engine_v1_engine_destroy, miso_engine_v1_session_destroy and
  *                miso_engine_v1_plan_destroy require quiescence: no other call on that handle is
  *                in flight or will start. A session and its plan may be destroyed in either order.
- *                miso_engine_v1_session_destroy claims the session as the session calls do; one
- *                that finds it claimed is refused: it frees nothing and returns, rather than free
- *                the session under the running call. The session stays live and valid, the call
- *                in flight and every later call proceed normally, and a later quiescent destroy
- *                frees it (a host that never destroys it again leaks it). A call that starts
- *                after a successful destroy is undefined, as before.
+ *                Each destroy claims its handle as the handle's calls do: the engine destroy as
+ *                the engine calls, the session destroy as the session calls (issue 2276), and the
+ *                plan destroy as the two render-side calls (issue 2321). A destroy that finds its
+ *                handle claimed is refused: it frees nothing and returns, rather than free the
+ *                handle under the running call. The handle stays live and valid, the call in
+ *                flight and every later call proceed normally, and a later quiescent destroy
+ *                frees it (a host that never destroys it again leaks it). The plan's any-thread
+ *                queries take no claim, so a plan destroy overlapping one of them is undefined.
+ *                So is a call that has entered but not yet claimed its handle when the destroy
+ *                frees it, like a call that starts after a successful destroy: both stay the
+ *                host's to prevent, as before.
  *
  * Live edits. A committed SESSION_TRANSACTION_APPLY whose changes are all live is applied to the
  * running plan: no plan is prepared, and the source rings, the effect state and the render
@@ -418,8 +430,9 @@ extern "C" {
  * miso_engine_v1_last_error on a plan returns a fixed diagnostic selected by the most recent render
  * call, one string per rule -- "render.output.unaligned", "render.output.platform",
  * "render.output.layout", "render.output.shape", "render.time.discontinuity",
- * "render.time.overflow", "render.plan.rejected", "render.busy" (issue 2213) -- and is empty
- * after a successful render or seek preparation; on a
+ * "render.time.overflow", "render.plan.rejected", "render.fp_environment.invalid" -- and is empty
+ * after a successful render or seek preparation (a call refused with MISO_ENGINE_V1_BUSY leaves it
+ * unchanged); on a
  * session or engine it returns the most recent control-thread diagnostic. The counter
  * LIVE_BLOCK_ERRORS (protocol counter 19, read with COUNTERS_GET) counts the render calls that
  * returned MISO_ENGINE_V1_RENDER_REJECTED with "render.plan.rejected": blocks the plan refused
@@ -762,7 +775,8 @@ extern "C" {
 #define MISO_ENGINE_V1_BACKPRESSURE UINT32_C(6)
 #define MISO_ENGINE_V1_UNSUPPORTED UINT32_C(7)
 #define MISO_ENGINE_V1_RENDER_REJECTED UINT32_C(8)
-/* Another call holds the session (issue 2276); see "Thread ownership". */
+/* Another call holds the session (issue 2276), the plan's render state (issue 2293) or the engine
+ * (issue 2321); see "Thread ownership". */
 #define MISO_ENGINE_V1_BUSY UINT32_C(9)
 #define MISO_ENGINE_V1_INTERNAL UINT32_C(255)
 

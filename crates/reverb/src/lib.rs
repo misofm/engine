@@ -43,6 +43,7 @@ use effect_contract::{
 };
 use effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
 use effect_runtime::ramp::LinearRamp;
+use effect_runtime::tap_crossfade::TapCrossfade;
 use lane::Lane;
 
 pub mod corpus;
@@ -65,7 +66,7 @@ const PARAMETER_COUNT: usize = 8;
 /// Length of every coefficient ramp.
 const RAMP_SAMPLES: u32 = 64;
 /// Length of every tap crossfade (pre-delay and lines).
-const TRANSITION_SAMPLES: u32 = 128;
+const TRANSITION_SAMPLES: u32 = effect_runtime::tap_crossfade::TRANSITION_SAMPLES;
 /// Ring words beyond the longest tap, as the note's capacity rule (`D_i(2, fs) + 128`).
 const RING_SLACK: u32 = 128;
 
@@ -789,21 +790,14 @@ pub struct PreparedReverb {
     /// The thirty-two line rings, concatenated.
     lines: Box<[f32]>,
     line_cursor: [u32; LINES],
-    line_active: [u32; LINES],
-    line_transition: [u32; LINES],
-    line_pending: [u32; LINES],
-    /// Updates left in the running line crossfade; `0` when idle.
-    line_fade: u32,
-    /// `line_pending != line_active` on some line: a crossfade waits to start.
-    line_queued: bool,
+    /// The thirty-two line taps, which crossfade together: one size change moves them all.
+    line_taps: TapCrossfade<[u32; LINES]>,
 
     /// The two pre-delay rings, left then right.
     pre: Box<[f32]>,
     pre_cursor: u32,
-    pre_active: u32,
-    pre_transition: u32,
-    pre_pending: u32,
-    pre_fade: u32,
+    /// The pre-delay tap, shared by both channels.
+    pre_tap: TapCrossfade<u32>,
 
     /// The eight diffuser rings, concatenated.
     diffusers: Box<[f32]>,
@@ -983,17 +977,10 @@ fn prepare_reverb(
         history: 0,
         lines: vec![0.0; geometry.line_words].into_boxed_slice(),
         line_cursor: [0; LINES],
-        line_active: design.lengths,
-        line_transition: design.lengths,
-        line_pending: design.lengths,
-        line_fade: 0,
-        line_queued: false,
+        line_taps: TapCrossfade::settled(design.lengths),
         pre: vec![0.0; 2 * geometry.pre_len as usize].into_boxed_slice(),
         pre_cursor: 0,
-        pre_active: design.pre_delay,
-        pre_transition: design.pre_delay,
-        pre_pending: design.pre_delay,
-        pre_fade: 0,
+        pre_tap: TapCrossfade::settled(design.pre_delay),
         diffusers: vec![0.0; geometry.diffuser_words].into_boxed_slice(),
         diffuser_cursor: [0; DIFFUSERS],
         pipe: [0.0; DIFFUSERS],
@@ -1020,8 +1007,8 @@ impl PreparedReverb {
             LinearRamp::fixed(self.default_targets[MIX]),
         ];
         self.gains = GainRamps::fixed(design.gains);
-        self.line_pending = design.lengths;
-        self.pre_pending = design.pre_delay;
+        self.line_taps.queue(design.lengths);
+        self.pre_tap.queue(design.pre_delay);
         self.drop_history();
     }
 
@@ -1036,13 +1023,8 @@ impl PreparedReverb {
 
     /// Settles every tap on its pending value, rewinds the cursors and empties the history.
     fn drop_history(&mut self) {
-        self.line_active = self.line_pending;
-        self.line_transition = self.line_pending;
-        self.line_fade = 0;
-        self.line_queued = false;
-        self.pre_active = self.pre_pending;
-        self.pre_transition = self.pre_pending;
-        self.pre_fade = 0;
+        self.line_taps = TapCrossfade::settled(*self.line_taps.pending());
+        self.pre_tap = TapCrossfade::settled(*self.pre_tap.pending());
         self.line_cursor = [0; LINES];
         self.pre_cursor = 0;
         self.diffuser_cursor = [0; DIFFUSERS];
@@ -1082,15 +1064,14 @@ impl PreparedReverb {
             && let Some(samples) = pre_delay_samples(value, sample_rate)
         {
             self.targets[PRE_DELAY] = value;
-            self.pre_pending = samples;
+            self.pre_tap.queue(samples);
         }
         let mut redesign_gains = false;
         if let Some(value) = pending[SIZE]
             && let Some(lengths) = line_lengths(value, sample_rate, &self.sieve)
         {
             self.targets[SIZE] = value;
-            self.line_pending = lengths;
-            self.line_queued = self.line_pending != self.line_active;
+            self.line_taps.queue(lengths);
             redesign_gains = true;
         }
         if let Some(value) = pending[DECAY] {
@@ -1098,7 +1079,7 @@ impl PreparedReverb {
             redesign_gains = true;
         }
         if redesign_gains {
-            let gains = line_gains(&self.line_pending, self.targets[DECAY], sample_rate);
+            let gains = line_gains(self.line_taps.pending(), self.targets[DECAY], sample_rate);
             self.gains.set_target(gains);
         }
         for (parameter, ramp) in [

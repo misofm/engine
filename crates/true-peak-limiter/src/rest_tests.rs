@@ -355,7 +355,7 @@ impl<L: Lane> Probe for LimiterProbe<L> {
         copy.left.copy_state_from(&core.left);
         copy.right.copy_state_from(&core.right);
         copy.cursors = core.cursors;
-        copy.gain_linked = core.gain_linked;
+        copy.link = core.link;
         copy.silent = core.silent;
         copy.silent.withdraw();
         Self {
@@ -507,7 +507,7 @@ fn a_restore_off_rest_withdraws_the_standing_claim() {
 
 /// Every state word of a bank, both channels and every lane, padded lanes included: the arena,
 /// the planar words with each lane's van Herk `phase`, the ramps, the shared [`Cursors`] and the
-/// three bank flags (`gain_linked` and the two words of `silent`).
+/// bank flags (the link record's three words, [`LinkRecord::words`], and the two of `silent`).
 pub(super) fn bank_state_words<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
     let mut out = Vec::new();
     for channel in [&core.left, &core.right] {
@@ -536,10 +536,9 @@ pub(super) fn bank_state_words<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
             ]);
         }
     }
+    out.extend([core.cursors.main, core.cursors.ring]);
+    out.extend(core.link.words());
     out.extend([
-        core.cursors.main,
-        core.cursors.ring,
-        u32::from(core.gain_linked),
         u32::from(core.silent.proved()),
     ]);
     out

@@ -257,7 +257,7 @@ pub use transition::{
     plan_strip_transition, strip_transition_ceiling,
 };
 #[cfg(feature = "control-provider")]
-pub use warm::{PrimedCandidate, fall_back_to_transition, publish_primed};
+pub use warm::{PrimedCandidate, fall_back_to_transition, hold_primed_until, publish_primed};
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).
 ///

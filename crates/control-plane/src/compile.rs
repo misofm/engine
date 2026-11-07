@@ -3048,7 +3048,6 @@ where
         meters: session_meters,
         response_ready: None,
         warm,
-        primed: None,
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,

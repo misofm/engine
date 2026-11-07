@@ -410,6 +410,55 @@ console digests green under both M1 and M4: the console fixture barely limits, a
 transition desymmetrizes. These rows were not re-run against `console-workload`; the discriminating
 gates are this crate's.
 
+### Issue #2285 — the record as `LinkRecord`, checked where it is trusted
+
+`gain_linked`, `relink_frames` and `relink_watch` became one `LinkRecord` (`mod link`), whose
+private state is `Linked { countdown }`, `Apart { countdown }` or `Watching`. The record is
+debug-asserted against `gain_state_agrees` at the linked decision in `process_block`. The rows
+above that name `gain_linked` describe the same writes, now made through `LinkRecord`'s methods.
+Each row below is the whole crate suite in the dev profile, with the tree restored between rows.
+"Gate 4" is `tests::glide::the_linked_pair_returns_once_the_words_agree`.
+
+| # | mutation | tests that turned red |
+|---|---|---|
+| 2285-1 | the trust-point assertion compares nothing | `a_stale_linked_record_is_refused_where_it_is_trusted` |
+| 2285-2 | a glide's block no longer unlinks the record | gate 4 (W1 block 41: the record over disagreeing gain words) |
+| 2285-3 | `restate` drops the countdown, so a linked record never carries one | gate 4 ("the linked pair never returned") |
+| 2285-4 | `arm` keeps a linked record linked | none, and cannot move a bit; see below |
+| 2285-5 | a collapsed block no longer unlinks the record (990-M4 again) | M4 gate, `the_linked_body_engages_exactly_where_the_record_allows`, `randomized_scenarios_match_the_current_frame_law`, `a_failed_lane_is_recovered_and_reported_alone`, `a_padded_lane_stays_at_rest_through_the_lookahead` |
+| 2285-6 | `decide` ignores its licence (every lane `Maximum`, the designed words agreeing) | 16 tests across 4 binaries, the new assertion among them |
+| 2285-7 | a lane reset never narrows the record | none, and cannot move a bit; see below |
+| 2285-8 | the countdown re-derives on a collapsed bank too | none: equivalent under the contract; see below |
+| 2285-9 | the watch never ends on a block that breaks the rings | none, and cannot move a bit; see below |
+| 2285-10 | a restore restates the record linked whatever the words | `the_linked_body_engages_exactly_where_the_record_allows`, `randomized_scenarios_match_the_current_frame_law`, `the_stationary_walk_matches_the_current_frame_law` |
+
+Row 3 is the tracker's suggested model taken literally (#2258 FX-2 called a linked record with a
+countdown an illegal combination). The combination is reachable through a restore, the disengage
+copy and both §4.4 recoveries, whenever one lands inside a D5 countdown. It is also required:
+the glide's next block unlinks the record, and only the surviving countdown brings it back.
+
+Rows 4, 7, 8 and 9 turn nothing red, and none of them can move a bit:
+- **Row 4.** A switch moves no gain word, and a block with a glide in flight unlinks the record
+  before it renders (row 2). So a linked record that survives `arm` is still true over the words
+  it describes. What it changes is when the pair may link: D5 holds a switch's pair apart until
+  the countdown ends. A gliding switch is still held apart, because the glide's block unlinks the
+  record. Only a snapped switch can link early, and only one that puts every lane back at
+  `Maximum` before any block renders under the other mode. The words then still agree.
+- **Row 7.** The narrowing fires only with lane shapes apart, which the next decision also
+  catches. A restore restates the record from `gain_state_agrees`, which does not compare
+  `LaneShape`, so a linked record can stand over a lane whose window shapes differ. Resetting
+  that lane leaves its box sums apart, and the narrowing keeps the record true until the next
+  `decide`. Without the narrowing the record is stale until then. Nothing reads it before then:
+  the reset withdraws the silent claim, so the next block or skip decides. Lane shapes apart are a
+  designed word apart, so that decision narrows the record before anything renders linked. With
+  lane shapes agreeing, both channels share survivor phases, the reset lane's words come out
+  equal, and the narrowing never fires.
+- **Row 8.** A collapsed block unlinks the record at its start (row 5). `desymmetrize` restates
+  the record before any dual block reads it, so a re-derivation from the frozen right channel is
+  overwritten unread. This is equivalent under the contract, as 990-M4 is.
+- **Row 9.** A watch re-links only through a full `gain_state_agrees`, so a watch that outlives
+  its block can only bring back a record that is true. The cost is `W` compares per block.
+
 ## Issue #996 — the linked pair at session level
 
 Superseded as a gate by the next section: #997 moved the test to
