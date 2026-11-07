@@ -186,3 +186,40 @@ accessor fix.
 - `cargo fmt --check`: clean.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - `./target/release/realtime_policy`: `realtime policy: ok (292 marked regions in 46 files)`.
+
+## Attempt 2 verdict: PASS, with three minors folded
+
+Attempt 2 (a7a571997) passed adversarial review. Reviewer's own evidence, scratch, not
+committed:
+- **Randomized model checker.** 20,000 seeds drive the per-node path (`apply_bypass`) and the
+  bank path (`crossfade_bank`) side by side, with random warm-ups (0 to 300), ramps, block sizes
+  (1 to 128) and switches.
+  - It found no non-dry output before a warm-up completes, and no lane stuck dry.
+  - It detects attempt 1's defect.
+- **Base-against-head differential.** Over the same 20,000-seed generator (19,999 rows), all
+  10,655 lanes never bypassed during a hold are identical between base and head; 6,473 of the
+  9,344 flagged lanes differ, as intended. This agrees with the attempt-2 digests above.
+
+Folded on the same branch:
+- The `symmetry` field doc said it is "retained across blocks exactly as `bypass` is", but that
+  field is gone. It now reads "as `phase` is".
+- **One test per claim.** `a_bypass_during_a_hold_renders_the_dry_the_hold_emits` was nearly
+  subsumed by `an_un_bypass_after_a_bypass_during_a_hold_resumes_from_rest`, so it is deleted.
+  - Its post-switch asserts moved into the second test: `take_rest().is_none()` and
+    `bypass_mix() == 0`, plus `settled_bypassed()` and an exact dry block right after the switch.
+  - The surviving test's doc now names both defects it turns red on.
+  - Re-mutated: the held branch crossfading from base's start mix fails it at
+    `the switch keeps the hold's dry`, and the 0 -> 0 ramp of attempt 1 fails it at
+    `settled at bypass at once`.
+- **`begin_hold` doc.** A moved lane is debug-asserted, and takes no hold in release.
+  - The check cannot tell an unmoved lane from one settled wet by a later step un-bypass: both
+    are at `Ramp { position: 0, bypass: false }`.
+  - Both call sites rule that case out by their shape: they spend the token in the same `if let`
+    that took it.
+
+**Gates (fold head).**
+- `cargo test --locked -p effect-contract -p rack -p graph -p graph-compiler`: 52 test binaries,
+  510 tests (one fewer: the folded test), all pass.
+- clippy `--all-targets -D warnings` on the four crates: clean.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps` on the four crates: clean.
+- `cargo fmt --check`: clean.

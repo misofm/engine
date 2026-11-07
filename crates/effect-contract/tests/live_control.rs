@@ -574,14 +574,18 @@ impl Held {
 }
 
 /// Issue #2129 D3 as a phase (#2271): a lane that left settled bypass by a step holds dry for its
-/// warm-up, and a switch back to bypass with a ramp during that hold renders exactly the dry word
-/// from the switch on: the lane already emits dry, so it settles at bypass at once.
+/// warm-up. A switch back to bypass with a ramp during that hold keeps the dry the hold emits,
+/// bit for bit: the lane settles at bypass at once. Un-bypassed again, it resumes from rest, as
+/// every un-bypass from settled bypass does (#2129 D2): it reports its rest, so its effect is
+/// reset, and it holds dry for a whole warm-up again.
 ///
 /// Test value: red if the switch crossfades from the mix of the un-bypass ramp it interrupts (`1`,
-/// the target a step reaches at once) instead of the `0` the hold renders: the output would jump
-/// from dry to the reset effect's warm-up output, the words the hold exists to keep out.
+/// the target a step reaches at once) instead of the `0` the hold renders, a jump onto the reset
+/// effect's warm-up output; or if it leaves the lane ramping toward bypass rather than settled
+/// there, so the un-bypass during that ramp reports no rest, takes no reset and no hold, and
+/// crossfades straight onto an effect fewer than its warm-up frames past its last reset.
 #[test]
-fn a_bypass_during_a_hold_renders_the_dry_the_hold_emits() {
+fn an_un_bypass_after_a_bypass_during_a_hold_resumes_from_rest() {
     use effect_contract::BypassSwitch;
     let mut held = Held::new();
     held.rig
@@ -600,31 +604,11 @@ fn a_bypass_during_a_hold_renders_the_dry_the_hold_emits() {
         0.0,
         "the switch keeps the hold's dry"
     );
-    for block in 0..3 {
-        assert!(held.block_is_dry(), "block {block} after the switch");
-    }
-    assert!(held.rig.lane.settled_bypassed());
-}
-
-/// #2271: a lane bypassed during its hold and then un-bypassed again resumes from rest, as every
-/// un-bypass from settled bypass does (#2129 D2): it reports its rest, so its effect is reset, and
-/// it holds dry for a whole warm-up again.
-///
-/// Test value: red if a bypass during a hold leaves the lane ramping toward bypass rather than
-/// settled there: the un-bypass during that ramp reports no rest, takes no reset and no hold, and
-/// crossfades straight onto an effect fewer than its warm-up frames past its last reset.
-#[test]
-fn an_un_bypass_after_a_bypass_during_a_hold_resumes_from_rest() {
-    use effect_contract::BypassSwitch;
-    let mut held = Held::new();
-    held.rig
-        .commit_bypass(BypassSwitch {
-            bypassed: true,
-            ramp_samples: 2 * HELD_FRAMES as u32,
-        })
-        .expect("a cell");
-    held.rig.stage();
-    assert!(held.block_is_dry());
+    assert!(
+        held.rig.lane.settled_bypassed(),
+        "settled at bypass at once"
+    );
+    assert!(held.block_is_dry(), "the block after the switch");
     // Two blocks after the reset, one short of its warm-up.
     held.unbypass_from_rest();
     assert!(

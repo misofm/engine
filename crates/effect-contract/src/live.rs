@@ -990,7 +990,7 @@ pub struct EffectControlLane {
     /// parameters, and starts its hold before the block renders ([`Self::take_rest`]). A switch
     /// that reverses a crossfade toward bypass before it settled does not set it.
     rest_pending: bool,
-    /// This instance's live channel-symmetry terms, retained across blocks exactly as `bypass`
+    /// This instance's live channel-symmetry terms, retained across blocks exactly as `phase`
     /// is, and for the same reason: the terms describe what the *drained* values did, so
     /// they have to survive the block that drained them.
     ///
@@ -1403,8 +1403,11 @@ impl EffectControlLane {
     /// that is bypassed, or a `frames` of `0`, takes no hold. `rest` is this lane's
     /// [`Self::take_rest`] of the block: only a lane that left settled bypass holds, and it holds
     /// from its ramp's first frame. A lane that has moved since (bypassed again, or a frame into
-    /// its ramp) takes no hold, so a hold never coexists with a moved ramp or a bypass target.
-    /// Render thread, at a block boundary.
+    /// its ramp) is debug-asserted, and takes no hold in release, so a hold never coexists with a
+    /// moved ramp or a bypass target. The check cannot tell a lane that has not moved from one
+    /// settled wet by a later step un-bypass (both are at `Ramp { position: 0, bypass: false }`);
+    /// both call sites rule that case out by their shape, spending the token in the same `if let`
+    /// that took it, before anything else touches the lane. Render thread, at a block boundary.
     pub fn begin_hold(&mut self, rest: RestToken, frames: u32) {
         let RestToken { _private: () } = rest;
         let fresh = self.phase == BypassPhase::start(false);
