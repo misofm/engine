@@ -1245,7 +1245,7 @@ impl SpectrumService {
             }
             self.stream_metadata.smoothing_ms = smoothing.smoothing_ms();
             if let Some(analysis) = analysis.as_deref_mut() {
-                analysis.smoothing = Some(smoothing);
+                analysis.set_stream_smoothing(smoothing);
             }
         }
         if selection_changed {
@@ -1290,7 +1290,7 @@ impl SpectrumService {
         self.stream_metadata.channels = self.channels().map_or(0, |channels| channels as u32);
         self.set_stream_window_ready(false);
         if let Some(analysis) = analysis.as_deref_mut() {
-            analysis.window_known = false;
+            analysis.set_window_known(false);
         }
         let result = match self.captures.try_read_continuous() {
             Ok(window) => self.keep_stream_window(window, analysis.as_deref_mut()),
@@ -1368,7 +1368,7 @@ impl SpectrumService {
         *self.stream_window = window;
         self.set_stream_window_ready(true);
         if let Some(analysis) = analysis {
-            analysis.window_known = true;
+            analysis.set_window_known(true);
         }
         Ok(())
     }
@@ -1472,10 +1472,24 @@ impl Default for SpectrumAnalysisResult {
 pub struct SpectrumAnalysis {
     analyzer: Box<SpectrumAnalyzer>,
     history: Option<Box<SpectrumAnalysisHistory>>,
-    stream_active: bool,
-    cadence: Option<SpectrumCadence>,
-    smoothing: Option<SpectrumSmoothingConfig>,
-    window_known: bool,
+    stream: AnalysisStream,
+}
+
+/// The analysis's half of the stream (#2272): only a running analysis has a cadence, a smoothing
+/// or a window at hand. A service may hand a read or a select an analysis that runs no stream
+/// (one made after the stream started, which adopts it with
+/// [`SpectrumAnalysis::configure_imported`]); those leave it `Stopped`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AnalysisStream {
+    /// No stream is under analysis.
+    Stopped,
+    /// A stream is under analysis at `cadence` with `smoothing`. `window_known` says whether a
+    /// window was read or imported since the last reset.
+    Running {
+        cadence: SpectrumCadence,
+        smoothing: SpectrumSmoothingConfig,
+        window_known: bool,
+    },
 }
 
 impl SpectrumAnalysis {
@@ -1485,10 +1499,7 @@ impl SpectrumAnalysis {
         Self {
             analyzer: Box::new(SpectrumAnalyzer::new()),
             history: None,
-            stream_active: false,
-            cadence: None,
-            smoothing: None,
-            window_known: false,
+            stream: AnalysisStream::Stopped,
         }
     }
 
@@ -1496,25 +1507,55 @@ impl SpectrumAnalysis {
     /// and no stop has ended it.
     #[must_use]
     pub const fn stream_active(&self) -> bool {
-        self.stream_active
+        matches!(self.stream, AnalysisStream::Running { .. })
     }
 
     /// The cadence of the stream under analysis.
     #[must_use]
     pub const fn stream_cadence(&self) -> Option<SpectrumCadence> {
-        self.cadence
+        match self.stream {
+            AnalysisStream::Running { cadence, .. } => Some(cadence),
+            AnalysisStream::Stopped => None,
+        }
     }
 
     /// The smoothing of the stream under analysis.
     #[must_use]
     pub const fn stream_smoothing(&self) -> Option<SpectrumSmoothingConfig> {
-        self.smoothing
+        match self.stream {
+            AnalysisStream::Running { smoothing, .. } => Some(smoothing),
+            AnalysisStream::Stopped => None,
+        }
     }
 
-    /// Whether a stream window is at hand: one was read or imported since the last reset.
+    /// Whether a stream window is at hand: a stream is under analysis and a window of it was read
+    /// or imported since the last reset.
     #[must_use]
     pub const fn has_stream_window(&self) -> bool {
-        self.window_known
+        matches!(
+            self.stream,
+            AnalysisStream::Running {
+                window_known: true,
+                ..
+            }
+        )
+    }
+
+    /// Record whether a window of the running stream is at hand; a stopped analysis holds none.
+    fn set_window_known(&mut self, known: bool) {
+        if let AnalysisStream::Running { window_known, .. } = &mut self.stream {
+            *window_known = known;
+        }
+    }
+
+    /// Change the smoothing of the running stream; a stopped analysis has none to change.
+    fn set_stream_smoothing(&mut self, smoothing: SpectrumSmoothingConfig) {
+        if let AnalysisStream::Running {
+            smoothing: running, ..
+        } = &mut self.stream
+        {
+            *running = smoothing;
+        }
     }
 
     /// Whether the smoothing history exists.
@@ -1552,7 +1593,7 @@ impl SpectrumAnalysis {
                 .reset()
                 .map_err(|_| SpectrumServiceError::Exhausted)?;
         }
-        self.window_known = false;
+        self.set_window_known(false);
         Ok(())
     }
 
@@ -1563,18 +1604,17 @@ impl SpectrumAnalysis {
         smoothing: SpectrumSmoothingConfig,
     ) -> Result<(), SpectrumServiceError> {
         self.reset_history()?;
-        self.stream_active = true;
-        self.cadence = Some(cadence);
-        self.smoothing = Some(smoothing);
+        self.stream = AnalysisStream::Running {
+            cadence,
+            smoothing,
+            window_known: false,
+        };
         Ok(())
     }
 
     /// End the analysis of the stream: the history stays, the next stream resets it.
-    pub fn end_stream(&mut self) {
-        self.stream_active = false;
-        self.cadence = None;
-        self.smoothing = None;
-        self.window_known = false;
+    pub const fn end_stream(&mut self) {
+        self.stream = AnalysisStream::Stopped;
     }
 
     /// Reset the smoothing history without stopping the stream, and forget the window at hand.
@@ -1584,7 +1624,7 @@ impl SpectrumAnalysis {
     /// [`SpectrumServiceError::StreamInactive`] without a stream under analysis;
     /// [`SpectrumServiceError::Exhausted`] when the history epoch cannot advance.
     pub fn reset_stream(&mut self) -> Result<(), SpectrumServiceError> {
-        if !self.stream_active {
+        if !self.stream_active() {
             return Err(SpectrumServiceError::StreamInactive);
         }
         self.reset_history()
@@ -1665,10 +1705,11 @@ impl SpectrumAnalysis {
         if self.history.is_none() {
             self.history = Some(Box::new(SpectrumAnalysisHistory::new()));
         }
-        self.stream_active = true;
-        self.cadence = Some(cadence);
-        self.smoothing = Some(smoothing);
-        self.window_known = true;
+        self.stream = AnalysisStream::Running {
+            cadence,
+            smoothing,
+            window_known: true,
+        };
         Ok(())
     }
 
@@ -1690,13 +1731,15 @@ impl SpectrumAnalysis {
         out: &mut SpectrumAnalysisResult,
         metadata: &mut SpectrumStreamMetadata,
     ) -> Result<(), SpectrumServiceError> {
-        if !self.stream_active {
-            return Err(SpectrumServiceError::StreamInactive);
-        }
-        let (Some(cadence), Some(smoothing)) = (self.cadence, self.smoothing) else {
+        let AnalysisStream::Running {
+            cadence,
+            smoothing,
+            window_known,
+        } = self.stream
+        else {
             return Err(SpectrumServiceError::StreamInactive);
         };
-        if !self.window_known {
+        if !window_known {
             return Err(SpectrumServiceError::WindowInvalid);
         }
         let token = window

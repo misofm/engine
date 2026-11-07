@@ -185,14 +185,20 @@ fn the_collapsed_body_publishes_the_dual_bodys_report() {
 /// the session. It is also the gate on the lifetime counters across the boundary, which the strip
 /// does not read.
 ///
+/// The second arm reaches the dual body straight from a collapsed block, with no `desymmetrize`
+/// between (issue #2274): `BankChain::run` always calls it first, but the bank's own surface
+/// does not make a caller do so, so the dual body takes the same copy itself.
+///
 /// Red mutation: `InputStage::desymmetrize` drops the integrator copy. This fails on the first
-/// dual block, on the right plane, for every lane whose high-pass is retaining anything.
+/// dual block, on the right plane, for every lane whose high-pass is retaining anything. Test value
+/// of the second arm: red if a dual block entered collapsed renders the right channel from the
+/// integrators the collapse froze.
 #[test]
 fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     const FRAMES: usize = 32;
     const BLOCKS: usize = 8;
     const SWITCH: usize = 4;
-    for (backend, width) in banks() {
+    for ((backend, width), explicit) in banks().flat_map(|bank| [(bank, true), (bank, false)]) {
         let lanes = width.lanes() as usize;
         let mut mixed = bank(backend, width);
         let mut never = bank(backend, width);
@@ -207,7 +213,7 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
                 // The seam: everything downstream of the input chain reads the duplicated plane.
                 mixed_right.copy_from_slice(&mixed_left);
             } else {
-                if block == SWITCH {
+                if block == SWITCH && explicit {
                     mixed.desymmetrize();
                 }
                 mixed.process(&mut mixed_left, &mut mixed_right, FRAMES as u32);
@@ -218,12 +224,12 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
                 assert_eq!(
                     mixed_left[word].to_bits(),
                     never_left[word].to_bits(),
-                    "width={lanes} block={block} word={word}: left plane"
+                    "width={lanes} explicit={explicit} block={block} word={word}: left plane"
                 );
                 assert_eq!(
                     mixed_right[word].to_bits(),
                     never_right[word].to_bits(),
-                    "width={lanes} block={block} word={word}: right plane"
+                    "width={lanes} explicit={explicit} block={block} word={word}: right plane"
                 );
             }
         }
@@ -338,6 +344,163 @@ fn a_collapsed_stage_that_falls_silent_is_at_rest_and_skips_exactly() {
         );
         for _ in 0..2 {
             run(&mut mixed, &mut never, true, false, false);
+        }
+    }
+}
+
+/// A lane imported into a collapsed bank keeps its own right channel (issue #2274).
+///
+/// The chain's order is the disengage boundary, then the import. Here the import lands straight in
+/// a collapsed bank, then a dual block runs: the bank must render what the chain's order renders.
+/// The carried lane comes from a bank driven dual over unequal planes, so its two channels really
+/// differ.
+///
+/// Test value: red if a disengage copy taken after the import (the dual body's own, or the
+/// chain's) overwrites the imported lane's right channel with its left.
+#[test]
+fn an_import_into_a_collapsed_bank_keeps_the_imported_right_channel() {
+    const FRAMES: usize = 32;
+    for (backend, width) in banks() {
+        let lanes = width.lanes() as usize;
+        let mut source = bank(backend, width);
+        for block in 0..3 {
+            let mut left: Vec<f32> = (0..FRAMES * lanes)
+                .map(|word| 0.3 + ((word + block) % 5) as f32 / 40.0)
+                .collect();
+            let mut right: Vec<f32> = (0..FRAMES * lanes)
+                .map(|word| -0.2 - ((word + 3 * block) % 11) as f32 / 30.0)
+                .collect();
+            source.process(&mut left, &mut right, FRAMES as u32);
+        }
+        let carried = source.export_lane(0).expect("a member lane");
+        let (mut mixed, mut reference) = (bank(backend, width), bank(backend, width));
+        for _ in 0..3 {
+            let plane: Vec<f32> = (0..FRAMES * lanes)
+                .map(|word| 0.1 + (word % 7) as f32 / 50.0)
+                .collect();
+            for arm in [&mut mixed, &mut reference] {
+                arm.process_mono(&mut plane.clone(), FRAMES as u32);
+            }
+        }
+        reference.desymmetrize();
+        reference.import_lane(0, &carried).expect("import");
+        mixed.import_lane(0, &carried).expect("import");
+        let plane: Vec<f32> = (0..FRAMES * lanes)
+            .map(|word| 0.05 + (word % 3) as f32 / 20.0)
+            .collect();
+        let (mut mixed_left, mut mixed_right) = (plane.clone(), plane.clone());
+        let (mut reference_left, mut reference_right) = (plane.clone(), plane);
+        mixed.process(&mut mixed_left, &mut mixed_right, FRAMES as u32);
+        reference.process(&mut reference_left, &mut reference_right, FRAMES as u32);
+        for word in 0..FRAMES * lanes {
+            assert_eq!(
+                (mixed_left[word].to_bits(), mixed_right[word].to_bits()),
+                (
+                    reference_left[word].to_bits(),
+                    reference_right[word].to_bits()
+                ),
+                "width={lanes} word={word}"
+            );
+        }
+    }
+}
+
+/// A reset ends a collapse (issue #2274): it writes one state onto both channels, so the bank
+/// after it is a dual bank and its silence clock runs on both channels again.
+///
+/// Both arms render signal, the first collapsed and the second dual, are reset, and then advance
+/// their clocks over a skipped silent block. The reset arm must hold the reference's retained
+/// silence counters. Its `channels_agree` and `export_lane` are not asserted: a stage wrongly left
+/// collapsed answers both from channel `0`, the counterfactual state, so they cannot see the flag.
+///
+/// Test value: red if a reset leaves the stage collapsed, so a skipped block advances channel
+/// `0`'s silence counter alone and the right channel's clock lags the dual run's.
+#[test]
+fn a_reset_bank_forgets_its_collapse() {
+    const FRAMES: usize = 32;
+    for (backend, width) in banks() {
+        let lanes = width.lanes() as usize;
+        let all = (1_u32 << lanes) - 1;
+        let mut mixed = bank(backend, width);
+        let mut never = bank(backend, width);
+        for _ in 0..3 {
+            let plane: Vec<f32> = (0..FRAMES * lanes)
+                .map(|word| 0.1 + (word % 7) as f32 / 50.0)
+                .collect();
+            mixed.process_mono(&mut plane.clone(), FRAMES as u32);
+            never.process(&mut plane.clone(), &mut plane.clone(), FRAMES as u32);
+        }
+        mixed.reset();
+        never.reset();
+        assert_eq!(
+            mixed.lanes_at_rest() & all,
+            all,
+            "width={lanes}: a reset bank is at rest"
+        );
+        mixed.advance_clocks(all, 1_000);
+        never.advance_clocks(all, 1_000);
+        for lane in 0..lanes {
+            assert_eq!(
+                test_support::bank_lane_silence_words(&mixed, lane),
+                test_support::bank_lane_silence_words(&never, lane),
+                "width={lanes} lane={lane}: the retained silence counters"
+            );
+        }
+    }
+}
+
+/// A collapsed bank exports, and proves agreement over, the dual run's state (issue #2274).
+///
+/// Its right channel's integrators and silence counter are frozen, and the counterfactual dual
+/// run's are the left channel's. So the lane export and `channels_agree` of a bank that rendered
+/// collapsed must be a never-collapsed bank's, before any disengage copy.
+///
+/// Test value: red if either reads the frozen right channel, so a carry that reached a collapsed
+/// bank would hand a successor stale right-channel state, or the proof would refuse a collapse
+/// whose channels agree.
+#[test]
+fn a_collapsed_bank_exports_the_dual_runs_state() {
+    const FRAMES: usize = 32;
+    for (backend, width) in banks() {
+        let lanes = width.lanes() as usize;
+        let mut collapsed = bank(backend, width);
+        let mut never = bank(backend, width);
+        // Signal, then `+0.0` so the left silence counter runs while the right one is frozen.
+        for block in 0..6 {
+            let plane: Vec<f32> = (0..FRAMES * lanes)
+                .map(|word| {
+                    if block < 4 {
+                        0.1 + ((word + block) % 7) as f32 / 50.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            collapsed.process_mono(&mut plane.clone(), FRAMES as u32);
+            never.process(&mut plane.clone(), &mut plane.clone(), FRAMES as u32);
+        }
+        assert_ne!(
+            test_support::bank_lane_state_words(&collapsed, 1),
+            test_support::bank_lane_state_words(&never, 1),
+            "width={lanes}: the collapsed bank's right integrators are frozen, or this is vacuous"
+        );
+        assert_ne!(
+            test_support::bank_lane_silence_words(&collapsed, 1)[1],
+            test_support::bank_lane_silence_words(&never, 1)[1],
+            "width={lanes}: the collapsed bank's right silence counter is frozen, or the export \
+             check below cannot see it"
+        );
+        assert!(
+            never.channels_agree(),
+            "width={lanes}: the reference agrees"
+        );
+        assert!(collapsed.channels_agree(), "width={lanes}: channels_agree");
+        for lane in 0..lanes {
+            assert_eq!(
+                format!("{:?}", collapsed.export_lane(lane)),
+                format!("{:?}", never.export_lane(lane)),
+                "width={lanes} lane={lane}: the exported lane"
+            );
         }
     }
 }

@@ -29,6 +29,13 @@ if MISO_ENGINE_WEB_HOST_TEST_MODULE="$unchecked_host" MISO_ENGINE_WEB_HOST_MAX_S
   echo "unchecked safe-integer allocator mutation escaped the red test" >&2
   exit 1
 fi
+# Issue #2279: a second copy starts one ID earlier, so a control request and the dispose sent
+# behind it take the last two IDs and the control reply's fence finds none.
+safe2_host="$host_test_dir/safe2-host.mjs"
+sed 's/#lastRequestId = 0;/#lastRequestId = Number.MAX_SAFE_INTEGER - 2;/' \
+  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" >"$safe2_host"
+MISO_ENGINE_WEB_HOST_TEST_MODULE="$safe2_host" MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST=2 \
+  node "$repo_root/scripts/test-web-audioworklet.mjs"
 echo "safe-integer allocator boundary and red mutation passed"
 elif command -v bun >/dev/null; then
   bun "$repo_root/scripts/test-web-audioworklet.mjs"

@@ -1061,6 +1061,52 @@ test("the prelude over the real engine worklet class: one miso.seek-at.v1, and t
   assert.equal(controls(ring)[MSB1_CONTROL.SEEKS_APPLIED], 1);
 });
 
+test("issue 2291: a trap in prepare-seek's export fails the real engine trapped, tells the page, and refuses the seek 255", async () => {
+  // The attach port is a message handler that reaches an engine export (`source_prepare_seek`). Red
+  // if a throw from it escapes the handler (no `seek-prepared`, so the feed waits out its bound),
+  // or if the engine class does not record it as a trap. Unrecorded, the page hears nothing and
+  // the dispose calls the export the trap left refusing, which the host retries for ever.
+  const feedSource = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const engineSource = await readFile(new URL("../../hosts/host-web/web/miso-engine-v1-audio-worklet.js", import.meta.url), "utf8");
+  const { sandbox, registrations } = preludeHarness(feedSource);
+  vm.runInContext(`(() => {\n${engineSource}\n})();`, sandbox);
+  // Constructed, so the prelude registers it as its engine. With no options the boot is refused
+  // before any module is touched, so the fields the handlers read are set here, and the phase is
+  // put back to `live` through the engine's own writer.
+  const engine = new (registrations.get("miso-engine-v1-audio-worklet"))({});
+  const memory = { buffer: new ArrayBuffer(65_536) };
+  const posts = []; const disposes = [];
+  Object.assign(engine, {
+    exports: {
+      memory,
+      miso_engine_web_v1_source_prepare_seek: () => { throw new Error("synthetic wasm trap from the source_prepare_seek export"); },
+      miso_engine_web_v1_dispose: () => { disposes.push(1); return 1; },
+      miso_engine_web_v1_render_allocation_count: () => 0,
+    },
+    memoryBuffer: memory.buffer, handle: 7, sourceIdPointer: 0, sourceIdCapacity: 128,
+    quantumFrames: 4, maximumSourceChannels: 2, failureCode: 0,
+    port: { onmessage: engine.port.onmessage, postMessage: (message) => posts.push(structuredClone(message)) },
+  });
+  engine.enter("live");
+  // A page request answered first: the trap is still request 0's, since the attach port's
+  // messages are no page requests.
+  engine.receive({ tag: "miso.renderallocations.v1", requestId: 1 });
+  const attach = new (registrations.get("miso-sab-feed-attach"))();
+  const replies = [];
+  attach.port.postMessage = (data) => replies.push(structuredClone(data));
+  const ring = createMsb1Ring({ sourceId: "trapped", channels: 1, frameCapacity: 4, capacity: 2 });
+  const writer = new Msb1RingWriter(ring); writer.engage(1n);
+  attach.port.onmessage({ data: { op: "attach", rings: [ring] } });
+  writer.seek(2n, 12n);
+  const epoch = Atomics.load(controls(ring), MSB1_CONTROL.SEEK_EPOCH);
+  assert.doesNotThrow(() => attach.port.onmessage({ data: { op: "prepare-seek", requestId: 4, seeks: [{ epoch, generation: 2n, frame: 12n }] } }));
+  assert.deepEqual(replies.at(-1), { op: "seek-prepared", requestId: 4, kind: "refused", result: 255 });
+  assert.deepEqual(posts.slice(1), [{ tag: "miso.error.v1", requestId: 0, result: 255 }], "the page hears of the trap");
+  engine.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 2 } });
+  assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 2, result: 255 }, "the dispose is final");
+  assert.deepEqual(disposes, [], "no dispose export runs on the trapped engine");
+});
+
 test("detachSource withdraws one ring: the drain never reads it after it resolves, and the others keep draining", async () => {
   // #1297b gate 4 (the feed half; the engine's timing is browser-evals'). Red if detachSource
   // resolves before the worklet withdrew the ring, names the ring by an identity a cloned message

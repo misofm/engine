@@ -21064,6 +21064,67 @@ mod tests {
         );
     }
 
+    /// Issue #2302: a plan's fade table is installed once. A second install is refused and keeps
+    /// the first table, so every lane the first install armed still fires.
+    ///
+    /// Red if a second install replaces the table: the first install already armed (muted) both
+    /// lanes, the replacement table names only one, and the other waits muted for a fire no table
+    /// holds; any fade-arm carry installed against the first table would also index the second.
+    #[test]
+    fn a_second_fade_table_is_refused_and_every_first_arm_still_fires() {
+        let shape = SourceShape {
+            stages: &[TrackStage::PostFader],
+            meters: &[],
+            fade_probe: true,
+            ..SourceShape::banked(BankWidth::Four, 2, 128)
+        };
+        let (plan, bindings, source_set) = source_fixture_parts(shape, &Published::default());
+        let (mut executor, _) = bind_executor(plan, bindings, Some(source_set));
+        let lanes = executor.runtime.builtin_strip_lanes();
+        let fader = |track: &str| {
+            lanes
+                .iter()
+                .find(|(id, lane)| {
+                    id.as_ref() == track && lane.owner == crate::BuiltinStripOwner::Fader
+                })
+                .map(|(_, lane)| lane.location)
+                .expect("a fader lane")
+        };
+        let arm = |track: &str| crate::GraphFadeArm {
+            target: crate::GraphFadeTarget::Fader(fader(track)),
+            source: None,
+            delay_samples: 0,
+            ramp_samples: 64,
+            tail_samples: 0,
+        };
+        let (_, watch) = executor
+            .install_fade_arms(vec![arm("track00"), arm("track01")])
+            .expect("installed");
+        let second = executor.install_fade_arms(vec![arm("track01")]);
+        FADE_FIRES.with(|fires| fires.borrow_mut().clear());
+        for block in 0..2_u64 {
+            let mut storage = vec![0.0_f32; 2 * 128];
+            render_host(
+                &mut executor,
+                engine::realtime::PlanarBufferMut::try_new(&mut storage, 2, 128, 128)
+                    .expect("host output"),
+                block * 128,
+            )
+            .expect("render");
+        }
+        let lane = |track: &str| usize::from(fader(track).lane);
+        let mut fired = FADE_FIRES.with(|fires| fires.borrow().clone());
+        fired.sort_unstable();
+        let mut expected = vec![(lane("track00"), 0), (lane("track01"), 0)];
+        expected.sort_unstable();
+        assert_eq!(fired, expected, "every lane the first install armed fires");
+        assert!(watch.fired(0) && watch.fired(1), "the first table's watch");
+        assert_eq!(
+            second.map(|(entries, _)| entries),
+            Err(crate::GraphCarryInstallError::FadeArmsInstalled)
+        );
+    }
+
     /// Issue #2257: a due fader arm whose lane does not resolve at render fires nothing, so it is
     /// neither reported fired nor settled; it stays due, is counted once per block, and fires at
     /// the first block its lane resolves again. The lane stops resolving here because its probe

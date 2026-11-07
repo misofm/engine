@@ -1643,11 +1643,23 @@ fn a_refused_configure_changes_nothing_and_a_pending_edit_is_superseded() {
 /// read allocates on the render thread or races into an internal error: while another thread
 /// renders, the control thread alternates two configurations 40 times (each a rebuild) and sends
 /// 25 `SPECTRUM_CAPTURE` operations after each (1,000 in all: arms, reads with and without the
-/// window, cancels); every render call allocates and frees nothing, every configure answers a
-/// reply and no capture answers `INTERNAL`.
+/// window, cancels; collection captures arm since #2296), and after the last keeps capturing until
+/// a read comes back `Ready`; every render call allocates and frees nothing, every configure
+/// answers a reply and no capture answers `INTERNAL`.
+///
+/// A slow machine renders fewer blocks per capture, so the run waits for the first `Ready` read
+/// instead of expecting one by a count, and fails with a named panic after `PROGRESS_DEADLINE`
+/// without one. However the control thread leaves the scope, `StopOnDrop` releases the render
+/// thread first, so a failed assertion fails the test instead of hanging the join (#1251, #2296).
 #[test]
 fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render() {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    /// How long the control thread waits on the render thread (a pending rebuild's adoption, the
+    /// first `Ready` read) before it fails instead of waiting forever.
+    const PROGRESS_DEADLINE: Duration = Duration::from_secs(30);
+    const CONFIGURES: usize = 40;
+    const CAPTURES: u32 = 25;
     bench_support::alloc::assert_installed();
     let Rig {
         mut session,
@@ -1681,9 +1693,18 @@ fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render(
             }
             frame
         });
+        // Bound before the first statement that can panic, so every exit from this thread's part
+        // of the scope releases the render loop before the scope joins it.
+        let stop = bench_support::producer::StopOnDrop(done);
+        let render_alive = || {
+            assert!(
+                !render.is_finished(),
+                "the render thread ended before it was released"
+            );
+        };
         let codec = ProtocolCodec::default();
         let requests = [single_request(), collection_as_request(None)];
-        for index in 0..40 {
+        for index in 0..CONFIGURES {
             request += 1;
             let frame = TypedCommandFrame {
                 request_id: RequestId::new(request).expect("nonzero request"),
@@ -1694,10 +1715,16 @@ fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render(
             let length = codec
                 .encode_command_frame_into(&frame, &mut bytes)
                 .expect("configure command");
+            let submitted = Instant::now();
             let length = loop {
                 match session.command(&bytes[..length], 65_536) {
                     Ok(length) => break length,
                     Err(control_plane::CommandError::Backpressure) => {
+                        render_alive();
+                        assert!(
+                            submitted.elapsed() < PROGRESS_DEADLINE,
+                            "configure {index}: still backpressured after {PROGRESS_DEADLINE:?}"
+                        );
                         session.service().expect("service step");
                         std::thread::yield_now();
                     }
@@ -1720,17 +1747,32 @@ fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render(
             session.service().expect("service step");
             // The collection has no selection: the first operation selects `eq0`, whose select
             // arms it for nobody, so the caller cancels before it arms its own.
-            let select = CaptureRequest::Select {
+            let select = || CaptureRequest::Select {
                 target_kind: SpectrumTargetKind::TrackPostPan,
                 target_id: "eq0".to_owned(),
                 channels: ParameterChannel::Both,
             };
             let mut next = if index % 2 == 1 {
-                select
+                select()
             } else {
                 CaptureRequest::Arm
             };
-            for capture in 0..25 {
+            // The last configure keeps capturing past `CAPTURES` until a read is `Ready`.
+            let mut capture = 0_u32;
+            let mut paced: Option<Instant> = None;
+            loop {
+                if capture >= CAPTURES {
+                    if index + 1 < CONFIGURES || ready > 0 {
+                        break;
+                    }
+                    render_alive();
+                    let since = *paced.get_or_insert_with(Instant::now);
+                    assert!(
+                        since.elapsed() < PROGRESS_DEADLINE,
+                        "no SPECTRUM_CAPTURE read came back Ready within {PROGRESS_DEADLINE:?} \
+                         after the last configure's {CAPTURES} captures"
+                    );
+                }
                 request += 1;
                 let frame = TypedCommandFrame {
                     request_id: RequestId::new(request).expect("nonzero request"),
@@ -1747,7 +1789,14 @@ fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render(
                 next = match (&next, reply) {
                     (_, Err((status, code))) => {
                         assert_ne!(status, StatusCode::Internal, "{code}");
-                        CaptureRequest::Cancel
+                        // A select that reaches the monitor before the configure's plan is
+                        // adopted is refused (the running monitor is still the single form), and
+                        // a collection with no selection refuses every arm: it selects again.
+                        if index % 2 == 1 {
+                            select()
+                        } else {
+                            CaptureRequest::Cancel
+                        }
                     }
                     (CaptureRequest::Select { .. }, Ok(_)) => CaptureRequest::Cancel,
                     (CaptureRequest::Cancel, Ok(_)) => CaptureRequest::Arm,
@@ -1757,15 +1806,15 @@ fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render(
                     }
                     (_, Ok(_)) => CaptureRequest::Read {
                         channels: ParameterChannel::Both,
-                        include_window: capture % 2 == 0,
+                        include_window: capture.is_multiple_of(2),
                     },
                 };
                 session.service().expect("service step");
-                std::thread::sleep(std::time::Duration::from_micros(200));
+                std::thread::sleep(Duration::from_micros(200));
+                capture += 1;
             }
         }
-        assert!(ready > 0, "some reads analyzed a window");
-        done.store(true, Ordering::Release);
+        drop(stop);
         assert!(render.join().expect("render thread") > 0);
     });
 }
