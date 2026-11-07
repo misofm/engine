@@ -40,9 +40,10 @@ extern "C" {
  *                concurrently with miso_engine_v1_render_f32_planar or with itself. Each of the
  *                two calls claims the render state on entry with one atomic compare-exchange and
  *                releases it on return; a call that finds it claimed does not wait, touches no
- *                plan state, and returns MISO_ENGINE_V1_RENDER_REJECTED with "render.busy". A
- *                refused render writes nothing into its output, so the host writes silence. The
- *                result code is authoritative: the winner may overwrite the plan's last error.
+ *                plan state, writes no diagnostic, and returns MISO_ENGINE_V1_BUSY (issue 2293),
+ *                as a refused session call does. A refused render writes nothing into its output,
+ *                so the host writes silence. The plan's last error stays the one the last call
+ *                that held the plan left.
  *                miso_engine_v1_plan_resources, miso_engine_v1_plan_watermark and
  *                miso_engine_v1_last_error on a plan: any thread, at any time while the plan is
  *                live, including concurrently with a render call. They are pure with respect to
@@ -418,8 +419,9 @@ extern "C" {
  * miso_engine_v1_last_error on a plan returns a fixed diagnostic selected by the most recent render
  * call, one string per rule -- "render.output.unaligned", "render.output.platform",
  * "render.output.layout", "render.output.shape", "render.time.discontinuity",
- * "render.time.overflow", "render.plan.rejected", "render.busy" (issue 2213) -- and is empty
- * after a successful render or seek preparation; on a
+ * "render.time.overflow", "render.plan.rejected", "render.fp_environment.invalid" -- and is empty
+ * after a successful render or seek preparation (a call refused with MISO_ENGINE_V1_BUSY leaves it
+ * unchanged); on a
  * session or engine it returns the most recent control-thread diagnostic. The counter
  * LIVE_BLOCK_ERRORS (protocol counter 19, read with COUNTERS_GET) counts the render calls that
  * returned MISO_ENGINE_V1_RENDER_REJECTED with "render.plan.rejected": blocks the plan refused
@@ -762,7 +764,8 @@ extern "C" {
 #define MISO_ENGINE_V1_BACKPRESSURE UINT32_C(6)
 #define MISO_ENGINE_V1_UNSUPPORTED UINT32_C(7)
 #define MISO_ENGINE_V1_RENDER_REJECTED UINT32_C(8)
-/* Another call holds the session (issue 2276); see "Thread ownership". */
+/* Another call holds the session (issue 2276) or the plan's render state (issue 2293); see
+ * "Thread ownership". */
 #define MISO_ENGINE_V1_BUSY UINT32_C(9)
 #define MISO_ENGINE_V1_INTERNAL UINT32_C(255)
 

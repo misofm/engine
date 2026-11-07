@@ -65,9 +65,6 @@ pub(crate) mod plan_error {
     pub(crate) const PLAN_REJECTED: u32 = 7;
     /// The canonical floating-point environment did not take on this render thread (issue #146).
     pub(crate) const FP_ENVIRONMENT: u32 = 8;
-    /// Another render-side call held the plan's render state (#2213): the host called render or
-    /// seek preparation concurrently with one of them. The refused call touched no state.
-    pub(crate) const BUSY: u32 = 9;
 
     /// Returns the frozen diagnostic text for `code`.
     ///
@@ -84,7 +81,6 @@ pub(crate) mod plan_error {
             TIME_OVERFLOW => b"render.time.overflow",
             PLAN_REJECTED => b"render.plan.rejected",
             FP_ENVIRONMENT => b"render.fp_environment.invalid",
-            BUSY => b"render.busy",
             _ => b"render.internal",
         }
     }

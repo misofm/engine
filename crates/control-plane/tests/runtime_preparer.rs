@@ -487,3 +487,39 @@ fn a_kept_base_keeps_nothing_of_owners_removed_while_a_successor_waits() {
         "the kept base holds rows or targets of removed VCAs"
     );
 }
+
+/// #2287 (tracker #2258 PR-6): a kept base lives exactly while its successor waits. The structural
+/// commit gives the running epoch the model it displaced, and the service step that promotes the
+/// successor render adopted leaves the epoch it makes running with no base.
+///
+/// Test value: red if a promotion leaves a kept base on the epoch it makes running (moved with the
+/// epoch, or never dropped), so both admissions charge a model no plan renders, since
+/// `held_models` reads the running epoch's base, until a later rebuild replaces it.
+#[test]
+fn a_kept_base_drops_when_render_adopts_its_successor() {
+    let CompiledChildren {
+        mut session,
+        mut plan,
+    } = compile_children::<Adapter>(
+        SESSION,
+        limits(1_024),
+        Box::new(CountingPreparer(Arc::new(Mutex::new(Calls::default())))),
+    )
+    .expect("boot compile");
+    render(&mut plan, 0);
+    rebuild(&mut session, 2, &[put_compressor("eq1")]);
+    assert!(
+        session.test_providers().test_kept_ramps().is_some(),
+        "the running epoch keeps its base while the successor waits"
+    );
+    render_until_applied(&session, &mut plan, 1);
+    session.service().expect("service step");
+    assert!(
+        session.test_pending_providers().is_empty(),
+        "the successor is promoted"
+    );
+    assert!(
+        session.test_providers().test_kept_ramps().is_none(),
+        "the newly running epoch keeps no base"
+    );
+}
