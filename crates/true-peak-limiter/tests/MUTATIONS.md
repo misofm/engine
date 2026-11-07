@@ -248,7 +248,7 @@ the recursive word, the cursors, the phases and all four ramps — are compared,
 | 182-11 | `self.cursors.advance(frames, &self.shape)` deleted from the fast path | `src/lib.rs` `LimiterCore::process_block` | `a_settled_silent_limiter_...`, `a_negative_zero_input_...`, `a_stale_detector_history_...` (via the state comparison, not the sample comparison) |
 | 182-12 | both `advance_rest_phase(frames)` calls deleted from the fast path | `src/lib.rs` `LimiterCore::process_block` | as 182-11 |
 | 182-13 | the four `ramps_are_stationary` legs dropped from the admission test | `src/lib.rs` `LimiterCore::process_block` | `a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim` — **and nothing else** |
-| 182-14 | `self.silent_fixed_point = false` deleted from `restore_track` | `src/lib.rs` `LimiterCore::restore_track` | `a_restore_withdraws_the_silence_claim` — **and nothing else** |
+| 182-14 | `self.silent.withdraw()` (then `self.silent_fixed_point = false`) deleted from `restore_track` | `src/lib.rs` `LimiterCore::restore_track` | `a_restore_withdraws_the_silence_claim` — **and nothing else** |
 | 182-15 | `if !block.automation.is_empty()` withdrawal deleted from `process` | `src/lib.rs` `PreparedTruePeakLimiter::process` | `automation_withdraws_the_claim_and_the_resident_tap_keeps_up` |
 | 182-16 | the same withdrawal deleted from `process_bank` | `src/lib.rs` `PreparedTruePeakLimiterBank::process_bank` | `automation_withdraws_the_claim_on_the_bank_path_too` |
 
@@ -286,8 +286,8 @@ release law changes.
 
 ### One leg that is inert today
 
-`self.silent_bypass == self.coefficients.bypass` turns nothing red, and cannot: `bypass` is fixed at
-preparation and there is no path that changes it, so `silent_bypass` is always equal to it. It is
+`SilentClaim::bypass_held` (then `self.silent_bypass == self.coefficients.bypass`) turns nothing red, and cannot: `bypass` is fixed at
+preparation and there is no path that changes it, so the recorded bypass is always equal to it. It is
 kept for parity with `compressor` and `parametric-eq`, which carry the same
 leg for the same reason, and because it is the leg that becomes load-bearing the day bypass becomes
 a per-block flag — at which point every standing claim would otherwise silently survive a change of
@@ -298,6 +298,23 @@ weaker reason: both resets land on `clear_runtime`, which *is* the rest state th
 so a claim that survived a reset would happen to be true. It is withdrawn because the claim is a
 statement about a block that was rendered and observed, and it must not come to depend on
 `clear_runtime` and `is_at_silent_rest` continuing to coincide.
+
+### Issue #2264 — the claim as `SilentClaim`, checked where it is trusted
+
+The two words moved into `SilentClaim` (`mod silent`), private to its methods, and the claim is
+debug-asserted equal to the rest scan at `lanes_at_rest` and on both silent fast paths. Each row is
+the whole crate suite.
+
+| # | mutation | test that turned red |
+|---|---|---|
+| 2264-1 | `lanes_at_rest`'s assertion compares nothing | `a_stale_silent_claim_is_refused_where_it_is_trusted` |
+| 2264-2 | the dual fast path's assertion scans the left channel only | `a_stale_silent_claim_is_refused_where_it_is_trusted` |
+| 2264-3 | the collapsed fast path's assertion compares nothing | `a_stale_silent_claim_is_refused_where_it_is_trusted` |
+| 2264-4 | `self.silent.withdraw()` deleted from `restore_track` (182-14 again) | `a_restore_withdraws_the_silence_claim`, `a_restore_off_rest_withdraws_the_standing_claim`, `advance_clocks_is_a_skipped_zero_block` |
+| 2264-5 | the withdrawal deleted from `exchange_lane_defaults` | none, and cannot: `rest_link` only ends a glide, and the lane swap restores right after |
+| 2264-6 | the withdrawal deleted from `reset` | none, as above: a reset lands on the rest state |
+| 2264-7 | the withdrawal deleted from `reset_lane` | none, for the same reason |
+| 2264-8 | the withdrawal deleted from `process_bank` (182-16 again) | `automation_withdraws_the_claim_on_the_bank_path_too` |
 
 ## Mono-collapse M2 — the collapsed kernel and the disengage copy
 
