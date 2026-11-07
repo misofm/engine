@@ -128,14 +128,15 @@ fn session_refusal(error: SourceSeekError) -> SourceControlError {
     }
 }
 
-/// Step 2 of [`SourceControlSet::seek_session`]: the timeline producer, then every source
+/// Step 2 of [`SourceControlSet::seek_session`], once the caller has the timeline's producer (a
+/// vacant timeline is [`SourceControlError::Vacated`]): the timeline producer, then every source
 /// producer in ID order, checks its command with nothing pushed; the first refusal is returned. A
 /// vacant entry is [`SourceControlError::Vacated`]; a producer of another session's word is an
 /// engine invariant ([`HostChunkError::InternalInvariant`]): every producer of the set is prepared
 /// with the set's word.
 fn check_session_producers(
     seek: &SessionSeek<'_>,
-    timeline: &Producer<TimelineProducer>,
+    timeline: &TimelineProducer,
     sources: &[ControlSource],
     timeline_sample: u64,
 ) -> Result<(), SourceControlError> {
@@ -145,11 +146,8 @@ fn check_session_producers(
             SourceControlError::Chunk(HostChunkError::InternalInvariant)
         }
     };
-    seek.check_timeline(
-        timeline.owned().ok_or(SourceControlError::Vacated)?,
-        timeline_sample,
-    )
-    .map_err(refused)?;
+    seek.check_timeline(timeline, timeline_sample)
+        .map_err(refused)?;
     for source in sources {
         seek.check_source(
             source.provider.owned().ok_or(SourceControlError::Vacated)?,
@@ -158,6 +156,75 @@ fn check_session_producers(
         .map_err(refused)?;
     }
     Ok(())
+}
+
+/// A session seek that every producer of its set has accepted (steps 1 and 2 of
+/// [`SourceControlSet::seek_session`]), holding the set's producers exclusively until it pushes
+/// (#2258 HC-9). [`Self::check`] is its only constructor, so a seek reaches its pushes only with
+/// every check passed, and nothing can change a producer between its check and its push.
+///
+/// Its push, [`Self::push_and_publish`], cannot be refused. For each producer, what the check read
+/// and the push reads again is unchanged in between:
+/// - the entry is still owned, and its producer still publishes to this session's word: the
+///   borrow keeps every producer move ([`SourceControlSet::adopt_persisting`], a donation) out;
+/// - every rule but the slot (a nonzero generation above the producer's, the anchor, the frame
+///   limit) reads the command, which is the same, and the producer's own state, which only its
+///   own push changes; no push changes another producer, and none publishes;
+/// - the one-slot command ring had room: only this producer fills it, and render only empties it.
+///
+/// So no state has some commands pushed and another refused: the seek is refused with nothing
+/// pushed, or every command is pushed and the generation is published once.
+struct CheckedSessionSeek<'s> {
+    seek: SessionSeek<'s>,
+    timeline: &'s mut TimelineProducer,
+    sources: &'s mut [ControlSource],
+    timeline_sample: u64,
+}
+
+impl<'s> CheckedSessionSeek<'s> {
+    /// Step 2: check every producer ([`check_session_producers`]), keeping them all for the push.
+    fn check(
+        seek: SessionSeek<'s>,
+        timeline: &'s mut Producer<TimelineProducer>,
+        sources: &'s mut [ControlSource],
+        timeline_sample: u64,
+    ) -> Result<Self, SourceControlError> {
+        let timeline = timeline.owned_mut().ok_or(SourceControlError::Vacated)?;
+        check_session_producers(&seek, timeline, sources, timeline_sample)?;
+        Ok(Self {
+            seek,
+            timeline,
+            sources,
+            timeline_sample,
+        })
+    }
+
+    /// Step 3: push every command, the timeline first, then the sources in ID order, none of them
+    /// published; then publish the generation once, so render observes all of them at one block
+    /// entry. Each push is one its check accepted (see the type), so none is refused. One refused
+    /// anyway would mean a ring whose slot render filled: the engine stops there (a panic is an
+    /// engine defect, and a release build aborts) rather than seek some producers and not others.
+    fn push_and_publish(self) {
+        let Self {
+            mut seek,
+            timeline,
+            sources,
+            timeline_sample,
+        } = self;
+        if seek.push_timeline(timeline, timeline_sample).is_err() {
+            unreachable!("the timeline accepted this seek, and nothing has pushed to it since");
+        }
+        for source in sources {
+            let frame = source.session_frame(timeline_sample);
+            let Some(provider) = source.provider.owned_mut() else {
+                unreachable!("the check found every source owned");
+            };
+            if seek.push_source(provider, frame).is_err() {
+                unreachable!("each source accepted this seek, and nothing has pushed to it since");
+            }
+        }
+        seek.publish();
+    }
 }
 
 /// One borrowed planar chunk offered to a named source.
@@ -479,10 +546,9 @@ impl SourceControlSet {
     ///    [`SourceControlError::Seek`] refusal.
     /// 3. Every command is pushed, the timeline first, then the sources in ID order, none of them
     ///    published; then the generation is published once (B16-R2), so render observes all of
-    ///    them at one block entry or none. Only this thread pushes to those slots and render only
-    ///    empties them, so after step 2 no push can fail; one that fails anyway is an engine
-    ///    invariant, [`HostChunkError::InternalInvariant`] (the pushed commands are published, so
-    ///    none stays held in its slot).
+    ///    them at one block entry or none. Step 2 holds every producer until its push, and only
+    ///    this thread fills those slots while render only empties them, so no push can be
+    ///    refused (#2258 HC-9): the seek is refused whole at step 1 or 2, or it lands whole.
     ///
     /// The plain form lands as [`Self::seek`] does, for every source and the timeline in one
     /// block (#2205): the first at which every source that waits has its runway queued, or the
@@ -525,25 +591,8 @@ impl SourceControlSet {
         if at_once {
             seek.land_at_once();
         }
-        check_session_producers(&seek, &self.timeline, &self.sources, timeline_sample)?;
-        // The source crate pushes unpublished and publishes once, when `seek` drops, whatever
-        // the pushes return: a pushed command never stays held in its slot.
-        let mut pushed = self
-            .timeline
-            .owned_mut()
-            .is_some_and(|timeline| seek.push_timeline(timeline, timeline_sample).is_ok());
-        for source in &mut self.sources {
-            let frame = source.session_frame(timeline_sample);
-            pushed &= source
-                .provider
-                .owned_mut()
-                .is_some_and(|provider| seek.push_source(provider, frame).is_ok());
-        }
-        seek.publish();
-        if !pushed {
-            debug_assert!(false, "a checked session seek pushes to every slot");
-            return Err(SourceControlError::Chunk(HostChunkError::InternalInvariant));
-        }
+        CheckedSessionSeek::check(seek, &mut self.timeline, &mut self.sources, timeline_sample)?
+            .push_and_publish();
         Ok(())
     }
 
@@ -560,7 +609,8 @@ impl SourceControlSet {
             .published
             .session_seek(generation, anchor_sample)
             .map_err(session_refusal)?;
-        check_session_producers(&seek, &self.timeline, &self.sources, timeline_sample)
+        let timeline = self.timeline.owned().ok_or(SourceControlError::Vacated)?;
+        check_session_producers(&seek, timeline, &self.sources, timeline_sample)
     }
 
     /// The session's published seek generation (#1642 B16-R2): the largest generation any seek of
