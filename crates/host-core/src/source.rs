@@ -35,6 +35,22 @@ pub(crate) struct ControlSource {
     /// `None` while vacant: the plan was prepared to carry this source's ring from its
     /// predecessor, and the producer arrives through [`SourceControlSet::adopt_persisting`].
     provider: Option<HostChunkProvider>,
+    /// Whether the plan was prepared to carry this source's ring from its predecessor (#2273):
+    /// fixed at preparation, whichever producer moves have happened since.
+    carried: bool,
+}
+
+/// How preparation made one entry of a [`SourceControlSet`] (#2273). Passed by value to the
+/// builder, which moves the producer into the entry; boxing it would add an allocation per source.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum PreparedProducer {
+    /// The plan carries the ring of the plan before it: the entry starts vacant, and the producer
+    /// arrives through [`SourceControlSet::adopt_persisting`].
+    Carried,
+    /// A projection (#2199): the ring is charged, not allocated, so there is no producer.
+    Projected,
+    /// A ring of the plan's own, with its producer.
+    Fresh(HostChunkProvider),
 }
 
 impl ControlSource {
@@ -255,25 +271,14 @@ impl SourceControlSet {
         self.timeline.as_mut()
     }
 
-    /// The `prime_required` flag of source `id`'s ring (#1320 D4), for a gate that publishes a
-    /// warm successor directly (#1355 D3). `None` for an unknown or vacant source. The control
-    /// plane's publication sets it in production (#1403).
-    #[cfg(feature = "test-support")]
-    pub fn test_only_prime_flag(&self, id: &[u8]) -> Option<source::PcmSourcePrimeFlag> {
-        let index = self.index_of(id)?;
-        self.sources[index]
-            .provider
-            .as_ref()
-            .map(source::HostChunkProvider::prime_flag)
-    }
-
-    /// Whether the set holds source `id` vacant: its plan was prepared to carry the ring of the
-    /// plan before it, and [`Self::adopt_persisting`] has not yet moved the producer in (#1403 D3).
-    /// `false` for an ID the set does not hold.
+    /// Whether the set's plan carries source `id`'s ring from the plan before it (#1272 D3): fixed
+    /// when the set is prepared, so the answer is the same before and after
+    /// [`Self::adopt_persisting`] or a donation moves a producer (#2273). `false` for an ID the
+    /// set does not hold.
     #[must_use]
-    pub fn holds_vacant(&self, id: &[u8]) -> bool {
+    pub fn carries(&self, id: &[u8]) -> bool {
         self.index_of(id)
-            .is_some_and(|index| self.sources[index].provider.is_none())
+            .is_some_and(|index| self.sources[index].carried)
     }
 
     /// Store `required(id)` on the `prime_required` flag (#1320 D4) of every ring whose producer
@@ -740,12 +745,17 @@ impl ControlSourceBuilder {
         channel_count: u32,
         region_start: u64,
         region_end: u64,
-        mut provider: Option<HostChunkProvider>,
+        producer: PreparedProducer,
     ) {
-        if let Some(provider) = provider.as_mut() {
-            // #2205: a live plain seek to the region's end has no PCM to wait for.
-            provider.set_region_end(SourceFrame(region_end));
-        }
+        let (carried, provider) = match producer {
+            PreparedProducer::Carried => (true, None),
+            PreparedProducer::Projected => (false, None),
+            PreparedProducer::Fresh(mut provider) => {
+                // #2205: a live plain seek to the region's end has no PCM to wait for.
+                provider.set_region_end(SourceFrame(region_end));
+                (false, Some(provider))
+            }
+        };
         let id_offset = self.ids.len();
         self.ids.extend_from_slice(id.as_bytes());
         self.sources.push(ControlSource {
@@ -756,6 +766,7 @@ impl ControlSourceBuilder {
             region_start,
             region_end,
             provider,
+            carried,
         });
     }
 
@@ -1142,7 +1153,9 @@ mod tests {
                     1,
                     0,
                     frames,
-                    Some(producer.into_host_chunk_provider(SampleRateHz(48_000))),
+                    PreparedProducer::Fresh(
+                        producer.into_host_chunk_provider(SampleRateHz(48_000)),
+                    ),
                 );
                 consumers.push(consumer);
             }
