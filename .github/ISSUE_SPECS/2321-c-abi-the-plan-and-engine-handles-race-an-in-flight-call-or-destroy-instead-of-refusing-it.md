@@ -69,9 +69,10 @@ corruption, not a result code.
   claim as before, and `HandleClaim` only gains a method.
 
 ## Non-goals
-- A plan destroy against an in-flight any-thread plan query. Excluding it needs a reader count or
-  a second word, not the single-holder claim, and a query must never block or be refused by
-  render. That would be a separate follow-up.
+- A plan destroy against an in-flight any-thread plan query. Ruled at review: an accepted
+  residual, of the same kind as the window between a call's entry and its claim. Both are the
+  host's to prevent under the quiescence rule. A reader count would not close it either, because a
+  query could still enter after the free and before it reads the count.
 - `hosts/host-web` (its render path has no claim word), the render arithmetic, and the plan's
   busy refusal (#2293).
 - `miso_engine_v1_engine_create` takes no live engine, so it has nothing to claim.
@@ -84,7 +85,7 @@ corruption, not a result code.
   With the engine's claim held, `compile_session` and `last_error` on the engine return `BUSY`,
   leave the holder's diagnostic, `diagnostics` and the `last_error` output untouched, and publish
   no handle. `engine_destroy` makes no deallocation (`bench_support::alloc` thread counters).
-  Released, the diagnostic is the holder's and a destroy makes exactly one deallocation.
+  Released, the diagnostic is the holder's and a destroy deallocates.
 - `ffi::tests::handle_claim_loom::destroy_racing_a_call_loom`: a destroy racing one call on the
   same handle. In every interleaving no call reaches freed state (loom's `UnsafeCell` and a
   `FREED` check), the two are never both refused, a refused destroy leaves the word released and a
@@ -189,3 +190,22 @@ syscalls. That is the digest #2293 recorded at its base `875a4c17e` and at its h
   linkage)`.
 - `cargo run --locked --release -p realtime-policy`: `realtime policy: ok (294 marked regions in
   46 files)`.
+
+## Verdict (attempt 1)
+**PASS**, with three minors and one nit folded on the branch after a merge of `origin/main`
+(the merged tree was green). The reviewer's rulings:
+- Folding the engine handle into this issue was right: same shape, same outcome, same files.
+- No claim leaks. Only a destroy keeps a claim, and only on the word of the handle it frees.
+- The any-thread-query residual is not a blocker, and a reader count would not close it (the
+  non-goal above now records the ruling).
+- The loom model is sound.
+
+The minors, folded:
+1. *Non-goal wording*: the plan-destroy-versus-query item records the ruling instead of "a
+   separate follow-up".
+2. *Comment wording*: the three destroys' SAFETY comments and the loom model's doc say that no
+   call *holds* the handle, not that none is in flight. The header's `*_destroy` row adds that a
+   call which has entered but not yet claimed its handle is, like one after a successful destroy,
+   the host's to prevent.
+3. *Spec filename*: renamed (a tracked move) to match the GitHub title.
+4. *Nit*: the engine test's quiescent destroy asserts `freed > 0`, not exactly one deallocation.

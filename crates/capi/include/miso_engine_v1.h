@@ -67,8 +67,10 @@ extern "C" {
  *                handle under the running call. The handle stays live and valid, the call in
  *                flight and every later call proceed normally, and a later quiescent destroy
  *                frees it (a host that never destroys it again leaks it). The plan's any-thread
- *                queries take no claim, so a plan destroy overlapping one of them is undefined,
- *                as is a call that starts after a successful destroy, as before.
+ *                queries take no claim, so a plan destroy overlapping one of them is undefined.
+ *                So is a call that has entered but not yet claimed its handle when the destroy
+ *                frees it, like a call that starts after a successful destroy: both stay the
+ *                host's to prevent, as before.
  *
  * Live edits. A committed SESSION_TRANSACTION_APPLY whose changes are all live is applied to the
  * running plan: no plan is prepared, and the source rings, the effect state and the render
