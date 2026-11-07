@@ -442,27 +442,17 @@ impl ProtocolQueues {
         }
     }
 
-    /// Enqueue a reliable event or preserve it exactly on full.
+    /// Enqueue a reliable event or preserve it exactly on full. A slot an outstanding reservation
+    /// holds is full for this unreserved event too ([`Self::check_reliable_event_room`]).
     pub fn try_enqueue_event(&mut self, value: ReliableSlot) -> Result<(), ReliableEnqueueError> {
-        let reserved = self.reliable_event_reservations.load(Ordering::Acquire);
-        if reserved != 0
-            && self
-                .events
-                .report(QueueKind::ReliableEvent)
-                .occupancy
-                .saturating_add(u64::try_from(reserved).unwrap_or(u64::MAX))
-                >= u64::try_from(self.events.producer.capacity()).unwrap_or(u64::MAX)
-        {
-            return Err(ReliableEnqueueError {
-                value,
-                report: self.report(QueueKind::ReliableEvent),
-            });
+        if let Err(report) = self.check_reliable_event_room(1) {
+            return Err(ReliableEnqueueError { value, report });
         }
         match self.events.producer.try_push(value) {
             Ok(()) => Ok(()),
             Err(full) => Err(ReliableEnqueueError {
                 value: full.value,
-                report: self.report(QueueKind::ReliableEvent),
+                report: self.reliable_event_admission_report(),
             }),
         }
     }
@@ -472,46 +462,65 @@ impl ProtocolQueues {
         self.events.consumer.try_pop()
     }
 
-    /// Reserve one reliable event slot before an atomic session replacement. A full queue leaves
-    /// the caller with a typed report and does not modify either queue state or a session store.
-    pub fn reserve_reliable_event(&mut self) -> Result<ReliableEventReservation, QueueReport> {
-        let report = self.report(QueueKind::ReliableEvent);
-        if report.occupancy.saturating_add(
-            u64::try_from(self.reliable_event_reservations.load(Ordering::Acquire))
-                .unwrap_or(u64::MAX),
-        ) >= u64::try_from(report.capacity).unwrap_or(u64::MAX)
-        {
+    /// Check, without changing anything, that the reliable event queue has room for `count` more
+    /// events. A slot an outstanding reservation holds is not room: it is spoken for, though no
+    /// event is queued in it yet. Every reliable-event admission reads the room here and only
+    /// here, so a read-only precheck that passes predicts the reservation that follows it exactly.
+    ///
+    /// # Errors
+    ///
+    /// The queue's report when it has less room, its `occupancy` counting the held slots with
+    /// the queued events, so `capacity - occupancy` is the room the refusal saw.
+    pub fn check_reliable_event_room(&self, count: usize) -> Result<(), QueueReport> {
+        let report = self.reliable_event_admission_report();
+        let room = report
+            .capacity
+            .saturating_sub(usize::try_from(report.occupancy).unwrap_or(usize::MAX));
+        if count > room {
             return Err(report);
         }
+        Ok(())
+    }
+
+    /// The reliable event queue as admission sees it: [`Self::report`] with `occupancy` counting
+    /// the slots outstanding reservations hold with the queued events. Every reliable-event
+    /// refusal reports this view, so each reports the same number.
+    #[must_use]
+    pub fn reliable_event_admission_report(&self) -> QueueReport {
+        let mut report = self.report(QueueKind::ReliableEvent);
+        let held = self.reliable_event_reservations.load(Ordering::Acquire);
+        report.occupancy = report
+            .occupancy
+            .saturating_add(u64::try_from(held).unwrap_or(u64::MAX));
+        report
+    }
+
+    /// Reserve one reliable event slot before an atomic session replacement. A full queue leaves
+    /// the caller with a typed report ([`Self::check_reliable_event_room`]) and does not modify
+    /// either queue state or a session store.
+    pub fn reserve_reliable_event(&mut self) -> Result<ReliableEventReservation, QueueReport> {
+        self.check_reliable_event_room(1)?;
         self.reliable_event_reservations
             .fetch_add(1, Ordering::AcqRel);
         Ok(ReliableEventReservation {
-            generation: report.generation,
+            generation: self.events.producer.generation(),
             reservations: Arc::clone(&self.reliable_event_reservations),
             armed: true,
         })
     }
 
-    /// Reserve every reliable event an action needs before it commits. A failure leaves the
-    /// queue and the action's caller-owned state unchanged.
+    /// Reserve every reliable event an action needs before it commits. A failure
+    /// ([`Self::check_reliable_event_room`]) leaves the queue and the action's caller-owned state
+    /// unchanged.
     pub fn reserve_reliable_events(
         &mut self,
         count: usize,
     ) -> Result<ReliableEventReservations, QueueReport> {
-        let report = self.report(QueueKind::ReliableEvent);
-        let reserved = self.reliable_event_reservations.load(Ordering::Acquire);
-        let capacity = report.capacity;
-        if count
-            > capacity
-                .saturating_sub(usize::try_from(report.occupancy).unwrap_or(usize::MAX))
-                .saturating_sub(reserved)
-        {
-            return Err(report);
-        }
+        self.check_reliable_event_room(count)?;
         self.reliable_event_reservations
             .fetch_add(count, Ordering::AcqRel);
         Ok(ReliableEventReservations {
-            generation: report.generation,
+            generation: self.events.producer.generation(),
             remaining: count,
             reservations: Arc::clone(&self.reliable_event_reservations),
         })
