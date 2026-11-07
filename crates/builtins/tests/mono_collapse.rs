@@ -409,8 +409,9 @@ fn an_import_into_a_collapsed_bank_keeps_the_imported_right_channel() {
 /// after it is a dual bank and its silence clock runs on both channels again.
 ///
 /// Both arms render signal, the first collapsed and the second dual, are reset, and then advance
-/// their clocks over a skipped silent block. The reset arm must report the reference's agreement,
-/// export the reference's lanes and hold the reference's retained silence counters.
+/// their clocks over a skipped silent block. The reset arm must hold the reference's retained
+/// silence counters. Its `channels_agree` and `export_lane` are not asserted: a stage wrongly left
+/// collapsed answers both from channel `0`, the counterfactual state, so they cannot see the flag.
 ///
 /// Test value: red if a reset leaves the stage collapsed, so a skipped block advances channel
 /// `0`'s silence counter alone and the right channel's clock lags the dual run's.
@@ -438,21 +439,7 @@ fn a_reset_bank_forgets_its_collapse() {
         );
         mixed.advance_clocks(all, 1_000);
         never.advance_clocks(all, 1_000);
-        assert!(
-            never.channels_agree(),
-            "width={lanes}: the reference agrees"
-        );
-        assert_eq!(
-            mixed.channels_agree(),
-            never.channels_agree(),
-            "width={lanes}"
-        );
         for lane in 0..lanes {
-            assert_eq!(
-                format!("{:?}", mixed.export_lane(lane)),
-                format!("{:?}", never.export_lane(lane)),
-                "width={lanes} lane={lane}: the exported lane"
-            );
             assert_eq!(
                 test_support::bank_lane_silence_words(&mixed, lane),
                 test_support::bank_lane_silence_words(&never, lane),

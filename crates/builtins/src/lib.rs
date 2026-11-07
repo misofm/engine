@@ -2152,6 +2152,14 @@ impl<L: Lane> InputStage<L> {
         // holds: by the time `desymmetrize` runs, this block's drain may legitimately have moved
         // one channel's words and not the other's.
         debug_assert!(self.trim_ramp_channels_agree());
+        // The rest of the premise: every member lane's designed words -- the filter coefficient,
+        // target, step and countdown records as well as the trim ramp -- compare bit-equal, which
+        // is the `DESIGNED` term the chain collapsed on (issue #2274). `lane_channel_symmetry`
+        // also checks its cache against a fresh walk.
+        debug_assert!(
+            (0..self.members.min(L::WIDTH)).all(|lane| self.lane_channel_symmetry(lane)),
+            "a collapsed block needs every member lane's designed words channel-symmetric"
+        );
         // From here until the disengage copy, channel `0` is the only live state.
         self.collapsed = true;
         let report = if self.filter_ramping {
