@@ -420,9 +420,9 @@ generation's queued blocks, so the producer accepts the new generation before th
 timeline lands at the next block through the at-once word. An anchored seek stays held. It returns
 `RESULT_OK` with nothing to prepare too. Misuse is refused, not raced: both render-side calls claim
 a `render_busy` word with one compare-exchange on entry and release it with one `Release` store on
-every exit; a call that finds it claimed touches no state and returns `RESULT_RENDER_REJECTED` with
-`render.busy`. A refused render writes nothing into its output, so the host writes silence; the
-result code is authoritative, because the winner may overwrite the plan's last error. The claim never waits, spins or makes a syscall. `capi` tests
+every exit; a call that finds it claimed touches no state, writes no diagnostic and returns
+`RESULT_BUSY` (#2293, below). A refused render writes nothing into its output, so the host writes
+silence. The claim never waits, spins or makes a syscall. `capi` tests
 `session_seek::a_stopped_host_refills_a_full_ring_before_restart` (the issue's gate) and
 `session_seek::a_render_side_call_during_render_is_refused_not_raced` hold it.
 
@@ -454,6 +454,21 @@ frees nothing; released, the session serves calls and a quiescent destroy frees 
 `ffi::tests::handle_claim_loom::handle_claim_loom` (two threads, one leaving by an error and one
 by an unwind: at most one holds the state, at least one wins, both release), on its own
 `test-release` leg (a debug build).
+
+The plan's busy refusal moves to the same code (#2293), amending #2213's root ruling 2
+(`RESULT_RENDER_REJECTED` with `render.busy`, no new code). That ruling wrote the refusal into the
+plan's diagnostic word, which belongs to the call that holds the plan: a refused call stored
+`render.busy` over the holder's sticky diagnostic (a `render.time.discontinuity`, say), and the
+holder's next store overwrote the refusal's, so the word was last-writer-wins and the header called
+the result code authoritative. Now a refused `render_f32_planar` or `plan_prepare_seek` returns
+`RESULT_BUSY` and writes no diagnostic, so the plan's `last_error` always names the last call that
+held the plan, and one code means "another call holds this handle" on the plan and the session
+alike. `render.busy` (plan diagnostic 9) is retired; no symbol, struct, size, feature bit or
+`ABI_VERSION` changes. A host that matched `RENDER_REJECTED` for a concurrent render-side call now
+sees `BUSY`, which only a host that breaks the plan's thread rule receives. The gate:
+`capi` `session_seek::a_render_side_call_during_render_is_refused_not_raced` (a held claim refuses
+both calls with `BUSY` and leaves the holder's `render.time.discontinuity`); the claim itself is
+unchanged, so `handle_claim_loom` covers it as before.
 
 A plain session seek is a declared discontinuity; the engine declares it in the same call, and a
 refused seek declares nothing (root ruling B16-R9). `control_plane::SessionState::session_seek`,
