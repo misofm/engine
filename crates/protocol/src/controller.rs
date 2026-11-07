@@ -4117,9 +4117,21 @@ impl<P: ControlProvider> ProtocolController<P> {
         self.response_ready.is_some()
     }
 
-    /// Dequeue and encode one complete reliable event frame. A short caller output buffer leaves
-    /// the exact queued event pending, so retrying with the required size neither loses nor
-    /// reorders reliable events.
+    /// The reliable events this endpoint holds whose frames have not reached caller output: the
+    /// queued ones, plus the one [`Self::dequeue_reliable_event_frame_into`] popped and keeps
+    /// pending after any error (#2268). A host that interleaves events of its own with these reads
+    /// it to place them behind every older one.
+    #[must_use]
+    pub fn reliable_backlog(&self) -> u64 {
+        self.queues
+            .report(crate::QueueKind::ReliableEvent)
+            .occupancy
+            .saturating_add(u64::from(self.pending_reliable_event.is_some()))
+    }
+
+    /// Dequeue and encode one complete reliable event frame. Any error, a short caller output
+    /// buffer included, leaves the exact event pending, so a retry neither loses nor reorders
+    /// reliable events.
     pub fn dequeue_reliable_event_frame_into(
         &mut self,
         output: &mut [u8],
