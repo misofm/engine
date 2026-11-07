@@ -2140,7 +2140,9 @@ fn one_shot_begin(
 /// from a failed block must never reach a reader (issue #1609, race 2).
 fn one_shot_finish(state: &mut SpectrumOneShotState, first_sample: u64, count: usize) {
     let OneShotWindow::Filling(fill) = &mut state.window else {
-        // `one_shot_begin` returned a count, so the window is filling.
+        // `one_shot_begin` returned a count, so the window is filling: every path between it and
+        // here that ends the window returns before calling this.
+        debug_assert!(false, "one_shot_finish runs only on a filling window");
         return;
     };
     fill.filled += count;
@@ -6256,6 +6258,97 @@ mod tests {
                     .join()
                     .expect("restart driver")
             });
+        }
+
+        /// Issue #2290: a failed block racing a cancel and re-arm of a surviving held window.
+        ///
+        /// A window of generation 1 is held behind a stale record and has survived a block end.
+        /// Render fails a later block while control cancels it, arms generation 2 and reads. The
+        /// held window may survive the failure only while the word is still its latch: once the
+        /// failure sees generation 2 armed, it ends that arm as on an observer that never held a
+        /// window. No read returns a window, the word stays at generation 2, and a failure that
+        /// saw the arm leaves it ended, `Invalid` to the read or `INVALID` in the word.
+        #[test]
+        fn spectrum_dead_held_window_loom() {
+            loom::model(|| {
+                spawn_with_stack(dead_held_versus_rearm)
+                    .join()
+                    .expect("dead held window driver")
+            });
+        }
+
+        fn dead_held_versus_rearm() {
+            use crate::spectrum::{ARMED, IDLE, INVALID, OneShotWindow, state_word, word_phase};
+            let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+            capture.arm().expect("arm generation 1");
+            // A cancelled window's record (generation 0) that landed after its cancel drained the
+            // queue, as render would push it.
+            let stale = crate::spectrum::SpectrumCapturedRecord::EMPTY;
+            assert!(observer.producer.try_push(stale).is_ok());
+            let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
+            let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
+            observer.capture(
+                &left,
+                &right,
+                0,
+                crate::spectrum::GraphObservationValidity::CLEAR,
+            );
+            observer.block_end();
+            assert!(
+                matches!(
+                    observer.one_shot.window,
+                    OneShotWindow::Held(held) if held.survived_block_end
+                ),
+                "the window survived its block end behind the stale record"
+            );
+
+            let armed = loom::sync::Arc::new(loom::sync::atomic::AtomicBool::new(false));
+            let render = {
+                let armed = armed.clone();
+                spawn_with_stack(move || {
+                    let saw_arm = armed.load(Ordering::Acquire);
+                    graph::GraphRuntimeObserver::invalidate_after_failure(
+                        &mut observer,
+                        SPECTRUM_WINDOW_FRAMES as u64,
+                    );
+                    (observer, saw_arm)
+                })
+            };
+            capture.cancel();
+            capture.arm().expect("the re-arm is never Busy");
+            armed.store(true, Ordering::Release);
+            let read = capture.try_read().map(|window| window.first_sample);
+            assert!(
+                matches!(
+                    read,
+                    Err(SpectrumCaptureReadError::Pending | SpectrumCaptureReadError::Invalid)
+                ),
+                "the read after the re-arm was {read:?}"
+            );
+            let (_observer, saw_arm) = render.join().expect("render thread");
+            let word = capture.state.load(Ordering::Acquire);
+            assert_eq!(
+                word_generation(word),
+                2,
+                "only control moves the generation"
+            );
+            match read {
+                // The read found the arm ended and parked the word idle.
+                Err(SpectrumCaptureReadError::Invalid) => assert_eq!(word, state_word(2, IDLE)),
+                _ => assert!(
+                    matches!(word_phase(word), ARMED | INVALID),
+                    "the word after a pending read was {word:#x}"
+                ),
+            }
+            if saw_arm {
+                // The failure ran after the arm was visible, so it saw the word move off the
+                // held window's latch: the dead window must not shield generation 2.
+                assert!(
+                    read == Err(SpectrumCaptureReadError::Invalid)
+                        || word == state_word(2, INVALID),
+                    "a failure after the re-arm left generation 2 armed"
+                );
+            }
         }
 
         fn restart_versus_failure() {
