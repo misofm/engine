@@ -816,7 +816,8 @@ class MisoAudioWorkletHost {
       return;
     }
     if (pending === null) {
-      this.#fail(webError(255, message?.requestId ?? 0));
+      // Issue #2279: the sticky error carries the stray's ID only when it is a request ID.
+      this.#fail(webError(255, validRequestId(message?.requestId) ? message.requestId : 0));
       return;
     }
     const expectedFields = pending.response === "source"

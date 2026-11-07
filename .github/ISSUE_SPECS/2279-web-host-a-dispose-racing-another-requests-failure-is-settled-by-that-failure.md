@@ -38,7 +38,7 @@ Verified on base, by reading and by the tests below:
 - Page-detected failures reaching the worklet or the Worker (a new worklet message tag; the follow-up listed in #2267's spec). It is its own issue.
 - `miso-engine-v1-control-worker.js` (WEB-5 and WEB-7) and `web/stem-store/`.
 - `#statusRead`/`#statusFollow` (the shared status read) are unchanged; they are already one owner.
-- No render-path, worklet or Rust change. Public behaviour changes only in the two races above.
+- No render-path, worklet or Rust change. Public behaviour changes only in the two races above, and in one record shape (attempt 4): a sticky error caused by a stray message whose `requestId` is not a request ID carries request ID 0 instead of echoing it.
 
 ## Gates
 - `scripts/test-web-audioworklet.mjs` rows, red on base:
@@ -62,9 +62,23 @@ Verified on base, by reading and by the tests below:
   The scattered single-kind refusals it supersedes are deleted.
 - An early-failure row covering every order: `error`, `messageerror`, `messageerror` then `error`, `error` then `messageerror` (attempt 3). The Worker is terminated exactly when it raised `error`, and the dispose then tears down at once and sends nothing.
 - A MAX_SAFE row (attempt 3): in worker mode, a held control reply whose fence gets no request ID. It fails the host with the control request's ID and posts no fence. Its dispose, which gets no ID either, rejects with result 1 and still terminates the Worker.
+- Attempt 4 rows (from the reviewer's repros and the 794-mutant generator):
+  - in the "does not settle" half: another request's reply, malformed as a `miso.error.v1` or failing its shape check (single mode), or a teardown carrying another request's ID (worker mode);
+  - a channel failure in worker mode (worklet `processorerror` or `messageerror`, Worker `messageerror`, a fence that cannot be posted, an early `messageerror`): a later dispose is sent once to the live Worker and settles on its reply;
+  - a duplicate control reply, which frees one place of the control bound, not two;
+  - an unclean worker-mode dispose, which refuses a held control reply with 3;
+  - a status follow-up still waiting at teardown, which rejects with 3;
+  - a late control reply on a failed host, which posts no fence;
+  - a release-timeout teardown, which refuses an overtaken request with 3;
+  - a worker-mode dispose whose own reply is a typed error, which settles at once;
+  - a malformed worker-mode control reply, which posts no fence;
+  - a fence answered with a refusal, which fails the host;
+  - a malformed unsolicited frame, which reaches no listener;
+  - a stray message's sticky error carries ID 0 unless it has a request ID;
+  - a channel failure's sticky error carries the oldest unsettled request's ID.
 - Three rows for guards that no row pinned (attempt 2): an early `messageerror` fails the host the factory returns; a status read that failed to post is not kept as the shared read; a reply that matches no request fails a live host.
 - Every existing row of `bash scripts/test-web-audioworklet.sh` stays green, including the safe-integer allocator mutation it runs.
-- Mutations of the fix, each red at its row: make `#fail` reject a dispose whose reply is still due; let a later `#fail` replace the first error; keep the dispose on its own reply's failure, on a channel failure, or on the Worker's `error`; restart the tick on a retry into `failed`. Every `if` guard and every `#fail` call between `inFlightSlot` and the end of `bootControlWorker` (lines 466-1581) was mutated mechanically (the condition set to `false`; the source swapped). Each mutant is either red at a named row or named as equivalent in the attempt-3 guard table.
+- Mutations of the fix, each red at its row: make `#fail` reject a dispose whose reply is still due; let a later `#fail` replace the first error; keep the dispose on its own reply's failure, on a channel failure, or on the Worker's `error`; restart the tick on a retry into `failed`. Every `if` guard and every `#fail` call between `inFlightSlot` and the end of `bootControlWorker` (lines 466-1581) was mutated mechanically (the condition set to `false`; the source swapped). Each mutant is either red at a named row or named as equivalent in the attempt-3 guard table. Attempt 4 re-ran the reviewer's broader generator over the same lines. Every green mutant in the lifecycle, failure, dispose, status-sharing and bound code is named there with its equivalence; the schema, argument and boot-validation clause swaps are listed for the follow-up.
 - `bash scripts/check-workspace-policy.sh` passes.
 - No Rust or render path is touched, so cargo, clippy, fmt, doc, the realtime-policy tool and a no-bit-moved comparison do not apply.
 
@@ -371,3 +385,151 @@ The host module is unchanged; attempt 3 is tests and the spec.
 - MAX_SAFE fence row: red if a held control reply whose fence has no request ID posts a fence with no ID, or is left pending for ever.
 - telemetry and control-event schema row: red if either schema check is dropped, so a broken frame reaches the app or is counted as discarded while the host keeps answering.
 - `seekReport` argument check: red if a non-string source ID is posted to the worklet.
+
+### Attempt 3 verdict: FAIL, two MAJORs and three MINORs (2026-11-07)
+The host module was found correct; the gaps were in the tests. The reviewer's generator (794-796 mutants over lines 466-1581) swaps each `#fail` source to every alternative, not just one. It also covers:
+- `if` set to true and to false;
+- `===`/`!==` and `&&`/`||`;
+- `??` to `||`;
+- the boundary operators;
+- `true` to `false`;
+- `resolve` to `reject`;
+- deleting a `return`;
+- deleting a `.delete`, `.set`, `.clear` or `.add` call.
+
+Findings:
+1. **MAJOR: another request's malformed reply settles the in-flight dispose.** The sites are 791, 814 and 924, with `pending` swapped to `FAIL_CHANNEL` or to `FAIL_WORKER_GONE`.
+2. **MAJOR: `FAIL_CHANNEL` to `FAIL_WORKER_GONE` was unpinned** at 569, 578, 585 and 973. A worker-mode dispose after a channel failure then skips the live Worker.
+3. **MINOR: the claimed equivalence at 932 is refuted.** A duplicate control reply plus a second fence frees a place in another control's bound.
+4. **MINOR:** `this.#pending.clear()` in `#fail` (1002) was unpinned.
+5. **MINOR:** pre-existing gaps in this issue's dispose and teardown code:
+   - `clean` (1430) and the follow-up's rejection at teardown (1493);
+   - the `#oldestRequestId` returns (639/640);
+   - the `return`s after a failing `#fail` (793, 804, 816, 925).
+
+All other equivalences were upheld. The attempt-3 table's entries for 932 (now RED, not unreachable) and for 585's `FAIL_WORKER_GONE` swap (now RED) are superseded by the attempt-4 tables below.
+
+### Attempt 4 (Terra, 2026-11-07)
+The branch merged `origin/main` (`cbab8eb3f`).
+- **MAJOR 1:** the "does not settle" half gained the reviewer's three repro cases.
+- **MAJOR 2:** the channel-failure row runs four failures in worker mode (a worklet `processorerror`, a worklet `messageerror`, a Worker `messageerror`, a fence that cannot be posted). In each, `dispose()` posts exactly one `miso.dispose.v1` to the live Worker and resolves on its reply. The early-failure row asserts the same for an early `messageerror` alone, which corrects 585's row.
+- **MINOR 3:** the duplicate-reply row is added and the 932 equivalence is withdrawn. Follow-up: fail the host on a duplicate reply (today the second reply is held for a second fence and absorbed).
+- **MINOR 4:** the late-reply-on-a-failed-host row (no fence).
+- **MINOR 5:** rows for the unclean dispose's held reply (1430) and the follow-up at teardown (1493). For the remaining sites:
+  - 639: a row (the oldest unsettled ID).
+  - 640: named equivalent (`webError` defaults the ID to 0).
+  - 793: a row (the release-timeout teardown).
+  - 925: a row (a malformed control reply posts no fence).
+  - 804 and 816: named equivalent (below).
+- The generator's re-run found more pinnable greens, now rows:
+  - the dispose's own typed error in worker mode (800, `&&` to `||`);
+  - the `return` after a malformed meter, telemetry or watermark frame (710, 728, 766), which handed the frame to its listener;
+  - a refused fence (924, the `||` to `&&` swap that folds `!validFence` into the plan-latency check).
+- **One host change.** At 820, the stray-message failure took `message?.requestId ?? 0`. Its `??` mutants were not equivalent: a missing ID could become 1, and an ID like `"x"` was echoed into the sticky record. The host now uses `validRequestId(message?.requestId) ? message.requestId : 0`, and a row pins ID 0 for both shapes.
+
+**The generator** (the reviewer's `tools/gen.py` and `tools/run2.py`), summarised so it can be re-run:
+- `gen.py <repo> <out>` reads the host and, for each code line in 466-1581, writes one mutant per occurrence of each swap: `===`/`!==`, `&&`/`||`, `??`/`||`, `>=`/`>`, `<=`/`<`, ` > `/` >= `, ` < `/` <= `, `true`/`false`, `.resolve`/`.reject`, `resolve,`/`reject,`, `outcome.reject`/`outcome.resolve`, ` + 1`/` + 0`, ` - 1`/` - 0`, `?? 1`/`?? 0`, `?? 0`/`?? 1`.
+- It also writes:
+  - one mutant per line that deletes its first `return ...;`;
+  - one per line that blanks a statement calling `.delete(`, `.set(`, `.clear()` or `.add(`;
+  - two per `if (`, with the condition, paren-matched across lines, set to `false` and to `true`;
+  - one per alternative `#fail` source (`null`, `FAIL_CHANNEL`, `FAIL_WORKER_GONE`, `pending`, each other than the current one).
+- `run2.py <repo> <index.json> 12` runs each mutant through `scripts/test-web-audioworklet.mjs` via `MISO_ENGINE_WEB_HOST_TEST_MODULE`, 12 at a time. A mutant still green is re-run in the MAX_SAFE mode (`#lastRequestId` starting at `MAX_SAFE_INTEGER - 1`, `MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST=1`).
+
+**Final counts on this head** (794 mutants): 633 RED, 9 RED only in the MAX_SAFE run, 152 GREEN.
+- 45 of the green mutants are in the lifecycle, failure, dispose, status-sharing and bound code. Each is named below with its equivalence.
+- 107 are schema, argument or boot-validation clause swaps, listed by family below for the follow-up.
+
+**Green mutants in the lifecycle, failure, dispose, status-sharing and bound code** (each equivalent or unreachable; line numbers at this head):
+
+| Line | Mutant | Why it is equivalent |
+|---|---|---|
+| 566 | `L566_qq_0` ('??'->'||' #0) | `worker` is a Worker or `undefined` and cannot be another falsy value, so `||` and `??` agree. |
+| 582 | `L582_qq_0` ('??'->'||' #0) | `early.messages` is an array (truthy even when empty) or `early` is `undefined`; it cannot be another falsy value, so `||` and `??` agree. |
+| 585 | `L585_failsrc_null` (#fail source FAIL_CHANNEL->null) | No dispose exists during construction, and the source only decides whether a dispose survives. (Its `FAIL_WORKER_GONE` swap is RED in the early-failure row.) |
+| 592 | `L592_iffalse` (if condition -> false) | Unreachable, as for the deleted `return`. |
+| 592 | `L592_noreturn` (delete 'return;') | Unreachable: `#failWorker` nulls `worker.onerror` before it calls `#fail`, and the constructor replays an early `error` once. |
+| 631 | `L631_iffalse` (if condition -> false) | `clearInterval(null)` is a no-op. |
+| 640 | `L640_noreturn` (delete 'return 0;') | `webError`'s `requestId` parameter defaults to 0, so a returned `undefined` becomes 0. |
+| 652 | `L652_qq1_0` ('?? 1'->'?? 0' #0) | The default is read only for a slot with no count, and a slot is released only after it was reserved. |
+| 652 | `L652_qq_0` ('??'->'||' #0) | A reserved slot's count is a positive number, and it cannot be another falsy value, so `||` and `??` agree. |
+| 653 | `L653_iffalse` (if condition -> false) | The same as `<=` to `<`: a count of 0 is stored instead of deleted. |
+| 653 | `L653_lteq_0` ('<='->'<' #0) | A count of 0 is stored instead of deleted. Every read is `?? 0`, and the `?? 1` read happens only on a reserved slot. |
+| 655 | `L655_iftrue` (if condition -> true) | Every pending with a `null` slot that is not a status read (a dispose or a fence) fails the inner `#statusRead` ID check, so nothing runs. |
+| 656 | `L656_iftrue` (if condition -> true) | A status request is pending only while it is `#statusRead`: a read is kept only once posted, a follow-up is sent only after the read settles, and `#fail`/`#teardown` clear both together. |
+| 749 | `L749_noreturn` (delete 'return;') | It falls into the listener loop over an empty set. |
+| 779 | `L779_qq_0` ('??'->'||' #0) | `Map.get` returns a pending record or `undefined`; it cannot be another falsy value, so `||` and `??` agree. |
+| 782 | `L782_iffalse` (if condition -> false) | The reply falls through to `#fail(255, null)`. The first error stands, nothing but a surviving dispose is pending, and a `null` source keeps it. |
+| 791 | `L791_qq_0` ('??'->'||' #0) | Request IDs are positive integers; an ID cannot be another falsy value, so `||` and `??` agree. |
+| 803 | `L803_failsrc_pending` (#fail source null->pending) | `pending` is `#pending.get(0)`, always `null`, because request IDs start at 1. |
+| 804 | `L804_noreturn` (delete 'return;') | It falls to the error path, where request ID 0 fails `validRequestId` and calls `#fail(255, null)` again. The first error stands, and a `null` source keeps the same dispose. |
+| 814 | `L814_qq_0` ('??'->'||' #0) | Request IDs are positive integers; an ID cannot be another falsy value, so `||` and `??` agree. |
+| 816 | `L816_noreturn` (delete 'return;') | It falls to the `pending === null` or shape-check `#fail`, a second call with the same source as the first (`null` or the same pending). The first error stands, and the second call finds the `#pending` the first one left. |
+| 820 | `L820_failsrc_pending` (#fail source null->pending) | It is inside `if (pending === null)`, so `pending` is `null`. |
+| 936 | `L936_noreturn` (delete 'return;') | It falls through with the fence record. Its second `#release` is a no-op (a `null` slot, not a status read) and its `resolve` is a no-op. |
+| 963 | `L963_failsrc_FAIL_CHANNEL` (#fail source control->FAIL_CHANNEL) | Unreachable with a dispose in flight; the reason is the same as for the `null` swap. |
+| 963 | `L963_failsrc_null` (#fail source control->null) | Unreachable with a dispose in flight. The fence finds no ID only after the control took the last one, and a dispose gets no ID after it (refused locally with result 1, as the MAX_SAFE row shows), while one sent before it refuses the control with result 3. |
+| 990 | `L990_iffalse` (if condition -> false) | Unreachable: `#teardown` nulls every handler that calls `#fail` (ports, `onprocessorerror`, `worker.onerror`). |
+| 995 | `L995_qq_0` ('??'->'||' #0) | `prior.error` is a frozen error record and cannot be another falsy value, so `||` and `??` agree. |
+| 1004 | `L1004_dropstmtclear` (blank line 'this.#inFlight.clear();') | Once failed, no bounded request is sent again, so the counts are never read. |
+| 1020 | `L1020_iffalse` (if condition -> false) | A `null` slot is never reserved, so its count is 0, under every bound. |
+| 1024 | `L1024_qq_0` ('??'->'||' #0) | A count is a number of at least 0, or absent; `0 || 0` is 0. |
+| 1028 | `L1028_iftrue` (if condition -> true) | A count under the `null` key is never read: `#saturated` returns first, and `null`-slot requests release through the status arm. |
+| 1028 | `L1028_qq_0` ('??'->'||' #0) | A count is a number of at least 0, or absent; `0 || 0` is 0. |
+| 1210 | `L1210_qq_0` ('??'->'||' #0) | `#statusFollow` is `null` or a deferred and cannot be another falsy value, so `||` and `??` agree. |
+| 1422 | `L1422_qq_0` ('??'->'||' #0) | `failure` is `null` or a failed record and cannot be another falsy value, so `||` and `??` agree. |
+| 1474 | `L1474_false_0` ('false'->'true' #0) | Only the single-mode runner calls `#teardown()` with no argument, and single mode never holds a control reply (fences are worker mode only), so `clean` decides nothing there. |
+| 1475 | `L1475_iffalse` (if condition -> false) | Unreachable: only the dispose runners call `#teardown`, once per dispose, always from `disposing`. |
+| 1484 | `L1484_dropstmtclear` (blank line 'this.#pending.clear();') | Once disposed, nothing reads `#pending`: every port handler is nulled, `#request` refuses before it stamps, and `#oldestRequestId` is reached only through `#fail`, which is unreachable. |
+| 1485 | `L1485_dropstmtclear` (blank line 'this.#inFlight.clear();') | Nothing bounded is sent once disposed. |
+| 1487 | `L1487_iffalse` (if condition -> false) | A fence's `reject` is a no-op. |
+| 1497 | `L1497_dropstmtclear` (blank line 'this.#controlEventListeners.clear();') | Listeners are called only from `#receive`, which no port can reach once `#teardown` nulls the handlers. |
+| 1498 | `L1498_dropstmtclear` (blank line 'this.#watermarkListeners.clear();') | Listeners are called only from `#receive`, which no port can reach once `#teardown` nulls the handlers. |
+| 1534 | `L1534_iffalse` (if condition -> false) | Unreachable, as for the deleted `return`. |
+| 1534 | `L1534_noreturn` (delete 'return;') | Unreachable: the first `finish` replaces (on resolve) or nulls (on reject) every boot handler, and the synchronous post-failure `finish` runs before any handler can. |
+| 1535 | `L1535_true_0` ('true'->'false' #0) | Unreachable, as for the deleted `return`: `settled` is read only by a second `finish`, which never runs. |
+| 1547 | `L1547_qq_0` ('??'->'||' #0) | `early.failed` is `null` or a non-empty string and cannot be another falsy value, so `||` and `??` agree. |
+
+**Green clause swaps outside this issue** (pre-existing, unchanged by this branch). They belong to the follow-up proposed in attempt 3, "Web host: factory-input, returned-plane and boot-reply validation guards have no rows", widened to cover the frame and reply schemas and the request arguments:
+
+| Lines | Clause family | Green mutants |
+|---|---|---|
+| 550-557 | the public host properties' `enumerable` flags (API shape) | 6 |
+| 682-708 | meter-frame schema clauses | 18 |
+| 720-726 | telemetry-frame schema clauses | 10 |
+| 741-743 | control-event schema clauses | 4 |
+| 764 | watermark schema clause | 1 |
+| 874-883 | session-map and status reply schema clauses | 11 |
+| 916-919 | plan-latency reply schema clauses | 7 |
+| 1080-1091 | `submitSource` argument clauses | 19 |
+| 1107-1109 | `seekSource` argument clauses | 5 |
+| 1126-1128 | `seekSourceAt` argument clauses | 4 |
+| 1179-1181 | `seekSession` argument clauses | 4 |
+| 1331 | `meters` argument clause | 1 |
+| 1348 | `telemetry` argument clause | 1 |
+| 1525 | the Worker constructor's failure at boot | 2 |
+| 1553-1563 | the control Worker's boot-reply checks | 14 |
+
+**Gates run (attempt 4):**
+- `node scripts/test-web-audioworklet.mjs`: passed.
+- The MAX_SAFE run: passed.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+
+**Follow-ups (not filed):**
+- Fail the host on a duplicate reply.
+- Give rows to the frame/reply schema, request-argument, factory-input, returned-plane and boot-reply validation clauses listed above.
+
+**Test value (attempt 4).**
+- another request's malformed reply or teardown: red if a reply to an earlier request names the channel or the Worker as its source, so it rejects a dispose the peer still answers.
+- worker-mode channel failures: red if a channel failure is taken for a gone Worker, so the dispose skips the Worker that holds the control half.
+- duplicate reply: red if the second fence releases the control again, so one settled call frees two places of the bound.
+- unclean dispose: red if held replies resolve after a teardown that did not prove their transactions committed.
+- follow-up at teardown: red if a waiting status follow-up resolves with nothing, or is left pending.
+- late reply on a failed host: red if `#fail` leaves its rejected requests in `#pending`, so a late reply is held for a fence.
+- release-timeout: red if the teardown reply is also read as a malformed reply and fails the overtaken request with 255.
+- worker-mode own typed error: red if a typed error to the dispose is read as a render failure, with a source that keeps the dispose waiting.
+- malformed worker-mode control reply: red if it is still held for a fence on the failed host.
+- refused fence: red if the fence's result check is dropped, so a refused fence releases the held reply.
+- malformed frame and listener: red if the frame reaches its listener after the host failed on it.
+- stray and oldest IDs: red if the sticky error echoes a non-ID or turns a missing ID into 1, or if the oldest-request lookup answers 0 with requests unsettled.
