@@ -531,42 +531,90 @@ fn restore_lane_zero(
     .expect("restore");
 }
 
-/// **A restore withdraws a standing claim** (issue #2320): a resting bank whose claim stands takes
-/// an off-rest payload (a donor's track 0 with one crossover integrator at `0.5`) and renders a
-/// `+0.0` block. The claim must be gone, so the block runs the kernel and the track's tail rings
-/// out; in debug builds a claim that survived would trip the fast path's claim-implies-scan
-/// assertion.
+/// **Every between-block writer that brings an off-rest lane into a resting bank withdraws its
+/// claim** (issue #2320). Each row takes a fresh resting bank whose claim stands and a donor whose
+/// track 0 holds one crossover integrator at `0.5`, and offers the donor's track to the bank's
+/// track 0 through one writer: a payload restore, the direct `copy_lane_from`, and a cross-bank
+/// `swap_bank_lanes` with the bank first and with the bank as the peer. The multiband implements
+/// no direct copy and declares no lane defaults, so those three refuse; a row that refuses must
+/// leave the bank at rest with its claim, a row that writes must leave the track off rest and the
+/// claim withdrawn. Either way a `+0.0` block then renders (in debug builds a stale claim would
+/// trip the fast path's claim-implies-scan assertion).
 ///
 /// Test value: deleting the withdrawal from `restore_track_state_payload` turns this red (#2320
-/// mutation M12, which no other test caught); a stale claim there would cut the restored tail.
+/// mutation M12), which no other test catches, and so does a future copy or swap that writes the
+/// track without withdrawing; a stale claim there would cut the moved track's tail.
 #[cfg(debug_assertions)]
 #[test]
-fn a_restore_off_rest_withdraws_the_standing_claim() {
-    lane::each_vector_lane!(|L, W| {
-        let mut donor = resting_bank::<L, W>();
-        for side in &mut donor.instance.sides {
-            side.filter.a.ic1 = set_lane_value(side.filter.a.ic1, 0, 0.5);
+fn every_writer_that_moves_a_lane_off_rest_withdraws_the_claim() {
+    type Bank<L, const W: usize> = PreparedMultibandCompressorBank<L, W>;
+    type Writer<L, const W: usize> = fn(&mut Bank<L, W>, &mut Bank<L, W>) -> bool;
+    fn rows<L: Lane, const W: usize>() -> [(&'static str, Writer<L, W>); 4] {
+        fn swap<L: Lane, const W: usize>(first: &mut Bank<L, W>, second: &mut Bank<L, W>) -> bool {
+            let sizes = first.state_sizes;
+            let mut scratch = vec![0_u8; sizes.total().expect("sizes") as usize * 2];
+            let second: &mut dyn PreparedNativeEffectBank = second;
+            effect_contract::swap_bank_lanes(
+                first,
+                0,
+                Some(second),
+                0,
+                MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version,
+                sizes,
+                &mut scratch,
+            )
+            .is_ok()
         }
-        let mut bank = resting_bank::<L, W>();
-        let sizes = bank.state_sizes;
-        let version = MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version;
-        restore_lane_zero(&mut bank, &donor, sizes, version);
-        assert_eq!(
-            PreparedNativeEffectBank::lanes_at_rest(&bank) & 1,
-            0,
-            "W{W}: the restored track is off rest"
-        );
-        assert!(!claim_stands(&bank), "W{W}: the restore withdrew the claim");
-        let frames = QUANTUM as usize;
-        let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
-        process(
-            &mut bank,
-            &mut left,
-            &mut right,
-            frames,
-            0,
-            &[],
-            &[0; W + 1],
-        );
+        [
+            ("restore", |bank, donor| {
+                let sizes = bank.state_sizes;
+                let version = MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version;
+                restore_lane_zero(bank, &*donor, sizes, version);
+                true
+            }),
+            ("copy_lane_from", |bank, donor| {
+                bank.copy_lane_from(0, &*donor, 0).is_some()
+            }),
+            ("swap_bank_lanes", |bank, donor| swap(bank, donor)),
+            ("swap_bank_lanes as the peer", |bank, donor| {
+                swap(donor, bank)
+            }),
+        ]
+    }
+    lane::each_vector_lane!(|L, W| {
+        for (row, write) in rows::<L, W>() {
+            let mut donor = resting_bank::<L, W>();
+            for side in &mut donor.instance.sides {
+                side.filter.a.ic1 = set_lane_value(side.filter.a.ic1, 0, 0.5);
+            }
+            let mut bank = resting_bank::<L, W>();
+            let wrote = write(&mut bank, &mut donor);
+            assert_eq!(
+                wrote,
+                row == "restore",
+                "W{W} {row}: which writers the multiband has"
+            );
+            let at_rest = PreparedNativeEffectBank::lanes_at_rest(&bank) & 1 != 0;
+            assert_eq!(
+                at_rest, !wrote,
+                "W{W} {row}: the track is off rest iff it was written"
+            );
+            assert_eq!(
+                claim_stands(&bank),
+                !wrote,
+                "W{W} {row}: a write withdrew the claim, a refusal kept it"
+            );
+            let frames = QUANTUM as usize;
+            let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
+            process(
+                &mut bank,
+                &mut left,
+                &mut right,
+                frames,
+                0,
+                &[],
+                &[0; W + 1],
+            );
+        }
     });
 }

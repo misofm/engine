@@ -2400,8 +2400,8 @@ struct PreparedMultibandCompressorBank<L: Lane, const W: usize> {
     state_sizes: StatePayloadSizes,
     instance: Instance<L, W>,
     /// Issue #893: the bank is at a silent fixed point ([`SilentClaim`], #2320, checked against
-    /// the scan where the fast path trusts it in debug builds). Earned at the end of a rendered block
-    /// whose input was exact `+0.0` with no ramp in flight, when every lane is at rest
+    /// the scan where the fast path trusts it in debug builds). Earned at the end of a rendered
+    /// block whose input was exact `+0.0` with no ramp in flight, when every lane is at rest
     /// ([`Side::rest_lanes`]) on both channels, or by [`advance_clocks`] over the whole bank;
     /// withdrawn by every automation block, reset and restore. While it stands, the next quiet
     /// block is the same block again: every lane stays at rest and writes `+0.0`, so

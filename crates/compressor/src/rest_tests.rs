@@ -478,36 +478,76 @@ fn restore_lane_zero(
     .expect("restore");
 }
 
-/// **A restore withdraws a standing claim** (issue #2320): a resting bank whose claim stands takes
-/// an off-rest payload (a donor's lane 0 with its envelope at -3 dB) and renders a `+0.0` block.
-/// The claim must be gone, so the block runs the kernel and the release moves on; in debug builds a
-/// claim that survived would trip the fast path's claim-implies-scan assertion.
+/// **Every between-block writer that brings an off-rest lane into a resting bank withdraws its
+/// claim** (issue #2320). Each row takes a fresh resting bank whose claim stands and a donor of the
+/// same requests whose lane 0 envelope sits at -3 dB, moves the donor's lane into the bank's lane 0
+/// through one writer, and requires the lane off rest, the claim withdrawn and a `+0.0` block to
+/// render through the kernel (in debug builds a surviving claim would also trip the fast path's
+/// claim-implies-scan assertion). The rows: a payload restore, the direct `copy_lane_from`, and a
+/// cross-bank `swap_bank_lanes` with the bank first and with the bank as the peer.
 ///
-/// Test value: deleting the withdrawal from `Instance::restore` turns this red (#2320 mutation
-/// M10, which no other test caught); a stale claim there would freeze the restored release.
+/// Test value: deleting the withdrawal from `Instance::restore` or from `write_lane_words` (the
+/// copy's and both swap lanes' writer) turns this red (#2320 mutations M10 and M13), which no other
+/// test catches; a stale claim there would freeze the moved lane's release.
 #[cfg(debug_assertions)]
 #[test]
-fn a_restore_off_rest_withdraws_the_standing_claim() {
+fn every_writer_that_moves_a_lane_off_rest_withdraws_the_claim() {
+    type Writer<L> = fn(&mut PreparedCompressorBank<L>, &mut PreparedCompressorBank<L>);
+    fn rows<L: Lane>() -> [(&'static str, Writer<L>); 4] {
+        fn swap<L: Lane>(
+            first: &mut PreparedCompressorBank<L>,
+            second: &mut PreparedCompressorBank<L>,
+        ) {
+            let sizes = first.instance.state_sizes;
+            let bytes = effect_contract::swap_bank_lanes_scratch_bytes(&*first, sizes);
+            let mut scratch = vec![0_u8; bytes.expect("the compressor swaps")];
+            let second: &mut dyn PreparedNativeEffectBank = second;
+            effect_contract::swap_bank_lanes(
+                first,
+                0,
+                Some(second),
+                0,
+                COMPRESSOR_DESCRIPTOR.state_layout_version,
+                sizes,
+                &mut scratch,
+            )
+            .expect("a cross-bank swap");
+        }
+        [
+            ("restore", |bank, donor| {
+                let sizes = bank.instance.state_sizes;
+                let version = COMPRESSOR_DESCRIPTOR.state_layout_version;
+                restore_lane_zero(bank, &*donor, sizes, version);
+            }),
+            ("copy_lane_from", |bank, donor| {
+                bank.copy_lane_from(0, &*donor, 0).expect("a direct copy");
+            }),
+            ("swap_bank_lanes", |bank, donor| swap(bank, donor)),
+            ("swap_bank_lanes as the peer", |bank, donor| {
+                swap(donor, bank)
+            }),
+        ]
+    }
     lane::each_vector_lane!(|L| {
         let lanes = L::WIDTH;
-        let mut donor = resting_bank::<L>();
-        plant_reduction(&mut donor.instance.left);
-        plant_reduction(&mut donor.instance.right);
-        let mut bank = resting_bank::<L>();
-        let sizes = bank.instance.state_sizes;
-        let version = COMPRESSOR_DESCRIPTOR.state_layout_version;
-        restore_lane_zero(&mut bank, &donor, sizes, version);
-        assert_eq!(
-            PreparedNativeEffectBank::lanes_at_rest(&bank) & 1,
-            0,
-            "W{lanes}: the restored lane is off rest"
-        );
-        assert!(
-            !claim_stands(&bank),
-            "W{lanes}: the restore withdrew the claim"
-        );
-        let mut left = vec![0.0_f32; QUANTUM as usize * lanes];
-        let mut right = vec![0.0_f32; QUANTUM as usize * lanes];
-        quiet_block(&mut bank, &mut left, &mut right, false);
+        for (row, write) in rows::<L>() {
+            let mut donor = resting_bank::<L>();
+            plant_reduction(&mut donor.instance.left);
+            plant_reduction(&mut donor.instance.right);
+            let mut bank = resting_bank::<L>();
+            write(&mut bank, &mut donor);
+            assert_eq!(
+                PreparedNativeEffectBank::lanes_at_rest(&bank) & 1,
+                0,
+                "W{lanes} {row}: the moved lane is off rest"
+            );
+            assert!(
+                !claim_stands(&bank),
+                "W{lanes} {row}: the claim was withdrawn"
+            );
+            let mut left = vec![0.0_f32; QUANTUM as usize * lanes];
+            let mut right = vec![0.0_f32; QUANTUM as usize * lanes];
+            quiet_block(&mut bank, &mut left, &mut right, false);
+        }
     });
 }

@@ -772,36 +772,84 @@ fn restore_lane_zero(
     .expect("restore");
 }
 
-/// **A restore withdraws a standing claim** (issue #2320): a resting bank whose claim stands takes
-/// an off-rest payload (a donor's lane 0 with one integrator at `0.5`) and renders a `+0.0` block.
-/// The claim must be gone, so the block runs the kernel and the lane's tail rings out; in debug
-/// builds a claim that survived would trip the fast path's claim-implies-scan assertion.
+/// **Every between-block writer that brings an off-rest lane into a resting bank withdraws its
+/// claim** (issue #2320). Each row takes a fresh resting bank whose claim stands and a donor of the
+/// same configuration whose lane 0 holds one integrator at `0.5`, moves the donor's lane into the
+/// bank's lane 0 through one writer, and requires the lane off rest, the claim withdrawn and a
+/// `+0.0` block to render through the kernel (in debug builds a surviving claim would also trip the
+/// fast path's claim-implies-scan assertion). The rows: a payload restore, the direct
+/// `copy_lane_from`, and a cross-bank `swap_bank_lanes` with the bank first and with the bank as
+/// the peer.
 ///
-/// Test value: deleting the withdrawal from the bank's `restore_track_state_payload` turns this
-/// red (#2320 mutation M11, which no other test caught); a stale claim there would cut the
-/// restored tail.
+/// Test value: deleting the withdrawal from the bank's `restore_track_state_payload`, from
+/// `copy_lane_from`, or from either side of `swap_lanes_direct` (the bank's own, or the peer's)
+/// turns this red (#2320 mutations M11 and M14 to M16), which no other test catches; a stale claim
+/// there would cut the moved lane's tail.
 #[cfg(debug_assertions)]
 #[test]
-fn a_restore_off_rest_withdraws_the_standing_claim() {
-    lane::each_vector_lane!(|L, W| {
-        let mut donor = resting_bank::<L, W>();
-        plant_integrator(&mut donor.left);
-        plant_integrator(&mut donor.right);
-        let mut eq = resting_bank::<L, W>();
-        let sizes = StatePayloadSizes {
+fn every_writer_that_moves_a_lane_off_rest_withdraws_the_claim() {
+    type Writer<L, const W: usize> =
+        fn(&mut PreparedParametricEq<L, W>, &mut PreparedParametricEq<L, W>);
+    fn eq_sizes() -> StatePayloadSizes {
+        StatePayloadSizes {
             common_bytes: STATE_SIZES.common as u32,
             left_bytes: STATE_SIZES.left as u32,
             right_bytes: STATE_SIZES.right as u32,
-        };
-        restore_lane_zero(&mut eq, &donor, sizes, STATE_LAYOUT_VERSION);
-        assert_eq!(
-            PreparedParametricEq::lanes_at_rest(&eq) & 1,
-            0,
-            "W{W}: the restored lane is off rest"
-        );
-        assert!(!claim_stands(&eq), "W{W}: the restore withdrew the claim");
-        let frames = eq.quantum() as usize;
-        let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
-        process(&mut eq, &mut left, &mut right, frames);
+        }
+    }
+    fn rows<L: Lane, const W: usize>() -> [(&'static str, Writer<L, W>); 4] {
+        fn swap<L: Lane, const W: usize>(
+            first: &mut PreparedParametricEq<L, W>,
+            second: &mut PreparedParametricEq<L, W>,
+        ) {
+            let sizes = eq_sizes();
+            let bytes = effect_contract::swap_bank_lanes_scratch_bytes(&*first, sizes);
+            let mut scratch = vec![0_u8; bytes.expect("the EQ swaps")];
+            let second: &mut dyn PreparedNativeEffectBank = second;
+            effect_contract::swap_bank_lanes(
+                first,
+                0,
+                Some(second),
+                0,
+                STATE_LAYOUT_VERSION,
+                sizes,
+                &mut scratch,
+            )
+            .expect("a cross-bank swap");
+        }
+        [
+            ("restore", |bank, donor| {
+                restore_lane_zero(bank, &*donor, eq_sizes(), STATE_LAYOUT_VERSION);
+            }),
+            ("copy_lane_from", |bank, donor| {
+                bank.copy_lane_from(0, &*donor, 0).expect("a direct copy");
+            }),
+            ("swap_bank_lanes", |bank, donor| swap(bank, donor)),
+            ("swap_bank_lanes as the peer", |bank, donor| {
+                swap(donor, bank)
+            }),
+        ]
+    }
+    lane::each_vector_lane!(|L, W| {
+        let lanes = W;
+        for (row, write) in rows::<L, W>() {
+            let mut donor = resting_bank::<L, W>();
+            plant_integrator(&mut donor.left);
+            plant_integrator(&mut donor.right);
+            let mut bank = resting_bank::<L, W>();
+            write(&mut bank, &mut donor);
+            assert_eq!(
+                PreparedParametricEq::lanes_at_rest(&bank) & 1,
+                0,
+                "W{lanes} {row}: the moved lane is off rest"
+            );
+            assert!(
+                !claim_stands(&bank),
+                "W{lanes} {row}: the claim was withdrawn"
+            );
+            let frames = bank.quantum() as usize;
+            let (mut left, mut right) = (vec![0.0_f32; frames * W], vec![0.0_f32; frames * W]);
+            process(&mut bank, &mut left, &mut right, frames);
+        }
     });
 }

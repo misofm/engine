@@ -1150,10 +1150,10 @@ const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4 + 4;
 /// * `defaults[l][p]` -- the control-plane reset values. They are not read by the kernel; a
 ///   `FullToDefaults` reset that made the channels disagree would show up in `words` and `ramps`
 ///   immediately, which is where the witness sees it.
-/// * `links`, `bypass`, `sample_rate`, `silent` -- whole-instance or per-channel-shared (a lane's link law is the same on
-///   both channels), so they cannot be asymmetric. The link is the reason the seam sits where it does, not a thing that breaks it:
-///   on identical planes the collapsed kernel computes the link on the one plane read twice, in
-///   the original operation order.
+/// * `links`, `bypass`, `sample_rate`, `silent` -- whole-instance or per-channel-shared (a lane's
+///   link law is the same on both channels), so they cannot be asymmetric. The link is the reason
+///   the seam sits where it does, not a thing that breaks it: on identical planes the collapsed
+///   kernel computes the link on the one plane read twice, in the original operation order.
 impl<L: Lane> Instance<L> {
     fn designed_channel_symmetry(&self, lane: usize) -> bool {
         if lane >= L::WIDTH {

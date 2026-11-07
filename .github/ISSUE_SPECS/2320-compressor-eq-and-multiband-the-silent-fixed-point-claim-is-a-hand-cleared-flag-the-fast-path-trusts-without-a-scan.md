@@ -138,11 +138,14 @@ parametric-eq: W4 dual fast path: a stale claim was believed (FAILED)
 - `silent::tests::the_claim_moves_only_as_the_table_says` (effect-runtime): a `settled` that scans a
   loud block, or a `settle_skipped` that withdraws on a partial mask, turns it red; neither moves a
   bit, so no effect gate sees either.
-- `rest_tests::a_restore_off_rest_withdraws_the_standing_claim` in each of the three crates (debug
-  builds): a resting bank with its claim standing restores an off-rest payload (a donor lane with
-  the same planted word), must report the lane off rest and the claim withdrawn, and renders a
-  `+0.0` block. Green on base too: it guards the one writer that can move a lane off rest, whose
-  withdrawal no existing test pinned (mutations M10 to M12 below were green before it).
+- `rest_tests::every_writer_that_moves_a_lane_off_rest_withdraws_the_claim` in each of the three
+  crates (debug builds), one table over every between-block writer that can bring an off-rest lane
+  into a resting bank: a payload restore, `copy_lane_from`, and a cross-bank `swap_bank_lanes`
+  with the bank first and with the bank as the peer. Each row takes a resting bank whose claim
+  stands and a donor whose lane 0 carries the planted word, and requires the lane off rest, the
+  claim withdrawn and a `+0.0` block to render. The multiband has no direct copy and no lane
+  defaults, so its copy and swap rows must refuse and leave the bank at rest with its claim.
+  Green on base too: it pins withdrawals no existing test pinned (M10 to M16 below).
 
 **Mutations (head).** Each run is the named test target; each mutant restored after its run.
 - M1 compressor dual assertion scans the left channel only: red, `a_stale_silent_claim_...` (dual arm).
@@ -154,8 +157,12 @@ parametric-eq: W4 dual fast path: a stale claim was believed (FAILED)
 - M9 `settled` evaluates the scan before the quiet leg: red, the same test.
 - M10 / M11 / M12 the restore withdrawal deleted (compressor `Instance::restore`, EQ bank
   `restore_track_state_payload`, multiband `restore_track_state_payload`): first run green over
-  each crate's whole suite, so `a_restore_off_rest_withdraws_the_standing_claim` was added; with it,
-  red in each crate.
+  each crate's whole suite, so a restore test was added; with it, red in each crate.
+- M13 compressor `write_lane_words` withdrawal deleted (the copy's and both swap lanes' writer),
+  M14 EQ `copy_lane_from` withdrawal deleted, M15 EQ `swap_lanes_direct` peer withdrawal deleted,
+  M16 EQ `swap_lanes_direct` own withdrawal deleted: survived attempt 1 (review finding), so the
+  restore test became the writer table above. With it, M10 to M16 are all red, each in
+  `every_writer_that_moves_a_lane_off_rest_withdraws_the_claim`.
 
 **No bit moved.** A scratch harness, never committed: one driver shared by the three effects
 (`fx6/nbm_driver.rs` in the coordinator's scratchpad) plus one glue file each, and #2264's own
@@ -208,8 +215,12 @@ debug profile, base `5d403acd8` and head.
   lands second resolves a one-hunk textual conflict.
 
 **Follow-ups (not in this issue).**
-- Move the limiter onto the shared `SilentClaim` once #2314 merges. It needs a withdrawing partial
-  skip (`settle_skipped` there sets `proved = whole`) and keeps its `lanes_at_rest` trust point.
+- Merge the limiter's private `mod silent` `SilentClaim` with `effect_runtime::silent`, now that
+  #2314 (#2285) has landed. It needs a withdrawing partial skip (`settle_skipped` there sets
+  `proved = whole`) and keeps its `lanes_at_rest` trust point.
+- Optionally, a `debug_assert!` of channel symmetry at the EQ's `process_bank_mono` entry, so a
+  collapsed block on a bank whose channels disagree fails where it starts rather than wherever a
+  claim earned on the left channel is later trusted.
 - The long-term model #2264's review recommended (a withdrawing accessor for between-block writes)
   applies to all four effects equally.
 - The scratch harness found, on base and head alike, that the EQ's `swap_lanes_direct` trips its
@@ -217,3 +228,18 @@ debug profile, base `5d403acd8` and head.
   random prepared-target retunes, resets and cross-bank swaps (step 765 of W4 seed 1). Not this
   issue's: no claim is involved, and the harness may be the one breaking the contract (its retunes
   design every band from the lane's prepared values, not its current ones). Worth a look.
+
+**Verdict (attempt 1): PASS, with MINOR findings, folded.**
+- The copy and swap withdrawals were pinned by no test (M13 to M16 survived). The restore test is
+  now one table over restore, `copy_lane_from` and `swap_bank_lanes` (both directions) per crate;
+  no sibling test was added, and M10 to M16 are red.
+- Two doc lines past 100 columns rewrapped: the compressor's symmetry-witness list and the
+  multiband's claim field.
+- Follow-ups recorded above: merge the limiter's `SilentClaim` with the shared one now that #2314
+  has landed; optionally assert channel symmetry at the EQ's `process_bank_mono` entry.
+- Branch merged with `main` @ `7f9d5e11c` (no rebase). The one expected conflict, in
+  `LimiterCore::advance_clocks`, kept #2314's `link.decide` body under the guard
+  `if !self.silent.proved()`; no `proved_under`, `bypass_held` or `silent.bypass()` remains.
+- Fold gates (focused, one crate at a time under CPU pressure): the five touched crates' tests,
+  `rack`'s lane tests, clippy `-D warnings`, `cargo fmt --check`, rustdoc `-D warnings`,
+  `scripts/check-workspace-policy.sh`.
