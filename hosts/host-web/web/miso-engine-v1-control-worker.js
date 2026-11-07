@@ -403,7 +403,6 @@ class ControlWorker {
     this.sourceIdCapacity = e.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SOURCE_ID);
     this.sourcePcmPointer = e.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_PCM);
     const sourcePcmCapacity = e.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SOURCE_PCM);
-    this.statusPointer = statusPointer;
     if (!u32(statusPointer) || statusPointer === 0 || !u32(resourcePointer) || resourcePointer === 0
         || !u32(this.sourceIdPointer) || this.sourceIdPointer === 0 || !u32(this.sourceIdCapacity)
         || !u32(this.sourcePcmPointer) || this.sourcePcmPointer === 0
@@ -467,8 +466,15 @@ class ControlWorker {
 
   /// The control half's status: its lifecycle state, last result and blocking rebuilds are
   /// current; its render clock is the one at the release (the worklet's is current).
+  ///
+  /// Issue #2346: the address is read on every call, never cached. It is the slot's: the render
+  /// half's own status while the half is here (before the release, and after the adoption back),
+  /// and the status shell inside the host while it is away. The address the boot read is the
+  /// released half's status, which the render thread writes.
   readStatus() {
-    const view = this.view(DataView, this.statusPointer, STATUS_BYTES);
+    const pointer = this.exports.miso_engine_web_v1_status_ptr(this.handle);
+    if (!u32(pointer) || pointer === 0) throw new RangeError("No status report");
+    const view = this.view(DataView, pointer, STATUS_BYTES);
     if (view.getUint32(0, true) !== STATUS_BYTES || view.getUint32(4, true) !== ABI_VERSION) {
       throw new RangeError("Invalid status report");
     }

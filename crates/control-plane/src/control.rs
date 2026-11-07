@@ -6166,11 +6166,21 @@ where
         // reprepare peak and published `Primed`, no earlier than the duck's `S` when it ducks a
         // strip. With `lead_samples == 0` there is no lead and no prime: it is an ordinary
         // duck-swap, admitted at the single peak and published as one.
-        let mut warm_lead_blocks = None;
-        // #1397 D2: whether this successor is the transition fallback: at submit (`warm_lead`
-        // answered `Unavailable`) or across a withdrawn donor (`Rebuild::Transition`).
-        let mut transition_fallback = false;
-        let mut replanned = false;
+        //
+        // #2258 PR-9: the successor's shape is one of three, decided once here.
+        enum SuccessorShape {
+            /// The ordinary successor, prepared once; its transition is the one planned above.
+            Ordinary,
+            /// Prepared again with a warm lead (#1354 D4). `primed_lead_blocks` is the lead in
+            /// blocks when `lead_samples > 0`: admitted with the reprepare peak and published
+            /// `Primed`. With no lead it is `None`: an ordinary duck-swap, admitted at the single
+            /// peak.
+            Warm { primed_lead_blocks: Option<u32> },
+            /// #1397 D2: the transition fallback, at submit (`warm_lead` answered `Unavailable`,
+            /// or `Warm` while a phase 1 ducks a strip) or across a withdrawn donor
+            /// (`Rebuild::Transition`).
+            Transition,
+        }
         let fall_back = |ordinary: PreparedRuntime| {
             host_core::fall_back_to_transition(
                 base,
@@ -6180,9 +6190,10 @@ where
                 prepare,
             )
         };
-        if fallback {
+        // The shape is the value of this one decision and is never reassigned.
+        let shape = if fallback {
             prepared_runtime = fall_back(prepared_runtime)?;
-            (transition_fallback, replanned) = (true, true);
+            SuccessorShape::Transition
         } else if let Some(config) = self.warm
             && transition.is_some()
         {
@@ -6214,22 +6225,29 @@ where
                         warm: Some(&lead),
                         ..base
                     })?;
-                    replanned = true;
-                    if lead.lead_samples > 0 {
-                        warm_lead_blocks = Some(lead_blocks);
+                    SuccessorShape::Warm {
+                        primed_lead_blocks: (lead.lead_samples > 0).then_some(lead_blocks),
                     }
                 }
                 // #1397 D2 at submit, with no donor: a failure refuses the edit before its commit.
                 host_core::WarmDecision::Warm(_) | host_core::WarmDecision::Unavailable(_) => {
                     prepared_runtime = fall_back(prepared_runtime)?;
-                    (transition_fallback, replanned) = (true, true);
+                    SuccessorShape::Transition
                 }
-                host_core::WarmDecision::Ordinary => {}
+                host_core::WarmDecision::Ordinary => SuccessorShape::Ordinary,
             }
-        }
+        } else {
+            SuccessorShape::Ordinary
+        };
+        // A primed warm candidate's lead, read by its admission, schedule and record below.
+        let warm_lead_blocks = match shape {
+            SuccessorShape::Warm { primed_lead_blocks } => primed_lead_blocks,
+            SuccessorShape::Ordinary | SuccessorShape::Transition => None,
+        };
         // The duck set is the strips the edit removes plus every strip the successor restarts:
         // the warm successor's (#1397 D1), or the transition's, its forced restarts (D2 step 4).
-        if replanned {
+        // A successor prepared again (warm or the transition) is planned again over its own.
+        if !matches!(shape, SuccessorShape::Ordinary) {
             // The first plan's result is freed before the second is planned, so one planning is
             // held at a time, as the ceiling counts it (issue #2234).
             drop(transition.take());
@@ -6401,10 +6419,11 @@ where
         // #1397 D5: the transition is the one writer of `TRANSITION_FALLBACK`. A carried live
         // send keeps each column's move in flight across the swap (#1713, #1718), so a rebuild
         // that carries one is exact.
-        let outcome = if transition_fallback {
-            engine::realtime::CandidateOutcome::TransitionFallback
-        } else {
-            engine::realtime::CandidateOutcome::Exact
+        let outcome = match shape {
+            SuccessorShape::Transition => engine::realtime::CandidateOutcome::TransitionFallback,
+            SuccessorShape::Ordinary | SuccessorShape::Warm { .. } => {
+                engine::realtime::CandidateOutcome::Exact
+            }
         };
         let reservation = match self
             .publisher
