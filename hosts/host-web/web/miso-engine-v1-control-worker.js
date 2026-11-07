@@ -227,6 +227,11 @@ class ControlWorker {
       }
       return;
     }
+    if (message?.tag === "miso.fail.v1" && exactFields(message, ["tag", "result"])
+        && u32(message.result) && message.result !== RESULT_OK) {
+      this.receiveHostFailure(message.result);
+      return;
+    }
     this.receive(message);
     const requestId = message?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
     this.afterControl(requestId);
@@ -559,18 +564,37 @@ class ControlWorker {
   /// session map the engine cannot have written) would otherwise leave the worklet playing. Later
   /// sticky replies only post their code.
   sticky(result, requestId, planes) {
+    this.failSession(result);
+    const message = { tag: "miso.error.v1", requestId, result };
+    if (planes !== undefined) message.planes = planes;
+    this.post(message, this.transferList(planes));
+  }
+
+  /// The session's failure, for `sticky` and `receiveHostFailure` alike: the first one fails the
+  /// lifecycle word too (#2267); a later one records only its code.
+  failSession(result) {
     if (this.stickyResult === RESULT_OK && this.handle !== 0) {
       try {
         this.exports.miso_engine_web_v1_session_fail(this.handle, result);
       } catch (_) {
-        // A trapped instance: the page still gets the sticky error below.
+        // A trapped instance: the caller still records the failure.
       }
     }
     this.ready = false;
     this.stickyResult = result;
-    const message = { tag: "miso.error.v1", requestId, result };
-    if (planes !== undefined) message.planes = planes;
-    this.post(message, this.transferList(planes));
+  }
+
+  /// Issue #2317: the page host failed on something this Worker did not find (a malformed frame or
+  /// reply, a broken channel, the worklet's own sticky error) and posted `miso.fail.v1 { result }`,
+  /// which is no request: no request ID, no reply. The session fails as for this Worker's own first
+  /// sticky error, `session_fail` included, so the render half silences at its next block, and the
+  /// tick stops. Nothing is posted: the page holds the error. A session already failed keeps its
+  /// first code, and a dispose already begun is left to finish: its release stops the worklet and
+  /// its dispose frees the host.
+  receiveHostFailure(result) {
+    if (this.disposing || this.stickyResult !== RESULT_OK) return;
+    this.failSession(result);
+    this.stopServiceTick();
   }
 
   fatal(result, requestId) {
