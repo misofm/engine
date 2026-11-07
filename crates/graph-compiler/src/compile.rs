@@ -21,9 +21,9 @@ use crate::canonical::{
 };
 use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_estimate};
 use crate::ids::{
-    AsProjected, EffectInputs, NodeTable, PreparedEffectIndex, add_main_edge, add_node,
-    add_route_destination_edge, add_route_source_edge, diag, effect_path, gid, into_effects, port,
-    ports_for, prepared_effect_node, route_destination_node, route_source_node, route_values,
+    AsProjected, EffectInputs, EffectNodeIds, EffectPlacement, NodeTable, PreparedEffectIndex,
+    add_main_edge, add_node, add_route_destination_edge, add_route_source_edge, diag, effect_path,
+    gid, into_effects, port, ports_for, route_destination_node, route_source_node, route_values,
     sidechain_matches, stages, track_node,
 };
 use crate::pdc::{TimingResult, timings};
@@ -130,14 +130,7 @@ impl GraphCompiler {
         };
         let (projected, processors) = effects.into_projected();
         let EffectProjectedSession { session, entries } = projected;
-        match Self::graph_back(
-            plan_id,
-            front,
-            &session,
-            entries,
-            processors.into_iter().map(Some).collect(),
-            dispatch,
-        ) {
+        match Self::graph_back(plan_id, front, &session, entries, processors, dispatch) {
             Ok(compiled) => Ok(attach_builtins(compiled, builtins, dispatch)),
             Err((entries, processors, diagnostics)) => Err(GraphBuiltinsCompileFailure {
                 effects: EffectPreparedSession {
@@ -145,11 +138,7 @@ impl GraphCompiler {
                     entries: entries
                         .into_iter()
                         .zip(processors)
-                        .map(|(entry, processor)| {
-                            entry.with_processor(
-                                processor.expect("every processor was supplied and kept"),
-                            )
-                        })
+                        .map(|(entry, processor)| entry.with_processor(processor))
                         .collect(),
                 },
                 builtins,
@@ -228,10 +217,7 @@ impl GraphCompiler {
             front,
         } = projection;
         let EffectProjectedSession { session, entries } = effects;
-        let processors = core::iter::repeat_with(|| None)
-            .take(entries.len())
-            .collect();
-        match Self::graph_back(plan_id, front, &session, entries, processors, dispatch) {
+        match Self::graph_back(plan_id, front, &session, entries, Unprepared, dispatch) {
             Ok(compiled) => Ok(attach_builtins(compiled, builtins, dispatch)),
             Err((entries, _, diagnostics)) => Err(GraphProjectedCompileFailure {
                 effects: EffectProjectedSession { session, entries },
@@ -326,9 +312,11 @@ impl GraphCompiler {
             return Err(diagnostics);
         }
 
+        // Issue #2303: validated above, so every entry is a declared session effect and has the
+        // node of its own key. Every pass below reads this one total vector.
+        let effect_ids = EffectNodeIds::of_validated(effects.iter());
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
-        let mut effect_ids = vec![None; effects.entries.len()];
         let mut route_transforms = Vec::new();
         // #1379 Amendment 1 H3: every strip's gain-only values, from its effective (prepared)
         // values and which of them a live lane or stored automation can change.
@@ -360,15 +348,10 @@ impl GraphCompiler {
             preceding = builtins;
             for (rack, values, boundary) in racks(index) {
                 for effect in values {
-                    let id = EffectNodeId {
-                        track_id: gid(strip.id.as_str()),
-                        rack,
-                        effect_id: gid(effect.id.as_str()),
-                    };
-                    let node = GraphNodeId::Effect(id.clone());
                     let slot = prepared
                         .get(strip.id.as_str(), rack, effect.id.as_str())
                         .expect("validated prepared effect");
+                    let node = GraphNodeId::Effect(effect_ids.get(slot).clone());
                     let index = slot.index();
                     let metadata = effects
                         .entry(index)
@@ -392,7 +375,6 @@ impl GraphCompiler {
                         effect_path(&strip.path_prefix(), rack, effect.id.as_str()),
                     );
                     preceding = node.clone();
-                    effect_ids[index] = Some(id);
                 }
                 let end = track_node(strip.id.as_str(), boundary);
                 add_main_edge(
@@ -490,9 +472,7 @@ impl GraphCompiler {
                     let slot = prepared
                         .get(strip.id.as_str(), rack, effect.id.as_str())
                         .expect("validated prepared effect");
-                    let id = prepared_effect_node(&effect_ids, slot)
-                        .expect("prepared effect node assigned")
-                        .clone();
+                    let id = effect_ids.get(slot).clone();
                     let destination = GraphNodeId::Effect(id.clone());
                     edges.push(GraphEdge {
                         id: GraphEdgeId::EffectSidechain {
@@ -613,9 +593,9 @@ impl GraphCompiler {
         // contracted by bank (#2134).
         let per_node: BTreeSet<EffectNodeId> = effects
             .iter()
-            .zip(&effect_ids)
+            .zip(effect_ids.iter())
             .filter(|(entry, _)| rack::BankSlotKey::blocks_banking(&entry.metadata.program_key()))
-            .filter_map(|(_, id)| id.clone())
+            .map(|(_, id)| id.clone())
             .collect();
         let candidates = match rack_chains(effects, &prepared, &effect_ids) {
             Ok(value) => value,
@@ -989,25 +969,17 @@ impl GraphCompiler {
         })
     }
 
-    /// The graph pipeline's back half (issue #2199): bind the planned banks, prepare a processor
-    /// for every entry that renders per node and has none, and lower the plan. On a failure every
-    /// input is handed back, with each processor that existed.
-    #[allow(clippy::type_complexity)] // The handed-back inputs, by value.
-    fn graph_back(
+    /// The graph pipeline's back half (issue #2199): bind the planned banks, place every entry --
+    /// per node with a processor, which `supply` provides or the compile prepares, or in its bank
+    /// -- and lower the plan. On a failure every input is handed back, `supply` unchanged.
+    fn graph_back<S: ProcessorSupply>(
         plan_id: u64,
         front: GraphFront,
         session: &session::CompiledSession,
         entries: Vec<EffectProjectedEntry>,
-        mut processors: Vec<Option<Box<dyn effect_contract::PreparedNativeEffect>>>,
+        supply: S,
         dispatch: Backend,
-    ) -> Result<
-        CompiledGraph,
-        (
-            Vec<EffectProjectedEntry>,
-            Vec<Option<Box<dyn effect_contract::PreparedNativeEffect>>>,
-            GraphDiagnosticSet,
-        ),
-    > {
+    ) -> Result<CompiledGraph, (Vec<EffectProjectedEntry>, S, GraphDiagnosticSet)> {
         let GraphFront {
             effect_ids,
             ports,
@@ -1039,16 +1011,22 @@ impl GraphCompiler {
                 drop(prepared);
                 return Err((
                     entries,
-                    processors,
+                    supply,
                     GraphDiagnosticSet::sorted(vec![diagnostic]),
                 ));
             }
         };
+        drop(prepared);
         // Issue #2199 (#2194 residual c): a processor is prepared only for an entry the bank plan
         // leaves per node; a banked member renders in its bank and never gets one, so the compile
         // never holds a member's processor beside its bank.
         let banked: BTreeSet<&EffectNodeId> =
             banks.iter().flat_map(|bank| bank.members.iter()).collect();
+        let is_banked: Vec<bool> = effect_ids
+            .iter()
+            .map(|node| banked.contains(node))
+            .collect();
+        drop(banked);
         let mut diagnostics = Vec::new();
         // The estimate charged each lane as the projection laid it out; a lane attached since
         // must be that lane, or the plan's estimate is not its own.
@@ -1063,28 +1041,19 @@ impl GraphCompiler {
         }) {
             diagnostics.push(diag("graph.effect.control_layout", "$.effects"));
         }
-        for (index, entry) in entries.iter().enumerate() {
-            let per_node = effect_ids[index]
-                .as_ref()
-                .is_none_or(|node| !banked.contains(node));
-            if per_node && processors[index].is_none() {
-                match entry.prepare() {
-                    Ok(processor) => processors[index] = Some(processor),
-                    Err(diagnostic) => diagnostics.push(diag(diagnostic.code, &diagnostic.path)),
-                }
+        // Issue #2303: every entry is placed here, once, and lowered only as placed.
+        let placements = match supply.place(&entries, &is_banked, diagnostics) {
+            Ok(placements) => placements,
+            Err((supply, diagnostics)) => {
+                return Err((entries, supply, GraphDiagnosticSet::sorted(diagnostics)));
             }
-        }
-        drop(banked);
-        drop(prepared);
-        if !diagnostics.is_empty() {
-            return Err((entries, processors, GraphDiagnosticSet::sorted(diagnostics)));
-        }
+        };
         let model = session.normalized_model();
         // No canonical text, no SHA-256 and no Graphviz here: they are evidence, not plan, and
         // `GraphCompiler::evidence` produces them from the finished plan when something asks
         // (#99 F5). Nothing on the structural-mutation path pays for them any more.
         let (effect_nodes, effect_controls, effect_observations) =
-            into_effects(entries, processors, &effect_ids);
+            into_effects(entries, placements, &effect_ids);
         let spec = GraphSpec {
             ports,
             nodes,
@@ -1169,10 +1138,83 @@ impl GraphCompiler {
     }
 }
 
+/// The processors a caller hands the graph back half (issue #2303): every entry's
+/// ([`GraphCompiler::compile_with_builtins`]) or none ([`Unprepared`],
+/// [`GraphCompiler::compile_projected`]). It places every entry, and on a failure is handed back
+/// unchanged, so a caller gets back exactly what it supplied.
+trait ProcessorSupply: Sized {
+    /// Every entry's [`EffectPlacement`], in entry order, where `banked[i]` says whether the bound
+    /// banks hold entry `i`. `diagnostics` are the back half's own so far: any of them, or a
+    /// processor that fails to prepare, refuses the placement and hands `self` back with them all.
+    fn place(
+        self,
+        entries: &[EffectProjectedEntry],
+        banked: &[bool],
+        diagnostics: Vec<GraphDiagnostic>,
+    ) -> Result<Vec<EffectPlacement>, (Self, Vec<GraphDiagnostic>)>;
+}
+
+/// Every entry's processor, in entry order: the plan keeps each one, a banked member's too.
+impl ProcessorSupply for Vec<Box<dyn effect_contract::PreparedNativeEffect>> {
+    fn place(
+        self,
+        _entries: &[EffectProjectedEntry],
+        banked: &[bool],
+        diagnostics: Vec<GraphDiagnostic>,
+    ) -> Result<Vec<EffectPlacement>, (Self, Vec<GraphDiagnostic>)> {
+        if !diagnostics.is_empty() {
+            return Err((self, diagnostics));
+        }
+        Ok(self
+            .into_iter()
+            .zip(banked)
+            .map(|(processor, &banked)| {
+                if banked {
+                    EffectPlacement::Banked {
+                        kept: Some(processor),
+                    }
+                } else {
+                    EffectPlacement::PerNode(processor)
+                }
+            })
+            .collect())
+    }
+}
+
+/// No processor: the compile prepares one for each entry the bank plan leaves per node, and none
+/// for a bank member (issue #2199).
+struct Unprepared;
+
+impl ProcessorSupply for Unprepared {
+    fn place(
+        self,
+        entries: &[EffectProjectedEntry],
+        banked: &[bool],
+        mut diagnostics: Vec<GraphDiagnostic>,
+    ) -> Result<Vec<EffectPlacement>, (Self, Vec<GraphDiagnostic>)> {
+        let mut placements = Vec::with_capacity(entries.len());
+        for (entry, &banked) in entries.iter().zip(banked) {
+            if banked {
+                placements.push(EffectPlacement::Banked { kept: None });
+                continue;
+            }
+            match entry.prepare() {
+                Ok(processor) => placements.push(EffectPlacement::PerNode(processor)),
+                Err(diagnostic) => diagnostics.push(diag(diagnostic.code, &diagnostic.path)),
+            }
+        }
+        if diagnostics.is_empty() {
+            Ok(placements)
+        } else {
+            Err((self, diagnostics))
+        }
+    }
+}
+
 /// What the graph front computed (issue #2199): everything the back half lowers into the plan,
 /// with the bank plan and the capped estimate, and no processor.
 pub(crate) struct GraphFront {
-    effect_ids: Vec<Option<EffectNodeId>>,
+    effect_ids: EffectNodeIds,
     ports: Vec<GraphPortId>,
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
@@ -1321,7 +1363,7 @@ impl GraphProjection {
         self.front
             .effect_ids
             .iter()
-            .map(move |node| node.as_ref().is_none_or(|node| !banked.contains(node)))
+            .map(move |node| !banked.contains(node))
     }
 
     /// The projected effects, for a caller that attaches each instance's live-control and

@@ -108,11 +108,40 @@ impl<'a> PreparedEffectIndex<'a> {
     }
 }
 
-pub(crate) fn prepared_effect_node(
-    nodes: &[Option<EffectNodeId>],
-    slot: PreparedEffectSlot,
-) -> Option<&EffectNodeId> {
-    nodes.get(slot.0).and_then(Option::as_ref)
+/// Every entry's effect node, in entry order: one per entry, never absent (issue #2303).
+///
+/// Built only from entries the graph front has validated against the session (no duplicate,
+/// missing or unexpected entry), so each entry's `(track, rack, effect)` key is a declared session
+/// key and its node is that key's. It replaced a vector of `Option`s that the front's node loop
+/// filled in place, whose readers each read an unfilled slot differently.
+pub(crate) struct EffectNodeIds(Vec<EffectNodeId>);
+
+impl EffectNodeIds {
+    /// The node of every entry, in entry order. `entries` must have passed the front's
+    /// validation: an entry whose IDs are not accepted stable IDs panics in [`gid`].
+    pub(crate) fn of_validated<'a>(
+        entries: impl Iterator<Item = &'a EffectProjectedEntry>,
+    ) -> Self {
+        Self(
+            entries
+                .map(|entry| EffectNodeId {
+                    track_id: gid(&entry.track_id),
+                    rack: rack_id(entry.rack),
+                    effect_id: gid(&entry.effect_id),
+                })
+                .collect(),
+        )
+    }
+
+    /// The node of the entry at `slot`, which indexes the same entries.
+    pub(crate) fn get(&self, slot: PreparedEffectSlot) -> &EffectNodeId {
+        &self.0[slot.0]
+    }
+
+    /// Every entry's node, in entry order.
+    pub(crate) fn iter(&self) -> core::slice::Iter<'_, EffectNodeId> {
+        self.0.iter()
+    }
 }
 
 pub(crate) fn ports_for(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<GraphPortId> {
@@ -535,30 +564,31 @@ pub fn route_coefficients(
 /// Lower the entries into the plan's effects, and -- separately -- the live-control channels of
 /// whichever of them live controls drive (issue #140 A).
 ///
-/// `processors` is each entry's processor, in entry order. An entry with none is a bank member
-/// the compile never prepared one for (issue #2199): its lanes ride its bank, and the plan holds
-/// no per-node effect for it, since the bank renders it.
+/// `placements` is each entry's [`EffectPlacement`], in entry order: the plan holds a per-node
+/// effect for every processor a placement carries, and none for a bank member the compile never
+/// prepared one for (issue #2199), since its bank renders it.
 ///
 /// The two vectors are returned side by side rather than as one because
 /// `core::mem::size_of::<RuntimeOp>()` is a reported byte: see
 /// [`graph::GraphEffectControlBinding`].
 pub(crate) fn into_effects(
     entries: Vec<EffectProjectedEntry>,
-    processors: Vec<Option<Box<dyn effect_contract::PreparedNativeEffect>>>,
-    ids: &[Option<EffectNodeId>],
+    placements: Vec<EffectPlacement>,
+    ids: &EffectNodeIds,
 ) -> (
     Vec<GraphPreparedEffect>,
     Vec<graph::GraphEffectControlBinding>,
     Vec<graph::GraphEffectObservationBinding>,
 ) {
-    let mut effects = Vec::with_capacity(processors.iter().flatten().count());
+    let mut effects = Vec::with_capacity(
+        placements
+            .iter()
+            .filter(|placement| placement.has_processor())
+            .count(),
+    );
     let mut controls = Vec::new();
     let mut observations = Vec::new();
-    for (index, (entry, processor)) in entries.into_iter().zip(processors).enumerate() {
-        let node = ids[index]
-            .as_ref()
-            .expect("prepared effect node assigned")
-            .clone();
+    for ((entry, placement), node) in entries.into_iter().zip(placements).zip(ids.iter()) {
         if let Some(control) = entry.control {
             controls.push(graph::GraphEffectControlBinding {
                 node: node.clone(),
@@ -571,9 +601,9 @@ pub(crate) fn into_effects(
                 observation,
             });
         }
-        if let Some(processor) = processor {
+        if let Some(processor) = placement.into_processor() {
             effects.push(GraphPreparedEffect {
-                id: node,
+                id: node.clone(),
                 metadata: entry.metadata,
                 processor,
                 response_snapshot_declared: entry.factory.response_analysis().is_some(),
@@ -582,6 +612,38 @@ pub(crate) fn into_effects(
         }
     }
     (effects, controls, observations)
+}
+
+/// Where one effect entry renders (issue #2303): decided once, by the graph back half after it
+/// binds the planned banks, and the only form [`into_effects`] lowers, so no entry is lowered
+/// before it is placed.
+pub(crate) enum EffectPlacement {
+    /// The bank plan leaves the entry per node: it renders with this processor, which its caller
+    /// supplied or the compile prepared.
+    PerNode(Box<dyn effect_contract::PreparedNativeEffect>),
+    /// The entry is a bank member and renders in its bank. `kept` is the processor its caller
+    /// supplied, which the plan keeps beside the bank
+    /// ([`GraphCompiler::compile_with_builtins`]), or `None` when the compile prepared none
+    /// ([`GraphCompiler::compile_projected`]).
+    Banked {
+        kept: Option<Box<dyn effect_contract::PreparedNativeEffect>>,
+    },
+}
+
+impl EffectPlacement {
+    fn has_processor(&self) -> bool {
+        match self {
+            Self::PerNode(_) => true,
+            Self::Banked { kept } => kept.is_some(),
+        }
+    }
+
+    fn into_processor(self) -> Option<Box<dyn effect_contract::PreparedNativeEffect>> {
+        match self {
+            Self::PerNode(processor) => Some(processor),
+            Self::Banked { kept } => kept,
+        }
+    }
 }
 pub(crate) fn diag(code: &'static str, path: &str) -> GraphDiagnostic {
     GraphDiagnostic {
