@@ -4962,7 +4962,7 @@ impl BankChain {
     ///
     /// A successor inherits before it renders, so it is never collapsed here. Were it, the
     /// disengage boundary is taken first, so the chain and its prefix stages leave
-    /// [`CollapseMode::Collapsed`] together.
+    /// `CollapseMode::Collapsed` together.
     pub fn inherit_channel_agreement(&mut self, agree: bool) {
         if !agree {
             self.disengage_collapse();
