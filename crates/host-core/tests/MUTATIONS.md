@@ -254,7 +254,7 @@ Every mutation below was applied, run, recorded and reverted on the delivery hos
   `miso_engine_v1_render_f32_planar` in `crates/capi/src/ffi.rs`.
 * Command: `cargo test -p capi --lib fp_environment`
 * Result: **RED**, and red at the *earliest* possible point: the plan's first block fails the
-  session-start re-attestation and the entry returns `RESULT_RENDER_REJECTED` (8) with
+  attestation (run on every block since #2357) and the entry returns `RESULT_RENDER_REJECTED` (8) with
   `render.fp_environment.invalid`, before any audio is produced.
 
   ```
@@ -269,7 +269,8 @@ Every mutation below was applied, run, recorded and reverted on the delivery hos
 Recorded because M-146-2 short-circuits on the attestation and therefore does not, by itself, show
 that the digest comparison discriminates.
 
-* Mutation: M-146-2, plus replace the first-block attestation condition with `if false`.
+* Mutation: M-146-2, plus replace the attestation condition (first block only until #2357, every
+  block since) with `if false`.
 * Command: `cargo test -p capi --lib fp_environment`
 * Result: **RED** on the bytes:
 

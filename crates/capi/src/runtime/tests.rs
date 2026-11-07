@@ -4945,6 +4945,66 @@ mod fp_environment {
     }
 }
 
+/// #2357: a C plan handle may move to another render thread between blocks -- an Android stream
+/// reopened after a device change calls back on a new thread -- and the attestation that the
+/// canonical floating-point word took is a statement about the thread, not the plan. A plan whose
+/// first block passed on one thread is still refused on a thread where the pin does not take.
+///
+/// Conforming hardware never refuses the pin (`LDMXCSR` loads the word or faults; FPCR `0` has no
+/// read-as-one bit), so the second thread is marked with this crate's test-only stand-in for one
+/// that does.
+#[test]
+fn a_render_moved_to_a_thread_whose_fp_pin_does_not_take_is_refused() {
+    const QUANTUM: usize = 128;
+    let children = compile_children(SESSION, limits()).expect("C children");
+    let c_session = Box::into_raw(Box::new(crate::Session::new(
+        children.session,
+        children.session_error,
+    )));
+    let c_plan = Box::into_raw(Box::new(crate::Plan::new(children.plan)));
+    let render_block = |plan: *mut crate::Plan, block: u64| {
+        let mut pcm = vec![f32::NAN; QUANTUM * 2];
+        let output = crate::PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: QUANTUM as u32,
+            plane_stride_samples: QUANTUM as u32,
+            reserved: [0; 2],
+        };
+        crate::ffi::test_render(plan, block * QUANTUM as u64, &output)
+    };
+
+    assert_eq!(render_block(c_plan, 0), crate::RESULT_OK);
+    // The handle crosses as an address, as a C host's would; this thread renders nothing while
+    // the other one holds it.
+    let address = c_plan as usize;
+    let moved = std::thread::spawn(move || {
+        crate::ffi::test_refuse_fp_pin_on_this_thread();
+        let plan = address as *mut crate::Plan;
+        (
+            render_block(plan, 1),
+            core::str::from_utf8(crate::ffi::test_plan_last_error(plan)).expect("ASCII diagnostic"),
+        )
+    })
+    .join()
+    .expect("the moved render thread");
+    assert_eq!(
+        moved,
+        (
+            crate::RESULT_RENDER_REJECTED,
+            "render.fp_environment.invalid"
+        ),
+        "a render on a thread whose canonical word did not take was not re-attested"
+    );
+    // Back on a thread whose pin takes, the same block renders: the refusal froze nothing.
+    assert_eq!(render_block(c_plan, 1), crate::RESULT_OK);
+
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
 /// A `SESSION_TRANSACTION_APPLY` at `revision` that rebuilds the plan ([`rebuild_edit`] with
 /// `tag`).
 fn rebuild_command(request_id: u64, revision: u64, tag: u8) -> Vec<u8> {
