@@ -259,8 +259,9 @@ fn recursive_chain(stage: &Recursive) -> BankChain {
 ///
 /// # Red mutation
 ///
-/// Delete `self.collapse_channels_agree = true;` from `disengage_collapse` and the chain never
-/// comes back: the transition triple reads `[1, 0, 0]` and `collapses()` is 4 rather than 8.
+/// Make `disengage_collapse` leave the chain `CollapseMode::Diverged` rather than `Agreeing`, and
+/// the switch coming back has to earn a proof it was owed for free: the transition triple reads
+/// `[1, 1, 1]`.
 #[test]
 fn the_forced_off_window_re_engages_and_renders_the_never_collapsed_bits() {
     let stage = Recursive::new([0.5, 0.5]);

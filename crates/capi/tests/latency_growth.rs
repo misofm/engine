@@ -13,6 +13,7 @@
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use bench_support::producer::StopOnDrop;
 use capi::*;
 use protocol::{
     CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
@@ -406,12 +407,17 @@ fn a_growth_with_sources_queued_ahead_is_adopted_exact() {
             }
             render
         });
+        // However this thread leaves the scope, `done` is set before the join, so a failed
+        // control assertion ends the worker's wait for the feed instead of hanging the join
+        // (#1251, #2296).
+        let stop = StopOnDrop(done);
         let mut revision = None;
         loop {
             let blocks = rendered.load(Ordering::Acquire);
             control.feed_to(blocks * Q + FEED_AHEAD);
             fed.store(control.fed, Ordering::Release);
-            if blocks >= TOTAL {
+            // A worker that has ended short of `TOTAL` panicked; the join reports it.
+            if blocks >= TOTAL || worker.is_finished() {
                 break;
             }
             if revision.is_none() && blocks >= BEFORE {
@@ -420,8 +426,9 @@ fn a_growth_with_sources_queued_ahead_is_adopted_exact() {
             control.service();
             std::thread::yield_now();
         }
-        done.store(true, Ordering::Release);
-        (revision.expect("applied"), worker.join().expect("render"))
+        drop(stop);
+        let render = worker.join().expect("render");
+        (revision.expect("applied"), render)
     });
     let watermark = render.watermark();
     assert_eq!(watermark.revision, revision);
