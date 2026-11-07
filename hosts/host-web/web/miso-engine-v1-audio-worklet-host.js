@@ -446,6 +446,40 @@ function isUnsupportedBrowser(value) {
     && hasExactFields(value, ["tag", "requestId", "result", "capability"]);
 }
 
+/// Issue #2279: the host's lifecycle is one immutable phase record.
+///
+/// - `live` (`HOST_LIVE`): requests are accepted; in `single` mode the service tick runs, and only
+///   in this phase.
+/// - `{ kind: "failed", error, workerGone }`: sticky. `error` is the first failure, and it stands;
+///   `workerGone` is set once the control Worker raised `error` and was terminated. Only
+///   `dispose()` is accepted.
+/// - `{ kind: "disposing", promise, failure }`: `dispose()` was called; `failure` is `null` or the
+///   `failed` record. Every other request is refused with result 3 and `dispose()` returns
+///   `promise`.
+/// - `{ kind: "disposed", promise }`: torn down; final.
+const HOST_LIVE = Object.freeze({ kind: "live" });
+/// The sources of a failure (`#fail`) that are no message: a port's `messageerror` or the
+/// processor's `processorerror` (`FAIL_CHANNEL`), and the control Worker's `error`
+/// (`FAIL_WORKER_GONE`). Either way the dispose's reply cannot be counted on.
+const FAIL_CHANNEL = Symbol("channel");
+const FAIL_WORKER_GONE = Symbol("worker-gone");
+
+/// Issue #2279: the slot a request's bound counts it in, or `null` for an unbounded kind: a status
+/// read is shared (see `status()`), a dispose is terminal and a fence follows a control reply.
+/// Seeks and seek-at share a source's one seek; the meter and telemetry leases and the session
+/// map have one each.
+function inFlightSlot(response, sourceId) {
+  if (response === "source" || response === "seek" || response === "seekReport") {
+    return `${response}:${sourceId}`;
+  }
+  if (response === "lease" || response === "sessionMap") return `lease:${sourceId}`;
+  if (response === "sessionSeek" || response === "renderAllocations"
+      || response === "planLatency" || response === "control") {
+    return response;
+  }
+  return null;
+}
+
 /// The browser-side streaming model (#106 F3).
 ///
 /// The engine streams sources just-in-time into bounded per-source rings, so the main realm must be
@@ -469,22 +503,14 @@ class MisoAudioWorkletHost {
   #renderPort;
   #worker;
   #pending = new Map();
-  #inFlightSources = new Map();
-  #inFlightSeeks = new Map();
-  /// Issue #1644 D1: one session seek may be unsettled at a time.
-  #inFlightSessionSeeks = 0;
-  /// Issue #1297a: the sources with a seek report request unsettled (one each).
-  #inFlightSeekReports = new Set();
+  /// Issue #2279: the count of unsettled requests per bounded slot (see `inFlightSlot`), the one
+  /// record of every per-kind bound.
+  #inFlight = new Map();
   /// The one status request on the port, `{ requestId, promise }`, or null. A `status()` call joins
   /// it only while no later request was sent; otherwise it joins `#statusFollow`, the one pending
   /// read the host sends when this one settles.
   #statusRead = null;
   #statusFollow = null;
-  #inFlightRenderAllocations = 0;
-  /// Issue #2116: one plan latency read may be unsettled at a time.
-  #inFlightPlanLatency = 0;
-  #inFlightControl = 0;
-  #inFlightLease = new Set();
   #ringBlocks;
   /// Issue #2191: the control frame the boot resolved; every control frame, response and event is
   /// at most this long.
@@ -498,12 +524,10 @@ class MisoAudioWorkletHost {
   /// Issue #1294a: the listeners of the applied-revision watermark, in subscription order.
   #watermarkListeners = new Set();
   #lastRequestId = 0;
-  #stickyError = null;
-  #disposed = false;
-  /// The one dispose in flight or done: a second `dispose()` returns the first one's promise.
-  #disposePromise = null;
-  /// Issue #1332 S8: the control Worker raised `error` after its boot and was terminated.
-  #workerGone = false;
+  /// Issue #2279: the host's lifecycle (see `HOST_LIVE`). Only `#fail`, `dispose()`, `#teardown`
+  /// and a single-mode dispose's retryable refusal write it.
+  #phase = HOST_LIVE;
+  /// The single-mode service tick's timer: running exactly while the phase is `live`.
   #serviceTick = null;
   #numericBackend;
   #sampleRateHz;
@@ -542,7 +566,7 @@ class MisoAudioWorkletHost {
     this.#port = worker ?? node.port;
     for (const port of worker === undefined ? [node.port] : [node.port, worker]) {
       port.onmessage = (event) => this.#receive(event.data);
-      port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
+      port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()), FAIL_CHANNEL);
     }
     if (worker !== undefined) {
       worker.onerror = (event) => {
@@ -551,25 +575,34 @@ class MisoAudioWorkletHost {
       };
     }
     // A user-agent/processor crash cannot return storage already transferred out of this realm.
-    this.node.onprocessorerror = () => this.#fail(webError(255, this.#oldestRequestId()));
+    this.node.onprocessorerror = () => this.#fail(webError(255, this.#oldestRequestId()), FAIL_CHANNEL);
     // In `worker` mode the control Worker runs its own service tick (#1332 S7).
     if (worker === undefined) this.#startServiceTick();
     // What the Worker posted, or how it failed, before this host took it over (#1332 S7).
     for (const message of early?.messages ?? []) this.#receive(message);
     if (early?.failed === "error") this.#failWorker();
-    else if (early?.failed === "messageerror") this.#fail(webError(255, this.#oldestRequestId()));
+    else if (early?.failed === "messageerror") {
+      this.#fail(webError(255, this.#oldestRequestId()), FAIL_CHANNEL);
+    }
   }
 
   /// Issue #1332 S8: a Worker `error` after the boot fails the host and terminates the Worker; a
   /// later dispose then tears down at once (nobody is left to answer it).
   #failWorker() {
-    if (this.#workerGone) return;
-    this.#workerGone = true;
+    if (this.#failure()?.workerGone) return;
     this.#worker.onerror = null;
     this.#worker.onmessage = null;
     this.#worker.onmessageerror = null;
     try { this.#worker.terminate(); } catch (_) { /* already gone */ }
-    this.#fail(webError(255, this.#oldestRequestId()));
+    this.#fail(webError(255, this.#oldestRequestId()), FAIL_WORKER_GONE);
+  }
+
+  /// The host's `failed` record, in the `failed` phase or under a dispose, or `null`.
+  #failure() {
+    const phase = this.#phase;
+    if (phase.kind === "failed") return phase;
+    if (phase.kind === "disposing") return phase.failure;
+    return null;
   }
 
   // Issue #1381a D6: in `single` mode the instance's control work runs in the worklet's message
@@ -583,7 +616,7 @@ class MisoAudioWorkletHost {
   }
 
   #postServiceTick() {
-    if (this.#disposed || this.#stickyError !== null) {
+    if (this.#phase !== HOST_LIVE) {
       this.#stopServiceTick();
       return;
     }
@@ -615,29 +648,15 @@ class MisoAudioWorkletHost {
 
   #release(pending) {
     this.#pending.delete(pending.requestId);
-    if (pending.response === "source") {
-      const count = (this.#inFlightSources.get(pending.sourceId) ?? 1) - 1;
-      if (count <= 0) this.#inFlightSources.delete(pending.sourceId);
-      else this.#inFlightSources.set(pending.sourceId, count);
-    } else if (pending.response === "seek") {
-      this.#inFlightSeeks.delete(pending.sourceId);
-    } else if (pending.response === "sessionSeek") {
-      this.#inFlightSessionSeeks -= 1;
-    } else if (pending.response === "seekReport") {
-      this.#inFlightSeekReports.delete(pending.sourceId);
+    if (pending.slot !== null) {
+      const count = (this.#inFlight.get(pending.slot) ?? 1) - 1;
+      if (count <= 0) this.#inFlight.delete(pending.slot);
+      else this.#inFlight.set(pending.slot, count);
     } else if (pending.response === "status") {
       if (this.#statusRead?.requestId === pending.requestId) {
         this.#statusRead = null;
         this.#sendStatusFollow();
       }
-    } else if (pending.response === "renderAllocations") {
-      this.#inFlightRenderAllocations -= 1;
-    } else if (pending.response === "planLatency") {
-      this.#inFlightPlanLatency -= 1;
-    } else if (pending.response === "control") {
-      this.#inFlightControl -= 1;
-    } else if (pending.response === "lease" || pending.response === "sessionMap") {
-      this.#inFlightLease.delete(pending.leaseKind);
     }
   }
 
@@ -760,7 +779,7 @@ class MisoAudioWorkletHost {
     const pending = this.#pending.get(message?.requestId) ?? null;
     // Issue #1332 S9: once the host has failed, a late reply that finds no request (a fence the
     // worklet answers after its own `miso.error.v1`, say) is ignored: the typed sticky error stands.
-    if (pending === null && this.#stickyError !== null) return;
+    if (pending === null && this.#failure() !== null) return;
     // Issue #1332 S8: the control Worker answers a dispose whose release timed out with the typed
     // teardown; the dispose rejects with it (and the page tears down).
     if (message?.tag === "miso.teardown.v1" && this.#worker !== undefined) {
@@ -769,7 +788,7 @@ class MisoAudioWorkletHost {
         this.#release(pending);
         pending.reject(Object.freeze(message));
       } else {
-        this.#fail(webError(255, pending?.requestId ?? this.#oldestRequestId()));
+        this.#fail(webError(255, pending?.requestId ?? this.#oldestRequestId()), pending);
       }
       return;
     }
@@ -790,14 +809,15 @@ class MisoAudioWorkletHost {
         : message.planes === undefined;
       if (validRequestId(message.requestId) && validResult(message.result)
           && pending !== null && validPlanes) {
-        this.#fail(Object.freeze(message));
+        this.#fail(Object.freeze(message), pending);
       } else {
-        this.#fail(webError(255, pending?.requestId ?? this.#oldestRequestId()));
+        this.#fail(webError(255, pending?.requestId ?? this.#oldestRequestId()), pending);
       }
       return;
     }
     if (pending === null) {
-      this.#fail(webError(255, message?.requestId ?? 0));
+      // Issue #2279: the sticky error carries the stray's ID only when it is a request ID.
+      this.#fail(webError(255, validRequestId(message?.requestId) ? message.requestId : 0));
       return;
     }
     const expectedFields = pending.response === "source"
@@ -902,7 +922,7 @@ class MisoAudioWorkletHost {
         || !validRequestId(message.requestId) || !validResult(message.result)
         || !validSourcePlanes || !validStatus || !validRenderAllocations || !validControl || !validSessionMap
         || !validSessionSeek || !validSeekReport || !validPlanLatency || !validFence) {
-      this.#fail(webError(255, message.requestId));
+      this.#fail(webError(255, message.requestId), pending);
       return;
     }
     // Issue #1332 S9: the fence (below) answered on the worklet's port; its control reply is
@@ -940,93 +960,91 @@ class MisoAudioWorkletHost {
   #holdForFence(control, reply) {
     const requestId = this.#allocateRequestId();
     if (requestId === null) {
-      this.#fail(webError(255, control.requestId));
+      this.#fail(webError(255, control.requestId), control);
       return;
     }
     control.held = reply;
     this.#pending.set(requestId, {
-      requestId, response: "fence", control, resolve: () => undefined, reject: () => undefined,
+      requestId, response: "fence", slot: null, control,
+      resolve: () => undefined, reject: () => undefined,
     });
     try {
       this.#renderPort.postMessage({ tag: "miso.fence.v1", requestId });
     } catch (_) {
-      this.#fail(webError(255, requestId));
+      this.#fail(webError(255, requestId), FAIL_CHANNEL);
     }
   }
 
-  // An error is sticky for the whole host, so every unsettled request is rejected with it. The
-  // maps are cleared first so a `reject` handler that re-enters sees a settled host.
-  #fail(error) {
-    this.#stickyError = error;
+  /// Issue #2279: the host's one failure transition. An error is sticky for the whole host: the
+  /// first failure's `error` stands, and a later one only records that the Worker is gone. Every
+  /// unsettled request is rejected with the error -- the maps are cleared first so a `reject`
+  /// handler that re-enters sees a settled host -- except a dispose whose own reply is still due.
+  ///
+  /// `source` is what failed: `FAIL_CHANNEL` or `FAIL_WORKER_GONE`, the pending request whose reply
+  /// was the failing message, or `null` for a message that answers no request (an unsolicited
+  /// frame). Only a message failure leaves the peer answering in arrival order, so a dispose
+  /// already sent survives it, unless that message was the dispose's own reply; the dispose is
+  /// then settled by its reply, or by its `DISPOSE_TIMEOUT_MS` bound.
+  #fail(error, source = null) {
+    const phase = this.#phase;
+    if (phase.kind === "disposed") return;
+    const prior = this.#failure();
+    // `prior === null` is the host's one entry into `failed`; no other site makes it.
+    const failure = Object.freeze({
+      kind: "failed",
+      error: prior?.error ?? error,
+      workerGone: prior?.workerGone === true || source === FAIL_WORKER_GONE,
+    });
+    this.#phase = phase.kind === "disposing" ? Object.freeze({ ...phase, failure }) : failure;
     this.#stopServiceTick();
+    const replyDue = source !== FAIL_CHANNEL && source !== FAIL_WORKER_GONE
+      && source?.response !== "dispose";
     const unsettled = [...this.#pending.values()];
     this.#pending.clear();
-    this.#inFlightSources.clear();
-    this.#inFlightSeeks.clear();
-    this.#inFlightSessionSeeks = 0;
-    this.#inFlightSeekReports.clear();
+    this.#inFlight.clear();
     this.#statusRead = null;
     const follow = this.#statusFollow;
     this.#statusFollow = null;
-    this.#inFlightRenderAllocations = 0;
-    this.#inFlightPlanLatency = 0;
-    this.#inFlightControl = 0;
-    for (const pending of unsettled) pending.reject(error);
+    for (const pending of unsettled) {
+      if (pending.response === "dispose" && replyDue) this.#pending.set(pending.requestId, pending);
+      else pending.reject(error);
+    }
     follow?.reject(error);
   }
 
   // The per-kind bound. `true` means the request has nowhere to go and is refused locally, before
   // any transfer, so the caller keeps its planes and can retry.
-  #saturated(response, sourceId) {
-    if (response === "source") {
-      return (this.#inFlightSources.get(sourceId) ?? 0) >= this.#ringBlocks;
-    }
-    if (response === "seek") return this.#inFlightSeeks.has(sourceId);
-    if (response === "sessionSeek") return this.#inFlightSessionSeeks >= 1;
-    if (response === "seekReport") return this.#inFlightSeekReports.has(sourceId);
-    if (response === "renderAllocations") return this.#inFlightRenderAllocations >= 1;
-    if (response === "planLatency") return this.#inFlightPlanLatency >= 1;
-    if (response === "control") return this.#inFlightControl >= MAXIMUM_CONTROL_IN_FLIGHT;
-    if (response === "lease" || response === "sessionMap") {
-      return this.#inFlightLease.has(sourceId);
-    }
-    return false; // dispose is terminal and waits for nothing
+  // A source may be as far ahead as its ring is deep, the control plane 64 calls deep, and every
+  // other bounded slot holds one request.
+  #saturated(response, slot) {
+    if (slot === null) return false;
+    const bound = response === "source"
+      ? this.#ringBlocks
+      : response === "control" ? MAXIMUM_CONTROL_IN_FLIGHT : 1;
+    return (this.#inFlight.get(slot) ?? 0) >= bound;
   }
 
-  #reserve(response, sourceId) {
-    if (response === "source") {
-      this.#inFlightSources.set(sourceId, (this.#inFlightSources.get(sourceId) ?? 0) + 1);
-    } else if (response === "seek") {
-      this.#inFlightSeeks.set(sourceId, true);
-    } else if (response === "sessionSeek") {
-      this.#inFlightSessionSeeks += 1;
-    } else if (response === "seekReport") {
-      this.#inFlightSeekReports.add(sourceId);
-    } else if (response === "renderAllocations") {
-      this.#inFlightRenderAllocations += 1;
-    } else if (response === "planLatency") {
-      this.#inFlightPlanLatency += 1;
-    } else if (response === "control") {
-      this.#inFlightControl += 1;
-    } else if (response === "lease" || response === "sessionMap") {
-      this.#inFlightLease.add(sourceId);
-    }
+  #reserve(slot) {
+    if (slot !== null) this.#inFlight.set(slot, (this.#inFlight.get(slot) ?? 0) + 1);
   }
 
   #request(
     message,
     transfer = [],
     response,
-    allowSticky = false,
     expectedPlanes = undefined,
     sourceId = undefined,
   ) {
-    if (this.#disposed) return Promise.reject(webError(3));
-    // Once `dispose()` was sent, every other request is refused locally (result 3), as
+    const phase = this.#phase;
+    // Once `dispose()` was called, every other request is refused locally (result 3), as
     // `status()` is: nothing sent behind the dispose can fail the host and reject the dispose.
-    if (response !== "dispose" && this.#disposePromise !== null) return Promise.reject(webError(3));
-    if (this.#stickyError !== null && !allowSticky) return Promise.reject(this.#stickyError);
-    if (this.#saturated(response, sourceId)) {
+    // The dispose itself is sent only from the `disposing` phase.
+    if (phase.kind === "disposed" || (phase.kind === "disposing") !== (response === "dispose")) {
+      return Promise.reject(webError(3));
+    }
+    if (phase.kind === "failed") return Promise.reject(phase.error);
+    const slot = inFlightSlot(response, sourceId);
+    if (this.#saturated(response, slot)) {
       return Promise.reject(webError(RESULT_BACKPRESSURE));
     }
     const requestId = this.#allocateRequestId();
@@ -1038,7 +1056,7 @@ class MisoAudioWorkletHost {
       const pending = {
         requestId,
         sourceId,
-        leaseKind: sourceId,
+        slot,
         generation: stamped.generation,
         resolve,
         reject,
@@ -1046,7 +1064,7 @@ class MisoAudioWorkletHost {
         planeShape: expectedPlanes === undefined ? undefined : planeShape(expectedPlanes),
       };
       this.#pending.set(requestId, pending);
-      this.#reserve(response, sourceId);
+      this.#reserve(slot);
       try {
         (RENDER_PORT_TAGS.has(stamped.tag) ? this.#renderPort : this.#port)
           .postMessage(stamped, transfer);
@@ -1079,7 +1097,6 @@ class MisoAudioWorkletHost {
       { tag: "miso.source.v1", ...request },
       transfer,
       "source",
-      false,
       request.planes,
       request.sourceId,
     );
@@ -1096,7 +1113,6 @@ class MisoAudioWorkletHost {
       { tag: "miso.seek.v1", ...request },
       [],
       "seek",
-      false,
       undefined,
       request.sourceId,
     );
@@ -1117,7 +1133,6 @@ class MisoAudioWorkletHost {
       { tag: "miso.seek-at.v1", ...request },
       [],
       "seek",
-      false,
       undefined,
       request.sourceId,
     );
@@ -1133,7 +1148,6 @@ class MisoAudioWorkletHost {
       { tag: "miso.seek-report.v1", sourceId },
       [],
       "seekReport",
-      false,
       undefined,
       sourceId,
     );
@@ -1186,9 +1200,10 @@ class MisoAudioWorkletHost {
   /// otherwise joins the one follow-up read the host sends when that read settles. Every reply
   /// therefore reflects every request the host sent before the call. A joined read settles every
   /// joined caller with the same reply or the same rejection, and a caller that stops waiting does
-  /// not cancel it. A call made once `dispose()` was sent is refused with result 3 and posts nothing.
+  /// not cancel it. A call made once `dispose()` was called is refused with result 3 and posts
+  /// nothing.
   status() {
-    if (this.#disposePending()) return Promise.reject(webError(3));
+    if (this.#disposeBegan()) return Promise.reject(webError(3));
     const read = this.#statusRead;
     if (read !== null) {
       if (read.requestId === this.#lastRequestId) return read.promise;
@@ -1198,9 +1213,8 @@ class MisoAudioWorkletHost {
     return this.#sendStatus();
   }
 
-  #disposePending() {
-    for (const pending of this.#pending.values()) if (pending.response === "dispose") return true;
-    return false;
+  #disposeBegan() {
+    return this.#phase.kind === "disposing" || this.#phase.kind === "disposed";
   }
 
   #sendStatus() {
@@ -1218,7 +1232,7 @@ class MisoAudioWorkletHost {
     const follow = this.#statusFollow;
     if (follow === null) return;
     this.#statusFollow = null;
-    (this.#disposePending() ? Promise.reject(webError(3)) : this.#sendStatus())
+    (this.#disposeBegan() ? Promise.reject(webError(3)) : this.#sendStatus())
       .then(follow.resolve, follow.reject);
   }
 
@@ -1238,10 +1252,7 @@ class MisoAudioWorkletHost {
   /// prelude's attach node in `single` mode). `null` in `single` mode and once the host failed or
   /// a dispose began.
   openFeedPort() {
-    if (this.#worker === undefined || this.#workerGone || this.#stickyError !== null
-        || this.#disposePromise !== null || this.#disposed) {
-      return null;
-    }
+    if (this.#worker === undefined || this.#phase !== HOST_LIVE) return null;
     const channel = new MessageChannel();
     this.#worker.postMessage({ tag: "miso.feed-port.v1", port: channel.port2 }, [channel.port2]);
     return channel.port1;
@@ -1307,7 +1318,7 @@ class MisoAudioWorkletHost {
   /// guesses an index. An `Observe` edit does not use one: it names its tap
   /// by stable key (#1677).
   sessionMap() {
-    return this.#request({ tag: "miso.sessionmap.v1" }, [], "sessionMap", false, undefined, "sessionMap");
+    return this.#request({ tag: "miso.sessionmap.v1" }, [], "sessionMap", undefined, "sessionMap");
   }
 
   /// Take or release the decimated meter lease (issue #137 D2).
@@ -1325,7 +1336,6 @@ class MisoAudioWorkletHost {
       { tag: "miso.meters.v1", enabled: request.enabled },
       [],
       "lease",
-      false,
       undefined,
       "meters",
     );
@@ -1343,7 +1353,6 @@ class MisoAudioWorkletHost {
       { tag: "miso.telemetry.v1", enabled: request.enabled },
       [],
       "lease",
-      false,
       undefined,
       "telemetry",
     );
@@ -1381,8 +1390,9 @@ class MisoAudioWorkletHost {
   /// later call returns it, settled or not; it resolves for a clean dispose and rejects with the
   /// typed error otherwise, and either way the page terminates the Worker and disconnects the node,
   /// exactly once. A failed worker-mode host is unusable, so there is no retry. In `single` mode a
-  /// failed dispose may be retried: the promise is dropped and the service tick it stopped runs
-  /// again, unless it ended in a teardown. Issue #2256: a single-mode dispose that fails with 255
+  /// failed dispose may be retried, unless it ended in a teardown: the promise is dropped and the
+  /// host is what it was before (failed, or live with the service tick it stopped running again).
+  /// Issue #2256: a single-mode dispose that fails with 255
   /// ends in teardown too -- the worklet answers 255 when its instance trapped (in render or in
   /// the dispose) and ends it, so nothing is left to answer a retry -- as worker mode does on
   /// the control Worker's 255.
@@ -1391,26 +1401,38 @@ class MisoAudioWorkletHost {
   /// `DISPOSE_TIMEOUT_MS` the page tears down directly and rejects with `miso.teardown.v1`
   /// (`context-closed` when the context is closed, `dispose-timeout` otherwise); in `worker` mode
   /// the Worker's own bound on the worklet's release answers `release-timeout` first.
+  ///
+  /// Issue #2279: a dispose already sent is settled by its own reply (or its bound), never by a
+  /// failure another message brought while it was in flight, since the peer still answers it; a
+  /// failure of the channel or the Worker itself (see `#fail`) settles it at once.
   dispose() {
-    if (this.#worker !== undefined) {
-      this.#disposePromise ??= this.#disposeWorkerMode();
-      return this.#disposePromise;
-    }
-    this.#disposePromise ??= this.#disposeSingleMode().catch((error) => {
-      if (!this.#disposed) {
-        this.#disposePromise = null;
-        if (this.#serviceTick === null) this.#startServiceTick();
-      }
-      throw error;
+    const phase = this.#phase;
+    if (phase.kind === "disposing" || phase.kind === "disposed") return phase.promise;
+    const outcome = deferred();
+    this.#phase = Object.freeze({
+      kind: "disposing", promise: outcome.promise, failure: phase.kind === "failed" ? phase : null,
     });
-    return this.#disposePromise;
+    this.#stopServiceTick();
+    const run = this.#worker === undefined ? this.#disposeSingleMode() : this.#disposeWorkerMode();
+    run.then(outcome.resolve, (error) => {
+      // A single-mode refusal that did not end in teardown may be retried: the host returns to
+      // what it was before the dispose, failed or live (and only live runs the tick again).
+      const current = this.#phase;
+      if (current.kind === "disposing") {
+        this.#phase = current.failure ?? HOST_LIVE;
+        if (this.#phase === HOST_LIVE) this.#startServiceTick();
+      }
+      outcome.reject(error);
+    });
+    return outcome.promise;
   }
 
   async #disposeWorkerMode() {
     let clean = false;
     try {
       // A Worker that failed after its boot was terminated: nobody is left to answer.
-      if (this.#workerGone) throw this.#stickyError;
+      const failure = this.#failure();
+      if (failure?.workerGone) throw failure.error;
       await this.#awaitDispose();
       clean = true;
     } finally {
@@ -1419,8 +1441,6 @@ class MisoAudioWorkletHost {
   }
 
   async #disposeSingleMode() {
-    if (this.#disposed) return;
-    this.#stopServiceTick();
     try {
       await this.#awaitDispose();
     } catch (error) {
@@ -1436,7 +1456,7 @@ class MisoAudioWorkletHost {
   /// is no failure: an `OfflineAudioContext` is closed once it rendered, and its worklet still
   /// answers.
   async #awaitDispose() {
-    const reply = this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
+    const reply = this.#request({ tag: "miso.dispose.v1" }, [], "dispose");
     reply.catch(() => undefined);
     const timer = deadline(DISPOSE_TIMEOUT_MS);
     try {
@@ -1452,8 +1472,8 @@ class MisoAudioWorkletHost {
   /// Runs once, after the dispose reply (or, in worker mode, its failure). `clean` is a worker-mode
   /// dispose the Worker answered OK.
   #teardown(clean = false) {
-    if (this.#disposed) return;
-    this.#disposed = true;
+    if (this.#phase.kind !== "disposing") return;
+    this.#phase = Object.freeze({ kind: "disposed", promise: this.#phase.promise });
     this.#stopServiceTick();
     // No request promise outlives the host: whatever is still unsettled (a reply the dispose
     // overtook) rejects with the typed disposed error. Issue #1332 S9: after a clean dispose, a
@@ -1462,6 +1482,7 @@ class MisoAudioWorkletHost {
     // calls in order, so held replies settle in request order and before any later one is refused.
     const unsettled = [...this.#pending.values()];
     this.#pending.clear();
+    this.#inFlight.clear();
     for (const pending of unsettled) {
       if (pending.response === "fence") continue;
       if (clean && pending.response === "control" && pending.held !== undefined) pending.resolve(pending.held);
