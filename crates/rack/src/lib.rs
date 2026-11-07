@@ -20,7 +20,9 @@ use effect_contract::{
 use engine::realtime::{Consumer, LiveSnapshot, RenderError};
 
 mod control_lanes;
+mod drain;
 use control_lanes::ControlLanes;
+use drain::Drained;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RackError {
@@ -3688,19 +3690,6 @@ impl<'a> ResidentOutputLane<'a> {
     }
 }
 
-/// Proof that one block's drains ran: every active slot's [`BankStage::begin_block`], before
-/// anything else of the block (tracker #2258 GR-5).
-///
-/// A live stage's process body reads the spans, targets and verdicts its drain wrote earlier in
-/// the same block, so no stage body may run in a block whose drains did not. `BankChain`'s step 0
-/// (`drain_slots`) is the only place that makes one, and the two bodies that dispatch a block's
-/// stage work, `render_slots` and `skip_block`, take it by value: each runs only after the drains
-/// of its own block, and a block runs at most one of them. Zero-sized, so it costs nothing at run
-/// time. A stage driven directly, outside a chain, carries the same obligation by its contract
-/// ([`BankStage::begin_block`]); the trait's signatures do not carry this proof.
-#[must_use = "a drained block is rendered or skipped"]
-struct Drained(());
-
 /// A [`BankChain`]'s mono-collapse phase at a block boundary (issue #2274).
 ///
 /// Two loose flags carried this before: "the chain rendered its previous block collapsed" and "the
@@ -4610,47 +4599,18 @@ impl BankChain {
         Ok(())
     }
 
-    /// Step 0 of the block: every slot that has an active lane reads its live cells and drains its
-    /// observation queues ([`BankStage::begin_block`]), before anything else of the block. See
-    /// `BankStage::begin_block` for why this cannot be folded into `process`. Issue #2135: the
-    /// settle edges are gathered here, one load per drained slot.
-    ///
-    /// The returned [`Drained`] is the only way to the block's stage bodies,
-    /// [`Self::render_slots`] and [`Self::skip_block`]. A drain that fails returns before the
-    /// proof exists, so no stage body runs in that block.
-    fn drain_slots(
-        &mut self,
-        first_sample: u64,
-        snapshot: LiveSnapshot,
-    ) -> Result<Drained, RenderError> {
-        let mut settle_edges = 0_u32;
-        for slot in &mut self.slots {
-            // The same identity-slot guard `process` has always taken. A slot that is an identity
-            // on every lane renders nothing, and draining its queues would consume records for a
-            // block it does not run. A slot with a live lane is active: the guard skips a stage
-            // that has no live lane to drain, never a drain (#1504 D3).
-            if slot.has_active_lanes() {
-                slot.stage.begin_block(first_sample, snapshot)?;
-                settle_edges |= slot.stage.settle_edges();
-            }
-        }
-        self.settle_edges = settle_edges;
-        Ok(Drained(()))
-    }
-
     /// Run every slot's per-block body over the resident block, which the gather or acquisition
     /// just wrote: the collapsible prefix one-plane and the seam after it when `collapse`, every
     /// slot dual otherwise. Only a slot with an active lane runs, the guard
-    /// [`Self::drain_slots`] drained under. `drained` is this block's proof that the drains ran
+    /// [`Self::drain_slots`] drained under. `_drained` is this block's proof that the drains ran
     /// (tracker #2258 GR-5): a live stage's body reads the spans and verdicts its drain wrote.
     fn render_slots(
         &mut self,
-        drained: Drained,
+        _drained: Drained,
         frames: u32,
         first_sample: u64,
         collapse: bool,
     ) -> Result<(), RenderError> {
-        let Drained(()) = drained;
         let len = frames as usize * self.lanes;
         let prefix = if collapse {
             self.collapse_prefix
@@ -4751,12 +4711,11 @@ impl BankChain {
     /// zeroed block when that declines.
     fn skip_block<M: BankMembers + ?Sized>(
         &mut self,
-        drained: Drained,
+        _drained: Drained,
         members: &mut M,
         frames: u32,
         first_sample: u64,
     ) {
-        let Drained(()) = drained;
         let len = frames as usize * self.lanes;
         // The skip's input test proved every active lane's input `+0.0` (issue #1981).
         self.input_silent = self.active_lanes_mask();
