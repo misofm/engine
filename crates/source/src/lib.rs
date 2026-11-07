@@ -515,6 +515,11 @@ pub struct SourceConsumerTelemetry {
     pub end_of_region: bool,
     /// Native-decoder replacements, or zero for a host-supplied consumer.
     pub native_decoder_sanitized_samples: u64,
+    /// Transfer blocks the recycle queue refused, leaked rather than freed on render (#2258
+    /// WEB-10). Zero unless a capacity rule broke: the queue holds every block the ring
+    /// allocates, so it never refuses render a push. Read here like every other field of this
+    /// record; no host plumbs any of them today.
+    pub recycle_refusals: u64,
 }
 
 /// Where the ring's newest generation landed, as render published it (#1316 D2, D3).
@@ -798,10 +803,10 @@ impl PcmSourceRing {
             end_frame: None,
             end_of_region: false,
             current: None,
-            played: None,
-            played_frames: 0,
-            retained_idle: Some(Box::new(TransferBlock::try_new(shape.samples_per_block)?)),
-            deferred_recycle: None,
+            retained: RetainedBlock::idle(Box::new(TransferBlock::try_new(
+                shape.samples_per_block,
+            )?)),
+            recycle_refusals: 0,
             cumulative_read_frames: 0,
             stale_generation_discard_count: 0,
             underrun_frames: 0,
@@ -1681,6 +1686,62 @@ fn validate_submission_metadata(
     Ok(())
 }
 
+/// The one transfer block a [`PcmSourceConsumer`] retains outside both queues (#917): the played
+/// block while one is readable, otherwise the same storage idle (#2258 WEB-10).
+///
+/// The block is always present and there is only one, so "no retained block" and "a played
+/// block and an idle one at once" cannot be represented. The phase is a field beside the block
+/// rather than an enum carrying it, because a variant change would have to move the `Box` out of
+/// `&mut self`, which needs a placeholder block to leave behind.
+struct RetainedBlock {
+    block: Box<TransferBlock>,
+    phase: RetainedPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetainedPhase {
+    /// Readable this quantum: lent by `played_plane`, copied by `copy_channel`.
+    Played,
+    /// Storage only, its metadata reset: it returns to the producer when a block is next played.
+    Idle,
+}
+
+// REALTIME_POLICY_BEGIN
+impl RetainedBlock {
+    fn idle(block: Box<TransferBlock>) -> Self {
+        Self {
+            block,
+            phase: RetainedPhase::Idle,
+        }
+    }
+
+    /// The played block, or `None` while the storage is idle.
+    fn played(&self) -> Option<&TransferBlock> {
+        match self.phase {
+            RetainedPhase::Played => Some(&self.block),
+            RetainedPhase::Idle => None,
+        }
+    }
+
+    /// End the played quantum: the block's storage stays, idle, with its metadata reset. Idle
+    /// storage is left as it is.
+    fn release(&mut self) {
+        if self.phase == RetainedPhase::Played {
+            self.block.reset_metadata();
+            self.phase = RetainedPhase::Idle;
+        }
+    }
+
+    /// Make `block` the played block and return the storage it displaces, idle and reset, for
+    /// the recycle queue: one block in, one block out, whatever the phase was.
+    fn play(&mut self, block: Box<TransferBlock>) -> Box<TransferBlock> {
+        self.release();
+        self.phase = RetainedPhase::Played;
+        core::mem::replace(&mut self.block, block)
+    }
+}
+// REALTIME_POLICY_END
+
 /// Exclusive render-owner consumer endpoint for one prepared source ring.
 ///
 /// # Played-block ownership (#917)
@@ -1723,11 +1784,11 @@ pub struct PcmSourceConsumer {
     end_frame: Option<SourceFrame>,
     end_of_region: bool,
     current: Option<Box<TransferBlock>>,
-    played: Option<Box<TransferBlock>>,
-    played_frames: u32,
-    /// The retained block while no block is played; `Some` exactly when `played` is `None`.
-    retained_idle: Option<Box<TransferBlock>>,
-    deferred_recycle: Option<Box<TransferBlock>>,
+    /// The one block retained outside both queues: the played block, or the same storage idle.
+    retained: RetainedBlock,
+    /// Recycle pushes the queue refused (#2258 WEB-10); zero unless the capacity rule of
+    /// [`Self::recycle_block`] broke.
+    recycle_refusals: u64,
     cumulative_read_frames: u64,
     stale_generation_discard_count: u64,
     underrun_frames: u64,
@@ -2156,15 +2217,8 @@ impl PcmSourceConsumer {
         let samples = u64::from(self.channel_count).saturating_mul(u64::from(self.quantum_frames));
         let block = (size_of::<TransferBlock>() as u64)
             .saturating_add(samples.saturating_mul(size_of::<f32>() as u64));
-        let held = [
-            &self.current,
-            &self.played,
-            &self.retained_idle,
-            &self.deferred_recycle,
-        ]
-        .into_iter()
-        .filter(|slot| slot.is_some())
-        .count();
+        // The retained block, and the pending block when there is one.
+        let held = 1 + usize::from(self.current.is_some());
         let blocks = held
             .saturating_add(self.data_consumer.queued_len())
             .saturating_add(self.recycle_producer.queued_len());
@@ -2200,7 +2254,6 @@ impl PcmSourceConsumer {
     ) -> bool {
         self.observed_published = published;
         self.end_block();
-        self.flush_deferred_recycle();
         // The prepared source command queue has one slot. Observe exactly that admitted
         // command, then check the requested identity before granting readiness.
         self.observe_seek_at_block_boundary(SeekClock::Hold);
@@ -2234,7 +2287,6 @@ impl PcmSourceConsumer {
     fn prepare_admitted_seek(&mut self, published: u64) -> Option<(SourceGeneration, SourceFrame)> {
         self.observed_published = published;
         self.end_block();
-        self.flush_deferred_recycle();
         // Generations strictly increase, so a seek applied here always changes the active one.
         let before = self.seek.active_generation;
         self.observe_seek_at_block_boundary(SeekClock::Hold);
@@ -2298,7 +2350,6 @@ impl PcmSourceConsumer {
     /// and the data pop, the window `acquire_current_block` must close.
     fn begin_block_observe(&mut self, clock: SeekClock) {
         self.end_block();
-        self.flush_deferred_recycle();
         self.generation_changed = false;
         self.take_seek_command(clock);
     }
@@ -2334,7 +2385,6 @@ impl PcmSourceConsumer {
         } else if self.current_matches_next_frame() {
             let block = self.current.take().expect("matching current block");
             copied_frames = block.frames;
-            self.played_frames = block.frames;
             self.next_frame =
                 SourceFrame(self.next_frame.0.saturating_add(u64::from(block.frames)));
             self.cumulative_read_frames = self
@@ -2424,9 +2474,9 @@ impl PcmSourceConsumer {
         // below -- a dead 512-byte write per plane per track per block on the production source
         // path, which the FrozenGraphSource-bound benchmark never sees. The two regions are
         // disjoint, so which order they are written in cannot be observed.
-        match self.played.as_ref() {
+        match self.retained.played() {
             Some(block) => {
-                let frames = usize::try_from(self.played_frames).expect("u32 fits usize");
+                let frames = usize::try_from(block.frames).expect("u32 fits usize");
                 let offset = usize::try_from(channel)
                     .expect("u32 fits usize")
                     .checked_mul(quantum)
@@ -2446,20 +2496,7 @@ impl PcmSourceConsumer {
     /// [`Self::copy_channel`] writes silence. The block's storage stays with the consumer as its
     /// idle retained block and returns to the producer when the next block is played.
     pub fn end_block(&mut self) {
-        self.played_frames = 0;
-        let Some(mut block) = self.played.take() else {
-            return;
-        };
-        block.reset_metadata();
-        let displaced = self.retained_idle.replace(block);
-        debug_assert!(
-            displaced.is_none(),
-            "a played block and an idle retained block never coexist"
-        );
-        if let Some(displaced) = displaced {
-            // Unreachable by the ownership rule above; recycle rather than free on render.
-            self.recycle_block(displaced);
-        }
+        self.retained.release();
     }
 
     // REALTIME_POLICY_BEGIN
@@ -2475,7 +2512,7 @@ impl PcmSourceConsumer {
         if channel >= self.channel_count {
             return None;
         }
-        let block = self.played.as_ref()?;
+        let block = self.retained.played()?;
         let quantum = usize::try_from(self.quantum_frames).ok()?;
         let offset = usize::try_from(channel).ok()?.checked_mul(quantum)?;
         block.samples.get(offset..offset.checked_add(quantum)?)
@@ -2489,9 +2526,9 @@ impl PcmSourceConsumer {
     /// This render-path operation allocates nothing and never blocks.
     #[must_use]
     pub fn played_block_silent(&self) -> bool {
-        self.played
-            .as_ref()
-            .is_none_or(|block| block.is_positive_zero())
+        self.retained
+            .played()
+            .is_none_or(TransferBlock::is_positive_zero)
     }
     // REALTIME_POLICY_END
 
@@ -2537,6 +2574,7 @@ impl PcmSourceConsumer {
             held_blocks: self.held_blocks,
             end_of_region: self.end_of_region,
             native_decoder_sanitized_samples: self.native_decoder_sanitized_samples,
+            recycle_refusals: self.recycle_refusals,
         }
     }
 
@@ -2758,7 +2796,6 @@ impl PcmSourceConsumer {
         let commands_popped = self.command_consumer.success_count();
         self.begun_block = true;
         self.end_block();
-        self.flush_deferred_recycle();
         self.generation_changed = false;
         // `Hold` reports on the consumer's own clock; this block's sample is the caller's.
         self.next_source_read_sample = source_read_sample;
@@ -2896,7 +2933,7 @@ impl PcmSourceConsumer {
         self.recycle_block(block);
     }
 
-    /// Make `block` the played block, then hand the idle retained block back to the producer:
+    /// Make `block` the played block, then hand the storage it displaces back to the producer:
     /// the consumer keeps exactly one block outside the queues.
     fn play(&mut self, mut block: Box<TransferBlock>) {
         let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
@@ -2908,31 +2945,41 @@ impl PcmSourceConsumer {
                 plane[frames..].fill(0.0);
             }
         }
-        debug_assert!(
-            self.played.is_none(),
-            "begin_block ended the previous block"
-        );
-        self.played = Some(block);
-        if let Some(idle) = self.retained_idle.take() {
-            self.recycle_block(idle);
-        }
+        let displaced = self.retained.play(block);
+        self.recycle_block(displaced);
     }
 
+    // REALTIME_POLICY_BEGIN
+    /// Hand `block` back to the producer through the recycle queue.
+    ///
+    /// The queue never refuses it (#2258 WEB-10), for every ring the public configuration can
+    /// prepare. The queue's capacity is every block the ring allocates
+    /// ([`PreparedShape::allocated_block_count`]), and render, its only pusher, holds `block`
+    /// while it pushes, and the retained block beside it. Render's view of the producer's pops
+    /// can lag, but never behind a pop of a block render holds: such a block was either never
+    /// pushed (the ring's first retained block) or came back to render through the data queue
+    /// after its last push was popped, and the data queue's `Release`/`Acquire` pair orders that
+    /// pop before the full check's reload of the pop cursor. So the pushes render sees as queued
+    /// are of distinct blocks (a block pushed twice came back in between, so its first push is
+    /// seen popped) that render does not hold: at most `allocated - 2`, two below the capacity.
+    ///
+    /// The bound has slack beyond the sizing, too. Prepare fills this queue with
+    /// `transfer_block_count = allocated - 1` blocks and fails if any push is refused, so no ring
+    /// with a capacity below `allocated - 1` is ever handed out, and any capacity that could
+    /// refuse a push here (at most `allocated - 2`) is below that.
+    ///
+    /// A refusal therefore means that capacity rule broke. The block is then leaked and counted
+    /// in [`SourceConsumerTelemetry::recycle_refusals`], never freed on render and never parked
+    /// where a later refusal could overwrite it. A leak takes the block out of circulation, so
+    /// refusals are bounded by the blocks in excess of the broken capacity: once they are gone,
+    /// every push fits.
     fn recycle_block(&mut self, block: Box<TransferBlock>) {
-        match self.recycle_producer.try_push(block) {
-            Ok(()) => {}
-            Err(QueueFull { value, .. }) => {
-                self.deferred_recycle = Some(value);
-            }
+        if let Err(QueueFull { value, .. }) = self.recycle_producer.try_push(block) {
+            self.recycle_refusals = self.recycle_refusals.saturating_add(1);
+            core::mem::forget(value);
         }
     }
-
-    fn flush_deferred_recycle(&mut self) {
-        let Some(block) = self.deferred_recycle.take() else {
-            return;
-        };
-        self.recycle_block(block);
-    }
+    // REALTIME_POLICY_END
 
     fn end_reached(&self) -> bool {
         self.end_frame.is_some_and(|end| self.next_frame.0 >= end.0)
@@ -4818,6 +4865,42 @@ mod tests {
         assert_eq!(consumer.unread_frames(), 4 + 2 + 4);
     }
 
+    /// WEB-10 of #2258. Red if a recycle push the queue refuses frees a transfer block on the
+    /// render thread, as the one-block deferral slot did when a second refusal overwrote it. A
+    /// refusal needs more blocks than the ring allocated, so the test breaks the capacity
+    /// invariant by hand: it swaps in a one-slot recycle queue, already full, then discards two
+    /// stale blocks in one render. Render must free nothing and count both refusals.
+    #[test]
+    fn a_refused_recycle_push_frees_nothing_on_render_and_is_counted() {
+        bench_support::alloc::assert_installed();
+        let (producer, mut consumer, _) = session_ring(config(1, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&[1.0; 4]], 4, false)).unwrap();
+        host.submit(chunk(1, 4, &[&[1.0; 4]], 4, false)).unwrap();
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(100),
+        })
+        .unwrap();
+        let (mut full, _drain) = bounded_spsc_move(NonZeroUsize::MIN, QueueGeneration(1)).unwrap();
+        assert!(
+            full.try_push(Box::new(TransferBlock::try_new(4).unwrap()))
+                .is_ok()
+        );
+        let _ring_recycle = core::mem::replace(&mut consumer.recycle_producer, full);
+        let mark = bench_support::alloc::current_thread_counters();
+        let report = consumer.begin_block_at(0);
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        assert_eq!(report.underrun_frames, 4, "no block of generation 2");
+        assert_eq!(consumer.telemetry().stale_generation_discard_count, 2);
+        assert_eq!(
+            (delta.allocations, delta.deallocations),
+            (0, 0),
+            "render allocates and frees nothing"
+        );
+        assert_eq!(consumer.telemetry().recycle_refusals, 2);
+    }
+
     /// #1274 MINOR-1. Red if an on-time apply keeps the primed block without noting the region
     /// end it carries: a stem whose primed block is its region's last, short block would then
     /// report an underrun on every block after it ends, and never reach the end of its region.
@@ -5129,10 +5212,9 @@ mod tests {
             .expect("initial begin of final block auto-recycled prior played block");
 
         consumer.end_block();
-        assert!(consumer.played.is_none());
-        assert_eq!(consumer.played_frames, 0);
+        assert!(consumer.retained.played().is_none());
         consumer.end_block();
-        assert!(consumer.played.is_none());
+        assert!(consumer.retained.played().is_none());
         assert_eq!(consumer.telemetry().cumulative_read_frames, 6);
     }
 
