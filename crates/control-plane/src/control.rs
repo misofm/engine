@@ -5643,6 +5643,8 @@ where
     /// changes nothing. #2044: every step of the rebuild that can panic runs before the protocol
     /// commit (`prepared.commit`), and the candidate is taken right after it, before any write to
     /// the controller's own fields; only `take_displaced`, which cannot panic, runs between them.
+    /// The protocol commit itself runs every check before its first write and cannot fail after
+    /// it (#2330), so a panic inside it has committed nothing either.
     /// So `withdrawn` is still `Some` exactly when the protocol commit did not happen, and a
     /// republished candidate always meets the controller it was published under. A panic after
     /// the take, which has taken the candidate, is not covered.
