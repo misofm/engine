@@ -175,3 +175,24 @@ delay -p reverb`.
 call-graph, trap-owner and kernel-shape gates. This machine has no `wasm-objdump`. The render
 closure gains no call: `begin`, `advance`, `queue` and the accessors are `#[inline(always)]`, and
 they do the same arithmetic as the field code they replace. CI's `qualification` runs the gate.
+
+**Verdict on attempt 1 (Sol): PASS, with no folds.** The reviewer confirmed:
+- **No behaviour change.** The `queued` cache matches the words in every reachable state, so
+  equality that compares the four words alone is exact.
+- **No live state is refused.** About 36k delay and 9k reverb self-restores all passed. They
+  include crossfades that end on a block's last sample with a change queued behind them.
+- **The digests match on base.**
+- **The browser gate passes.** The reviewer built the artifact and ran
+  `scripts/check-web-audioworklet.sh` on it with wabt 1.0.34, and it exited 0. The render callee
+  sets are identical to base, and no `TapCrossfade` function is outlined. This closes the gate
+  that was not run here.
+
+**After the verdict.**
+- The branch merged `origin/main` (`792458eca`) with a merge commit. None of the touched crates
+  changed upstream.
+- The reviewer's optional item is taken. `begin` no longer carries the `queued` debug assertion,
+  which compared all 32 line taps on every sample of a debug build. The assertion now runs where
+  the cache is written: in `from_words`, in `queue`, and at the end of a fade in `advance`. It is
+  a `debug_assert`, so release builds are unchanged.
+- `cargo test --locked -p effect-runtime -p delay -p reverb`, clippy `-D warnings` and
+  `cargo fmt --check` are green on the merged tree.

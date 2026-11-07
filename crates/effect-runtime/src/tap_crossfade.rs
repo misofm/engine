@@ -87,13 +87,23 @@ impl<T: Copy + PartialEq> TapCrossfade<T> {
         if remaining > TRANSITION_SAMPLES || idle != (transition == active) {
             return None;
         }
-        Some(Self {
+        let taps = Self {
             active,
             transition,
             pending,
             remaining,
             queued: idle && pending != active,
-        })
+        };
+        debug_assert!(taps.cache_holds());
+        Some(taps)
+    }
+
+    /// `queued` is `pending != active` while idle and `false` while fading. Checked where the
+    /// cache is written (`from_words`, `queue`, the end of a fade in `advance`), not in the
+    /// per-sample `begin`, which on a large tap set would compare every tap on every sample of a
+    /// debug build.
+    fn cache_holds(&self) -> bool {
+        self.queued == (self.remaining == 0 && self.pending != self.active)
     }
 
     /// The tap read when no crossfade runs; a running crossfade fades from it.
@@ -132,12 +142,12 @@ impl<T: Copy + PartialEq> TapCrossfade<T> {
         if self.remaining == 0 {
             self.queued = tap != self.active;
         }
+        debug_assert!(self.cache_holds());
     }
 
     /// Starts the queued crossfade, if one is queued and none is running.
     #[inline(always)]
     pub fn begin(&mut self) {
-        debug_assert!(self.remaining != 0 || self.queued == (self.pending != self.active));
         if self.remaining == 0 && self.queued {
             self.transition = self.pending;
             self.remaining = TRANSITION_SAMPLES;
@@ -155,6 +165,7 @@ impl<T: Copy + PartialEq> TapCrossfade<T> {
             if self.remaining == 0 {
                 self.active = self.transition;
                 self.queued = self.pending != self.active;
+                debug_assert!(self.cache_holds());
             }
         }
     }
