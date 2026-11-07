@@ -1434,6 +1434,52 @@ fn alone(session: &Session, caps: &HostPrepareCaps, backend: Backend, ahead: u64
     )
 }
 
+/// #2328 (#2258 PR-7): the duck's hold on a warm candidate's reservation raises its `Primed`
+/// `not_before` and never lowers it, keeps its lead, and leaves any other adoption alone;
+/// `PrimedCandidate::of` reads back exactly the schedule the reservation will publish. A hold
+/// that ignored, lowered or replaced the published `not_before` would let render adopt the
+/// candidate before the duck's `S`.
+#[test]
+fn a_primed_hold_raises_not_before_and_never_lowers_it() {
+    let session = Session::compile(two_tracks());
+    let backend = backend();
+    let caps = caps();
+    let (mut publisher, _owner, _retirer) = exchange(fresh(&session, &caps, backend).plan);
+
+    let mut next = publisher
+        .reserve_replacement(fresh(&session, &caps, backend).plan, PlanAdoption::Next)
+        .unwrap_or_else(|_| panic!("reserve"));
+    host_core::hold_primed_until(&mut next, 640);
+    assert_eq!(next.adoption(), PlanAdoption::Next, "not a warm candidate");
+    assert_eq!(host_core::PrimedCandidate::of(&next), None);
+    drop(next);
+
+    let primed = PlanAdoption::Primed {
+        not_before: 256,
+        lead_blocks: 4,
+    };
+    let mut warm = publisher
+        .reserve_replacement(fresh(&session, &caps, backend).plan, primed)
+        .unwrap_or_else(|_| panic!("reserve"));
+    host_core::hold_primed_until(&mut warm, 128);
+    assert_eq!(warm.adoption(), primed, "an earlier hold never lowers it");
+    host_core::hold_primed_until(&mut warm, 640);
+    host_core::hold_primed_until(&mut warm, 384);
+    assert_eq!(
+        warm.adoption(),
+        PlanAdoption::Primed {
+            not_before: 640,
+            lead_blocks: 4,
+        },
+        "raised to the latest hold, lead kept"
+    );
+    let record = host_core::PrimedCandidate::of(&warm).expect("a Primed reservation");
+    assert_eq!(
+        (record.epoch(), record.not_before(), record.lead_blocks()),
+        (warm.epoch().0, 640, 4)
+    );
+}
+
 /// Blocks rendered before an edit.
 const BEFORE: usize = 6;
 /// Blocks rendered after one.
