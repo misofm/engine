@@ -799,3 +799,138 @@ fn a_coefficient_ramp_in_flight_survives_a_carry() {
         );
     }
 }
+
+/// Issue #2310: a hold countdown that live rendering never holds is refused with
+/// `effect.state.hold`, and the refused restore changes nothing. A closed lane's countdown is
+/// `+0.0` (closing needs it expired, and only an opening reloads it), and no countdown is `-0.0`.
+/// An open lane's expired countdown and a closed lane's own snapshot restore.
+///
+/// Test value: a restore that checks `open` and `hold` one at a time (as main did) accepts a
+/// closed lane carrying a countdown, which its snapshot then echoes, and a `-0.0` countdown;
+/// either turns this red.
+#[test]
+fn a_hold_countdown_live_rendering_never_holds_is_refused() {
+    const OPEN_WORD: usize = 1;
+    const HOLD_WORD: usize = 2;
+    let mut values = active_values();
+    support::set_parameter(&mut values, 5, 10.0, 10.0);
+    let mut effect = prepare(request(&values));
+    let opened = snapshot(&effect);
+    assert_eq!(word(&opened.1, OPEN_WORD), 1.0_f32.to_bits(), "fresh: open");
+    assert_eq!(
+        f32::from_bits(word(&opened.1, HOLD_WORD)),
+        480.0,
+        "fresh: hold loaded"
+    );
+    let (mut left, mut right) = (vec![0.0; 1024], vec![0.0; 1024]);
+    support::render_scalar(&mut effect, &mut left, &mut right, 128);
+    let closed = snapshot(&effect);
+    for section in [&closed.1, &closed.2] {
+        assert_eq!(word(section, OPEN_WORD), 0, "silence closes the gate");
+        assert_eq!(word(section, HOLD_WORD), 0, "with its countdown expired");
+    }
+    let sizes = effect.metadata.state_sizes;
+    let with_hold = |section: &[u8], hold: f32| {
+        let mut section = section.to_vec();
+        section[HOLD_WORD * 4..HOLD_WORD * 4 + 4].copy_from_slice(&hold.to_le_bytes());
+        section
+    };
+    for (case, saved, hold) in [
+        ("closed, hold 1", &closed, 1.0),
+        ("closed, hold H", &closed, 480.0),
+        ("closed, hold -0.0", &closed, -0.0),
+        ("open, hold -0.0", &opened, -0.0),
+    ] {
+        let section = with_hold(&saved.1, hold);
+        let input = StatePayloadInput::new(&saved.0, &section, &saved.2, sizes).expect("sizes");
+        assert_eq!(
+            effect
+                .processor
+                .restore_state_payload(STATE_LAYOUT_VERSION, input)
+                .expect_err(case)
+                .code,
+            "effect.state.hold",
+            "{case}"
+        );
+        assert_eq!(
+            snapshot(&effect),
+            closed,
+            "{case}: the refusal changes nothing"
+        );
+    }
+    for (case, saved, hold) in [
+        ("open, hold 0", &opened, 0.0),
+        ("closed, own", &closed, 0.0),
+    ] {
+        let section = with_hold(&saved.1, hold);
+        let input = StatePayloadInput::new(&saved.0, &section, &saved.2, sizes).expect("sizes");
+        effect
+            .processor
+            .restore_state_payload(STATE_LAYOUT_VERSION, input)
+            .unwrap_or_else(|error| panic!("{case}: {}", error.code));
+    }
+}
+
+/// Issue #2310: a settled parameter ramp or link weight whose `current` is one ulp off its
+/// `target` is refused (`effect.state.parameter`, `effect.state.link`), and the refused restore
+/// changes nothing. Every live writer lands a settling ramp on its target, as the coefficient
+/// ramps' check (`a_coefficient_ramp_in_flight_survives_a_carry`) already requires. A resting link
+/// weight off its target is not inert: the prepared law renders while it rests, and the next
+/// glide starts from the stale word.
+///
+/// Test value: a restore that holds a settled ramp only to its domain (as main did) accepts each
+/// case and turns this red.
+#[test]
+fn a_settled_ramp_off_its_target_is_refused() {
+    let mut effect = prepare(request(&active_values()));
+    let saved = snapshot(&effect);
+    let sizes = effect.metadata.state_sizes;
+    let parameter = |index: usize| {
+        let row = &gate_expander::GATE_EXPANDER_PARAMETERS[index];
+        (row.minimum.expect("min"), row.maximum.expect("max"))
+    };
+    let cases = [
+        ("threshold", 6, parameter(0), "effect.state.parameter"),
+        ("ratio", 10, parameter(1), "effect.state.parameter"),
+        ("range", 14, parameter(2), "effect.state.parameter"),
+        ("hysteresis", 18, parameter(3), "effect.state.parameter"),
+        ("link weight", 30, (0.0, 1.0), "effect.state.link"),
+        ("average weight", 34, (0.0, 1.0), "effect.state.link"),
+    ];
+    for (case, at, (low, high), code) in cases {
+        let current = f32::from_bits(word(&saved.1, at));
+        assert_eq!(
+            word(&saved.1, at + 1),
+            current.to_bits(),
+            "{case}: at its target"
+        );
+        assert_eq!(word(&saved.1, at + 2), 0, "{case}: step +0.0");
+        assert_eq!(word(&saved.1, at + 3), 0, "{case}: settled");
+        let off = if current.next_up() <= high {
+            current.next_up()
+        } else {
+            current.next_down()
+        };
+        assert!(
+            (low..=high).contains(&off),
+            "{case}: {off:e} inside the domain"
+        );
+        let mut section = saved.1.clone();
+        section[at * 4..at * 4 + 4].copy_from_slice(&off.to_le_bytes());
+        let input = StatePayloadInput::new(&saved.0, &section, &saved.2, sizes).expect("sizes");
+        assert_eq!(
+            effect
+                .processor
+                .restore_state_payload(STATE_LAYOUT_VERSION, input)
+                .expect_err(case)
+                .code,
+            code,
+            "{case}"
+        );
+        assert_eq!(
+            snapshot(&effect),
+            saved,
+            "{case}: the refusal changes nothing"
+        );
+    }
+}

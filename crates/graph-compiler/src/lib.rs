@@ -630,8 +630,8 @@ mod tests {
         write_canonical,
     };
     use crate::ids::{
-        NodeTable, PreparedEffectIndex, gid, port, prepared_effect_node, rack_id,
-        route_destination_node, route_source_node, track_node,
+        EffectNodeIds, NodeTable, PreparedEffectIndex, gid, port, route_destination_node,
+        route_source_node, track_node,
     };
     use crate::pdc::timings;
     use crate::schedule::{
@@ -651,22 +651,11 @@ mod tests {
 
     fn indexed_effect_ids(
         prepared: &EffectPreparedSession,
-    ) -> (PreparedEffectIndex<'_>, Vec<Option<EffectNodeId>>) {
-        let (index, _) = PreparedEffectIndex::from_entries(
+    ) -> (PreparedEffectIndex<'_>, EffectNodeIds) {
+        let indexed = PreparedEffectIndex::from_entries(
             prepared.entries.iter().map(|entry| &entry.projected),
         );
-        let nodes = prepared
-            .entries
-            .iter()
-            .map(|entry| {
-                Some(EffectNodeId {
-                    track_id: gid(&entry.track_id),
-                    rack: rack_id(entry.rack),
-                    effect_id: gid(&entry.effect_id),
-                })
-            })
-            .collect();
-        (index, nodes)
+        (indexed.index, indexed.ids.expect("stable effect IDs"))
     }
 
     /// Track stages the builtins compiler banks, one bank each per cohort.
@@ -5483,9 +5472,7 @@ mod tests {
         let first_slot = same_wave_index
             .get("bank0", RackId::Simd1, "bank-delay")
             .expect("first effect");
-        let first_id = prepared_effect_node(&same_wave_ids, first_slot)
-            .expect("first effect node")
-            .clone();
+        let first_id = same_wave_ids.get(first_slot).clone();
         let first = GraphNodeId::Effect(first_id.clone());
         let mut incompatible_levels = dependency_levels.clone();
         let first_level = incompatible_levels

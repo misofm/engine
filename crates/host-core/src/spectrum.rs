@@ -1729,23 +1729,63 @@ struct SpectrumContinuousSharedAllocation {
 
 struct SpectrumOneShotState {
     state: Arc<StateWord>,
-    filled: usize,
-    first_sample: u64,
-    next_sample: u64,
-    /// A window is in progress: render latched `latched` and has not completed or abandoned it.
-    armed: bool,
-    source_underrun: bool,
-    /// The word render moved to `(g, CAPTURING)` at the start of the current window. Every later
-    /// render transition is one compare-and-swap from it, so a cancel or a re-arm in between
-    /// makes the transition fail and the window is abandoned.
-    latched: u64,
+    /// The window render is working on. Render is its only reader and writer.
+    window: OneShotWindow,
+}
+
+/// The phase of the one-shot window in the observer's buffers (issue #2290). Render-local: the
+/// shared word says what control asked for, this says what render holds for it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OneShotWindow {
+    /// No window: none was armed, or render published or abandoned it.
+    Idle,
+    /// Render latched an arm and is filling its window.
+    Filling(OneShotFill),
     /// A completed window waits in the observer's own buffers for [`one_shot_block_end`]: it is
     /// pushed and moved to `COMPLETE` only after the block that completed it rendered without
     /// failure, and again on each later block end while the queue is full (issue #1609).
-    held: bool,
-    /// The held window outlived a block end (its push found the slot full). A later block that
-    /// fails, or is malformed, did not complete it, so it cannot take the window away.
+    Held(OneShotHeld),
+}
+
+/// A window render is filling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OneShotFill {
+    /// The word render moved to `(g, CAPTURING)` at the start of this window. Every later render
+    /// transition is one compare-and-swap from it, so a cancel or a re-arm in between makes the
+    /// transition fail and the window is abandoned.
+    latched: u64,
+    /// Frames captured so far, always below [`SPECTRUM_WINDOW_FRAMES`]: the block that reaches
+    /// it holds the window instead.
+    filled: usize,
+    first_sample: u64,
+    next_sample: u64,
+    source_underrun: bool,
+}
+
+/// A complete window waiting for a block end.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OneShotHeld {
+    /// The word the window latched, `(g, CAPTURING)`. While the shared word still equals it the
+    /// window is the arm's; once control moved the word the window is dead.
+    latched: u64,
+    first_sample: u64,
+    source_underrun: bool,
+    /// The window outlived a block end (its push found the slot full). A later block that
+    /// fails, or is malformed, did not complete it, so it cannot take the window away while the
+    /// window is still the arm's.
     survived_block_end: bool,
+}
+
+#[cfg(test)]
+impl SpectrumOneShotState {
+    /// The latched word and first sample of the window render holds, filling or held.
+    fn window_start(&self) -> Option<(u64, u64)> {
+        match self.window {
+            OneShotWindow::Idle => None,
+            OneShotWindow::Filling(fill) => Some((fill.latched, fill.first_sample)),
+            OneShotWindow::Held(held) => Some((held.latched, held.first_sample)),
+        }
+    }
 }
 
 struct SpectrumContinuousState {
@@ -1920,14 +1960,7 @@ impl SpectrumCaptureObserver {
             channels,
             one_shot: SpectrumOneShotState {
                 state,
-                filled: 0,
-                first_sample: 0,
-                next_sample: 0,
-                armed: false,
-                source_underrun: false,
-                latched: 0,
-                held: false,
-                survived_block_end: false,
+                window: OneShotWindow::Idle,
             },
             continuous: SpectrumContinuousState {
                 shared,
@@ -2008,9 +2041,9 @@ impl SpectrumCaptureObserver {
     /// Publish the window a block completed, now that the block rendered without failure.
     fn block_end(&mut self) {
         if continuous_latch(&mut self.continuous) {
-            // Continuous mode shares the capture buffers: a window held from one-shot mode is
-            // gone, and `cancel` already moved the word that held it.
-            self.one_shot.held = false;
+            // Continuous mode shares the capture buffers: a one-shot window, filling or held, is
+            // gone, and `cancel` already moved the word that latched it.
+            self.one_shot.window = OneShotWindow::Idle;
             return;
         }
         let mut buffers = SpectrumCaptureBuffers {
@@ -2025,18 +2058,20 @@ impl SpectrumCaptureObserver {
 }
 
 // REALTIME_POLICY_BEGIN
+/// Start or continue the window for a block of `frames` frames at `first_sample`. Returns the
+/// window offset the block's frames go to and how many of them the window takes; on `Some`, the
+/// window is `Filling`.
 fn one_shot_begin(
     state: &mut SpectrumOneShotState,
     first_sample: u64,
     frames: usize,
     validity: GraphObservationValidity,
-) -> Option<usize> {
+) -> Option<(usize, usize)> {
     let current = state.state.load(Ordering::Acquire);
-    match word_phase(current) {
+    let fill = match word_phase(current) {
         ARMED => {
-            // A new arm. A window held for an earlier generation is gone with it.
-            state.held = false;
-            state.armed = false;
+            // A new arm. A window filling or held for an earlier generation is gone with it.
+            state.window = OneShotWindow::Idle;
             let latched = word_with_phase(current, CAPTURING);
             if state
                 .state
@@ -2045,33 +2080,40 @@ fn one_shot_begin(
             {
                 return None;
             }
-            state.latched = latched;
-            state.filled = 0;
-            state.first_sample = first_sample;
-            state.next_sample = first_sample;
-            state.armed = true;
-            state.source_underrun = validity.source_underrun;
+            let fill = OneShotFill {
+                latched,
+                filled: 0,
+                first_sample,
+                next_sample: first_sample,
+                source_underrun: validity.source_underrun,
+            };
+            state.window = OneShotWindow::Filling(fill);
+            fill
         }
         CAPTURING => {
-            if !state.armed || current != state.latched {
-                // Either the window completed and waits in `held`, or control moved the word.
-                state.armed = false;
+            let OneShotWindow::Filling(fill) = &mut state.window else {
+                // A held window waits for its block end, and nothing else is filling.
+                return None;
+            };
+            if fill.latched != current {
+                // Control moved the word: the window is abandoned.
+                state.window = OneShotWindow::Idle;
                 return None;
             }
             if validity.source_generation_changed {
                 one_shot_invalidate(state);
                 return None;
             }
-            state.source_underrun |= validity.source_underrun;
+            fill.source_underrun |= validity.source_underrun;
+            *fill
         }
         _ => {
             // Idle, complete or invalid: a cancel, a read or a failure ended the window.
-            state.armed = false;
-            state.held = false;
+            state.window = OneShotWindow::Idle;
             return None;
         }
-    }
-    if frames == 0 || first_sample != state.next_sample {
+    };
+    if frames == 0 || first_sample != fill.next_sample {
         one_shot_invalidate(state);
         return None;
     }
@@ -2082,9 +2124,10 @@ fn one_shot_begin(
         one_shot_invalidate(state);
         return None;
     }
-    let remaining = SPECTRUM_WINDOW_FRAMES - state.filled;
+    let remaining = SPECTRUM_WINDOW_FRAMES - fill.filled;
     Some(remaining.min(frames))
         .filter(|count| *count > 0)
+        .map(|count| (fill.filled, count))
         .or_else(|| {
             one_shot_invalidate(state);
             None
@@ -2096,14 +2139,23 @@ fn one_shot_begin(
 /// The window is not pushed here: this block may still fail after this observer ran, and a window
 /// from a failed block must never reach a reader (issue #1609, race 2).
 fn one_shot_finish(state: &mut SpectrumOneShotState, first_sample: u64, count: usize) {
-    state.filled += count;
-    state.next_sample = first_sample
+    let OneShotWindow::Filling(fill) = &mut state.window else {
+        // `one_shot_begin` returned a count, so the window is filling: every path between it and
+        // here that ends the window returns before calling this.
+        debug_assert!(false, "one_shot_finish runs only on a filling window");
+        return;
+    };
+    fill.filled += count;
+    fill.next_sample = first_sample
         .checked_add(u64::try_from(count).unwrap_or(0))
         .unwrap_or(first_sample);
-    if state.filled == SPECTRUM_WINDOW_FRAMES {
-        state.armed = false;
-        state.held = true;
-        state.survived_block_end = false;
+    if fill.filled == SPECTRUM_WINDOW_FRAMES {
+        state.window = OneShotWindow::Held(OneShotHeld {
+            latched: fill.latched,
+            first_sample: fill.first_sample,
+            source_underrun: fill.source_underrun,
+            survived_block_end: false,
+        });
     }
 }
 
@@ -2115,11 +2167,11 @@ fn one_shot_finish(state: &mut SpectrumOneShotState, first_sample: u64, count: u
 /// queue means a stale record holds the only slot; the window stays held and the word stays
 /// `CAPTURING`, and the next block end makes one more attempt (never a loop, never a failure).
 fn one_shot_block_end(state: &mut SpectrumOneShotState, buffers: &mut SpectrumCaptureBuffers<'_>) {
-    if !state.held {
+    let OneShotWindow::Held(held) = &mut state.window else {
         return;
-    }
-    if state.state.load(Ordering::Acquire) != state.latched {
-        state.held = false;
+    };
+    if state.state.load(Ordering::Acquire) != held.latched {
+        state.window = OneShotWindow::Idle;
         return;
     }
     probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
@@ -2127,16 +2179,16 @@ fn one_shot_block_end(state: &mut SpectrumOneShotState, buffers: &mut SpectrumCa
     let window = SpectrumWindow {
         left: *buffers.left,
         right: *buffers.right,
-        first_sample: state.first_sample,
+        first_sample: held.first_sample,
         channels: buffers.channels,
-        source_underrun: state.source_underrun,
+        source_underrun: held.source_underrun,
     };
     let record = SpectrumCapturedRecord {
         window,
         stream_epoch: 0,
         sequence: 0,
         dropped_captures: 0,
-        arm_generation: word_generation(state.latched),
+        arm_generation: word_generation(held.latched),
     };
     probe_add(PROBE_PUBLICATION_ATTEMPTS, 1);
     probe_add(
@@ -2144,13 +2196,14 @@ fn one_shot_block_end(state: &mut SpectrumOneShotState, buffers: &mut SpectrumCa
         2 * SPECTRUM_WINDOW_FRAMES,
     );
     if buffers.producer.try_push(record).is_err() {
-        state.survived_block_end = true;
+        held.survived_block_end = true;
         return;
     }
-    state.held = false;
+    let latched = held.latched;
+    state.window = OneShotWindow::Idle;
     let _ = state.state.compare_exchange(
-        state.latched,
-        word_with_phase(state.latched, COMPLETE),
+        latched,
+        word_with_phase(latched, COMPLETE),
         Ordering::AcqRel,
         Ordering::Acquire,
     );
@@ -2173,7 +2226,8 @@ fn one_shot_capture(
         }
         return;
     }
-    let Some(count) = one_shot_begin(state, first_sample, left.len(), validity) else {
+    let Some((destination, count)) = one_shot_begin(state, first_sample, left.len(), validity)
+    else {
         return;
     };
     if (buffers.channels.includes_left() && !selected_is_finite(&left[..count]))
@@ -2182,7 +2236,6 @@ fn one_shot_capture(
         one_shot_invalidate(state);
         return;
     }
-    let destination = state.filled;
     if buffers.channels.includes_left() {
         buffers.left[destination..destination + count].copy_from_slice(&left[..count]);
         probe_add(PROBE_STORAGE_WRITES, count);
@@ -2221,10 +2274,11 @@ fn one_shot_capture_resident(
         one_shot_invalidate(state);
         return;
     };
-    let Some(count) = one_shot_begin(state, block.first_sample, frames, block.validity) else {
+    let Some((destination, count)) =
+        one_shot_begin(state, block.first_sample, frames, block.validity)
+    else {
         return;
     };
-    let destination = state.filled;
     for frame in 0..count {
         let Some(index) = frame
             .checked_mul(lanes)
@@ -2271,13 +2325,18 @@ fn one_shot_capture_resident(
 /// A window that an earlier, good block completed and a stale record keeps held is not this
 /// block's to take: it stays held for the next block end, and the word stays `CAPTURING`. The
 /// block that completed a window and then fails still drops it (it has not survived a block end).
+/// So does any block once control moved the word off the window's latch (issue #2290): the
+/// window is dead, and the arm the word now holds ends as it would on an observer that never held
+/// a window.
 fn one_shot_invalidate(state: &mut SpectrumOneShotState) {
-    if state.held && state.survived_block_end {
+    let word = state.state.load(Ordering::Acquire);
+    if let OneShotWindow::Held(held) = state.window
+        && held.survived_block_end
+        && word == held.latched
+    {
         return;
     }
-    state.armed = false;
-    state.held = false;
-    let word = state.state.load(Ordering::Acquire);
+    state.window = OneShotWindow::Idle;
     if matches!(word_phase(word), ARMED | CAPTURING) {
         let _ = state.state.compare_exchange(
             word,
@@ -3920,11 +3979,10 @@ mod tests {
         capture.arm().expect("one-shot arm");
         let (left, right) = ramp_block(0, SPECTRUM_WINDOW_FRAMES);
         observer.capture(&left, &right, 0, super::GraphObservationValidity::CLEAR);
-        assert!(
-            observer.one_shot.held,
-            "the one-shot window is complete and held"
-        );
-        let generation = super::word_generation(observer.one_shot.latched);
+        let super::OneShotWindow::Held(held) = observer.one_shot.window else {
+            panic!("the one-shot window is complete and held");
+        };
+        let generation = super::word_generation(held.latched);
         // The collection's replacement path switches an armed capture: drain, park, mode store.
         let cadence = SpectrumCadence::new(48_000, 128).expect("cadence");
         capture
@@ -4488,6 +4546,73 @@ mod tests {
         );
     }
 
+    /// Issue #2290: a window held behind a stale record dies when control cancels it and arms
+    /// again. A later failed, malformed or render-failed block then ends the new arm exactly as
+    /// it ends the arm of an observer that never held a window: the reader gets `Invalid` once.
+    /// The dead window's survival must not shield an arm of a later generation.
+    #[test]
+    fn a_dead_held_window_does_not_shield_a_new_arm_from_a_failed_block() {
+        type Failure = fn(&mut SpectrumCaptureObserver);
+        let failures: [(&str, Failure); 3] = [
+            ("failed", |observer| {
+                observer.invalidate_after_failure(10_240)
+            }),
+            ("malformed", |observer| {
+                observer.capture(
+                    &[0.0; 128],
+                    &[0.0; 64],
+                    10_240,
+                    super::GraphObservationValidity::CLEAR,
+                );
+            }),
+            ("render-failed", |observer| {
+                SpectrumCaptureObserver::invalidate(observer);
+            }),
+        ];
+        let mut reads = Vec::new();
+        for (kind, fail) in failures {
+            // The oracle: an observer that never held a window, armed, then the same block.
+            let (mut fresh_observer, mut fresh) = one_shot_pair(SpectrumChannels::Left);
+            fresh.arm().expect("fresh arm");
+            fail(&mut fresh_observer);
+            assert_eq!(
+                fresh.try_read().map(|window| window.first_sample),
+                Err(SpectrumCaptureReadError::Invalid),
+                "{kind}: the oracle"
+            );
+
+            let (mut observer, mut capture) = one_shot_pair(SpectrumChannels::Left);
+            capture.arm().expect("first arm");
+            capture.cancel();
+            capture.arm().expect("an arm after a cancel is never Busy");
+            let stale = super::SpectrumCapturedRecord {
+                window: window(0.25),
+                stream_epoch: 0,
+                sequence: 0,
+                dropped_captures: 0,
+                arm_generation: 1,
+            };
+            assert!(observer.producer.try_push(stale).is_ok());
+            feed_window(&mut observer, 8_192, 16);
+            observer.block_end();
+            // The window of generation 2 is held behind the stale record. Control cancels it and
+            // arms generation 3 before any block end publishes it.
+            capture.cancel();
+            capture.arm().expect("re-arm");
+            fail(&mut observer);
+            reads.push((kind, capture.try_read().map(|window| window.first_sample)));
+        }
+        assert_eq!(
+            reads,
+            [
+                ("failed", Err(SpectrumCaptureReadError::Invalid)),
+                ("malformed", Err(SpectrumCaptureReadError::Invalid)),
+                ("render-failed", Err(SpectrumCaptureReadError::Invalid)),
+            ],
+            "each block after the re-arm reads as it does on a fresh observer"
+        );
+    }
+
     /// #1618 gate 2: a window held behind a stale record when the plan swaps, on a capture that
     /// does not carry. The held window died with its observer, so no block end will ever publish
     /// it: the service drops the arm, the read answers `Dropped` once (#1593 D6; not `Pending`
@@ -4627,11 +4752,12 @@ mod tests {
                             first_sample,
                             super::GraphObservationValidity::CLEAR,
                         );
-                        let latched = observer.one_shot.latched;
-                        if latched != last_latched {
+                        if let Some((latched, first)) = observer.one_shot.window_start()
+                            && latched != last_latched
+                        {
                             last_latched = latched;
                             begun[super::word_generation(latched) as usize]
-                                .store(observer.one_shot.first_sample, Ordering::Release);
+                                .store(first, Ordering::Release);
                         }
                         observer.block_end();
                         first_sample += SPECTRUM_WINDOW_FRAMES as u64;
@@ -6134,6 +6260,97 @@ mod tests {
             });
         }
 
+        /// Issue #2290: a failed block racing a cancel and re-arm of a surviving held window.
+        ///
+        /// A window of generation 1 is held behind a stale record and has survived a block end.
+        /// Render fails a later block while control cancels it, arms generation 2 and reads. The
+        /// held window may survive the failure only while the word is still its latch: once the
+        /// failure sees generation 2 armed, it ends that arm as on an observer that never held a
+        /// window. No read returns a window, the word stays at generation 2, and a failure that
+        /// saw the arm leaves it ended, `Invalid` to the read or `INVALID` in the word.
+        #[test]
+        fn spectrum_dead_held_window_loom() {
+            loom::model(|| {
+                spawn_with_stack(dead_held_versus_rearm)
+                    .join()
+                    .expect("dead held window driver")
+            });
+        }
+
+        fn dead_held_versus_rearm() {
+            use crate::spectrum::{ARMED, IDLE, INVALID, OneShotWindow, state_word, word_phase};
+            let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+            capture.arm().expect("arm generation 1");
+            // A cancelled window's record (generation 0) that landed after its cancel drained the
+            // queue, as render would push it.
+            let stale = crate::spectrum::SpectrumCapturedRecord::EMPTY;
+            assert!(observer.producer.try_push(stale).is_ok());
+            let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
+            let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
+            observer.capture(
+                &left,
+                &right,
+                0,
+                crate::spectrum::GraphObservationValidity::CLEAR,
+            );
+            observer.block_end();
+            assert!(
+                matches!(
+                    observer.one_shot.window,
+                    OneShotWindow::Held(held) if held.survived_block_end
+                ),
+                "the window survived its block end behind the stale record"
+            );
+
+            let armed = loom::sync::Arc::new(loom::sync::atomic::AtomicBool::new(false));
+            let render = {
+                let armed = armed.clone();
+                spawn_with_stack(move || {
+                    let saw_arm = armed.load(Ordering::Acquire);
+                    graph::GraphRuntimeObserver::invalidate_after_failure(
+                        &mut observer,
+                        SPECTRUM_WINDOW_FRAMES as u64,
+                    );
+                    (observer, saw_arm)
+                })
+            };
+            capture.cancel();
+            capture.arm().expect("the re-arm is never Busy");
+            armed.store(true, Ordering::Release);
+            let read = capture.try_read().map(|window| window.first_sample);
+            assert!(
+                matches!(
+                    read,
+                    Err(SpectrumCaptureReadError::Pending | SpectrumCaptureReadError::Invalid)
+                ),
+                "the read after the re-arm was {read:?}"
+            );
+            let (_observer, saw_arm) = render.join().expect("render thread");
+            let word = capture.state.load(Ordering::Acquire);
+            assert_eq!(
+                word_generation(word),
+                2,
+                "only control moves the generation"
+            );
+            match read {
+                // The read found the arm ended and parked the word idle.
+                Err(SpectrumCaptureReadError::Invalid) => assert_eq!(word, state_word(2, IDLE)),
+                _ => assert!(
+                    matches!(word_phase(word), ARMED | INVALID),
+                    "the word after a pending read was {word:#x}"
+                ),
+            }
+            if saw_arm {
+                // The failure ran after the arm was visible, so it saw the word move off the
+                // held window's latch: the dead window must not shield generation 2.
+                assert!(
+                    read == Err(SpectrumCaptureReadError::Invalid)
+                        || word == state_word(2, INVALID),
+                    "a failure after the re-arm left generation 2 armed"
+                );
+            }
+        }
+
         fn restart_versus_failure() {
             let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
             let cadence = crate::spectrum::SpectrumCadence::new(48_000, 128).expect("cadence");
@@ -6227,10 +6444,11 @@ mod tests {
                             block * SPECTRUM_WINDOW_FRAMES as u64,
                             crate::spectrum::GraphObservationValidity::CLEAR,
                         );
-                        let latched = observer.one_shot.latched;
-                        if latched != last_latched {
+                        if let Some((latched, first)) = observer.one_shot.window_start()
+                            && latched != last_latched
+                        {
                             last_latched = latched;
-                            begun.push((word_generation(latched), observer.one_shot.first_sample));
+                            begun.push((word_generation(latched), first));
                         }
                         observer.block_end();
                     }
