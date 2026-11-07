@@ -1069,8 +1069,8 @@ struct Instance<L: Lane, const W: usize> {
     /// last disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894).
     /// While it is set the right side is frozen and stale, so
     /// [`lanes_at_rest`](Self::lanes_at_rest) reads the left side alone and a skipped block
-    /// advances the left silence counter alone: the effect contract's collapsed-bank rule. A reset
-    /// leaves it alone.
+    /// advances the left silence counter alone: the effect contract's collapsed-bank rule. Every
+    /// bank entry that writes channel state, a reset included, takes the copy first (#2352).
     collapse: MonoCollapse,
 }
 
@@ -2855,6 +2855,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     /// Issue #2131: [`Instance::reset_lane`], withdrawing the silent claim as
     /// [`reset`](PreparedNativeEffectBank::reset) withdraws it.
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         if lane >= W {
             return;
         }
@@ -2879,6 +2881,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         self.silent.withdraw();
         self.instance.reset(kind);
     }
@@ -2921,6 +2925,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     /// withdraws the silent fixed-point claim (the next quiet block that ends at rest re-earns
     /// it).
     fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         let accepted = self.instance.retarget_link(track, mode, samples);
         if accepted {
             self.silent.withdraw();
@@ -2960,6 +2966,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.instance);
         let track = checked_track(track_index, W, self.instance.active)?;
         // A restore can write any state word, so the claim goes whatever the result.
         self.silent.withdraw();

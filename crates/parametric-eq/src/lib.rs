@@ -3447,7 +3447,8 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894). While
     /// it is set the right channel is frozen and stale, so the rest mask reads the left channel
     /// alone and a skipped block advances the left silence counter alone: the effect contract's
-    /// collapsed-bank rule (`PreparedNativeEffectBank::lanes_at_rest`). A reset leaves it alone.
+    /// collapsed-bank rule (`PreparedNativeEffectBank::lanes_at_rest`). Every bank entry that
+    /// writes channel state, a reset included, takes the copy first (#2352).
     collapse: MonoCollapse,
     /// The two channels' rest planes ([`silence_block`], issue #1328 amendment A9): one threshold
     /// word per lane per frame of the prepared quantum, allocated once at preparation. Written from
@@ -4463,6 +4464,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
     // REALTIME_POLICY_BEGIN
     /// Issue #2131: see [`reset_lane_state`](PreparedParametricEq::reset_lane_state).
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(self);
         self.reset_lane_state(lane, kind);
     }
     // REALTIME_POLICY_END
@@ -4487,10 +4490,14 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         lane: usize,
         target: &PreparedEffectTarget,
     ) -> Result<(), EffectTargetError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(self);
         self.apply_target_lane(lane, target)
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(self);
         self.reset_state(kind);
     }
 
@@ -4572,6 +4579,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(self);
         // Issue #1089: a padded lane carries no track, and a restore is the one write that could
         // move its integrators off the `+0.0` rest the padding contract holds it at. A snapshot
         // only reads, so it stays open on every lane: a padded lane is refused here, at restore,
@@ -4621,6 +4630,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         from: &dyn PreparedNativeEffectBank,
         from_lane: usize,
     ) -> Option<bool> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(self);
         let from = from.as_any()?.downcast_ref::<Self>()?;
         if lane >= W || from_lane >= W || !self.active[lane] || from.sample_rate != self.sample_rate
         {
@@ -4655,6 +4666,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         peer: Option<&mut dyn PreparedNativeEffectBank>,
         peer_lane: usize,
     ) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(self);
         if lane >= W || peer_lane >= W || !self.active[lane] {
             return false;
         }
@@ -4678,6 +4691,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
                 else {
                     return false;
                 };
+                MonoCollapse::enter::<false>(peer);
                 if !peer.active[peer_lane] || peer.sample_rate != self.sample_rate {
                     return false;
                 }
@@ -4713,6 +4727,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(self);
         PreparedParametricEq::exchange_lane_defaults(self, lane, bytes)
     }
     // REALTIME_POLICY_END

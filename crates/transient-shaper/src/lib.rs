@@ -1091,9 +1091,6 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         frames: usize,
     ) -> [u32; 2] {
         debug_assert_eq!(W, L::WIDTH);
-        // A collapsed block freezes the right channel until the disengage copy; a dual
-        // block entered collapsed takes that copy first (#2352).
-        MonoCollapse::enter::<MONO>(self);
         let silent = if MONO {
             block_is_positive_zero(left)
                 && silent_allowed()
@@ -2044,6 +2041,8 @@ impl PreparedNativeEffect for PreparedTransientShaper {
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<L, W> {
     // REALTIME_POLICY_BEGIN
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         self.shaper.reset_lane(lane, kind);
     }
     // REALTIME_POLICY_END
@@ -2053,6 +2052,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         self.shaper.reset(kind);
     }
 
@@ -2100,6 +2101,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         let track = checked_track(track_index, W)?;
         self.shaper.restore(track, state_layout_version, input)
     }
@@ -2121,11 +2124,15 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         self.exchange_defaults(lane, bytes)
     }
 
     /// Issue #1370: [`Shaper::retarget_link`]; a padded lane takes no glide.
     fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
         self.shaper.retarget_link(track, mode, samples)
     }
 }
@@ -2147,6 +2154,10 @@ impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
         if block.width != self.width || block.frames > self.quantum || block.sidechain.is_some() {
             return report;
         }
+        // The collapse record moves before anything else the block does (#2352): a collapsed
+        // block engages it, and a dual block entered collapsed takes the disengage copy here,
+        // before this block's automation writes either channel.
+        MonoCollapse::enter::<MONO>(&mut self.shaper);
         for track in 0..W {
             // A padded lane carries no track, so no span is its to apply (issue #1092).
             if self.shaper.active & (1 << track) == 0 {

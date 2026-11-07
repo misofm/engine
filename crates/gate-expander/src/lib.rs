@@ -1000,9 +1000,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         reports: &mut [ProcessReport; MAX_WIDTH],
     ) {
         let width = L::WIDTH;
-        // A collapsed block freezes the right channel until the disengage copy; a dual
-        // block entered collapsed takes that copy first (#2352).
-        MonoCollapse::enter::<MONO>(self);
         let smoothed = (self.ramp_frames_left as usize).min(frames);
         if self.silent_block::<MONO>(left, right, sidechain) {
             // Every lane of both channels is at its exact rest and every input word is `+0.0`,
@@ -1590,7 +1587,6 @@ const STATE_LINK_WORD: usize = STATE_RATE_WORD + RATE_COUNT * 4;
 const RATE_MIN: f32 = 5.0e-6;
 const RATE_MAX: f32 = 0.203;
 
-/// One validated channel section, held on the stack until both channels have been accepted.
 impl<L: Lane, const CONNECTED: bool> CollapsibleChannels for PreparedGate<L, CONNECTED> {
     fn mono_collapse(&mut self) -> &mut MonoCollapse {
         &mut self.collapse
@@ -1603,6 +1599,7 @@ impl<L: Lane, const CONNECTED: bool> CollapsibleChannels for PreparedGate<L, CON
     }
 }
 
+/// One validated channel section, held on the stack until both channels have been accepted.
 struct LaneRestore {
     gain_db: f32,
     open: f32,
@@ -1706,6 +1703,8 @@ macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for PreparedGate<$lane, false> {
             fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 PreparedGate::reset_lane(self, lane, kind);
             }
             /// Every field is inline: this instance owns no heap (#1074).
@@ -1730,6 +1729,8 @@ macro_rules! bank_impl {
             }
 
             fn reset(&mut self, kind: ResetKind) {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 PreparedGate::reset(self, kind);
             }
 
@@ -1750,6 +1751,8 @@ macro_rules! bank_impl {
 
             /// Issue #1370: `PreparedGate::retarget_link`; a padded lane takes no glide.
             fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 PreparedGate::retarget_link(self, track, mode, samples)
             }
 
@@ -1788,6 +1791,8 @@ macro_rules! bank_impl {
                 state_layout_version: u32,
                 input: StatePayloadInput<'_>,
             ) -> Result<(), StatePayloadError> {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 let track = checked_track(track_index, <$lane>::WIDTH)?;
                 self.restore_lane(track, state_layout_version, &input)
             }
@@ -1819,6 +1824,8 @@ macro_rules! bank_impl {
             }
 
             fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 self.exchange_defaults(lane, bytes)
             }
         }
@@ -1845,6 +1852,10 @@ impl<L: Lane> PreparedGate<L, false> {
         if block.width != width || block.sidechain.is_some() {
             return report;
         }
+        // The collapse record moves before anything else the block does (#2352): a collapsed
+        // block engages it, and a dual block entered collapsed takes the disengage copy here,
+        // before this block's automation writes either channel.
+        MonoCollapse::enter::<MONO>(self);
         debug_assert_eq!(block.left.len(), block.frames as usize * L::WIDTH);
         let mut reports = [ProcessReport::default(); MAX_WIDTH];
         for (track, lane_report) in reports.iter_mut().enumerate().take(L::WIDTH) {

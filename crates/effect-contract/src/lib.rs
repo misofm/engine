@@ -2780,10 +2780,11 @@ pub trait PreparedNativeEffectBank: Send {
     ///   original operation order, because `link(p, p)` is not in general the same expression as
     ///   `link(p, q)` simplified;
     /// * the right-channel state is left exactly as it was. It is restored by
-    ///   [`desymmetrize_channels`](Self::desymmetrize_channels) before any dual block runs: the
-    ///   caller's copy, or, when a [`process_bank`](Self::process_bank) is entered collapsed, the
-    ///   dual body's own, taken first (#2352, `effect_runtime::collapse::MonoCollapse`), so a dual
-    ///   block never reads the frozen right channel;
+    ///   [`desymmetrize_channels`](Self::desymmetrize_channels) before any dual block runs or
+    ///   any other entry writes channel state: the caller's copy, or the bank's own, which a
+    ///   launch bank takes first in [`process_bank`](Self::process_bank) (before the block's
+    ///   automation) and in every per-lane or whole-bank writer when it is entered collapsed
+    ///   (#2352, `effect_runtime::collapse::MonoCollapse`);
     /// * every **report** this call produces is the report the dual run would have produced, not
     ///   the half of it this call happened to compute. Per-lane right-channel counters are
     ///   duplicated from the left, because the right plane the seam is about to write carries
@@ -2814,8 +2815,12 @@ pub trait PreparedNativeEffectBank: Send {
     /// unsound; the transition oracle in the gates is what proves it did not.
     ///
     /// Off the render thread's hot path but *on* the render thread, at a block boundary, before
-    /// the first dual block. It allocates nothing. A dual block entered collapsed takes this copy
-    /// itself (#2352), so a caller that skips it gets the dual run's render, never the frozen one.
+    /// the first dual block. It allocates nothing. A launch bank takes this copy itself when a
+    /// dual block or a writer of channel state (a reset, a lane reset, a prepared target, a link
+    /// retarget, a restore, a lane copy or swap, a defaults exchange) is entered collapsed
+    /// (#2352). A caller that skips the copy before such an entry therefore gets what the dual run
+    /// would have rendered; a `&self` read (a snapshot, a resident observation) cannot take it,
+    /// and still reads the frozen right channel, as the sections below say.
     ///
     /// # Snapshotting a collapsed bank
     ///

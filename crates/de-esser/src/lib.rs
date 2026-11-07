@@ -978,9 +978,6 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         frames: usize,
         reports: &mut [ProcessReport; MAX_WIDTH],
     ) {
-        // A collapsed block freezes the right channel until the disengage copy; a dual
-        // block entered collapsed takes that copy first (#2352).
-        MonoCollapse::enter::<MONO>(self);
         if self.silent_block::<MONO>(left, right, sidechain) {
             // Every lane rests and every input word is `+0.0`: the kernel would write the `+0.0`
             // the planes hold and move only the clocks, which advance here as it would.
@@ -1541,6 +1538,10 @@ impl<L: Lane> DeEsser<L, false> {
         if block.width != width || block.sidechain.is_some() {
             return report;
         }
+        // The collapse record moves before anything else the block does (#2352): a collapsed
+        // block engages it, and a dual block entered collapsed takes the disengage copy here,
+        // before this block's automation writes either channel.
+        MonoCollapse::enter::<MONO>(self);
         let mut reports = [ProcessReport::default(); MAX_WIDTH];
         for (track, lane_report) in reports.iter_mut().enumerate().take(L::WIDTH) {
             if !self.is_active(track) {
@@ -1610,6 +1611,8 @@ macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for DeEsser<$lane, false> {
             fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 DeEsser::reset_lane(self, lane, kind);
             }
             /// Every field is inline: this instance owns no heap (#1074).
@@ -1629,6 +1632,8 @@ macro_rules! bank_impl {
             }
 
             fn reset(&mut self, kind: ResetKind) {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 DeEsser::reset(self, kind);
             }
 
@@ -1646,6 +1651,8 @@ macro_rules! bank_impl {
 
             /// Issue #1969: `DeEsser::retarget_link`; a padded lane takes no glide.
             fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 DeEsser::retarget_link(self, track, mode, samples)
             }
 
@@ -1685,6 +1692,8 @@ macro_rules! bank_impl {
                 state_layout_version: u32,
                 input: StatePayloadInput<'_>,
             ) -> Result<(), StatePayloadError> {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 let track = checked_track(track_index, <$lane as Lane>::WIDTH)?;
                 self.restore_lane(track, state_layout_version, &input)
             }
@@ -1715,6 +1724,8 @@ macro_rules! bank_impl {
             }
 
             fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+                // A per-channel write lands on live state (#2352).
+                MonoCollapse::enter::<false>(self);
                 self.exchange_defaults(lane, bytes)
             }
         }

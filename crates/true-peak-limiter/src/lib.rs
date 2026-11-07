@@ -5966,6 +5966,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     // REALTIME_POLICY_BEGIN
     /// Issue #2131: see [`LimiterCore::reset_lane`].
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.core);
         self.core.reset_lane(lane, kind);
     }
     // REALTIME_POLICY_END
@@ -5979,6 +5981,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
 
     /// Issue #1370: [`LimiterCore::retarget_link`]; a padded lane takes no glide.
     fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.core);
         self.core.retarget_link(track, mode, samples)
     }
 
@@ -6017,6 +6021,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.core);
         self.core.reset(kind);
     }
 
@@ -6059,6 +6065,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.core);
         let track = self.checked_member(track_index)?;
         self.core.restore_track(track, state_layout_version, &input)
     }
@@ -6079,6 +6087,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.core);
         self.core.exchange_lane_defaults(lane, bytes)
     }
     // REALTIME_POLICY_END
@@ -6117,6 +6127,11 @@ impl<L: Lane> PreparedTruePeakLimiterBank<L> {
         // this block carries automation at all, valid or not; the next settled silent block earns
         // it back. This is the compressor's rule and it is the same hole at both effects.
         let mut report = BankProcessReport::empty(self.width);
+        // The collapse record moves before anything else the block does (#2352): a collapsed
+        // block engages it, and a dual block entered collapsed takes the disengage copy here,
+        // before this block's automation writes either channel. The core bodies enter too, for
+        // the tests that drive a core directly; from here theirs is a repeat.
+        MonoCollapse::enter::<MONO>(&mut self.core);
         // Issue #991: with no spans `apply_automation` reads and writes nothing, so the per-lane
         // walk runs only for a block that carries automation.
         if !block.automation.is_empty() {

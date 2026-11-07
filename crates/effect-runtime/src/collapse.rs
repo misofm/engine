@@ -12,15 +12,27 @@
 //! * [`MonoCollapse::disengage`], the disengage copy, copies the left channel's whole per-channel
 //!   state onto the right ([`CollapsibleChannels::copy_left_channel_onto_right`]) and then clears
 //!   it. No other write clears it, so the record is never cleared with the right channel stale;
-//! * [`MonoCollapse::enter`]`::<false>`, at the top of a dual body, takes that copy itself when the
-//!   record is engaged. A dual body entered collapsed therefore never reads the frozen right
-//!   channel: it reads the counterfactual dual run's state, which is what the copy writes.
+//! * [`MonoCollapse::enter`]`::<false>` takes that copy itself when the record is engaged. A bank
+//!   calls it at the top of every entry that reads or writes channel state as real state: its
+//!   dual body, before the block's automation reaches either channel, and every writer (a reset,
+//!   a lane reset, a prepared target, a link retarget, a restore, a lane copy or swap, a defaults
+//!   exchange). Such an entry therefore never reads the frozen right channel and never has a
+//!   write it made overwritten by a later copy: it starts from the counterfactual dual run's
+//!   state, which is what the copy writes.
 //!
-//! The chain (`rack::BankChain`) always takes the disengage copy before the first dual block, so
-//! from the chain the dual entry is one untaken branch. The bank's own public surface does not
-//! enforce that order, and before this type a caller that skipped the copy got a dual block
-//! rendered over the frozen right channel. `builtins::InputStage` follows the same rule with its
-//! own flag (issue #2274).
+//! A whole-bank reset takes the copy too rather than clearing the record: a reset that keeps
+//! parameters keeps each channel's ramps and targets, and the right channel's are the frozen ones.
+//!
+//! The chain (`rack::BankChain`) always takes the disengage copy before the first dual block and
+//! before a carry or a lane swap, so from the chain the dual entry is one untaken branch; a writer
+//! the chain calls on a collapsed bank (a lane reset, a target, a link retarget, all before the
+//! block's mode is decided) takes the copy, which the next collapsed block's frozen right channel
+//! never reads. The bank's own public surface does not enforce the order, and before this type a
+//! caller that skipped the copy got a dual block rendered over the frozen right channel.
+//!
+//! `builtins::InputStage` keeps its own flag under the same rule (issue #2274): its dual body and
+//! its lane import take the copy, and a reset, which rewrites both channels from one state, clears
+//! the flag.
 
 /// Whether a collapsed block has rendered since the last disengage copy. See the
 /// [module documentation](self).

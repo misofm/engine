@@ -1327,9 +1327,6 @@ impl<L: Lane> SoftClip<L> {
         let allowed = !silent_forbidden();
         #[cfg(not(test))]
         let allowed = true;
-        // A collapsed block freezes the right channel until the disengage copy; a dual
-        // block entered collapsed takes that copy first (#2352).
-        MonoCollapse::enter::<MONO>(self);
         let silent = if MONO {
             block_is_positive_zero(left) && self.left.rest_lanes() == all_lanes::<L>()
         } else {
@@ -1834,6 +1831,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
 
     // REALTIME_POLICY_BEGIN
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.inner);
         self.inner.reset_lane(lane, kind);
     }
     // REALTIME_POLICY_END
@@ -1842,6 +1841,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.inner);
         self.inner.reset(kind);
     }
 
@@ -1892,6 +1893,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.inner);
         let lane = bank_track_index::<L>(track_index)?;
         restore_sections(
             &mut self.inner.left,
@@ -1923,6 +1926,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.inner);
         self.exchange_defaults(lane, bytes)
     }
 }
@@ -1946,6 +1951,10 @@ impl<L: Lane> PreparedSoftClipBank<L> {
         {
             return report;
         }
+        // The collapse record moves before anything else the block does (#2352): a collapsed
+        // block engages it, and a dual block entered collapsed takes the disengage copy here,
+        // before this block's automation writes either channel.
+        MonoCollapse::enter::<MONO>(&mut self.inner);
         for lane in 0..L::WIDTH {
             // A padded lane carries no track, so no span is its to apply (issue #1092).
             if self.inner.active & (1 << lane) == 0 {
