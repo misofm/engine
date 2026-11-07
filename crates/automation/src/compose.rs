@@ -41,6 +41,13 @@
 //! cap on `K`), on the control thread; [`Composed::bytes`] gives its bytes first. Everything else
 //! is render-reachable and allocates, locks and blocks on nothing. A block's walk is bounded: each
 //! step consumes at least one cursor event, so it takes at most [`Composed::max_events`] steps.
+//!
+//! # Blocks
+//!
+//! A block is walked through a [`BlockWalk`], which [`Composed::start`] returns and which holds the
+//! output's only borrow until it ends, so every call that changes the output's or a cursor's state
+//! between blocks (a retarget, a deferral, a seed, a carry) cannot be made inside one (#2258
+//! PR-11).
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -116,7 +123,7 @@ pub struct ComposeCursor {
     /// the cell's ramp completion without changing either origin; held events move only heard.
     heard_at: Option<i64>,
     target_at: Option<i64>,
-    // The walk's scratch, meaningful only inside [`Composed::walk`].
+    // The walk's scratch, meaningful only while a [`BlockWalk`] walks a block.
     /// The state before the pull that produced `next`, and the offset that pull started at.
     before: CellState,
     resume: u32,
@@ -258,8 +265,6 @@ pub struct Composed<T> {
     state: CellState,
     target: Option<T>,
     completion: Completion,
-    /// The block begun by [`Self::start`] and its seek mode, until its events end.
-    block: Option<(NodeSpan, SeekMode)>,
     /// [`Self::with_held_grid`]: every output retarget holds each value cursor's grid inside the
     /// retarget's ramp, as one cell holds its grid inside its own ramp (#1655 V2, R19-2).
     held_grid: bool,
@@ -333,7 +338,6 @@ impl<T: Composable> Composed<T> {
             state: CellState::new(),
             target: None,
             completion,
-            block: None,
             held_grid: false,
             jump_release: false,
         })
@@ -502,7 +506,7 @@ impl<T: Composable> Composed<T> {
     /// gate change of the cell): the output takes `target`, and every value cursor defers its jump
     /// to the ramp's first free sample (R19-3), so its grid is held until then and it lands over
     /// its own jump length if its curve moved. With `n = 0` nothing is in flight and nothing is
-    /// deferred. Call it between blocks.
+    /// deferred. A between-block call: no [`BlockWalk`] of this output can be live.
     pub fn retarget(&mut self, target: T, start: i64, n: u32) {
         self.target = Some(target);
         self.state.commit_ramp(self.completion, start, n);
@@ -517,7 +521,7 @@ impl<T: Composable> Composed<T> {
 
     /// Defers every value cursor's jump to node time `at` ([`CellState::defer_jump`]): the
     /// output's ramp in flight was adopted at a plan swap and its curves moved (#1711 D1, R19-5).
-    /// Call it between blocks.
+    /// A between-block call: no [`BlockWalk`] of this output can be live.
     pub fn defer_jump(&mut self, at: i64) {
         for cursor in self.cursors.iter_mut() {
             if cursor.kind == CursorKind::Value {
@@ -527,7 +531,8 @@ impl<T: Composable> Composed<T> {
     }
 
     /// Drops every value cursor's pending deferral ([`CellState::clear_deferred_jump`]): the ramp
-    /// it waits for was replaced or ended early.
+    /// it waits for was replaced or ended early. A between-block call: no [`BlockWalk`] of this
+    /// output can be live.
     pub fn clear_deferred_jump(&mut self) {
         for cursor in self.cursors.iter_mut() {
             if cursor.kind == CursorKind::Value {
@@ -547,7 +552,6 @@ impl<T: Composable> Composed<T> {
         self.state = other.state;
         self.target = other.target;
         self.completion = other.completion;
-        self.block = other.block;
         self.held_grid = other.held_grid;
         self.jump_release = other.jump_release;
         true
@@ -568,7 +572,7 @@ impl<T: Composable> Composed<T> {
     /// The events of the block `span` in increasing offset, at most one per offset, each passed
     /// to `emit`; `compose` turns the heard values into the output's target. Every cursor's state
     /// advances through the block. A cursor whose cell the program does not hold gives no event.
-    /// [`Self::start`] then [`Self::next_event`] until `None`.
+    /// [`Self::start`] then [`BlockWalk::next_event`] until `None`.
     pub fn walk(
         &mut self,
         program: &Program,
@@ -577,37 +581,199 @@ impl<T: Composable> Composed<T> {
         mut compose: impl FnMut(Heard<'_>) -> T,
         mut emit: impl FnMut(ComposedEvent<T>),
     ) {
-        self.start(program, span, mode);
-        while let Some(event) = self.next_event(program, &mut compose) {
+        let mut block = self.start(program, span, mode);
+        while let Some(event) = block.next_event(&mut compose) {
             emit(event);
         }
     }
 
-    /// Begins the block `span`: each cursor pulls its first event. The block's events then come
-    /// out of [`Self::next_event`], one at a time, so a caller can merge several outputs' events
-    /// in offset order (a route's two columns).
-    pub fn start(&mut self, program: &Program, span: NodeSpan, mode: SeekMode) {
+    /// Begins the block `span` of `program`: each cursor pulls its first event. The block's events
+    /// then come out of the returned [`BlockWalk`], one at a time, so a caller can merge several
+    /// outputs' events in offset order (a route's two columns, a fader channel's pieces). The walk
+    /// borrows the output, so no between-block call (a retarget, a deferral, a seed, a carry or a
+    /// cursor's state) can be made while the block is walked (#2258 PR-11).
+    pub fn start<'a>(
+        &'a mut self,
+        program: &'a Program,
+        span: NodeSpan,
+        mode: SeekMode,
+    ) -> BlockWalk<'a, T> {
         let frames = span.frames();
-        self.block = Some((span, mode));
         for cursor in self.cursors.iter_mut() {
             cursor.next = None;
             cursor.consumed = false;
             cursor.shown = cursor.heard;
             pull(cursor, program, &span, mode, 0, frames);
         }
+        BlockWalk {
+            output: self,
+            program,
+            span,
+            mode,
+            ended: false,
+        }
     }
 
-    /// The block's next event, or `None` at its end (or with no block begun): every offset with
-    /// cursor events is merged and decided in order until one gives the output an event. Bounded:
-    /// each merged offset consumes at least one cursor event.
+    /// The output's decision at `offset` (node time `time`) over the events `merged` there;
+    /// `landing` when they are the block's seek landings.
+    fn decide(
+        &mut self,
+        landing: bool,
+        offset: u32,
+        time: i64,
+        merged: Merged,
+        compose: &mut impl FnMut(Heard<'_>) -> T,
+    ) -> Option<ComposedEvent<T>> {
+        let event = |value, ramp, kind, held| ComposedEvent {
+            offset,
+            value,
+            ramp,
+            kind,
+            held,
+        };
+        if landing {
+            // A seek landing: every cursor landed here, and a landing always emits.
+            let value = compose(self.heard(Source::Heard));
+            self.state.clear_for_landing();
+            let kind = if merged.set {
+                EventKind::Set
+            } else {
+                EventKind::Jump
+            };
+            let ramp = if merged.set { 0 } else { merged.ramp };
+            self.commit(value, time, ramp);
+            return Some(event(value, ramp, kind, false));
+        }
+        if merged.jump || merged.grid {
+            let value = compose(self.heard(Source::Heard));
+            let same = self.target.is_some_and(|target| target.same_bits(&value));
+            let lagging = merged.jump && self.state.lagging(self.completion, time, merged.ramp);
+            if self.state.unchanged_with(same) && !lagging {
+                return None;
+            }
+            self.commit(value, time, merged.ramp);
+            let kind = if merged.jump {
+                EventKind::Jump
+            } else {
+                EventKind::Grid
+            };
+            return Some(event(value, merged.ramp, kind, false));
+        }
+        if merged.held {
+            let value = compose(self.heard(Source::Shown));
+            let differs = !self.target.is_some_and(|target| target.same_bits(&value));
+            if self.state.hold_event(differs) {
+                return Some(event(value, merged.held_ramp, EventKind::Grid, true));
+            }
+        }
+        None
+    }
+
+    fn commit(&mut self, value: T, time: i64, ramp: u32) {
+        self.target = Some(value);
+        self.state.commit_ramp(self.completion, time, ramp);
+    }
+}
+
+/// One block of a [`Composed`] output being walked (#2258 PR-11): [`Composed::start`] begins it,
+/// [`Self::next_event`] gives its events and [`Self::finish`] ends it. The walk's scratch (each
+/// cursor's pulled event and the state its pull started from) is meaningful only while a block is
+/// walked, so the walk holds the output's only borrow: the between-block calls
+/// ([`Composed::retarget`], [`Composed::defer_jump`], [`Composed::clear_deferred_jump`], a seed,
+/// a carry or a cursor's state) cannot be made until it ends. A walk dropped before its end
+/// leaves each cursor where its last pull stopped; the next [`Composed::start`] clears the
+/// scratch.
+///
+/// The between-block call after the block's end compiles:
+///
+/// ```
+/// use automation::compose::{Composed, CursorKind};
+/// use automation::{
+///     CellDescription, Completion, JumpLength, NodeSpan, ProgramBuilder, SeekMode, Segment, Shape,
+/// };
+///
+/// let segments = [Segment {
+///     start: 0,
+///     end: 512,
+///     start_value: 0.0,
+///     end_value: 8.0,
+///     shape: Shape::Linear,
+/// }];
+/// let cell = CellDescription {
+///     segments: &segments,
+///     grid_ramp: 64,
+///     grid: 64,
+///     jump: JumpLength::Block,
+///     completion: Completion::End,
+///     no_restart: false,
+/// };
+/// let program = ProgramBuilder::build(&[cell]).expect("a program");
+/// let mut output = Composed::<f32>::new(&program, &[(0, CursorKind::Value)], Completion::End)
+///     .expect("an output");
+/// let span = NodeSpan::new(64, None, 256).expect("a span");
+/// let mut block = output.start(&program, span, SeekMode::Exact);
+/// while block.next_event(|heard| heard.value(0)).is_some() {}
+/// output.retarget(5.0, 320, 200);
+/// ```
+///
+/// The same call inside the block does not compile (E0499: the walk still borrows the output).
+/// This twin differs from the one above only in where the retarget stands:
+///
+/// ```compile_fail,E0499
+/// use automation::compose::{Composed, CursorKind};
+/// use automation::{
+///     CellDescription, Completion, JumpLength, NodeSpan, ProgramBuilder, SeekMode, Segment, Shape,
+/// };
+///
+/// let segments = [Segment {
+///     start: 0,
+///     end: 512,
+///     start_value: 0.0,
+///     end_value: 8.0,
+///     shape: Shape::Linear,
+/// }];
+/// let cell = CellDescription {
+///     segments: &segments,
+///     grid_ramp: 64,
+///     grid: 64,
+///     jump: JumpLength::Block,
+///     completion: Completion::End,
+///     no_restart: false,
+/// };
+/// let program = ProgramBuilder::build(&[cell]).expect("a program");
+/// let mut output = Composed::<f32>::new(&program, &[(0, CursorKind::Value)], Completion::End)
+///     .expect("an output");
+/// let span = NodeSpan::new(64, None, 256).expect("a span");
+/// let mut block = output.start(&program, span, SeekMode::Exact);
+/// output.retarget(5.0, 320, 200);
+/// while block.next_event(|heard| heard.value(0)).is_some() {}
+/// ```
+#[derive(Debug)]
+#[must_use = "a block's events come out of `next_event`"]
+pub struct BlockWalk<'a, T> {
+    output: &'a mut Composed<T>,
+    program: &'a Program,
+    span: NodeSpan,
+    mode: SeekMode,
+    /// The block's events have ended.
+    ended: bool,
+}
+
+impl<'a, T: Composable> BlockWalk<'a, T> {
+    /// The block's next event, or `None` at its end: every offset with cursor events is merged
+    /// and decided in order until one gives the output an event. Bounded: each merged offset
+    /// consumes at least one cursor event.
     pub fn next_event(
         &mut self,
-        program: &Program,
         mut compose: impl FnMut(Heard<'_>) -> T,
     ) -> Option<ComposedEvent<T>> {
-        let (span, mode) = self.block?;
+        if self.ended {
+            return None;
+        }
+        let (program, span, mode) = (self.program, self.span, self.mode);
+        let output = &mut *self.output;
         let frames = span.frames();
-        while let Some(offset) = self
+        while let Some(offset) = output
             .cursors
             .iter()
             .filter_map(|cursor| cursor.next.map(|event| event.offset))
@@ -616,32 +782,32 @@ impl<T: Composable> Composed<T> {
             let Some(time) = span.time_at(offset) else {
                 break;
             };
-            let merged = merge(&mut self.cursors, program, offset, time);
+            let merged = merge(&mut output.cursors, program, offset, time);
             let landing = span.step_offset() == Some(offset) && (merged.set || merged.jump);
-            let event = self.decide(landing, offset, time, merged, &mut compose);
+            let event = output.decide(landing, offset, time, merged, &mut compose);
             // R19-3: a gate's jump that retargets the output is a column jump; a seek landing is
             // not (every cursor landed itself).
             let column_jump =
                 merged.gate_jump && !landing && event.is_some_and(|event| !event.held);
             let retargeted = !landing && event.is_some_and(|event| !event.held);
             let free = if retargeted {
-                self.state.free_after(self.completion)
+                output.state.free_after(output.completion)
             } else {
                 None
             };
             // `with_held_grid`: the completion of the ramp this offset retargets the output over
             // (a landing too), which every value cursor holds its grid inside.
             let hold = event
-                .filter(|event| self.held_grid && !event.held && event.ramp > 0)
-                .map(|event| crate::completion_of(self.completion, time, event.ramp));
+                .filter(|event| output.held_grid && !event.held && event.ramp > 0)
+                .map(|event| crate::completion_of(output.completion, time, event.ramp));
             // `with_jump_release`: the completion of the jump this offset emits, which replaces
             // the lane's ramp on every value cursor.
             let release = event
                 .filter(|event| {
-                    self.jump_release && !landing && !event.held && event.kind == EventKind::Jump
+                    output.jump_release && !landing && !event.held && event.kind == EventKind::Jump
                 })
-                .map(|event| crate::completion_of(self.completion, time, event.ramp));
-            let completion = self.completion;
+                .map(|event| crate::completion_of(output.completion, time, event.ramp));
+            let completion = output.completion;
             let short = |state: &CellState, hold: i64| {
                 state.free_after(completion).is_none_or(|free| free <= hold)
             };
@@ -653,7 +819,7 @@ impl<T: Composable> Composed<T> {
                     || released.free_after(completion) != state.free_after(completion)
             };
             let next = offset.saturating_add(1);
-            for cursor in self.cursors.iter_mut() {
+            for cursor in output.cursors.iter_mut() {
                 cursor.shown = cursor.heard;
                 let value = cursor.kind == CursorKind::Value;
                 // A value cursor deferred to the end of a column ramp that this retarget replaced
@@ -729,68 +895,16 @@ impl<T: Composable> Composed<T> {
                 return event;
             }
         }
-        self.block = None;
+        self.ended = true;
         None
     }
 
-    /// The output's decision at `offset` (node time `time`) over the events `merged` there;
-    /// `landing` when they are the block's seek landings.
-    fn decide(
-        &mut self,
-        landing: bool,
-        offset: u32,
-        time: i64,
-        merged: Merged,
-        compose: &mut impl FnMut(Heard<'_>) -> T,
-    ) -> Option<ComposedEvent<T>> {
-        let event = |value, ramp, kind, held| ComposedEvent {
-            offset,
-            value,
-            ramp,
-            kind,
-            held,
-        };
-        if landing {
-            // A seek landing: every cursor landed here, and a landing always emits.
-            let value = compose(self.heard(Source::Heard));
-            self.state.clear_for_landing();
-            let kind = if merged.set {
-                EventKind::Set
-            } else {
-                EventKind::Jump
-            };
-            let ramp = if merged.set { 0 } else { merged.ramp };
-            self.commit(value, time, ramp);
-            return Some(event(value, ramp, kind, false));
-        }
-        if merged.jump || merged.grid {
-            let value = compose(self.heard(Source::Heard));
-            let same = self.target.is_some_and(|target| target.same_bits(&value));
-            let lagging = merged.jump && self.state.lagging(self.completion, time, merged.ramp);
-            if self.state.unchanged_with(same) && !lagging {
-                return None;
-            }
-            self.commit(value, time, merged.ramp);
-            let kind = if merged.jump {
-                EventKind::Jump
-            } else {
-                EventKind::Grid
-            };
-            return Some(event(value, merged.ramp, kind, false));
-        }
-        if merged.held {
-            let value = compose(self.heard(Source::Shown));
-            let differs = !self.target.is_some_and(|target| target.same_bits(&value));
-            if self.state.hold_event(differs) {
-                return Some(event(value, merged.held_ramp, EventKind::Grid, true));
-            }
-        }
-        None
-    }
-
-    fn commit(&mut self, value: T, time: i64, ramp: u32) {
-        self.target = Some(value);
-        self.state.commit_ramp(self.completion, time, ramp);
+    /// Ends the block: walks its remaining events, if any, and drops them (every cursor's state
+    /// advances through the block, as the caller's own drain would), and gives the output back
+    /// for the between-block calls. A walk already at its end walks nothing.
+    pub fn finish(mut self, mut compose: impl FnMut(Heard<'_>) -> T) -> &'a mut Composed<T> {
+        while self.next_event(&mut compose).is_some() {}
+        self.output
     }
 }
 

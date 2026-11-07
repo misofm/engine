@@ -49,7 +49,7 @@ mod program;
 pub mod corpus;
 
 pub use compose::{
-    Composable, ComposeCursor, ComposeError, Composed, ComposedEvent, CursorKind, Heard,
+    BlockWalk, Composable, ComposeCursor, ComposeError, Composed, ComposedEvent, CursorKind, Heard,
 };
 pub use evaluate::value_at;
 pub use events::{
