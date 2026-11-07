@@ -430,7 +430,7 @@ One row per mutated line follows, with the rows that went red. A row is named by
 | 1573 | `state: control.state !== STATE_READY ? control.state : render.st` | !==->=== | L6540 «A status read is answered once: by the worklet's rep…» |
 | 1574 | `lastResult: render.lastResult \|\| control.lastResult,` | \|\|->&& | L6540 «A status read is answered once: by the worklet's rep…» |
 
-**Green, equivalent (29).**
+**Green, equivalent (29 at attempt 2; two of the claims below were wrong, see the PASS verdict's minors).**
 - **Constructor initialisers with the same effect undeleted** (184 `handle`, 185 `serviceTick`, 196 `bootToken`, 197 `lastRenderCheck`, 191 `postedMemoryBytes`, 204 `lastSessionSeekGeneration`).
   - `handle`, `serviceTick`, `bootToken`, `lastRenderCheck` and `postedMemoryBytes` are each read only after `boot()` assigned them. `bootToken` is read only in `disposing`; `lastRenderCheck` only on a live tick; `serviceTick` only after the boot started the tick; `postedMemoryBytes` is set at line 346, before any meter view.
   - Before the boot nothing calls `sticky`, which reads `handle`: an unreadable message then goes to `failBoot`.
@@ -445,9 +445,9 @@ One row per mutated line follows, with the rows that went red. A row is named by
 - **`handle = 0` deleted in `disposeAfterFailedBoot` and `finishDispose` (512, 1491).** With no host, nothing reads `handle` but `sticky`'s `session_fail`. That `sticky` is reachable only through `onMessageError`, which now drops a message with no host.
 - **`stopServiceTick`'s null return forced false (556).** The mutant calls `clearInterval(null)`, a no-op in HTML.
 - **`sticky` calls `session_fail` every time (586, two mutants).** The engine refuses a second fail and a freed handle, and changes nothing (`ffi.rs:1241-1243`).
-- **`receive`'s `miso.service.v1` return (600, three mutants).** In `worker` mode the page sends no service message: it starts its tick only when there is no Worker (`audio-worklet-host.js:580`). This is the one rule attempt 1 got right; its line-232 claim, about the request ID that `afterControl` carries, was wrong, and the request-ID row now pins it.
+- **`receive`'s `miso.service.v1` return (600, three mutants).** In `worker` mode the page sends no service message: it starts its tick only when there is no Worker (`audio-worklet-host.js:580`). The claim was incomplete: it also needed the fact that the page never posts a message without a `requestId`. The fold deletes the branch instead (below).
 - **`refuseDisposing`'s `seek || seek-at` as `seek && seek-at` (661).** A seek or seek-at then falls through to the last branch, which posts the identical ack.
-- **`pushWatermark`'s `return` after a refused read's sticky error deleted (868).** A refused read writes no record (`lib.rs:2036-2045`), and every read that did write either posted its revision and sample or found them equal to the stored ones. So the dedupe then returns.
+- **`pushWatermark`'s `return` after a refused read's sticky error deleted (868).** This claim was false. It holds only when an earlier read wrote the record. When the boot's baseline read was refused too, the record was never written, and the mutant posts a second error or a watermark after the failure. The fold adds a row for that case (below).
 - **The reserved word read big-endian (871, the second `true`).** The word must be zero, and zero reads as zero in either byte order.
 - **A detached feed's `delivered = []` deleted (954).** The feed is dropped from `feeds` and its port's handler is cleared, so nothing reads that list again.
 - **`detach-source`'s `<` as `<=` (961), and its `shared != null` forced true (963).** An index the mutants admit names no element, so `shared` is undefined and nothing is withdrawn or replaced. The reply's `detached` is computed apart, from the same `shared`.
@@ -464,3 +464,13 @@ One row per mutated line follows, with the rows that went red. A row is named by
 - `bash scripts/check-sdk-headless.sh` with no argument, exit 0: 716 tests, 716 passed. It self-builds the artifact from this merged tree, so its real-Wasm `worker`-mode evals ran the attempt-2 Worker.
 
 **Not run here:** the Playwright two-browser legs.
+
+**Verdict on attempt 2 (Sol): PASS, with three MINORs.** The reviewer's checks all went red where they should: an 827-mutant pass, the attempt-1 probes and the hand mutants. The merged tree is green (716/716 headless). The minors are folded in `b9eaad712`, after `origin/main` (`fd33447dc`) was merged in with a normal merge commit:
+1. **The line-868 equivalence was false.** A new row: the boot's baseline watermark read answers 6, then a live read is refused 3. Exactly one `miso.error.v1` is posted, and no watermark. Deleting that `return` is red: "one sticky error and no watermark".
+2. **The dispose-window row's `onmessageerror` assertion checked nothing.** The worklet fault had already posted the same `{error 1 255}`. The row now checks that the unreadable message posts its own error. Mutating `onMessageError`'s `holdsHost()` to `controlLive()` is red: "an unreadable page message in the dispose window posts its sticky error".
+3. **The worker-mode `miso.service.v1` branch is deleted.** It was the dead remains of the `single`-mode service step. Both the `receive` return and the service case of `onPageMessage`'s request-ID ternary are gone, so a service message in `worker` mode is a protocol violation: it is refused like any message with no request ID, as request 0. A new row covers it, and restoring the branch is red. Line 600's three equivalent mutants no longer exist.
+
+**Gates run (fold):**
+- `bash scripts/test-web-audioworklet.sh`, exit 0;
+- `bash scripts/check-workspace-policy.sh`, `workspace policy: ok`;
+- `bash scripts/check-sdk-headless.sh` with no argument, exit 0: 716 tests, 716 passed, self-built from this tree.
