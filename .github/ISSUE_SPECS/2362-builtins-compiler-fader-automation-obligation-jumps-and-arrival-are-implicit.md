@@ -86,4 +86,58 @@ All in `crates/builtins-compiler/src/lib.rs` unless named.
   `scripts/check-workspace-policy.sh`; `realtime_policy`.
 
 ## Evidence (attempt 1)
-(filled in by the attempt)
+Terra, base `5c71b3e8d`, implementation `9e54f821a`.
+
+**No red-on-base test.** None of the three encodings has an observable defect on base (see
+Verified), so no structural test was added. The existing suites cover the change: each mutation
+below was applied alone to the new code, and the named tests (host-core `stored_*_automation`,
+`successor_swap`, builtins-compiler lib) turned red.
+
+| Mutation | Red |
+|---|---|
+| m1: R17-10 release never fires (`entry == HeldThrough` → `false`) | `a_live_write_that_frees_a_held_lane_releases_its_hold`, `a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold`, `a_hand_mute_inside_a_pending_deferral_lands_the_lane_on_the_new_table_at_the_unmute` |
+| m2: `jumped_at_entry` does nothing | `an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp` |
+| m3: `jumped_at_entry` also clears `EndsAtBlockEnd` | **survives** (see below) |
+| m4: `rehold` never yields `EndsAtBlockEnd` | `a_hold_that_starts_and_ends_inside_a_block_moves_at_its_end` |
+| m5: `block` never yields `EndsAtBlockEnd` | 7 tests, for example `a_remembered_jump_or_seek_set_moves_the_lane_at_the_unmute_ramps_end` and `the_move_at_the_unmute_ramps_end_replaces_the_cells_event_there` |
+| m6: the due move ignores `owed` | **survives**. Base logic, not this change: a cut at 0 with nothing owed moves nothing, so the mutation looks equivalent |
+| m7: bank lanes built at `a(n) = 0` | `each_automated_fader_lane_takes_its_arrival_and_node_time_per_block`, `a_fader_step_meets_its_source_frame_through_a_latent_insert`, `a_vca_ride_reaches_each_member_in_its_own_node_time` and 5 more |
+| m8: oracle lanes built at `a(n) = 0` | `the_scalar_oracle_renders_the_banks_fader_events`, `a_session_seek_sets_a_latent_fader_lane_exactly_where_it_reaches_the_node` and 4 more |
+| m9: fader and mute row lengths swapped in the driver | 19 tests across the fader, mute and VCA suites |
+
+m3 is the one reachable state the old bools spelled twice (`due_at_entry && !held_through`). It
+needs an owed move that is due at a block's entry plus an offsets jump applied at that same entry.
+No existing test builds that case. This change keeps base behaviour there, so nothing moves. The
+question of whether base's "the due move still lands over the jump" is the right rule is a
+follow-up, not part of this item.
+
+**No bit moved.** This was a one-time comparison, not a committed test. A temporary patch to
+`engine::PreparedRenderPlan::render` (scratchpad `gr9/dump.patch`, never committed) appended the
+FNV-1a hash of every rendered output block to a per-test file. It ran over host-core
+`stored_fader_automation`, `stored_mute_automation`, `stored_vca_automation`, `successor_swap`
+and `session_seek` (with `test-support`), once on base and once on the branch:
+
+- 118 dump files and about 61.9k block hashes. Every file is identical except one.
+- The exception is `session_seek`'s single concurrent test, whose block count depends on timing
+  (21,291, 21,294 and 21,296 blocks on three runs). Its common prefix is identical.
+- Pass/fail verdicts were identical on both sides. The dump allocates, so the
+  allocation-counting tests fail on both sides, at the same assertions.
+
+**Plan bytes.** Rendered output does not change, but the resource estimate does:
+`size_of::<LaneFaderAutomation>()` goes from 416 to 408 bytes and `HeldRampObligation` from 3 to
+2 bytes. `fader_automation_sizes().lane_slot_bytes` and the unbanked-owner charge both read
+`size_of`, so a plan with stored fader automation reports 8 fewer bytes for each automation lane
+slot. No committed fixture pins those bytes, and the graph fixtures are not touched.
+
+**Gates (this worktree, own target dir):**
+- `cargo test --locked` passes for the four crates:
+  - `-p builtins-compiler --all-targets` with `builtins-compiler,graph,engine,session/test-support,engine/realtime-audit`
+  - `-p graph -p graph-compiler --all-targets` with the same features
+  - `-p host-core --all-targets` with `host-core/test-support` added (471 tests)
+- `cargo clippy --locked -p builtins-compiler -p graph -p graph-compiler -p host-core --all-targets --all-features -- -D warnings`: clean.
+- `cargo fmt --all --check`: clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p builtins-compiler -p graph -p graph-compiler`: clean. A per-package host-core doc fails on an existing link in
+  `host-core/src/prepare.rs` 262 (`crate::warm::production_config`). That file is untouched, and
+  the failure is not caused by this change.
+- `scripts/check-workspace-policy.sh`: ok.
+- `realtime_policy`: ok (298 marked regions in 48 files).
