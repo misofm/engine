@@ -4285,15 +4285,17 @@ async function testProcessor() {
         },
         {
           export: "service",
+          // A request answered first: the tick's error is still request 0's, not the last one's.
+          before: { tag: "miso.telemetry.v1", requestId: 1, enabled: true },
           message: { tag: "miso.service.v1" },
           answer: { tag: "miso.error.v1", requestId: 0, result: 255 },
         },
       ];
       for (const row of rows) {
         const { processor, fake } = makeProcessor();
+        if (row.before !== undefined) processor.port.onmessage({ data: row.before });
         let trapped = false;
-        const name = `miso_engine_web_v1_${row.export}`;
-        fake.exports[name] = () => {
+        fake.exports[`miso_engine_web_v1_${row.export}`] = () => {
           trapped = true;
           throw new Error(`synthetic wasm trap from the ${row.export} export`);
         };
@@ -4702,28 +4704,38 @@ async function testProcessor() {
       strict.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
       assert.equal(strict.port.posts.at(-1).message.tag, "miso.error.v1");
     }
-    // Issue #2291, the `worker`-mode row: its page-port handler is its own entry. A trap in the
-    // meter lease export is answered 255 to its request and recorded, so render is not called on
-    // the trapped half and its release answers no token without calling `host_release`. Red if the
-    // throw escapes `receiveWorkerMode`.
-    {
+    // Issue #2291, the `worker`-mode rows: its two ports are handler entries of their own. A trap
+    // in the meter lease export (the page's port) is answered 255 to its request; one in
+    // `meter_header_ptr` under the Worker's meter view (the Worker's port) is posted to the page as
+    // request 0, as a render failure is. Either is recorded, so render is not called on the
+    // trapped half and its release answers no token without calling `host_release`. Red if the
+    // throw escapes `receiveWorkerMode` or the control port's handler.
+    for (const port of ["page", "worker"]) {
       const fake = createFakeExports(64);
       const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
-      fake.exports.miso_engine_web_v1_meter_lease = () => {
-        throw new Error("synthetic wasm trap from the meter lease export");
+      const name = port === "page" ? "meter_lease" : "meter_header_ptr";
+      fake.exports[`miso_engine_web_v1_${name}`] = () => {
+        throw new Error(`synthetic wasm trap from the ${name} export`);
       };
-      assert.doesNotThrow(() => processor.port.onmessage({
-        data: { tag: "miso.meters.v1", requestId: 1, enabled: true },
-      }), "a worker-mode trap stays inside the handler");
+      const send = port === "page"
+        ? () => processor.port.onmessage({
+          data: { tag: "miso.meters.v1", requestId: 1, enabled: true },
+        })
+        : () => fromWorker({
+          tag: "miso.meter-view.v1", header: fake.successorHeader.byteOffset,
+          memoryBytes: fake.memory.buffer.byteLength,
+        });
+      assert.doesNotThrow(send, `a ${port}-port trap stays inside the handler`);
       assert.deepEqual(processor.port.posts.at(-1).message,
-        { tag: "miso.error.v1", requestId: 1, result: 255 }, "a worker-mode trap: the typed answer");
+        { tag: "miso.error.v1", requestId: port === "page" ? 1 : 0, result: 255 },
+        `a ${port}-port trap: the typed answer`);
       const rendered = fake.calls.render.length;
       processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
-      assert.equal(fake.calls.render.length, rendered, "a worker-mode trap: no render after it");
+      assert.equal(fake.calls.render.length, rendered, `a ${port}-port trap: no render after it`);
       fromWorker({ tag: "miso.release.v1" });
       assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: 0n },
-        "a worker-mode trap: the release answers no token");
-      assert.deepEqual(fake.calls.release, [], "a worker-mode trap: no release export runs");
+        `a ${port}-port trap: the release answers no token`);
+      assert.deepEqual(fake.calls.release, [], `a ${port}-port trap: no release export runs`);
     }
     // R-S7-meters (3): `process()` switches to the pre-cut set only when the header render reports,
     // its frame pointer and its strip counts all match; otherwise it skips the frame and counts it.

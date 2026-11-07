@@ -35,9 +35,53 @@ What a throw leaves, in `single` mode (verified by reading `hosts/host-web/src/f
   - leaves the render export uncalled on the next block;
   - makes the dispose answer 255 without calling the dispose export, after which the instance ends.
 
-  In `worker` mode, a throw from the meter lease export on the page's port is answered 255 to its request, and the release then answers token `0n` without calling `host_release`. Red on base.
+  In `worker` mode, a throw from the meter lease export on the page's port is answered 255 to its request, and a throw from `meter_header_ptr` under the control Worker's meter view is posted to the page as request 0. After either, render is not called and the release answers token `0n` without calling `host_release`. Red on base.
 - `bash scripts/test-web-audioworklet.sh` passes, as does `bash scripts/check-workspace-policy.sh`.
 - The SDK evals that need no artifact pass with the same set as base.
 
 ## Evidence
-(attempt record below)
+### Attempt 1 (Terra, 2026-11-07)
+Base `9c1ef3ea7`. The spec and the red rows are `f1687a364`; the fix is the commit after it.
+
+**Mechanism, confirmed by reading.** `miso_engine_web_v1_control_command` runs inside `with_host_mut`, which holds `LIVE_HOST.try_borrow_mut()` across the call. Under `panic = "abort"` a trap leaves that borrow held. The render export's `with_render_mut` and the dispose export's own `try_borrow_mut` then refuse with `RESULT_INVALID_ARGUMENT` on every call. Every other handler export either borrows `LIVE_HOST` the same way or reads behind it. The worklet's handler entries had no `catch`: the `single`-mode `port.onmessage` had only a `finally`, and `receiveWorkerMode` and the control port's handler had neither.
+
+**Model.** The phase model #2256 introduced is unchanged: `failed{code, posted, trapped}`, written only by `fail`. This change adds the one method that reaches it from a handler, `trap(requestId, planes)`, and the three handler entries that call it:
+- `single` mode `port.onmessage`: before `receive` has answered, `trap(lastRequestId, the message's planes)`; after, `trap(the step's request ID)`.
+- `receiveWorkerMode`: `trap(lastRequestId)` before the answer, `trap(0)` after.
+- The control port's `onmessage`: `trap(0)`.
+
+The steps after `receive` stay in their order. The only change there is that the last `rebindMemoryViews`/`syncMeterViews` moved out of the `finally`, so after a trap they no longer run (`syncMeterViews` calls an export). The `returnedPlanes` expression that `receive` already used became a module function, so both sites share one definition.
+
+**Red on base** (`node scripts/test-web-audioworklet.mjs` with the rows of `f1687a364` over the base worklet):
+- `single` mode: `AssertionError [ERR_ASSERTION]: Got unwanted exception: a control_command trap stays inside the handler` / `Actual message: "synthetic wasm trap from the control_command export"`.
+- A probe run (temporary, uncommitted) let the throw pass and logged each row's state. The pattern was the same for control command, source submit, session seek and service:
+  - the last post was still `miso.ready.v1` (nothing answered);
+  - after the trap, phase `live` and sticky 0;
+  - after one block, phase `failed` and sticky **1**, with the render export called once;
+  - the dispose was answered `{ tag: "miso.ack.v1", requestId: 2, result: 1 }`, with the dispose export called once. That is the retryable answer, the #2256 wedge reached by another route.
+- `worker` mode, page port (single-mode rows skipped for the run): `Got unwanted exception: a worker-mode trap stays inside the handler` / `"synthetic wasm trap from the meter lease export"`.
+- The control-port row and the service row's prior request were added with the fix, so `f1687a364` does not hold them. On base they sit behind the first red row; their own red is the matching mutation below.
+
+**Mutations of the fix.** Each is red, and the first failing assertion is named:
+
+| Mutation | First failing assertion |
+|---|---|
+| The `single`-mode catch rethrows | `a control_command trap stays inside the handler` |
+| `trap` records no trap (`fail(.., false)`) | `a control_command trap: the dispose is final` (the dispose export ran) |
+| An unanswered trap drops the planes | `a source_submit trap: the typed answer` |
+| An answered trap uses `lastRequestId` instead of the step's ID | `a service trap: the typed answer` |
+| The `worker` page-port catch rethrows | `a page-port trap stays inside the handler` |
+| The control-port catch rethrows | `a worker-port trap stays inside the handler` |
+
+They were run with `MISO_ENGINE_WEB_WORKLET_TEST_MODULE` pointing at mutated copies. The base worklet itself was run the same way and is red at the first row.
+
+**Green at the fix:**
+- `bash scripts/test-web-audioworklet.sh`: exit 0. That covers the hermetic suite with its safe-integer host variants, the source, clock, timer and capability policies with their mutations, the call-graph self-test, the parameter-metadata and session-map gates, and the UTF-8 mutation.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- SDK evals without an artifact (`cd sdk && node --test 'test/*-evals.mjs'`): 710 tests, 340 pass, 22 fail. The failing set is identical on base and on this change (diffed by name), and every failure is the missing artifact (`MISO_ENGINE_SDK_ARTIFACTS_HEX ...`). `the prelude over the real engine worklet class` passes.
+- Not run: the artifact-backed SDK evals and the Playwright legs (no pinned browser nightly here, so no artifact can be built). No Rust, `process()` or render-path code changed, so cargo test, clippy, fmt, rustdoc, the realtime policy tool and a no-bit-moved comparison do not apply.
+
+**Test value.**
+- The `single`-mode rows (`scripts/test-web-audioworklet.mjs`, "Issue #2291: a trap in an export a message handler calls"). Red if a handler export's throw escapes `port.onmessage`, goes unanswered, comes back without a source's planes or with the wrong request ID, or leaves the trap unrecorded so that render and the dispose export run on the trapped instance. No existing test throws from a handler export other than the dispose export.
+- The `worker`-mode rows ("Issue #2291, the `worker`-mode rows"). Red if a throw escapes the page-port or the control-port handler, which are entries separate from the `single`-mode one, or if the release then calls `host_release` on the trapped half.
+- No existing test was made useless. #2256's dispose-trap row still defends `receiveDispose`'s own containment, which answers `miso.ack.v1` 255 and ends the instance; without it the boundary would answer `miso.error.v1` and keep the instance `failed`.
