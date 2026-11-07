@@ -628,3 +628,42 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
         }
     }
 }
+
+/// Issue #2368 (tracker #2258 GR-7): a settled ramp whose `current` is one ulp off its `target`,
+/// inside the converted domain, or whose step is not `+0.0`, is refused with
+/// `effect.state.parameter`, and the refusal changes nothing. Every engine writer settles a ramp
+/// at its target with a `+0.0` step, so such a ramp is never the effect's own word, and the
+/// off-target one would render its stale `current` until the next retarget.
+///
+/// Test value: a restore that holds a settled ramp only to its domain and step range (as
+/// `decode_lane_words` did) accepts every case and turns this red.
+#[test]
+fn a_settled_ramp_off_its_target_or_with_a_step_is_refused() {
+    let values = values_from([(6.0, -6.0), (0.0, 3.0), (0.5, 0.5)]);
+    let mut effect = prepare(&values);
+    let saved = support::snapshot(effect.as_ref());
+    for ramp in 0..3 {
+        let at = ramp * 4;
+        assert_eq!(word(&saved.1, at + 3), 0, "ramp {ramp} is settled");
+        let current = f32::from_bits(word(&saved.1, at));
+        let mut off = saved.clone();
+        off.1[at * 4..at * 4 + 4].copy_from_slice(&current.next_down().to_bits().to_le_bytes());
+        let mut stepping = saved.clone();
+        let step = current * 1e-3;
+        stepping.1[(at + 2) * 4..(at + 2) * 4 + 4].copy_from_slice(&step.to_bits().to_le_bytes());
+        for (case, payload) in [("off its target", off), ("with a step", stepping)] {
+            assert_eq!(
+                effect.restore_state_payload(1, as_input(&payload)),
+                Err(StatePayloadError {
+                    code: "effect.state.parameter"
+                }),
+                "ramp {ramp} {case}"
+            );
+            assert_eq!(
+                support::snapshot(effect.as_ref()),
+                saved,
+                "ramp {ramp} {case}"
+            );
+        }
+    }
+}

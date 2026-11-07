@@ -254,8 +254,18 @@ fn any_finite(rng: &mut Rng) -> f32 {
 }
 
 /// A restored ramp of [`EFFECT_WINDOW`] or fewer samples with a step drawn independently of its
-/// endpoints, as a forged or foreign payload could carry it.
+/// endpoints, as a forged or foreign payload could carry it: words `LinearRamp::from_words`
+/// refuses (a settled ramp off its target or with a step) are drawn again.
 fn restored_ramp(rng: &mut Rng) -> LinearRamp {
+    loop {
+        if let Some(ramp) = forged_words(rng) {
+            return ramp;
+        }
+    }
+}
+
+/// One draw of [`restored_ramp`]'s words.
+fn forged_words(rng: &mut Rng) -> Option<LinearRamp> {
     let current = magnitude_value(rng);
     let target = if rng.below(4) == 0 {
         current
@@ -268,29 +278,21 @@ fn restored_ramp(rng: &mut Rng) -> LinearRamp {
         2 => 0.0,
         _ => f32::from_bits(rng.next_u32() & 0x807F_FFFF),
     };
-    LinearRamp {
-        current,
-        target,
-        step,
-        remaining: rng.below(EFFECT_WINDOW + 2),
-    }
+    LinearRamp::from_words(current, target, step, rng.below(EFFECT_WINDOW + 2))
 }
 
 /// `ramp_path_inside` stated as a walk: the rules it keeps, and every value `next_value` visits.
 fn walked_inside(ramp: LinearRamp, (low, high): (f32, f32), max_remaining: u32) -> bool {
     let inside = |value: f32| (low..=high).contains(&value);
-    if ramp.remaining > max_remaining
-        || !ramp.step.is_finite()
-        || !inside(ramp.current)
-        || !inside(ramp.target)
+    if ramp.remaining() > max_remaining
+        || !ramp.step().is_finite()
+        || !inside(ramp.current())
+        || !inside(ramp.target())
     {
         return false;
     }
-    if ramp.remaining == 0 {
-        return ramp.step.to_bits() == 0;
-    }
     let mut walk = ramp;
-    (0..ramp.remaining).all(|_| inside(walk.next_value()))
+    (0..ramp.remaining()).all(|_| inside(walk.next_value()))
 }
 
 #[test]
@@ -300,10 +302,13 @@ fn a_restored_ramp_with_any_finite_step_stays_inside_and_the_validator_agrees() 
     for _ in 0..RESTORED_RAMPS {
         let ramp = restored_ramp(&mut rng);
         let context = format!("{ramp:?}");
-        let (low, high) = (ramp.current.min(ramp.target), ramp.current.max(ramp.target));
+        let (low, high) = (
+            ramp.current().min(ramp.target()),
+            ramp.current().max(ramp.target()),
+        );
         // D2: every word the restored ramp produces lies between its endpoints.
         let mut walk = ramp;
-        for sample in 0..ramp.remaining {
+        for sample in 0..ramp.remaining() {
             let word = walk.next_value();
             assert!(
                 (low..=high).contains(&word),

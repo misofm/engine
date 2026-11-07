@@ -93,12 +93,16 @@ fn the_state_after_a_block_is_partition_invariant() {
             done += this;
         }
         assert_eq!(
-            split.current.to_bits(),
-            one_shot.current.to_bits(),
+            split.current().to_bits(),
+            one_shot.current().to_bits(),
             "blocks of {frames}: current"
         );
-        assert_eq!(split.remaining, one_shot.remaining, "blocks of {frames}");
-        assert_eq!(split.target.to_bits(), one_shot.target.to_bits());
+        assert_eq!(
+            split.remaining(),
+            one_shot.remaining(),
+            "blocks of {frames}"
+        );
+        assert_eq!(split.target().to_bits(), one_shot.target().to_bits());
     }
 }
 
@@ -107,8 +111,8 @@ fn the_state_after_a_block_is_partition_invariant() {
 fn zero_length_ramps_snap() {
     let mut ramp = LinearRamp::fixed(1.0);
     ramp.set_target(-3.0, 0);
-    assert_eq!(ramp.current.to_bits(), (-3.0f32).to_bits());
-    assert_eq!(ramp.step.to_bits(), 0.0f32.to_bits());
+    assert_eq!(ramp.current().to_bits(), (-3.0f32).to_bits());
+    assert_eq!(ramp.step().to_bits(), 0.0f32.to_bits());
     assert!(!ramp.is_ramping());
 
     let mut snapped = LinearRamp::fixed(1.0);
@@ -137,11 +141,124 @@ fn the_rest_invariant_holds() {
         ramp.set_target(target, samples);
         for _ in 0..samples + 2 {
             ramp.next_value();
-            if ramp.remaining == 0 {
-                assert_eq!(ramp.current.to_bits(), ramp.target.to_bits());
+            if ramp.remaining() == 0 {
+                assert_eq!(ramp.current().to_bits(), ramp.target().to_bits());
             }
         }
-        assert_eq!(ramp.remaining, 0);
-        assert_eq!(ramp.current.to_bits(), target.to_bits());
+        assert_eq!(ramp.remaining(), 0);
+        assert_eq!(ramp.current().to_bits(), target.to_bits());
     }
+}
+
+/// Issue #2368: words enter a ramp only in phase. `from_words` refuses exactly a settled ramp
+/// that is not at its target bit for bit, or whose step is not `+0.0`, and keeps every other
+/// ramp's words as given; `record_advance` stores a settled advance at the target with a `+0.0`
+/// step whatever words it is handed, and an advance in flight verbatim.
+///
+/// Test value: `from_words` comparing with float `==` (which accepts a settled `-0.0`/`+0.0`
+/// pair and refuses a settled NaN at its own bits), dropping its step clause, or
+/// `record_advance` storing a settled `current` verbatim turns this red; no restore test reaches
+/// the `-0.0`, NaN or `record_advance` cases.
+#[test]
+fn words_enter_a_ramp_only_in_phase() {
+    let bits = |ramp: LinearRamp| {
+        [
+            ramp.current().to_bits(),
+            ramp.target().to_bits(),
+            ramp.step().to_bits(),
+            ramp.remaining(),
+        ]
+    };
+    let nan = f32::from_bits(0x7FC0_0001);
+    for value in [0.0_f32, -0.0, 0.5, f32::from_bits(1), nan, f32::INFINITY] {
+        let ramp = LinearRamp::from_words(value, value, 0.0, 0).expect("settled at its target");
+        assert_eq!(bits(ramp), bits(LinearRamp::fixed(value)), "{value:e}");
+    }
+    for (case, current, target, step) in [
+        ("-0.0 at +0.0", -0.0_f32, 0.0_f32, 0.0_f32),
+        ("+0.0 at -0.0", 0.0, -0.0, 0.0),
+        ("one ulp off", 0.5_f32.next_up(), 0.5, 0.0),
+        ("a step of -0.0", 0.5, 0.5, -0.0),
+        ("a step", 0.5, 0.5, 1e-3),
+    ] {
+        assert_eq!(
+            LinearRamp::from_words(current, target, step, 0),
+            None,
+            "{case}"
+        );
+    }
+    for (current, target, step, remaining) in [
+        (-0.0_f32, 0.0_f32, 0.0_f32, 1_u32),
+        (0.25, 0.75, -1e-3, 64),
+        (0.5, 0.5, 0.0, 3),
+        (0.5, 0.25, nan, u32::MAX),
+    ] {
+        let ramp = LinearRamp::from_words(current, target, step, remaining).expect("in flight");
+        assert_eq!(
+            bits(ramp),
+            [
+                current.to_bits(),
+                target.to_bits(),
+                step.to_bits(),
+                remaining
+            ]
+        );
+    }
+
+    let mut ramp = LinearRamp::fixed(0.0);
+    ramp.set_target(1.0, 8);
+    ramp.record_advance(0.375, 0.125, 5);
+    assert_eq!(
+        bits(ramp),
+        [
+            0.375_f32.to_bits(),
+            1.0_f32.to_bits(),
+            0.125_f32.to_bits(),
+            5
+        ]
+    );
+    let settling = ramp;
+    ramp.record_advance(1.0, 0.125, 0);
+    assert_eq!(
+        bits(ramp),
+        bits(LinearRamp::fixed(1.0)),
+        "a settled advance carries a +0.0 step"
+    );
+    // Off its target, a settled advance is a lane-law defect: a debug build asserts
+    // (`a_settled_advance_off_its_target_asserts_in_debug`), a release build stores the target.
+    if !cfg!(debug_assertions) {
+        let mut ramp = settling;
+        ramp.record_advance(0.875, 0.125, 0);
+        assert_eq!(
+            bits(ramp),
+            bits(LinearRamp::fixed(1.0)),
+            "a settled advance is at its target"
+        );
+    }
+
+    let mut held = LinearRamp::holding(0.5, 3);
+    assert!(held.is_ramping());
+    assert_eq!(
+        [held.next_value(), held.next_value(), held.next_value()],
+        [0.5; 3]
+    );
+    assert_eq!(bits(held), bits(LinearRamp::fixed(0.5)));
+    assert_eq!(
+        bits(LinearRamp::holding(0.5, 0)),
+        bits(LinearRamp::fixed(0.5))
+    );
+}
+
+/// Issue #2368: a settled advance off its target is a lane-law defect, and a debug build says so
+/// rather than letting `record_advance`'s store mask it.
+///
+/// Test value: dropping `record_advance`'s `debug_assert!` turns this red; a lane law that walks
+/// off its target would then be invisible in every test build.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a settled advance lands on its target")]
+fn a_settled_advance_off_its_target_asserts_in_debug() {
+    let mut ramp = LinearRamp::fixed(0.0);
+    ramp.set_target(1.0, 8);
+    ramp.record_advance(0.875, 0.125, 0);
 }

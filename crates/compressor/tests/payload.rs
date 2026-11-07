@@ -42,7 +42,9 @@ fn a_restore_is_transactional_across_both_channels() {
     // The left section handed to `restore` must differ from the live state, or a commit that
     // happened before the right section was validated would be invisible.
     let mut modified_left = saved_left.clone();
-    write_f32(&mut modified_left, 1, -17.5);
+    // Ramp 0 settled at another value: a settled ramp is at its target (issue #2368).
+    write_f32(&mut modified_left, ramp_word(0, CURRENT), -17.5);
+    write_f32(&mut modified_left, ramp_word(0, TARGET), -17.5);
     assert_ne!(modified_left, saved_left);
 
     for (word, value, code) in [
@@ -111,7 +113,9 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
     let mut scalar = prepare(request(&values));
     let scalar_saved = snapshot(scalar.as_ref());
     let mut scalar_left = scalar_saved.0.clone();
-    write_f32(&mut scalar_left, 1, -17.5);
+    // Ramp 0 settled at another value: a settled ramp is at its target (issue #2368).
+    write_f32(&mut scalar_left, ramp_word(0, CURRENT), -17.5);
+    write_f32(&mut scalar_left, ramp_word(0, TARGET), -17.5);
     let mut scalar_short = scalar_saved.1.clone();
     scalar_short.pop();
     assert_eq!(
@@ -141,7 +145,9 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
     let bank_saved = snapshot_track(bank.as_ref(), 0);
 
     let mut bank_left = bank_saved.0.clone();
-    write_f32(&mut bank_left, 1, -17.5);
+    // Ramp 0 settled at another value: a settled ramp is at its target (issue #2368).
+    write_f32(&mut bank_left, ramp_word(0, CURRENT), -17.5);
+    write_f32(&mut bank_left, ramp_word(0, TARGET), -17.5);
     let mut corrupt_right = bank_saved.1.clone();
     write_u32(&mut corrupt_right, STATE_HEADER_WORDS - 1, 65);
     assert_eq!(
@@ -313,11 +319,14 @@ fn a_coefficient_below_zero_or_above_its_design_is_refused() {
     };
     let above_one = f32::from_bits(1.0_f32.to_bits() + 8);
     for (case, section) in [
-        ("a settled negative current", ramp(-1e-6, 0.5, 0.0, 0)),
+        ("a settled negative coefficient", ramp(-1e-6, -1e-6, 0.0, 0)),
         // A zero coefficient freezes the smoother; no legal time designs one.
-        ("a settled zero current", ramp(0.0, 0.5, 0.0, 0)),
+        ("a settled zero coefficient", ramp(0.0, 0.0, 0.0, 0)),
         ("a zero target", ramp(0.5, 0.0, -1e-3, 10)),
-        ("a settled current above one", ramp(above_one, 0.5, 0.0, 0)),
+        (
+            "a settled coefficient above one",
+            ramp(above_one, above_one, 0.0, 0),
+        ),
         ("a target above one", ramp(0.5, above_one, 1e-3, 10)),
     ] {
         assert_eq!(
@@ -488,6 +497,7 @@ fn preparation_legal_parameter_states_round_trip() {
     // Makeup and mix admit positive subnormals in their continuous domains.
     let words = [
         ramp_word(5, CURRENT),
+        ramp_word(5, TARGET),
         ramp_word(6, CURRENT),
         ramp_word(6, TARGET),
     ];
@@ -533,4 +543,62 @@ fn resets_clear_state_and_only_the_full_one_restores_defaults() {
     effect.reset(ResetKind::FullToDefaults);
     let (state, _) = snapshot(effect.as_ref());
     assert_eq!(read_f32(&state, 1).to_bits(), (-18.0_f32).to_bits());
+}
+
+/// Issue #2368 (tracker #2258 GR-7): a settled ramp whose `current` is one ulp off its `target`,
+/// inside its domain, is refused, and the refusal changes nothing: each parameter ramp and rate
+/// coefficient ramp (`effect.state.parameter`) and each link weight (`effect.state.link`). No
+/// engine writer settles a ramp off its target, so such a ramp would render its stale `current`
+/// (a parameter, a time constant's coefficient, or the detector link law) until the next retarget.
+///
+/// Test value: a restore that holds a settled ramp only to its domain (as `validate_channel` did
+/// at all three sites) accepts every case and turns this red.
+#[test]
+fn a_settled_ramp_off_its_target_is_refused() {
+    const RATES: usize = 2;
+    const LINKS: usize = 2;
+    let values = initial_values();
+    let mut effect = prepare(request(&values));
+    let (left, right) = snapshot(effect.as_ref());
+    let mut cases: Vec<(usize, f32, &str)> = COMPRESSOR_PARAMETERS
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (index, row.maximum.expect("max"), "effect.state.parameter"))
+        .collect();
+    let rates = COMPRESSOR_PARAMETERS.len();
+    cases.extend((rates..rates + RATES).map(|index| (index, 1.0, "effect.state.parameter")));
+    let links = rates + RATES;
+    cases.extend((links..links + LINKS).map(|index| (index, 1.0, "effect.state.link")));
+    for (index, high, code) in cases {
+        assert_eq!(
+            read_u32(&left, ramp_word(index, REMAINING)),
+            0,
+            "ramp {index}"
+        );
+        let current = read_f32(&left, ramp_word(index, CURRENT));
+        assert_eq!(
+            read_f32(&left, ramp_word(index, TARGET)).to_bits(),
+            current.to_bits(),
+            "ramp {index} is at its target"
+        );
+        let off = if current.next_up() <= high {
+            current.next_up()
+        } else {
+            current.next_down()
+        };
+        let mut section = left.clone();
+        write_f32(&mut section, ramp_word(index, CURRENT), off);
+        assert_eq!(
+            restore(effect.as_mut(), STATE_VERSION, &section, &right)
+                .expect_err(&format!("ramp {index}"))
+                .code,
+            code,
+            "ramp {index}: settled current {off:e} off its target {current:e}"
+        );
+        assert_eq!(
+            snapshot(effect.as_ref()),
+            (left.clone(), right.clone()),
+            "ramp {index}: atomic"
+        );
+    }
 }

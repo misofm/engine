@@ -655,7 +655,7 @@ impl<L: Lane> Channel<L> {
         self.clear_lane_rows(lane);
         for (parameter, ramp) in self.ramps[lane].iter_mut().enumerate() {
             ramp.snap();
-            set_lane(self.state.field_mut(parameter), lane, ramp.current);
+            set_lane(self.state.field_mut(parameter), lane, ramp.current());
         }
     }
     // REALTIME_POLICY_END
@@ -685,17 +685,17 @@ impl<L: Lane> Channel<L> {
             for lane in 0..width {
                 for parameter in 0..PARAMETER_COUNT {
                     let ramp = &mut self.ramps[lane][parameter];
-                    if ramp.remaining == 1 {
+                    if ramp.remaining() == 1 {
                         ramp.snap();
-                        set_lane(self.state.field_mut(parameter), lane, ramp.current);
+                        set_lane(self.state.field_mut(parameter), lane, ramp.current());
                     }
                 }
             }
             let mut span = frames - done;
             for ramps in self.ramps.iter() {
                 for ramp in ramps {
-                    if ramp.remaining > 0 {
-                        span = span.min(ramp.remaining as usize - 1);
+                    if ramp.remaining() > 0 {
+                        span = span.min(ramp.remaining() as usize - 1);
                     }
                 }
             }
@@ -718,8 +718,12 @@ impl<L: Lane> Channel<L> {
             );
             for ramps in self.ramps.iter_mut() {
                 for ramp in ramps {
-                    if ramp.remaining > 0 {
-                        ramp.remaining -= span as u32;
+                    if ramp.remaining() > 0 {
+                        ramp.record_advance(
+                            ramp.current(),
+                            ramp.step(),
+                            ramp.remaining() - span as u32,
+                        );
                     }
                 }
             }
@@ -733,7 +737,11 @@ impl<L: Lane> Channel<L> {
         let mut words: LaneWords = [0.0; 8];
         for (lane, slot) in words[..L::WIDTH].iter_mut().enumerate() {
             let ramp = &self.ramps[lane][parameter];
-            *slot = if ramp.remaining > 0 { ramp.step } else { 0.0 };
+            *slot = if ramp.remaining() > 0 {
+                ramp.step()
+            } else {
+                0.0
+            };
         }
         L::load(&words[..L::WIDTH])
     }
@@ -744,7 +752,7 @@ impl<L: Lane> Channel<L> {
     fn target_vector(&self, parameter: usize) -> L {
         let mut words: LaneWords = [0.0; 8];
         for (lane, slot) in words[..L::WIDTH].iter_mut().enumerate() {
-            *slot = self.ramps[lane][parameter].target;
+            *slot = self.ramps[lane][parameter].target();
         }
         L::load(&words[..L::WIDTH])
     }
@@ -755,7 +763,8 @@ impl<L: Lane> Channel<L> {
             let mut words: LaneWords = [0.0; 8];
             self.state.field(parameter).store(&mut words[..L::WIDTH]);
             for (lane, value) in words[..L::WIDTH].iter().enumerate() {
-                self.ramps[lane][parameter].current = *value;
+                let ramp = &mut self.ramps[lane][parameter];
+                ramp.record_advance(*value, ramp.step(), ramp.remaining());
             }
         }
     }
@@ -804,7 +813,7 @@ impl<L: Lane> Channel<L> {
             & positive_zero_lanes_of::<L>(&self.history.e)
             & positive_zero_lanes_of::<L>(&self.history.dry);
         for (lane, ramps) in self.ramps.iter().enumerate() {
-            if ramps.iter().any(|ramp| ramp.remaining != 0) {
+            if ramps.iter().any(|ramp| ramp.remaining() != 0) {
                 mask &= !(1 << lane);
             }
         }
@@ -918,9 +927,9 @@ fn write_lane_words<L: Lane>(channel: &Channel<L>, lane: usize, words: &mut [u32
         let ramp = &channel.ramps[lane][parameter];
         let base = parameter * RAMP_WORDS;
         words[base] = lane_of(channel.state.field(parameter), lane).to_bits();
-        words[base + 1] = ramp.target.to_bits();
-        words[base + 2] = ramp.step.to_bits();
-        words[base + 3] = ramp.remaining;
+        words[base + 1] = ramp.target().to_bits();
+        words[base + 2] = ramp.step().to_bits();
+        words[base + 3] = ramp.remaining();
     }
     let width = L::WIDTH;
     let position = channel.history.pos as usize;
@@ -1016,12 +1025,12 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
                 code: STATE_PARAMETER_CODE,
             });
         }
-        *ramp = LinearRamp {
-            current,
-            target,
-            step,
-            remaining,
-        };
+        // A settled ramp is at its target with a `+0.0` step (issue #2368): every writer lands
+        // it there, so any other settled word is refused.
+        *ramp =
+            LinearRamp::from_words(current, target, step, remaining).ok_or(StatePayloadError {
+                code: STATE_PARAMETER_CODE,
+            })?;
     }
     let mut restore = LaneRestore {
         ramps,
@@ -1110,7 +1119,7 @@ fn apply_lane_words<L: Lane>(channel: &mut Channel<L>, lane: usize, restore: &La
         }
     }
     for (parameter, ramp) in restore.ramps.into_iter().enumerate() {
-        set_lane(channel.state.field_mut(parameter), lane, ramp.current);
+        set_lane(channel.state.field_mut(parameter), lane, ramp.current());
         channel.ramps[lane][parameter] = ramp;
     }
 }
@@ -1483,10 +1492,10 @@ impl<L: Lane> SoftClip<L> {
 
 /// Whether two ramps hold the same four words, raw bits (issue #1872).
 fn same_ramp_bits(a: &LinearRamp, b: &LinearRamp) -> bool {
-    a.current.to_bits() == b.current.to_bits()
-        && a.target.to_bits() == b.target.to_bits()
-        && a.step.to_bits() == b.step.to_bits()
-        && a.remaining == b.remaining
+    a.current().to_bits() == b.current().to_bits()
+        && a.target().to_bits() == b.target().to_bits()
+        && a.step().to_bits() == b.step().to_bits()
+        && a.remaining() == b.remaining()
 }
 
 /// Whether lane `lane` of two channels holds the same three [`SoftClipState`] words, raw bits.

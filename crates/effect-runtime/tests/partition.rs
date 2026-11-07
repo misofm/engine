@@ -99,9 +99,9 @@ fn render<L: Lane>(partition: usize) -> (Vec<f32>, Vec<u32>) {
     }
     let mut state = vec![0u32; L::WIDTH];
     processor.envelope.store_bits(&mut state);
-    state.push(processor.makeup.current.to_bits());
-    state.push(processor.makeup.step.to_bits());
-    state.push(processor.makeup.remaining);
+    state.push(processor.makeup.current().to_bits());
+    state.push(processor.makeup.step().to_bits());
+    state.push(processor.makeup.remaining());
     (buffer, state)
 }
 

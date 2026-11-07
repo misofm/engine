@@ -44,7 +44,7 @@ fn linear_smoother_is_bit_identical_to_the_linear_ramp() {
 
             assert_eq!(
                 smoother.step().to_bits(),
-                ramp.step.to_bits(),
+                ramp.step().to_bits(),
                 "the one division must produce the same increment ({from} -> {to} over {samples})"
             );
 
@@ -59,7 +59,7 @@ fn linear_smoother_is_bit_identical_to_the_linear_ramp() {
                 );
             }
             assert_eq!(smoother.remaining(), 0);
-            assert_eq!(smoother.current().to_bits(), ramp.current.to_bits());
+            assert_eq!(smoother.current().to_bits(), ramp.current().to_bits());
         }
     }
 }

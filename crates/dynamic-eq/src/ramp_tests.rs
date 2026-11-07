@@ -50,15 +50,15 @@ fn bank() -> DynamicEq<Simd4, false> {
 }
 
 /// Points one ramp's four words at `target` over `samples` frames, the way `LinearRamp` does.
-fn glide([current, _, step, remaining]: [f32; 4], to: f32, samples: u32) -> [f32; 4] {
-    let mut ramp = LinearRamp {
-        current,
-        target: to,
-        step,
-        remaining: remaining as u32,
-    };
+fn glide([current, ..]: [f32; 4], to: f32, samples: u32) -> [f32; 4] {
+    let mut ramp = LinearRamp::fixed(current);
     ramp.set_target(to, samples);
-    [ramp.current, ramp.target, ramp.step, ramp.remaining as f32]
+    [
+        ramp.current(),
+        ramp.target(),
+        ramp.step(),
+        ramp.remaining() as f32,
+    ]
 }
 
 /// `blocks` blocks of `+0.0` with no automation.

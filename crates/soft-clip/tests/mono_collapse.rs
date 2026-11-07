@@ -273,6 +273,18 @@ fn restore(bank: &mut dyn PreparedNativeEffectBank, track: u32, left: &[u8], rig
     .expect("restore");
 }
 
+/// The pair whose right channel differs from its left in `word` alone, from `a` (mid-ramp) and
+/// `b` (at rest): `b`'s word in `a`, except a countdown word, which is `a`'s in `b`. A settled
+/// countdown under a ramp in flight would leave a settled ramp off its target, which no restore
+/// admits (issue #2368).
+fn asymmetric<'a>(a: &'a [u8], b: &'a [u8], word: usize) -> (&'a [u8], Vec<u8>) {
+    if word < DESIGNED_WORDS && word % 4 == 3 {
+        (b, with_word(b, a, word))
+    } else {
+        (a, with_word(a, b, word))
+    }
+}
+
 fn with_word(base: &[u8], other: &[u8], word: usize) -> Vec<u8> {
     let mut bytes = base.to_vec();
     bytes[word * 4..word * 4 + 4].copy_from_slice(&other[word * 4..word * 4 + 4]);
@@ -302,9 +314,9 @@ fn the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetri
     assert!((0..lanes).all(|lane| equal.lane_channel_symmetry(lane)));
     assert!(!equal.lane_channel_symmetry(lanes));
     for word in 0..LANE_WORDS {
-        let right = with_word(&a, &b, word);
+        let (left, right) = asymmetric(&a, &b, word);
         let mut odd = bank();
-        restore(odd.as_mut(), track as u32, &a, &right);
+        restore(odd.as_mut(), track as u32, left, &right);
         assert!(!odd.channels_agree(), "word {word}: channels_agree");
         let designed = word < DESIGNED_WORDS;
         for lane in 0..lanes {
@@ -321,7 +333,8 @@ fn the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetri
     assert!(scalar.channel_symmetry(), "a symmetric instance");
     let sections = snapshot(scalar.as_ref());
     for word in [0, 3, 11, DESIGNED_WORDS, LANE_WORDS - 1] {
-        let input = (sections.0.clone(), a.clone(), with_word(&a, &b, word));
+        let (left, right) = asymmetric(&a, &b, word);
+        let input = (sections.0.clone(), left.to_vec(), right);
         scalar
             .restore_state_payload(1, as_input(&input))
             .expect("restore");

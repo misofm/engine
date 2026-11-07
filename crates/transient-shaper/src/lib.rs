@@ -74,7 +74,7 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, write_f32, write_ramp,
+    RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, read_u32, write_f32, write_ramp,
 };
 use lane::kernels::{gain_mix_step, ramp_toward};
 use lane::{Backend, Lane};
@@ -565,10 +565,10 @@ impl<L: Lane> LinkRamp<L> {
         let mut words = [[0.0_f32; 8]; 4];
         for (lane, ramps) in ramps.iter().enumerate() {
             let ramp = ramps[weight];
-            words[0][lane] = ramp.current;
-            words[1][lane] = ramp.target;
-            words[2][lane] = ramp.step;
-            words[3][lane] = ramp.remaining as f32;
+            words[0][lane] = ramp.current();
+            words[1][lane] = ramp.target();
+            words[2][lane] = ramp.step();
+            words[3][lane] = ramp.remaining() as f32;
         }
         Self {
             current: L::load(&words[0]),
@@ -585,9 +585,7 @@ impl<L: Lane> LinkRamp<L> {
         self.remaining.store(&mut words[2]);
         for (lane, ramps) in ramps.iter_mut().enumerate() {
             let ramp = &mut ramps[weight];
-            ramp.current = words[0][lane];
-            ramp.step = words[1][lane];
-            ramp.remaining = words[2][lane] as u32;
+            ramp.record_advance(words[0][lane], words[1][lane], words[2][lane] as u32);
         }
     }
 
@@ -813,7 +811,7 @@ impl<const W: usize> Ramps<W> {
             .iter()
             .flatten()
             .chain(self.links.iter().flatten())
-            .map(|ramp| ramp.remaining as usize)
+            .map(|ramp| ramp.remaining() as usize)
             .max()
             .unwrap_or(0)
     }
@@ -848,7 +846,7 @@ impl<const W: usize> Ramps<W> {
         let mut packed = [[0.0_f32; 8]; PARAMETER_COUNT];
         for (lane, ramps) in self.ramps.iter().enumerate() {
             for (index, ramp) in ramps.iter().enumerate() {
-                packed[index][lane] = ramp.current;
+                packed[index][lane] = ramp.current();
             }
         }
         Params {
@@ -1540,7 +1538,7 @@ fn channel_rest_lanes<L: Lane, const W: usize>(env: &Env<L>, ramps: &Ramps<W>) -
     let mut mask = positive_zero_lanes(env.fast) & positive_zero_lanes(env.slow);
     for (lane, (ramps, links)) in ramps.ramps.iter().zip(&ramps.links).enumerate() {
         // Issue #1370: a link glide in flight moves its weights every frame.
-        if ramps.iter().chain(links).any(|ramp| ramp.remaining != 0) {
+        if ramps.iter().chain(links).any(|ramp| ramp.remaining() != 0) {
             mask &= !(1 << lane);
         }
     }
@@ -1560,10 +1558,10 @@ fn same_lane_bits<L: Lane>(a: L, b: L, lanes: usize) -> bool {
 
 /// Whether two ramps hold the same four words, raw bits (issue #1873).
 fn same_ramp_bits(a: &LinearRamp, b: &LinearRamp) -> bool {
-    a.current.to_bits() == b.current.to_bits()
-        && a.target.to_bits() == b.target.to_bits()
-        && a.step.to_bits() == b.step.to_bits()
-        && a.remaining == b.remaining
+    a.current().to_bits() == b.current().to_bits()
+        && a.target().to_bits() == b.target().to_bits()
+        && a.step().to_bits() == b.step().to_bits()
+        && a.remaining() == b.remaining()
 }
 
 /// Writes one lane's twenty-two state words into a payload section.
@@ -1612,24 +1610,30 @@ fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
     }
     let mut ramps = [LinearRamp::fixed(0.0); PARAMETER_COUNT];
     for (index, ramp) in ramps.iter_mut().enumerate() {
-        let read = read_ramp(bytes, 2 + index * RAMP_WORDS);
+        let word = 2 + index * RAMP_WORDS;
         let parameter = &TRANSIENT_SHAPER_PARAMETERS[index];
         let (low, high) = parameter
             .minimum
             .zip(parameter.maximum)
             .ok_or(state_error("effect.state.parameter"))?;
         // The target and the current, moving or settled, are held to the strict domain.
-        if !value_valid(parameter, read.current)
-            || !value_valid(parameter, read.target)
-            || !ramp_path_inside(read, (low, high), RAMP_SAMPLES)
-        {
+        let (current, target) = (read_f32(bytes, word), read_f32(bytes, word + 1));
+        if !value_valid(parameter, current) || !value_valid(parameter, target) {
             return Err(state_error("effect.state.parameter"));
         }
-        *ramp = LinearRamp {
-            current: normalize_zero(read.current),
-            target: normalize_zero(read.target),
-            ..read
-        };
+        // A settled ramp is at its target with a `+0.0` step (issue #2368), compared with `-0.0`
+        // normalised, as the words are kept.
+        let read = LinearRamp::from_words(
+            normalize_zero(current),
+            normalize_zero(target),
+            read_f32(bytes, word + 2),
+            read_u32(bytes, word + 3),
+        )
+        .ok_or(state_error("effect.state.parameter"))?;
+        if !ramp_path_inside(read, (low, high), RAMP_SAMPLES) {
+            return Err(state_error("effect.state.parameter"));
+        }
+        *ramp = read;
     }
     // Issue #1370 D6: each weight lies in `[0, 1]` on its whole path, the engine never holds
     // `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`, `c` a
@@ -1637,17 +1641,17 @@ fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
     // and the two targets are exactly one supported mode's rest weights.
     let mut links = [LinearRamp::fixed(0.0); LINK_WEIGHTS];
     for (index, link) in links.iter_mut().enumerate() {
-        let read = read_ramp(bytes, LINK_WORD + index * RAMP_WORDS);
-        let valid = read.current.to_bits() != (-0.0_f32).to_bits()
-            && (read.remaining == 0 || read.step != 0.0)
-            && (read.remaining != 0 || read.current.to_bits() == read.target.to_bits())
+        let read = read_ramp(bytes, LINK_WORD + index * RAMP_WORDS)
+            .ok_or(state_error("effect.state.link"))?;
+        let valid = read.current().to_bits() != (-0.0_f32).to_bits()
+            && (read.remaining() == 0 || read.step() != 0.0)
             && ramp_path_inside(read, (0.0, 1.0), effect_contract::LINK_GLIDE_MAX_SAMPLES);
         if !valid {
             return Err(state_error("effect.state.link"));
         }
         *link = read;
     }
-    let mode = effect_contract::link_glide_mode([links[0].target, links[1].target])
+    let mode = effect_contract::link_glide_mode([links[0].target(), links[1].target()])
         .filter(|mode| {
             TRANSIENT_SHAPER_DESCRIPTOR
                 .supported_link_modes

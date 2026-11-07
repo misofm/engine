@@ -904,7 +904,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
             if ramps
                 .iter()
                 .chain(links)
-                .any(|ramp| ramp.remaining != 0 || ramp.step.to_bits() != 0)
+                .any(|ramp| ramp.remaining() != 0 || ramp.step().to_bits() != 0)
             {
                 mask &= !(1 << track);
             }
@@ -919,7 +919,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
             .iter()
             .flatten()
             .chain(self.links.iter().flatten())
-            .all(|ramp| ramp.remaining == 0)
+            .all(|ramp| ramp.remaining() == 0)
     }
 
     /// `true` while a link glide weight of any track of this channel is in flight (issue #1367).
@@ -937,10 +937,10 @@ impl<L: Lane, const W: usize> Side<L, W> {
             let mut targets = [0.0f32; 8];
             for track in 0..W {
                 let ramp = self.links[track][weight];
-                values[track] = ramp.current;
-                steps[track] = ramp.step;
-                targets[track] = ramp.target;
-                if ramp.remaining != 0 {
+                values[track] = ramp.current();
+                steps[track] = ramp.step();
+                targets[track] = ramp.target();
+                if ramp.remaining() != 0 {
                     gliding |= 1 << track;
                 }
             }
@@ -961,8 +961,11 @@ impl<L: Lane, const W: usize> Side<L, W> {
             weights.current[weight].store(&mut values[..W]);
             for (track, value) in values.iter().enumerate().take(W) {
                 let ramp = &mut self.links[track][weight];
-                ramp.current = *value;
-                ramp.remaining = ramp.remaining.saturating_sub(advanced);
+                ramp.record_advance(
+                    *value,
+                    ramp.step(),
+                    ramp.remaining().saturating_sub(advanced),
+                );
             }
         }
     }
@@ -1731,9 +1734,9 @@ impl<L: Lane, const W: usize> Side<L, W> {
             let mut steps = [0.0f32; 8];
             let mut targets = [0.0f32; 8];
             for track in 0..W {
-                values[track] = self.ramps[track][index].current;
-                steps[track] = self.ramps[track][index].step;
-                targets[track] = self.ramps[track][index].target;
+                values[track] = self.ramps[track][index].current();
+                steps[track] = self.ramps[track][index].step();
+                targets[track] = self.ramps[track][index].target();
             }
             current[index] = L::load(&values[..W]);
             step[index] = L::load(&steps[..W]);
@@ -1758,8 +1761,11 @@ impl<L: Lane, const W: usize> Side<L, W> {
             segment.current[index].store(&mut values[..W]);
             for (track, value) in values.iter().enumerate().take(W) {
                 let ramp = &mut self.ramps[track][index];
-                ramp.current = *value;
-                ramp.remaining = ramp.remaining.saturating_sub(advanced);
+                ramp.record_advance(
+                    *value,
+                    ramp.step(),
+                    ramp.remaining().saturating_sub(advanced),
+                );
             }
         }
     }
@@ -1801,7 +1807,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         for side in self.sides.iter_mut().take(sides) {
             for track in 0..W {
                 for ramp in side.ramps[track].iter_mut().chain(&mut side.links[track]) {
-                    if ramp.remaining == 1 {
+                    if ramp.remaining() == 1 {
                         ramp.snap();
                     }
                 }
@@ -1813,17 +1819,17 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         for side in self.sides.iter().take(sides) {
             for track in 0..W {
                 for ramp in &side.ramps[track] {
-                    if ramp.remaining > 0 {
+                    if ramp.remaining() > 0 {
                         ramping = true;
-                        length = length.min(ramp.remaining as usize - 1);
+                        length = length.min(ramp.remaining() as usize - 1);
                     }
                 }
                 // Issue #1367 D3: a link glide weight splits and keeps the segment ramped as the
                 // other ramps do, so its arrival is a boundary and never inside a segment.
                 for ramp in &side.links[track] {
-                    if ramp.remaining > 0 {
+                    if ramp.remaining() > 0 {
                         gliding = true;
-                        length = length.min(ramp.remaining as usize - 1);
+                        length = length.min(ramp.remaining() as usize - 1);
                     }
                 }
             }
@@ -1860,10 +1866,10 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 .flatten()
                 .chain(side.links.iter().flatten())
                 .all(|ramp| {
-                    ramp.remaining == 0
-                        && ramp.step.to_bits() == 0
-                        && ramp.current.is_finite()
-                        && ramp.current.to_bits() != NEGATIVE_ZERO
+                    ramp.remaining() == 0
+                        && ramp.step().to_bits() == 0
+                        && ramp.current().is_finite()
+                        && ramp.current().to_bits() != NEGATIVE_ZERO
                 })
         })
     }
@@ -2092,10 +2098,10 @@ fn write_side<L: Lane, const W: usize>(bytes: &mut [u8], side: &Side<L, W>, trac
     for index in 0..RAMP_COUNT {
         let ramp = side.ramps[track][index];
         let word = 3 + index * RAMP_WORDS;
-        write_f32(bytes, word, ramp.current);
-        write_f32(bytes, word + 1, ramp.target);
-        write_f32(bytes, word + 2, ramp.step);
-        write_u32(bytes, word + 3, ramp.remaining);
+        write_f32(bytes, word, ramp.current());
+        write_f32(bytes, word + 1, ramp.target());
+        write_f32(bytes, word + 2, ramp.step());
+        write_u32(bytes, word + 3, ramp.remaining());
     }
     let filter = [
         side.filter.a.ic1,
@@ -2158,25 +2164,22 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
         // word between the ramp's start and its target (issue #1409 D2), so a word past the
         // domain is one the engine never holds (issue #1411 D1).
         let spec = &SPECS[index + 1];
-        let read = LinearRamp {
-            current,
-            target,
-            step,
-            remaining,
-        };
+        let parameter = || state_error("effect.state.parameter");
+        let read =
+            LinearRamp::from_words(current, target, step, remaining).ok_or_else(parameter)?;
         if !parameter_state_valid(index + 1, current)
             || !parameter_state_valid(index + 1, target)
             || !ramp_path_inside(read, (spec.minimum, spec.maximum), SMOOTHING_SAMPLES)
-            || (remaining == 0 && current.to_bits() != target.to_bits())
         {
-            return Err(state_error("effect.state.parameter"));
+            return Err(parameter());
         }
-        *ramp = LinearRamp {
-            current: normalize_zero(current),
-            target: normalize_zero(target),
-            step: normalize_zero(step),
+        *ramp = LinearRamp::from_words(
+            normalize_zero(current),
+            normalize_zero(target),
+            normalize_zero(step),
             remaining,
-        };
+        )
+        .ok_or_else(parameter)?;
     }
     let mut filter = [0.0f32; 4];
     for (index, word) in filter.iter_mut().enumerate() {
@@ -2199,19 +2202,22 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
     // (issue #1409 D2) and is held to the same range with no rounding budget (issue #1411 D1). A
     // settled coefficient ramp is at its target, as a settled parameter ramp is.
     for rate in 0..RATE_COUNT {
-        let read = read_ramp(bytes, RATE_WORD + rate * RAMP_WORDS);
+        let parameter = || state_error("effect.state.parameter");
+        let read = read_ramp(bytes, RATE_WORD + rate * RAMP_WORDS).ok_or_else(parameter)?;
         let designed = |value: f32| value > 0.0 && value <= 1.0;
-        if !designed(read.current)
-            || !designed(read.target)
+        if !designed(read.current())
+            || !designed(read.target())
             || !ramp_path_inside(read, (0.0, 1.0), SMOOTHING_SAMPLES)
-            || (read.remaining == 0 && read.current.to_bits() != read.target.to_bits())
         {
-            return Err(state_error("effect.state.parameter"));
+            return Err(parameter());
         }
-        ramps[rate_slot(rate)] = LinearRamp {
-            step: normalize_zero(read.step),
-            ..read
-        };
+        ramps[rate_slot(rate)] = LinearRamp::from_words(
+            read.current(),
+            read.target(),
+            normalize_zero(read.step()),
+            read.remaining(),
+        )
+        .ok_or_else(parameter)?;
     }
     // Issue #1338 D6: each crossover word ramp walks between two designs. Its target triple is the
     // design of `crossover_hz` bit for bit, so a triple the engine would not design is refused and
@@ -2219,19 +2225,22 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
     // below 1, a settled ramp is at its target, and the current triple, a point of a walk between
     // two designs, is held within `RAMP_PATH_NORM_TOLERANCE` at every point of its remaining walk.
     for (word, design) in designed.into_iter().enumerate() {
-        let read = read_ramp(bytes, CROSSOVER_WORD + word * RAMP_WORDS);
+        let coefficient = || state_error("effect.state.coefficient");
+        let read = read_ramp(bytes, CROSSOVER_WORD + word * RAMP_WORDS).ok_or_else(coefficient)?;
         let positive = |value: f32| value.is_normal() && value > 0.0 && value < 1.0;
-        if !positive(read.current)
-            || read.target.to_bits() != design.to_bits()
+        if !positive(read.current())
+            || read.target().to_bits() != design.to_bits()
             || !ramp_path_inside(read, (0.0, 1.0), SMOOTHING_SAMPLES)
-            || (read.remaining == 0 && read.current.to_bits() != read.target.to_bits())
         {
-            return Err(state_error("effect.state.coefficient"));
+            return Err(coefficient());
         }
-        ramps[crossover_slot(word)] = LinearRamp {
-            step: normalize_zero(read.step),
-            ..read
-        };
+        ramps[crossover_slot(word)] = LinearRamp::from_words(
+            read.current(),
+            read.target(),
+            normalize_zero(read.step()),
+            read.remaining(),
+        )
+        .ok_or_else(coefficient)?;
     }
     // The walk the render takes, point by point (`LinearRamp::next_value` is the kernel's clamped
     // law and its snap): a forged step keeps each word inside its endpoints but can leave the
@@ -2239,12 +2248,12 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
     // (the parametric EQ's restore walks its words for the same reason). At most 64 points.
     let mut walk: [LinearRamp; CROSSOVER_WORDS] =
         core::array::from_fn(|word| ramps[crossover_slot(word)]);
-    let mut point = walk.map(|ramp| ramp.current);
+    let mut point = walk.map(|ramp| ramp.current());
     loop {
         if transition_norm(point[0], point[1], point[2]) > RAMP_PATH_NORM_TOLERANCE {
             return Err(state_error("effect.state.coefficient"));
         }
-        if walk.iter().all(|ramp| ramp.remaining == 0) {
+        if walk.iter().all(|ramp| ramp.remaining() == 0) {
             break;
         }
         point = walk.each_mut().map(LinearRamp::next_value);
@@ -2255,17 +2264,17 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
     // target, and the two targets are exactly one supported mode's rest weights.
     let mut links = [LinearRamp::fixed(0.0); LINK_WEIGHTS];
     for (weight, link) in links.iter_mut().enumerate() {
-        let read = read_ramp(bytes, LINK_WORD + weight * RAMP_WORDS);
-        let valid = read.current.to_bits() != (-0.0_f32).to_bits()
-            && (read.remaining == 0 || read.step != 0.0)
-            && (read.remaining != 0 || read.current.to_bits() == read.target.to_bits())
+        let read = read_ramp(bytes, LINK_WORD + weight * RAMP_WORDS)
+            .ok_or(state_error("effect.state.link"))?;
+        let valid = read.current().to_bits() != (-0.0_f32).to_bits()
+            && (read.remaining() == 0 || read.step() != 0.0)
             && ramp_path_inside(read, (0.0, 1.0), effect_contract::LINK_GLIDE_MAX_SAMPLES);
         if !valid {
             return Err(state_error("effect.state.link"));
         }
         *link = read;
     }
-    let mode = effect_contract::link_glide_mode([links[0].target, links[1].target])
+    let mode = effect_contract::link_glide_mode([links[0].target(), links[1].target()])
         .filter(|mode| {
             MULTIBAND_COMPRESSOR_DESCRIPTOR
                 .supported_link_modes
@@ -2587,10 +2596,10 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 /// A ramp's four words as raw bits, for the witness and the agreement test.
 fn ramp_bits(ramp: &LinearRamp) -> [u32; 4] {
     [
-        ramp.current.to_bits(),
-        ramp.target.to_bits(),
-        ramp.step.to_bits(),
-        ramp.remaining,
+        ramp.current().to_bits(),
+        ramp.target().to_bits(),
+        ramp.step().to_bits(),
+        ramp.remaining(),
     ]
 }
 

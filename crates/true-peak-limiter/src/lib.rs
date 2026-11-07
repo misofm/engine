@@ -112,8 +112,8 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    HEADER_WORDS, StateLayout, ramp_path_inside, read_f32, read_header, read_u32, validate_lengths,
-    write_f32, write_header, write_u32,
+    HEADER_WORDS, StateLayout, ramp_path_inside, read_f32, read_header, read_ramp, read_u32,
+    validate_lengths, write_f32, write_header, write_u32,
 };
 use lane::kernels::ramp_toward;
 use lane::{Backend, Lane, flush};
@@ -865,7 +865,7 @@ impl ChannelState {
     fn glide_frames(&self) -> u32 {
         self.link[..self.width]
             .iter()
-            .map(|link| link.remaining)
+            .map(|link| link.remaining())
             .max()
             .unwrap_or(0)
     }
@@ -1146,7 +1146,7 @@ fn exactly_one_lanes<L: Lane>(words: &[f32]) -> u32 {
 /// `true` when `ramp` has no window open and holds exactly its target: [`ramps_are_stationary`]
 /// for one lane.
 fn ramp_is_stationary(ramp: &LinearRamp) -> bool {
-    ramp.remaining == 0 && ramp.current.to_bits() == ramp.target.to_bits()
+    ramp.remaining() == 0 && ramp.current().to_bits() == ramp.target().to_bits()
 }
 
 /// `true` when no lane of `ramps` has a window open and every lane holds exactly its target.
@@ -1165,10 +1165,10 @@ fn ramps_are_stationary(ramps: &[LinearRamp]) -> bool {
 /// All four, because [`RampLanes::advance`] reads all four: two ramps that agree on `current` and
 /// disagree on `step` produce the same value on this sample and different ones on the next.
 fn ramp_words_agree(left: &LinearRamp, right: &LinearRamp) -> bool {
-    left.current.to_bits() == right.current.to_bits()
-        && left.target.to_bits() == right.target.to_bits()
-        && left.step.to_bits() == right.step.to_bits()
-        && left.remaining == right.remaining
+    left.current().to_bits() == right.current().to_bits()
+        && left.target().to_bits() == right.target().to_bits()
+        && left.step().to_bits() == right.step().to_bits()
+        && left.remaining() == right.remaining()
 }
 
 /// Issue #990 contract 1: `true` when, on every lane, the two channels carry the same designed
@@ -1544,10 +1544,10 @@ impl<L: Lane> RampLanes<L> {
     fn gather_link(ramps: &[LinearRamp]) -> Self {
         let mut words = [[0.0_f32; MAXIMUM_WIDTH]; 4];
         for (lane, ramp) in ramps.iter().enumerate() {
-            words[0][lane] = ramp.current;
-            words[1][lane] = ramp.target;
-            words[2][lane] = ramp.step;
-            words[3][lane] = ramp.remaining as f32;
+            words[0][lane] = ramp.current();
+            words[1][lane] = ramp.target();
+            words[2][lane] = ramp.step();
+            words[3][lane] = ramp.remaining() as f32;
         }
         Self {
             current: L::load(&words[0]),
@@ -1565,10 +1565,10 @@ impl<L: Lane> RampLanes<L> {
         let mut step = [0.0_f32; MAXIMUM_WIDTH];
         let mut remaining = [0.0_f32; MAXIMUM_WIDTH];
         for (lane, ramp) in ramps.iter().enumerate() {
-            current[lane] = ramp.current;
-            target[lane] = ramp.target;
-            step[lane] = ramp.step;
-            remaining[lane] = f32::from(ramp.remaining as u16);
+            current[lane] = ramp.current();
+            target[lane] = ramp.target();
+            step[lane] = ramp.step();
+            remaining[lane] = f32::from(ramp.remaining() as u16);
         }
         Self {
             current: L::load(&current),
@@ -1588,9 +1588,7 @@ impl<L: Lane> RampLanes<L> {
         self.remaining.store(&mut remaining);
         self.step.store(&mut step);
         for (lane, ramp) in ramps.iter_mut().enumerate() {
-            ramp.current = current[lane];
-            ramp.step = step[lane];
-            ramp.remaining = remaining[lane] as u32;
+            ramp.record_advance(current[lane], step[lane], remaining[lane] as u32);
         }
     }
 
@@ -2249,8 +2247,8 @@ impl<L: Lane> HotChannel<L> {
         for (lane, (limit_ramp, release_ramp)) in
             state.limit.iter().zip(state.release.iter()).enumerate()
         {
-            limit[lane] = limit_ramp.current;
-            release[lane] = release_ramp.current;
+            limit[lane] = limit_ramp.current();
+            release[lane] = release_ramp.current();
         }
         let zero = L::zero();
         Self {
@@ -4399,8 +4397,8 @@ impl<L: Lane> LimiterCore<L> {
         self.left.link[lane].set_target(weight, samples);
         self.right.link[lane].set_target(weight, samples);
         let remaining = self.left.link[lane]
-            .remaining
-            .max(self.right.link[lane].remaining);
+            .remaining()
+            .max(self.right.link[lane].remaining());
         if previous != mode || remaining != 0 {
             self.arm_relink(remaining);
         }
@@ -5224,10 +5222,10 @@ fn snapshot_lane(
         } else {
             words::RELEASE_RAMP
         };
-        write_f32(bytes, word, ramp.current);
-        write_f32(bytes, word + 1, ramp.target);
-        write_f32(bytes, word + 2, ramp.step);
-        write_u32(bytes, word + 3, ramp.remaining);
+        write_f32(bytes, word, ramp.current());
+        write_f32(bytes, word + 1, ramp.target());
+        write_f32(bytes, word + 2, ramp.step());
+        write_u32(bytes, word + 3, ramp.remaining());
     }
     for tap in 0..HISTORY_WORDS {
         write_f32(
@@ -5237,10 +5235,10 @@ fn snapshot_lane(
         );
     }
     let link = state.link[lane];
-    write_f32(bytes, words::LINK_RAMP, link.current);
-    write_f32(bytes, words::LINK_RAMP + 1, link.target);
-    write_f32(bytes, words::LINK_RAMP + 2, link.step);
-    write_u32(bytes, words::LINK_RAMP + 3, link.remaining);
+    write_f32(bytes, words::LINK_RAMP, link.current());
+    write_f32(bytes, words::LINK_RAMP + 1, link.target());
+    write_f32(bytes, words::LINK_RAMP + 2, link.step());
+    write_u32(bytes, words::LINK_RAMP + 3, link.remaining());
     let mut word = LANE_HEADER_WORDS;
     for slot in 0..shape.main {
         write_f32(bytes, word, state.main_ring[slot * width + lane]);
@@ -5330,19 +5328,13 @@ fn read_lane(
         } else {
             release_bounds
         };
-        let read = LinearRamp {
-            current: read_f32(bytes, word),
-            target: read_f32(bytes, word + 1),
-            step: read_f32(bytes, word + 2),
-            remaining: read_u32(bytes, word + 3),
-        };
+        // A settled ramp is at its target with a `+0.0` step, or `read_ramp` refuses it.
+        let read = read_ramp(bytes, word).ok_or(state_error("effect.state.parameter"))?;
         // The target and a settled current are designed values, inside the range exactly. A
         // moving current lies between two designed values under the clamped law (issue #1409
         // D2), so it is held to the same range, with no rounding budget (issue #1411 D1).
-        // `ramp_path_inside` also bounds `remaining` by `RAMP_UPDATES`, and a settled ramp's step
-        // must be `+0.0`.
-        if !(low..=high).contains(&read.target)
-            || (read.remaining == 0 && read.current.to_bits() != read.target.to_bits())
+        // `ramp_path_inside` also bounds `remaining` by `RAMP_UPDATES`.
+        if !(low..=high).contains(&read.target())
             || !ramp_path_inside(read, (low, high), RAMP_UPDATES)
         {
             return Err(state_error("effect.state.parameter"));
@@ -5357,20 +5349,14 @@ fn read_lane(
     // `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`, `c` a
     // word of an earlier glide and `n <= 2^24`, never `0`), a settled weight holds its target, and
     // the target is exactly a supported mode's rest weight (`w_avg` is `0` on both of them).
-    let link = LinearRamp {
-        current: read_f32(bytes, words::LINK_RAMP),
-        target: read_f32(bytes, words::LINK_RAMP + 1),
-        step: read_f32(bytes, words::LINK_RAMP + 2),
-        remaining: read_u32(bytes, words::LINK_RAMP + 3),
-    };
-    if is_negative_zero(link.current)
-        || (link.remaining != 0 && link.step == 0.0)
-        || (link.remaining == 0 && link.current.to_bits() != link.target.to_bits())
+    let link = read_ramp(bytes, words::LINK_RAMP).ok_or(state_error("effect.state.link"))?;
+    if is_negative_zero(link.current())
+        || (link.remaining() != 0 && link.step() == 0.0)
         || !ramp_path_inside(link, (0.0, 1.0), effect_contract::LINK_GLIDE_MAX_SAMPLES)
     {
         return Err(state_error("effect.state.link"));
     }
-    let mode = effect_contract::link_glide_mode([link.target, 0.0])
+    let mode = effect_contract::link_glide_mode([link.target(), 0.0])
         .filter(|mode| {
             TRUE_PEAK_LIMITER_DESCRIPTOR
                 .supported_link_modes
@@ -5555,7 +5541,7 @@ impl<L: Lane> LimiterCore<L> {
         if left.mode == self.coefficients.links[track] {
             self.left.link[track] = left.link;
             self.right.link[track] = right.link;
-            let remaining = left.link.remaining.max(right.link.remaining);
+            let remaining = left.link.remaining().max(right.link.remaining());
             if remaining != 0 {
                 self.arm_relink(remaining);
             }
@@ -7534,10 +7520,10 @@ mod tests {
             lanes.scatter(&mut scattered[..L::WIDTH]);
             for lane in 0..L::WIDTH {
                 assert_eq!(
-                    scattered[lane].current.to_bits(),
-                    expected[lane].current.to_bits()
+                    scattered[lane].current().to_bits(),
+                    expected[lane].current().to_bits()
                 );
-                assert_eq!(scattered[lane].remaining, expected[lane].remaining);
+                assert_eq!(scattered[lane].remaining(), expected[lane].remaining());
             }
         }
         lane::each_lane!(|L| check::<L>());
@@ -8307,10 +8293,10 @@ mod tests {
             &channel.link[..channel.width],
         ] {
             for ramp in ramps.iter() {
-                words.push(ramp.current.to_bits());
-                words.push(ramp.target.to_bits());
-                words.push(ramp.step.to_bits());
-                words.push(ramp.remaining);
+                words.push(ramp.current().to_bits());
+                words.push(ramp.target().to_bits());
+                words.push(ramp.step().to_bits());
+                words.push(ramp.remaining());
             }
         }
         words
@@ -10362,10 +10348,10 @@ mod tests {
         ]);
         for ramp in [state.limit[lane], state.release[lane]] {
             words.extend([
-                ramp.current.to_bits(),
-                ramp.target.to_bits(),
-                ramp.step.to_bits(),
-                ramp.remaining,
+                ramp.current().to_bits(),
+                ramp.target().to_bits(),
+                ramp.step().to_bits(),
+                ramp.remaining(),
             ]);
         }
         words
@@ -10724,7 +10710,7 @@ mod tests {
                         f32::from_bits(bits & 0x807F_FFFF)
                     }
                     LinkedSignal::Threshold => {
-                        let limit = [&core.left, &core.right][channel].limit[lane].current;
+                        let limit = [&core.left, &core.right][channel].limit[lane].current();
                         let below = f32::from_bits(limit.to_bits().wrapping_sub(1));
                         let magnitude = if draw.chance(1, 2) { limit } else { below };
                         if draw.chance(1, 2) {

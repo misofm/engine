@@ -52,7 +52,7 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, read_u32, write_f32, write_ramp, write_u32,
+    RAMP_WORDS, ramp_path_inside, read_f32, read_u32, write_f32, write_ramp, write_u32,
 };
 use effect_runtime::tap_crossfade::TapCrossfade;
 use lane::kernels::ramp_toward;
@@ -1278,7 +1278,7 @@ impl PreparedDelay {
 
 /// Frames for which `ramp`'s per-sample value is `start + k * step` with no snap inside.
 const fn ramp_bound(ramp: &LinearRamp) -> usize {
-    match ramp.remaining {
+    match ramp.remaining() {
         0 => usize::MAX,
         1 => 1,
         remaining => remaining as usize - 1,
@@ -1554,10 +1554,10 @@ impl PreparedDelay {
 fn lanes_symmetric(left: &DelayLane, right: &DelayLane) -> bool {
     for parameter in 0..ORDINARY_RAMP_COUNT {
         let (l, r) = (&left.ramps[parameter], &right.ramps[parameter]);
-        if l.current.to_bits() != r.current.to_bits()
-            || l.target.to_bits() != r.target.to_bits()
-            || l.step.to_bits() != r.step.to_bits()
-            || l.remaining != r.remaining
+        if l.current().to_bits() != r.current().to_bits()
+            || l.target().to_bits() != r.target().to_bits()
+            || l.step().to_bits() != r.step().to_bits()
+            || l.remaining() != r.remaining()
         {
             return false;
         }
@@ -1957,20 +1957,24 @@ fn read_carried_ramp(
     word: usize,
     spec: &ParameterSpec,
 ) -> Result<LinearRamp, StatePayloadError> {
-    let read = read_ramp(bytes, word);
-    let (low, high) = (spec.minimum, spec.maximum);
-    if !parameter_value_valid(spec, read.current)
-        || !parameter_value_valid(spec, read.target)
-        || !ramp_path_inside(read, (low, high), RAMP_SAMPLES)
-        || (read.remaining == 0 && read.current != read.target)
-    {
+    let (current, target) = (read_f32(bytes, word), read_f32(bytes, word + 1));
+    if !parameter_value_valid(spec, current) || !parameter_value_valid(spec, target) {
         return Err(state_error("effect.state.parameter"));
     }
-    Ok(LinearRamp {
-        current: normalize_zero(read.current),
-        target: normalize_zero(read.target),
-        ..read
-    })
+    // The words are read with `-0.0` normalised, so a settled `-0.0`/`+0.0` pair is at its
+    // target, as the float compare this replaced held it; any other settled ramp off its target,
+    // or with a step, is refused (issue #2368).
+    let read = LinearRamp::from_words(
+        normalize_zero(current),
+        normalize_zero(target),
+        read_f32(bytes, word + 2),
+        read_u32(bytes, word + 3),
+    )
+    .ok_or(state_error("effect.state.parameter"))?;
+    if !ramp_path_inside(read, (spec.minimum, spec.maximum), RAMP_SAMPLES) {
+        return Err(state_error("effect.state.parameter"));
+    }
+    Ok(read)
 }
 
 const fn state_error(code: &'static str) -> StatePayloadError {
@@ -2354,27 +2358,30 @@ mod tests {
         let mut effect = prepare(&values);
         process_zeros(&mut effect, 1, 0, &[span]);
         assert_eq!(
-            effect.left.ramps[2].current.to_bits(),
+            effect.left.ramps[2].current().to_bits(),
             (1.0_f32 / 64.0).to_bits()
         );
-        assert_eq!(effect.left.ramps[2].remaining, 63);
-        assert_eq!(effect.right.ramps[2].current.to_bits(), 0.35_f32.to_bits());
+        assert_eq!(effect.left.ramps[2].remaining(), 63);
+        assert_eq!(
+            effect.right.ramps[2].current().to_bits(),
+            0.35_f32.to_bits()
+        );
         process_zeros(&mut effect, 62, 1, &[]);
         assert_eq!(
-            effect.left.ramps[2].current.to_bits(),
+            effect.left.ramps[2].current().to_bits(),
             (63.0_f32 / 64.0).to_bits()
         );
-        assert_eq!(effect.left.ramps[2].remaining, 1);
+        assert_eq!(effect.left.ramps[2].remaining(), 1);
         process_zeros(&mut effect, 1, 63, &[]);
-        assert_eq!(effect.left.ramps[2].current.to_bits(), 1.0_f32.to_bits());
-        assert_eq!(effect.left.ramps[2].remaining, 0);
+        assert_eq!(effect.left.ramps[2].current().to_bits(), 1.0_f32.to_bits());
+        assert_eq!(effect.left.ramps[2].remaining(), 0);
         let retarget = point(3, ParameterChannel::Left, 64, 0.0);
         process_zeros(&mut effect, 1, 64, &[retarget]);
         assert_eq!(
-            effect.left.ramps[2].current.to_bits(),
+            effect.left.ramps[2].current().to_bits(),
             (63.0_f32 / 64.0).to_bits()
         );
-        assert_eq!(effect.left.ramps[2].remaining, 63);
+        assert_eq!(effect.left.ramps[2].remaining(), 63);
 
         let mut whole = prepare(&values);
         let mut partitioned = prepare(&values);
@@ -2408,7 +2415,7 @@ mod tests {
             }
         }
         assert_eq!(produced, expected);
-        assert_eq!(chunked.current.to_bits(), 0.8_f32.to_bits());
+        assert_eq!(chunked.current().to_bits(), 0.8_f32.to_bits());
     }
 
     /// E6 — the frozen 128-update crossfade law, its final update, and a queued retarget.
@@ -2849,7 +2856,7 @@ mod tests {
         wet.process(
             EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("wet block"),
         );
-        assert_eq!(wet.left.ramps[1].current.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(wet.left.ramps[1].current().to_bits(), 0.0_f32.to_bits());
         assert_eq!(left[48].to_bits(), 0.125_f32.to_bits());
     }
 
@@ -2970,9 +2977,9 @@ mod tests {
         ];
         let report = process_zeros(&mut effect, 4, 0, &spans);
         assert_eq!(report.invalid_spans, 4);
-        assert_eq!(effect.left.ramps[2].target.to_bits(), 0.5_f32.to_bits());
-        assert_eq!(effect.left.ramps[0].current.to_bits(), 0.35_f32.to_bits());
-        assert_eq!(effect.cross.target.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(effect.left.ramps[2].target().to_bits(), 0.5_f32.to_bits());
+        assert_eq!(effect.left.ramps[0].current().to_bits(), 0.35_f32.to_bits());
+        assert_eq!(effect.cross.target().to_bits(), 0.0_f32.to_bits());
     }
 
     /// #1278 D2a: a carried ramp is validated whole before anything is committed. Each row

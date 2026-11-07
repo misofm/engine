@@ -29,10 +29,10 @@ fn lane_state<L: Lane, const W: usize>(shaper: &Shaper<L, W>, lane: usize, out: 
         out.extend([fast[lane], slow[lane]]);
         for ramp in &ramps.ramps[lane] {
             out.extend([
-                ramp.current.to_bits(),
-                ramp.target.to_bits(),
-                ramp.step.to_bits(),
-                ramp.remaining,
+                ramp.current().to_bits(),
+                ramp.target().to_bits(),
+                ramp.step().to_bits(),
+                ramp.remaining(),
             ]);
         }
     }

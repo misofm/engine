@@ -37,10 +37,10 @@ fn state_words<L: Lane>(bank: &PreparedSoftClipBank<L>) -> Vec<u32> {
         }
         for ramp in channel.ramps.iter().flatten() {
             words.extend([
-                ramp.current.to_bits(),
-                ramp.target.to_bits(),
-                ramp.step.to_bits(),
-                ramp.remaining,
+                ramp.current().to_bits(),
+                ramp.target().to_bits(),
+                ramp.step().to_bits(),
+                ramp.remaining(),
             ]);
         }
     }
@@ -117,7 +117,7 @@ fn advancing_the_clocks_is_a_rendered_zero_block() {
                 [&rendered.inner.left, &rendered.inner.right]
                     .iter()
                     .all(
-                        |channel| channel.ramps.iter().flatten().all(|r| r.remaining == 0)
+                        |channel| channel.ramps.iter().flatten().all(|r| r.remaining() == 0)
                             && channel.history.pos == 0
                     ),
                 "seed {seed}: a fresh bank is settled at position 0"
