@@ -175,7 +175,9 @@ The reviewer asked for a claim matrix (abort source × phase) to replace the gua
 - `throwingResumeLeavesATerminalState` has its third leg, the open in flight behind a current lease.
 
 **Red.**
-- Base: `the aborted open never settled (same-session open, from ready)`. With the matrix removed, the sweep is red: `the aborted open committed (same-session open, after the resume settles, offset 2)`.
+- Base gate with the base store: red first at `the aborted open never settled (same-session open, queued on the pin)`.
+- Base gate with the fixed store: red first at `the aborted open never settled (same-session open, resume wait)`.
+- With the matrix removed, the sweep on the base gate is red: `the aborted open committed (same-session open, after the resume settles, offset 2)`.
 - M14: `the aborted open never settled (caller signal, resume wait)`.
 - M5: `the aborted open committed (caller signal, predecessor close)`.
 - M10: `a refused open left the gate loading behind a current lease with no open in flight`.
@@ -227,3 +229,10 @@ Equivalent mutants. They are kept for the representation, and each stays green f
 - `everyAbortSourceInEveryPhase`: red if any abort source, in any open phase, leaves the open committed, waiting, holding its pin, or the gate in the wrong state. The caller-signal row is the only one that tells a signal-based ownership check from an identity check (M5), or a forwarding that stops early (M14).
 - `abortAsResumeSettlesNeverCommits`: red if an abort from any source between the resume settling and the commit still commits.
 - `throwingResumeLeavesATerminalState` third leg: red if the throwing-resume refusal keys on the lease rather than on an open being in flight (M10).
+- Folded after the verdict: `abortAsResumeSettlesNeverCommits` now asserts that, past the commit, the newer open settles without error. Before, its result was discarded.
+
+**Verdict: PASS** (Sol).
+- Every mutation from the earlier verdicts is red again (12 listed), plus 27 more of the reviewer's own.
+- The claim matrix is complete, and the reviewer verified by probe its fold of the same-ID predecessor close into the first column.
+- The merge kept every #2263 entry (45 in the ledger).
+- No flakes in 768 parallel runs.

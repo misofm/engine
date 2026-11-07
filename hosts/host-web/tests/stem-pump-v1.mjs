@@ -804,7 +804,11 @@ async function abortAsResumeSettlesNeverCommits() {
         assert.equal(outcome.error, undefined, label)
         committedOffsets += 1
         await env.closing
-        await settledWithin(env.newer ?? Promise.resolve(), 500)
+        if (env.newer !== undefined) {
+          const newer = await settledWithin(env.newer, 500)
+          assert.notEqual(newer, "timed-out", `the newer open never settled ${label}`)
+          assert.equal(newer.error, undefined, `the newer open failed after the commit ${label}`)
+        }
         await env.gate.close()
       } else {
         assert.equal(outcome.error?.name, "AbortError", `the aborted open committed ${label}`)
