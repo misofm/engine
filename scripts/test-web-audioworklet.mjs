@@ -5438,6 +5438,232 @@ async function testControlWorker() {
       assert.deepEqual(posts, [{ tag: "miso.error.v1", requestId: 0, result: 9 }]);
       assert.deepEqual(fake.calls.release, []);
     }
+    // Issue #2306 (#2258 WEB-7): the Worker's lifecycle phases.
+    // Once a dispose began, no control work runs. A session that failed in the dispose window
+    // (render stored `FAILED`, so the service step and the watermark read answer `WRONG_STATE`
+    // and the event drain `REFUSED_LIFECYCLE`) cannot fail the dispose. Red, one row per stage, if
+    // the stage runs after the dispose message or a request refused during it: its refusal posts a
+    // sticky error, which the page rejects its dispose with before it terminates the Worker, so
+    // the host is never freed.
+    const failingStages = [
+      ["the service step", (engine) => { engine.calls.serviceResult = 3; }],
+      ["the watermark read", (engine) => { engine.calls.watermarkResult = 3; }],
+      ["the event drain", (engine) => { engine.calls.eventResult = 3; }],
+    ];
+    for (const [name, fail] of failingStages) {
+      const { workletPosts, send, fromWorklet } = await boot();
+      const tick = intervals.at(-1);
+      fail(fake);
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      send({ tag: "miso.status.v1", requestId: 2 });
+      now += RELEASE_TIMEOUT_MS - 1;
+      tick.callback();
+      assert.deepEqual(posts.filter((message) => message.tag === "miso.error.v1"), [],
+        `${name}: a session failed in the dispose window posts no sticky error`);
+      assert.equal(tick.cleared, false, `${name}: the release deadline's tick keeps running`);
+      assert.deepEqual(workletPosts.at(-1), { tag: "miso.release.v1" });
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      assert.deepEqual([fake.calls.dispose, posts.filter((message) => message.requestId === 1)],
+        [1, [{ tag: "miso.ack.v1", requestId: 1, result: 0 }]],
+        `${name}: the half comes back, the host is freed and the dispose is answered once`);
+    }
+    // Once the host is freed, a worklet message other than a late release means nothing. Red if
+    // a status reply that outlived its release-timeout dispose falls through to the sticky error
+    // for an unknown worklet message, posted after the dispose was answered.
+    {
+      const { send, fromWorklet } = await boot();
+      const tick = intervals.at(-1);
+      send({ tag: "miso.status.v1", requestId: 1 });
+      send({ tag: "miso.dispose.v1", requestId: 2 });
+      now += RELEASE_TIMEOUT_MS;
+      tick.callback();
+      assert.deepEqual(posts.at(-1),
+        { tag: "miso.teardown.v1", requestId: 2, result: 255, reason: "release-timeout" });
+      const answered = posts.length;
+      fromWorklet({
+        tag: "miso.render-status.v1", requestId: 1,
+        status: { state: 2, lastResult: 0, renderedQuanta: 9n, blockingRebuilds: 0, meterFramesSkipped: 0 },
+      });
+      assert.equal(posts.length, answered, "a late status reply posts nothing once the host is freed");
+      fromWorklet({ tag: "miso.released.v1", token: 0n });
+      assert.deepEqual([fake.calls.adopt, fake.calls.dispose], [[(1n << 32n) | 1n], 1],
+        "a late release with no token adopts and frees nothing");
+    }
+    // A boot ends live or refused. Red if a boot that reports `RESULT_OK` without a host (handle
+    // 0) is taken for a success: the Worker posts nothing, and the page's boot waits for good.
+    // A later dispose is answered 255 and a later request runs nothing.
+    {
+      const timers = intervals.length;
+      const { send } = await boot({}, 64, (engine) => {
+        engine.exports.miso_engine_web_v1_boot = () => 0;
+      });
+      assert.deepEqual(posts, [{ tag: "miso.error.v1", requestId: 0, result: 255 }]);
+      send({ tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([5]) });
+      send({ tag: "miso.dispose.v1", requestId: 2 });
+      assert.deepEqual(posts.slice(1), [{ tag: "miso.ack.v1", requestId: 2, result: 255 }]);
+      assert.deepEqual([fake.calls.control, fake.calls.release, intervals.length],
+        [[], [], timers], "nothing runs, nothing is released and no tick starts");
+    }
+    // In a live session the stages run on the tick, and the same refusals stay sticky: the tick
+    // stops at its next run, and a dispose starts it again for the release deadline. Red if a
+    // stage's guard or call stops it running in a live session, if a live refusal is not sticky,
+    // or if a dispose after the stop never times out its release.
+    for (const [name, fail] of failingStages) {
+      const { send } = await boot();
+      const tick = intervals.at(-1);
+      fake.calls.watermark = { ...fake.calls.watermark, revision: 4n, sample: 64n };
+      fake.calls.events[0].push(new Uint8Array([7, 7]));
+      tick.callback();
+      assert.deepEqual(posts.filter((message) => message.tag === "miso.watermark.v1")
+        .map((message) => [message.revision, message.sample]), [[4n, 64n]], `${name}: the tick posts the watermark`);
+      assert.deepEqual(posts.filter((message) => message.tag === "miso.control-event.v1")
+        .map((message) => [message.lane, [...message.frame]]), [[0, [7, 7]]], `${name}: and the event`);
+      fail(fake);
+      tick.callback();
+      assert.deepEqual(posts.filter((message) => message.tag === "miso.error.v1"),
+        [{ tag: "miso.error.v1", requestId: 0, result: 3 }], `${name}: a live refusal is sticky, once`);
+      tick.callback();
+      assert.equal(tick.cleared, true, `${name}: the tick stops at its next run`);
+      const timers = intervals.length;
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      assert.equal(intervals.length, timers + 1, `${name}: the dispose starts a tick for its deadline`);
+      now += RELEASE_TIMEOUT_MS;
+      intervals.at(-1).callback();
+      assert.deepEqual(posts.at(-1),
+        { tag: "miso.teardown.v1", requestId: 1, result: 255, reason: "release-timeout" },
+        `${name}: and the release times out`);
+    }
+    // A sticky error is latched. Red if an out-of-order request runs on after its sticky error,
+    // if the latch is dropped (a later request runs), if a later refusal loses the planes it
+    // returns, or if the tick keeps running and asking the worklet after a sticky error.
+    {
+      const { workletPosts, send } = await boot();
+      const tick = intervals.at(-1);
+      send({ tag: "miso.sessionmap.v1", requestId: 1 });
+      assert.deepEqual([posts.at(-1).tag, posts.at(-1).result, posts.at(-1).sources.length, posts.at(-1).metersAttached],
+        ["miso.sessionmap.v1", 0, 2, true], "a live session map read is answered");
+      send({ tag: "miso.control.v1", requestId: 2, frame: new Uint8Array([5]) });
+      const before = posts.length;
+      send({ tag: "miso.sessionmap.v1", requestId: 2 });
+      assert.deepEqual(posts.slice(before), [{ tag: "miso.error.v1", requestId: 2, result: 1 }],
+        "an out-of-order request ID posts one sticky error");
+      send({ tag: "miso.control.v1", requestId: 3, frame: new Uint8Array([5]) });
+      send({
+        tag: "miso.source.v1", requestId: 4, sourceId: "drums", generation: 1n, startFrame: 0n,
+        sampleRateHz: 48000, planes: [new Float32Array(64), new Float32Array(64)], frames: 64, endOfRegion: false,
+      });
+      assert.deepEqual(posts.slice(before + 1).map(({ tag, requestId, result, planes }) => [tag, requestId, result, planes?.length]), [
+        ["miso.error.v1", 3, 1, undefined], ["miso.error.v1", 4, 1, 2],
+      ], "every later request gets the sticky error, a chunk with its planes back");
+      assert.deepEqual([fake.calls.control.length, fake.calls.source], [1, []], "and runs nothing");
+      now += 50;
+      const asked = workletPosts.length;
+      tick.callback();
+      assert.deepEqual([tick.cleared, workletPosts.length], [true, asked],
+        "the tick stops and asks the worklet nothing more");
+    }
+    // In a live session, a release nobody asked for frees nothing and posts nothing, and any other
+    // worklet message outside the protocol is a sticky internal error. Red if the release runs a
+    // dispose outside one, falls through, or if the fall-through error is dropped.
+    {
+      const { fromWorklet } = await boot();
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      assert.deepEqual([posts.length, fake.calls.adopt, fake.calls.dispose], [1, [], 0]);
+      fromWorklet({ tag: "miso.unknown.v1" });
+      assert.deepEqual(posts.slice(1), [{ tag: "miso.error.v1", requestId: 0, result: 255 }]);
+    }
+    // Every refused boot frees what it booted and stays refused: the page gets the code, and a
+    // later dispose is answered 255. Red if a refusal path falls through to the release and the
+    // ready reply, or loses its code.
+    for (const [name, prepare, result] of [
+      ["an unready status", (engine) => { new DataView(engine.memory.buffer, 16384, 80).setUint32(8, 3, true); }, 1],
+      ["no TLS size", (engine) => { delete engine.exports.__tls_size; }, 255],
+      // The word at address 0 reads as a reservation record, so only the zero check refuses it.
+      ["no reservation", (engine) => {
+        new DataView(engine.memory.buffer).setUint32(0, 16, true);
+        engine.exports.miso_engine_web_v1_instance_reserve = () => 0;
+      }, 255],
+      ["a reservation past the memory", (engine) => {
+        engine.exports.miso_engine_web_v1_instance_reserve = () => engine.memory.buffer.byteLength - 8;
+      }, 255],
+      ["no token", (engine) => { engine.exports.miso_engine_web_v1_host_release = () => 0n; }, 255],
+      ["another handle's token", (engine) => {
+        engine.exports.miso_engine_web_v1_host_release = () => (2n << 32n) | 1n;
+      }, 255],
+    ]) {
+      const { send } = await boot({}, 64, prepare);
+      assert.deepEqual(posts, [{ tag: "miso.error.v1", requestId: 0, result }], `${name}: the boot is refused with its code`);
+      assert.deepEqual(fake.calls.disposeHandles, [1], `${name}: what it booted is freed`);
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 1, result: 255 }, `${name}: a later dispose`);
+    }
+    // While a dispose runs, every request but a dispose is refused `WRONG_STATE` in its own reply
+    // shape, runs nothing and is never sticky (a sticky error would reject the dispose). Red if a
+    // branch of `refuseDisposing` answers another request's shape or none.
+    {
+      const { send } = await boot();
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      const before = posts.length;
+      send({
+        tag: "miso.source.v1", requestId: 2, sourceId: "drums", generation: 1n, startFrame: 0n,
+        sampleRateHz: 48000, planes: [new Float32Array(64), new Float32Array(64)], frames: 64, endOfRegion: false,
+      });
+      send({ tag: "miso.seek.v1", requestId: 3, sourceId: "drums", generation: 2n, sourceFrame: 0n });
+      send({ tag: "miso.seek-at.v1", requestId: 4, sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: 64n });
+      send({ tag: "miso.session-seek.v1", requestId: 5, generation: 4n, sourceFrame: 0n, anchorSample: -1n, atOnce: false });
+      send({ tag: "miso.seek-report.v1", requestId: 6, sourceId: "drums" });
+      send({ tag: "miso.plan-latency.v1", requestId: 7 });
+      send({ tag: "miso.status.v1", requestId: 8 });
+      send({ tag: "miso.unknown.v1", requestId: 9 });
+      send({ tag: "miso.sessionmap.v1", requestId: 10 });
+      const replies = posts.slice(before);
+      assert.deepEqual(replies.map(({ tag, requestId, result }) => [tag, requestId, result]), [
+        ["miso.ack.v1", 2, 3], ["miso.ack.v1", 3, 3], ["miso.ack.v1", 4, 3], ["miso.session-seek.v1", 5, 3],
+        ["miso.seek-report.v1", 6, 3], ["miso.plan-latency.v1", 7, 3], ["miso.status.v1", 8, 0], ["miso.ack.v1", 9, 3],
+        ["miso.sessionmap.v1", 10, 0],
+      ]);
+      assert.deepEqual([replies[0].planes?.length, replies[3].generation, replies[4].report, replies[5].latency,
+        replies[8].sources.length, replies[8].metersAttached],
+      [2, 4n, null, null, 2, true], "each in its own shape, a chunk with its planes back");
+      assert.deepEqual([fake.calls.source, fake.calls.seek, fake.calls.seekAt, fake.calls.sessionSeek],
+        [[], [], [], []], "and none runs");
+    }
+    // Once a dispose began, no ring is drained, bound or prepared, and the finished dispose
+    // withdraws every ring and closes its port. Red if the feed drain or the seek preparation
+    // runs in the dispose window, if an attach binds a ring then, or if the dispose leaves a ring
+    // attached and its port open.
+    {
+      const { send, fromWorklet } = await boot();
+      const replies = [];
+      const port = { onmessage: null, postMessage: (data) => replies.push(data), close() {} };
+      const late = { onmessage: null, postMessage: () => {}, close() {} };
+      send({ tag: "miso.feed-port.v1", port });
+      send({ tag: "miso.feed-port.v1", port: late });
+      fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
+      const [ring, lateRing] = [0, 1].map(() => createMsb1Ring({ sourceId: "drums", channels: 2, frameCapacity: 64, capacity: 4 }));
+      const control = new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4);
+      const writer = new Msb1RingWriter(ring);
+      writer.engage(1n);
+      port.onmessage({ data: structuredClone({ op: "attach", rings: [ring] }) });
+      port.onmessage({ data: { op: "prepare-seek", requestId: 1, seeks: [] } });
+      assert.deepEqual(replies.at(-1), { op: "seek-prepared", requestId: 1, kind: "refused", result: 3 },
+        "a live preparation for another ring count is refused");
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      writer.reserve(64);
+      writer.commit({ generation: 1n, startFrame: 0n, frames: 64, endOfRegion: false });
+      send({ tag: "miso.status.v1", requestId: 2 });
+      port.onmessage({ data: { op: "prepare-seek", requestId: 2, seeks: [{ epoch: 0, generation: 1n, frame: 0n }] } });
+      assert.deepEqual(fake.calls.source, [], "no chunk is submitted in the dispose window");
+      assert.deepEqual(replies.at(-1), { op: "seek-prepared", requestId: 2, kind: "refused", result: 3 },
+        "a preparation in the dispose window is refused");
+      late.onmessage({ data: structuredClone({ op: "attach", rings: [lateRing] }) });
+      assert.equal(new Int32Array(lateRing, 0, MSB1_CONTROL_BYTES / 4)[MSB1_CONTROL.ATTACHED], 0,
+        "an attach in the dispose window binds nothing");
+      assert.equal(control[MSB1_CONTROL.ATTACHED], 1);
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      assert.deepEqual([control[MSB1_CONTROL.ATTACHED], port.onmessage, late.onmessage], [0, null, null],
+        "the finished dispose withdraws the ring and closes the ports");
+    }
   } finally {
     WebAssembly.Instance = original.Instance;
     globalThis.postMessage = original.postMessage;
