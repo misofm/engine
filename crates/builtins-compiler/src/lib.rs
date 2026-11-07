@@ -2010,13 +2010,11 @@ enum ChannelEvents<'a> {
         events: Option<automation::CellEvents<'a, 'a>>,
     },
     Composed {
-        /// The plan's program.
-        program: &'a automation::Program,
         /// What the curve composes with besides `S`.
         composition: FaderComposition,
         /// The current piece's walk, spent or not: its output holds every cursor's state for the
-        /// next piece. `None` only after a refusal (unreachable) or once the block is spent.
-        walk: Option<automation::BlockWalk<'a, f32>>,
+        /// next piece, which [`automation::BlockWalk::restart`] begins.
+        walk: automation::BlockWalk<'a, f32>,
     },
 }
 
@@ -2027,12 +2025,9 @@ impl FaderCellCursor<'_> {
         let sum = self.offsets_sum;
         let next = match &mut self.walk {
             ChannelEvents::Cell { events, .. } => events.as_mut().and_then(Iterator::next),
-            ChannelEvents::Composed {
-                composition, walk, ..
-            } => walk
-                .as_mut()
-                .and_then(|walk| walk.next_event(composition.compose(sum)))
-                .map(fader_event),
+            ChannelEvents::Composed { composition, walk } => {
+                walk.next_event(composition.compose(sum)).map(fader_event)
+            }
         };
         self.next = next.map(|event| automation::Event {
             offset: event.offset.saturating_add(base),
@@ -2096,21 +2091,13 @@ impl FaderCellCursor<'_> {
                 *events = Some(landing_events);
                 landing
             }
-            ChannelEvents::Composed {
-                program,
-                composition,
-                walk,
-            } => {
+            ChannelEvents::Composed { composition, walk } => {
                 // Every cursor lands (R17-9 on each curve), and the output lands over the longest
                 // of their jumps (R19-4).
-                let output = walk.take()?.finish(composition.compose(sum));
-                let mut landing_walk = output.start(program, span, automation::SeekMode::Ramp);
-                let landing = landing_walk
-                    .next_event(composition.compose(sum))
-                    .map(fader_event);
+                walk.restart(composition.compose(sum), span, automation::SeekMode::Ramp);
+                let landing = walk.next_event(composition.compose(sum)).map(fader_event);
                 // The one-sample span holds no other offset: the walk ends here.
-                while landing_walk.next_event(composition.compose(sum)).is_some() {}
-                *walk = Some(landing_walk);
+                while walk.next_event(composition.compose(sum)).is_some() {}
                 landing
             }
         }
@@ -2136,13 +2123,10 @@ impl FaderCellCursor<'_> {
                             release_lane_hold(events.into_state(), release);
                         }
                     }
-                    ChannelEvents::Composed {
-                        composition, walk, ..
-                    } => {
-                        if let Some(spent) = walk.take() {
-                            let output = spent.finish(composition.compose(sum));
+                    ChannelEvents::Composed { composition, walk } => {
+                        walk.finish(composition.compose(sum), |output| {
                             each_cursor_state(output, |state| release_lane_hold(state, release));
-                        }
+                        });
                     }
                 }
             }
@@ -2171,19 +2155,17 @@ impl FaderCellCursor<'_> {
                     self.jump,
                 ));
             }
-            ChannelEvents::Composed {
-                program,
-                composition,
-                walk,
-            } => {
-                let Some(spent) = walk.take() else {
-                    return false;
-                };
-                let output = spent.finish(composition.compose(sum));
+            ChannelEvents::Composed { composition, walk } => {
                 if let Some(release) = release {
-                    each_cursor_state(output, |state| release_lane_hold(state, release));
+                    walk.finish(composition.compose(sum), |output| {
+                        each_cursor_state(output, |state| release_lane_hold(state, release));
+                    });
                 }
-                *walk = Some(output.start(program, span, controls::FADER_CELL_RULE.seek));
+                walk.restart(
+                    composition.compose(sum),
+                    span,
+                    controls::FADER_CELL_RULE.seek,
+                );
             }
         }
         self.base = from;
@@ -2676,9 +2658,8 @@ impl<'a> FaderEventDriver<'a> {
                         // pull is below), so its cursors' history is this plan's.
                         curve.cursor_history_valid = true;
                         ChannelEvents::Composed {
-                            program,
                             composition: curve.fader_composition(),
-                            walk: Some(curve.walk.start(program, node, mode)),
+                            walk: curve.walk.start(program, node, mode),
                         }
                     }
                 };

@@ -689,3 +689,77 @@ fn a_step_replaces_a_hold_the_lane_put_on_every_cursor_as_one_cell_does() {
         assert_eq!(actual, expected, "{defer:?}");
     }
 }
+
+/// #2297: a block walk dropped before its end loses no event. A walk that pulled its cursors'
+/// first events and was dropped undecided leaves the output as of the block's start, so walking
+/// the same span again gives exactly a fresh output's events and states.
+///
+/// Red if a dropped walk leaves a pulled-ahead cursor's state advanced past its undecided event
+/// (the second walk would begin at 64, not 0), or if the restoration waits for the next
+/// [`Composed::start`] (it would then overwrite a deferral made between the drop and that start).
+/// No caller abandons a walk today, so no other test reaches it.
+#[test]
+fn a_dropped_block_walk_loses_no_pulled_event() {
+    let segments = [
+        seg(0, 512, 0.0, 8.0, Shape::Linear),
+        seg(512, 1_024, 2.0, 2.0, Shape::Step),
+    ];
+    let program =
+        ProgramBuilder::build(&[fader_cell(&segments), fader_cell(&segments)]).expect("program");
+    let span = NodeSpan::new(64, None, 256).expect("span");
+    let bind = || {
+        let mut output = Composed::<f32>::new(
+            &program,
+            &[(0, CursorKind::Value), (1, CursorKind::Value)],
+            Completion::End,
+        )
+        .expect("bind")
+        .with_held_grid();
+        output.seed(summed);
+        output
+    };
+    let walk = |output: &mut Composed<f32>| {
+        let mut events = Vec::new();
+        output.walk(&program, span, SeekMode::Exact, summed, |event| {
+            events.push(composed_word(&event));
+        });
+        let states: Vec<_> = output
+            .cursors()
+            .iter()
+            .map(|cursor| {
+                (
+                    cursor.heard().to_bits(),
+                    alloc::format!("{:?}", cursor.state()),
+                )
+            })
+            .collect();
+        (
+            events,
+            states,
+            alloc::format!("{:?}", output.output_state()),
+        )
+    };
+    let expected = walk(&mut bind());
+    assert_eq!(expected.0.first().map(|event| event.0), Some(0));
+    let mut dropped = bind();
+    drop(dropped.start(&program, span, SeekMode::Exact));
+    assert_eq!(
+        walk(&mut dropped),
+        expected,
+        "a walk dropped before its first event"
+    );
+    // A between-block call after the drop acts on the restored state: a deferral made then holds
+    // the grid as on an output that never walked.
+    let mut deferred = bind();
+    deferred.defer_jump(200);
+    let expected = walk(&mut deferred);
+    assert_eq!(expected.0.first().map(|event| event.4), Some(true));
+    let mut dropped = bind();
+    drop(dropped.start(&program, span, SeekMode::Exact));
+    dropped.defer_jump(200);
+    assert_eq!(
+        walk(&mut dropped),
+        expected,
+        "a deferral made after a dropped walk"
+    );
+}

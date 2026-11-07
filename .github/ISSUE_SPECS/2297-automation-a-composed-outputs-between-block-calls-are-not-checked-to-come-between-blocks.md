@@ -71,30 +71,43 @@ mid block:      [(0, false), (64, true), (128, true), (192, true), (200, false)]
 The event the cursor had already pulled at offset 0 escapes the deferral and retargets the output,
 cutting the column jump short (R19-3).
 
-**Model.** `Composed::start(&'a mut self, &'a Program, span, mode) -> BlockWalk<'a, T>`. The walk
-holds the output's borrow, the program, the span and mode, and an `ended` flag. `next_event(compose)`
-and `finish(compose) -> &'a mut Composed<T>` live only on it. `finish` drains what is left and hands
-the output back. The `block` word is gone, and `copy_from` no longer copies it. `walk` is
-`start` followed by `next_event` until `None`. The per-cursor scratch stays in the preallocated
-table, so no allocation is added, but only a `BlockWalk` can reach it.
+**Model** (as folded after the attempt-1 verdict, below).
+- `Composed::start(&'a mut self, &'a Program, span, mode) -> BlockWalk<'a, T>`. The walk holds the
+  output's borrow, the program, the span and mode, and an `ended` flag.
+- Three methods live only on the walk:
+  - `next_event(compose)` gives the block's events.
+  - `finish(&mut self, compose, between)` drains the block, then hands the output to a
+    between-block closure.
+  - `restart(&mut self, compose, span, mode)` drains the block and begins the next block or piece
+    on the same output and program.
+- `Drop` covers a walk abandoned before its end: each cursor whose event was pulled but not decided
+  returns to the state its pull started from (`before`). The walk therefore stops at its last
+  decided offset and loses no event, and a between-block call made after the drop sees that state.
+- The `block` word is gone, and `copy_from` no longer copies it.
+- `walk` is `start` followed by `next_event` until `None`.
+- The per-cursor scratch stays in the preallocated table, so no allocation is added, but only a
+  `BlockWalk` can reach it.
 
 Callers:
 - *graph*: `walk_columns` holds two `Option<(BlockWalk, roles)>`.
 - *builtins-compiler*: `MuteEvents::Composed` holds the mute walk. `ChannelEvents::Composed` holds
-  the program, a `FaderComposition` (the `own_curve`/`own_db` pair, fixed through a block) and an
-  `Option<BlockWalk>`, just as the lone-cell variant holds `Option<CellEvents>`. Each piece's restart
-  is `take` -> `finish` -> `each_cursor_state` -> `start`.
+  a `FaderComposition` (the `own_curve`/`own_db` pair, fixed through a block) and the walk. A piece
+  boundary with a pending release is `finish(.., each_cursor_state(release))` then `restart`; a
+  piece boundary without one is `restart` alone. A cut's one-sample landing is `restart` followed by
+  a drain. A spent block's release is `finish`.
 - `FaderComposite::next_event` is gone. `cursor_history_valid = true` is set once, where the
   channel's walk starts. The first pull follows at once, and nothing reads the flag while the driver
   holds the lane.
 - `crates/builtins` and `crates/effect-contract` are untouched.
 
 **Test.** One `compile_fail,E0499` doctest on `BlockWalk`, with its plain twin. The twin starts a
-block, drains it, then calls `retarget`. The `compile_fail` copy moves the `retarget` above the
-drain. Test value: it turns red if a change lets the output be reached while a block walk lives, for
-example a walk that holds a pointer instead of the borrow, or a `start` that takes `&self`. The
-plain twin turns red if the shared code stops compiling for any other reason, so the `compile_fail`
-cannot pass vacuously. No runtime test is added, and none is made useless.
+block, drains it, then calls `retarget`. The `compile_fail` copy is the same text with the
+`retarget` line moved above the drain. rustdoc checks the `E0499` code only on nightly; on stable
+any compile error satisfies the fence. Test value: it turns red if a change lets the output be
+reached while a block walk lives, for example a walk that holds a pointer instead of the borrow,
+or a `start` that takes `&self`. The plain twin turns red if the shared code stops compiling for
+any other reason, so the `compile_fail` cannot pass vacuously. No runtime test is made useless. The
+attempt-1 fold adds one runtime test (below).
 
 **Mutations (head).**
 - `BlockWalk` holds a `NonNull<Composed<T>>` instead of the borrow, and `start` takes `&mut self`
@@ -162,7 +175,71 @@ tests of that run passed on both.
   stack value holding two references, a span, a mode and a flag, so it adds no allocation, lock or
   call.
 
+**Verdict (attempt 1): PASS, with these folded.**
+- The adversarial review confirmed four points:
+  - the builtins-compiler restructure is equivalent;
+  - the doctest runs in CI (the workspace doctest step);
+  - `cursor_history_valid` is set at an equivalent point;
+  - realtime is clean, and the branch merges cleanly with `main`.
+- It found the abandoned-walk hole, the same scratch state this issue is about. A `BlockWalk`
+  dropped before its end lost the event it had pulled but not decided: the cursor's state had
+  advanced past it, and the next `start` cleared `next`. `drop(output.start(..))` followed by a
+  second walk of the same span emitted `[(64, ..), ..]` instead of `[(0, ..), ..]`. Folded:
+  - **Fix.** The restore went into `Drop for BlockWalk`, not into `Composed::start` as the
+    reviewer suggested. A cursor whose `next` is `Some` and not consumed returns to `before`, and
+    `next` is cleared. A restore deferred to the next `start` would overwrite any between-block
+    call made after the drop (a `defer_jump`, say) with the stale `before`. A walk at its end has
+    no pulled event, so `Drop` does nothing for it.
+  - **API.** `finish` takes `&mut self` and a between-block closure instead of moving the borrow
+    out, because a type with `Drop` cannot move a field out. `restart` begins the next block or
+    piece on the same walk. builtins-compiler's composed fader channel now holds the walk itself
+    rather than an `Option`, and no longer needs its own `program` field.
+  - **Test.** `compose::tests::a_dropped_block_walk_loses_no_pulled_event`. Case 1: a walk
+    dropped before its first event, then the same span walked again, must equal a fresh output's
+    events, cursor states and output state. Case 2: the same, with a `defer_jump(200)` made between
+    the drop and the walk.
+    - Red at `59ae78d70` (case 1): `left: ([(64, .., Grid, false), (128, ..), (192, ..)], ..)`
+      against `right: ([(0, .., Grid, false), (64, ..), (128, ..), (192, ..)], ..)`.
+    - Test value: red if a dropped walk leaves a pulled-ahead cursor past its undecided event, or
+      if the restore waits for the next `start` (it would then overwrite the deferral). No caller
+      abandons a walk today, so no other test reaches it.
+  - **Mutations.**
+    - Restore line deleted from `Drop`: red, case 1.
+    - Restore moved from `Drop` into `start`, the reviewer's placement: red, case 2 (`a deferral
+      made after a dropped walk`).
+  - **No bit moved, again.** The same instrumentation and scratch generator were re-applied to the
+    folded head. The run skipped only the new test, since its walks have no base counterpart. The
+    per-binary digests are identical to the base table above: 138,498 walks in all, every ordered
+    and sorted digest the same, and the seeded generator still at `a31771ff..39e4`. So no current
+    caller ever drops an unfinished walk, and the restore never fires on their paths.
+  - **Doc.** `BlockWalk`'s doc now says a dropped walk stops at its last decided offset and loses
+    no event; it no longer describes the loss as acceptable.
+- Doctest wording: the `compile_fail` twin is the plain twin with the `retarget` line moved, and
+  the doc says rustdoc checks `E0499` only on nightly.
+- `cursor_history_valid`'s untested re-arm is tracked by the coordinator in #2258.
+
+  - **Placement.** The restore body is `BlockWalk::abandon`, inside the marked realtime region.
+    The one-line `impl Drop` that calls it sits just after the region, because the policy's text
+    predicate reads `fn drop(` as a `drop(` call. That is the same placement as the engine's other
+    render-reachable `Drop` impls (`RetirementCredit`, `CanonicalFpEnv`). The hash run above had
+    the same body inline in `drop`, before it moved.
+  - **Doctests.** A `Drop` type's borrow lasts until it is dropped, so both twins now end the walk
+    with `drop(block)`. The plain twin drops the walk and then calls `retarget`. The `compile_fail`
+    twin is that text with the `retarget` line moved above the drain. The pointer-instead-of-borrow
+    mutation above was run at `59ae78d70`, before `drop(block)` was added.
+
+**Gates after the fold (head).**
+- `cargo test --locked --no-fail-fast -p automation -p graph -p builtins-compiler -p host-core
+  --all-targets --features builtins-compiler/test-support,graph/test-support,host-core/test-support`:
+  719 passed (the new test included), 0 failed.
+- Doctests on the same packages and features: all pass, including both `BlockWalk` twins.
+- clippy `-D warnings` on the same set: clean. `cargo fmt --check`: clean.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps -p automation -p graph -p builtins-compiler`:
+  clean.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- `cargo run --locked --release -p realtime-policy`: `ok (292 marked regions in 46 files)`.
+
 **Follow-ups (not in this issue).**
 - `cursor_history_valid`'s re-arm at a fader walk's start has no test that reaches it (mutation
-  above).
+  above). Tracked in #2258.
 - host-core's broken intra-doc link `crate::warm::production_config` (pre-existing).

@@ -598,19 +598,24 @@ impl<T: Composable> Composed<T> {
         span: NodeSpan,
         mode: SeekMode,
     ) -> BlockWalk<'a, T> {
-        let frames = span.frames();
-        for cursor in self.cursors.iter_mut() {
-            cursor.next = None;
-            cursor.consumed = false;
-            cursor.shown = cursor.heard;
-            pull(cursor, program, &span, mode, 0, frames);
-        }
+        self.begin(program, span, mode);
         BlockWalk {
             output: self,
             program,
             span,
             mode,
             ended: false,
+        }
+    }
+
+    /// Each cursor pulls its first event of the block `span`.
+    fn begin(&mut self, program: &Program, span: NodeSpan, mode: SeekMode) {
+        let frames = span.frames();
+        for cursor in self.cursors.iter_mut() {
+            cursor.next = None;
+            cursor.consumed = false;
+            cursor.shown = cursor.heard;
+            pull(cursor, program, &span, mode, 0, frames);
         }
     }
 
@@ -680,11 +685,14 @@ impl<T: Composable> Composed<T> {
 /// cursor's pulled event and the state its pull started from) is meaningful only while a block is
 /// walked, so the walk holds the output's only borrow: the between-block calls
 /// ([`Composed::retarget`], [`Composed::defer_jump`], [`Composed::clear_deferred_jump`], a seed,
-/// a carry or a cursor's state) cannot be made until it ends. A walk dropped before its end
-/// leaves each cursor where its last pull stopped; the next [`Composed::start`] clears the
-/// scratch.
+/// a carry or a cursor's state) cannot be made until it ends. [`Self::finish`] walks the rest of
+/// the block and hands the output to a between-block call; [`Self::restart`] begins the next
+/// block (or piece) on the same output. A walk dropped before its end stops at its last decided
+/// offset and loses no event: each cursor whose event was pulled and not decided returns to the
+/// state its pull started from, so the next block pulls that event again.
 ///
-/// The between-block call after the block's end compiles:
+/// The between-block call after the walk is dropped compiles (the walk implements `Drop`, so its
+/// borrow lasts until it is dropped or goes out of scope):
 ///
 /// ```
 /// use automation::compose::{Composed, CursorKind};
@@ -713,11 +721,13 @@ impl<T: Composable> Composed<T> {
 /// let span = NodeSpan::new(64, None, 256).expect("a span");
 /// let mut block = output.start(&program, span, SeekMode::Exact);
 /// while block.next_event(|heard| heard.value(0)).is_some() {}
+/// drop(block);
 /// output.retarget(5.0, 320, 200);
 /// ```
 ///
-/// The same call inside the block does not compile (E0499: the walk still borrows the output).
-/// This twin differs from the one above only in where the retarget stands:
+/// The same call inside the block does not compile (E0499: the walk still borrows the output;
+/// rustdoc checks the error code only on nightly). This twin is the one above with the
+/// `retarget` line moved above the drain:
 ///
 /// ```compile_fail,E0499
 /// use automation::compose::{Composed, CursorKind};
@@ -747,6 +757,7 @@ impl<T: Composable> Composed<T> {
 /// let mut block = output.start(&program, span, SeekMode::Exact);
 /// output.retarget(5.0, 320, 200);
 /// while block.next_event(|heard| heard.value(0)).is_some() {}
+/// drop(block);
 /// ```
 #[derive(Debug)]
 #[must_use = "a block's events come out of `next_event`"]
@@ -900,11 +911,51 @@ impl<'a, T: Composable> BlockWalk<'a, T> {
     }
 
     /// Ends the block: walks its remaining events, if any, and drops them (every cursor's state
-    /// advances through the block, as the caller's own drain would), and gives the output back
-    /// for the between-block calls. A walk already at its end walks nothing.
-    pub fn finish(mut self, mut compose: impl FnMut(Heard<'_>) -> T) -> &'a mut Composed<T> {
+    /// advances through the block, as the caller's own drain would), then hands the output to
+    /// `between` for between-block calls (a release of every cursor's hold). The walk stays at
+    /// its end until [`Self::restart`]. A walk already at its end walks nothing.
+    pub fn finish(
+        &mut self,
+        mut compose: impl FnMut(Heard<'_>) -> T,
+        between: impl FnOnce(&mut Composed<T>),
+    ) {
         while self.next_event(&mut compose).is_some() {}
-        self.output
+        between(self.output);
+    }
+
+    /// Ends the block as [`Self::finish`] does and begins the block `span` of the same program:
+    /// the next block of the output, or the next piece of one (a fader channel cut at a held
+    /// ramp's end or at a mute event).
+    pub fn restart(
+        &mut self,
+        mut compose: impl FnMut(Heard<'_>) -> T,
+        span: NodeSpan,
+        mode: SeekMode,
+    ) {
+        while self.next_event(&mut compose).is_some() {}
+        self.output.begin(self.program, span, mode);
+        self.span = span;
+        self.mode = mode;
+        self.ended = false;
+    }
+}
+
+impl<T> BlockWalk<'_, T> {
+    /// A walk dropped before its end stops at its last decided offset (#2297): each cursor whose
+    /// event was pulled and not decided returns to the state its pull started from, so the next
+    /// block pulls that event again instead of losing it, and a between-block call made first
+    /// sees that state. A walk at its end has no such cursor. Run by the walk's `Drop`.
+    fn abandon(&mut self) {
+        if self.ended {
+            return;
+        }
+        for cursor in self.output.cursors.iter_mut() {
+            if cursor.next.is_some() && !cursor.consumed {
+                cursor.state = cursor.before;
+            }
+            cursor.next = None;
+            cursor.consumed = false;
+        }
     }
 }
 
@@ -1005,6 +1056,14 @@ fn replay(cursor: &mut ComposeCursor, program: &Program, span: &NodeSpan, mode: 
     for _ in events.by_ref() {}
 }
 // REALTIME_POLICY_END
+
+// Render-reachable, outside the marked region only because the policy's text predicate reads a
+// `Drop` impl's method name as a drop call: the body is the marked `BlockWalk::abandon`.
+impl<T> Drop for BlockWalk<'_, T> {
+    fn drop(&mut self) {
+        self.abandon();
+    }
+}
 
 #[cfg(test)]
 mod tests;
