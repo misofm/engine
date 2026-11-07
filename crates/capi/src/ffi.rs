@@ -216,8 +216,9 @@ unsafe fn plan_busy_slot(plan: *const Plan) -> *const ClaimWord {
 }
 
 /// A call's claim on a handle's exclusive state through the handle's [`ClaimWord`]: a plan's
-/// render state (#2213: `render_f32_planar` and `plan_prepare_seek`) or a session's state and
-/// diagnostic (#2276: every session call). A call holds it for the whole time it touches that
+/// render state (#2213: `render_f32_planar` and `plan_prepare_seek`), a session's state and
+/// diagnostic (#2276: every session call) or an engine's diagnostic (#2321: `compile_session` and
+/// `last_error` on the engine). A call holds it for the whole time it touches that
 /// state, so at most one thread ever holds the exclusive borrow, even when a host breaks the
 /// thread rule. The claim is one compare-exchange (`Acquire`, so the holder sees every write of
 /// the previous holder) and its drop is one `Release` store, on every exit, an early return and an
@@ -232,6 +233,15 @@ impl<'a> HandleClaim<'a> {
             .ok()
             .map(|_| Self(word))
     }
+
+    /// Claim `word` for the handle's destroy (#2276, #2321), `true` when the caller may free the
+    /// handle. The claim is never released: the word goes with the freed handle, so a call that
+    /// reaches the word before the free is refused, not handed state that is being freed. `false`
+    /// when another call holds the word: the destroy frees nothing and the handle stays live and
+    /// valid for the call in flight, every later call and a later quiescent destroy.
+    fn claim_for_destroy(word: &'a ClaimWord) -> bool {
+        Self::try_claim(word).map(core::mem::forget).is_some()
+    }
 }
 
 impl Drop for HandleClaim<'_> {
@@ -240,20 +250,40 @@ impl Drop for HandleClaim<'_> {
     }
 }
 
-/// Claims `plan`'s render state for one render-side call, or records `render.busy` and returns
-/// `None` (#2213).
+/// Claims `plan`'s render state for one render-side call (#2213), or `None` when another holds
+/// it. A refused call returns [`RESULT_BUSY`] and touches nothing (#2293): the plan's diagnostic
+/// word belongs to the holder, so a refusal never stores over the code the holder left there.
 ///
 /// # Safety
 ///
 /// `plan` must have passed [`plan_kind`].
 unsafe fn claim_render_side<'a>(plan: *const Plan) -> Option<HandleClaim<'a>> {
-    // SAFETY: The caller proved the live kind; both projections are disjoint from `state`.
-    let claim = HandleClaim::try_claim(unsafe { &*plan_busy_slot(plan) });
-    if claim.is_none() {
-        // SAFETY: See above.
-        unsafe { &*plan_error_slot(plan) }.store(plan_error::BUSY, Ordering::Relaxed);
-    }
-    claim
+    // SAFETY: The caller proved the live kind; the projection is disjoint from `state`.
+    HandleClaim::try_claim(unsafe { &*plan_busy_slot(plan) })
+}
+
+/// Projects an engine's claim word (#2321) without borrowing the whole handle.
+///
+/// # Safety
+///
+/// `engine` must have passed [`engine_kind`].
+unsafe fn engine_busy_slot(engine: *const Engine) -> *const ClaimWord {
+    // SAFETY: The live-kind check established the concrete representation; a raw field projection
+    // creates no reference to `Engine` itself.
+    unsafe { &raw const (*engine).busy }
+}
+
+/// Claims `engine`'s diagnostic for one engine call (#2321), or `None` when another call holds
+/// it. A refused call returns [`RESULT_BUSY`] and touches nothing: the diagnostic belongs to the
+/// holder. The holder reaches the diagnostic through `&Engine`, a shared borrow whose fields are
+/// all interior-mutable, so a refused call's read of the word aliases nothing exclusive.
+///
+/// # Safety
+///
+/// `engine` must have passed [`engine_kind`].
+unsafe fn claim_engine<'a>(engine: *const Engine) -> Option<HandleClaim<'a>> {
+    // SAFETY: The caller proved the live kind; the projection is disjoint from the diagnostic.
+    HandleClaim::try_claim(unsafe { &*engine_busy_slot(engine) })
 }
 
 /// Projects a session's claim word (#2276) without borrowing the whole handle.
@@ -402,6 +432,11 @@ pub unsafe extern "C" fn miso_engine_v1_engine_create(
 
 /// Destroys an engine handle off render; null is a no-op.
 ///
+/// A destroy that finds an engine call holding the engine (#2321) is refused: it frees nothing
+/// and returns, as `session_destroy` does (#2276). The engine stays live and valid, and a later
+/// quiescent destroy frees it; a host that never destroys it again leaks it. A call that starts
+/// after a successful destroy is still the host's to prevent: freed memory carries no claim.
+///
 /// # Safety
 ///
 /// A nonnull `engine` must be the unique live engine handle returned by this library.
@@ -418,13 +453,22 @@ pub unsafe extern "C" fn miso_engine_v1_engine_destroy(engine: *mut Engine) {
         if unsafe { engine_kind(engine) } != RESULT_OK {
             return;
         }
+        // SAFETY: `engine` passed the live-kind check.
+        if !HandleClaim::claim_for_destroy(unsafe { &*engine_busy_slot(engine) }) {
+            return;
+        }
         // SAFETY: The successful kind check and ABI ownership contract establish that this is the
-        // unique pointer produced by Box::into_raw and has not previously been destroyed.
+        // unique pointer produced by Box::into_raw and has not previously been destroyed, and the
+        // claim proves no engine call holds the engine.
         drop(unsafe { Box::from_raw(engine) });
     });
 }
 
 /// Transactionally compile one strict session and publish independent child handles together.
+///
+/// The call claims the engine right after the handle check (#2321); one that finds another engine
+/// call holding it returns [`RESULT_BUSY`] with both handle outputs cleared, as on every
+/// rejection, and writes neither the engine's diagnostic nor `diagnostics`.
 ///
 /// # Safety
 ///
@@ -456,6 +500,13 @@ pub unsafe extern "C" fn miso_engine_v1_compile_session(
         if kind != RESULT_OK {
             return kind;
         }
+        // #2321: the engine's diagnostic belongs to the call that holds the engine, so a compile
+        // that finds it held is refused before it validates or writes anything; both handle
+        // outputs stay cleared, as on every rejection.
+        // SAFETY: `engine` passed the live-kind check.
+        let Some(_claim) = (unsafe { claim_engine(engine) }) else {
+            return RESULT_BUSY;
+        };
         if document.is_null() || limits.is_null() || diagnostics.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
@@ -1329,8 +1380,8 @@ pub unsafe extern "C" fn miso_engine_v1_dequeue_event(
 /// `plan` must be live and exclusive; `output` must satisfy the caller-owned output contract.
 ///
 /// A call made while another render-side call holds the plan (a concurrent render or
-/// [`miso_engine_v1_plan_prepare_seek`]) touches no plan state and returns
-/// `RESULT_RENDER_REJECTED` with `render.busy` (#2213).
+/// [`miso_engine_v1_plan_prepare_seek`]) touches no plan state, writes no diagnostic and returns
+/// [`RESULT_BUSY`] (#2213, #2293).
 ///
 /// Thread: render only, never concurrently with itself or with `plan_prepare_seek`.
 #[unsafe(no_mangle)]
@@ -1354,7 +1405,7 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
         // `&mut PlanState` while this one runs.
         // SAFETY: `plan` passed the live-kind check.
         let Some(_claim) = (unsafe { claim_render_side(plan) }) else {
-            return RESULT_RENDER_REJECTED;
+            return RESULT_BUSY;
         };
         if output.is_null() {
             return RESULT_INVALID_ARGUMENT;
@@ -1456,8 +1507,8 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
 /// nothing to prepare is `RESULT_OK` and does nothing. It renders nothing, advances no clock and
 /// allocates nothing.
 ///
-/// A call made while another render-side call holds the plan touches no plan state and returns
-/// `RESULT_RENDER_REJECTED` with `render.busy`. A success clears the plan's diagnostic.
+/// A call made while another render-side call holds the plan touches no plan state, writes no
+/// diagnostic and returns [`RESULT_BUSY`] (#2293). A success clears the plan's diagnostic.
 ///
 /// # Safety
 ///
@@ -1475,7 +1526,7 @@ pub unsafe extern "C" fn miso_engine_v1_plan_prepare_seek(plan: *mut Plan) -> u3
         }
         // SAFETY: `plan` passed the live-kind check.
         let Some(_claim) = (unsafe { claim_render_side(plan) }) else {
-            return RESULT_RENDER_REJECTED;
+            return RESULT_BUSY;
         };
         // SAFETY: The live-kind check establishes the concrete representation and the claim
         // excludes every other render-side borrow of `state`. The projections are disjoint, so a
@@ -1591,6 +1642,10 @@ pub unsafe extern "C" fn miso_engine_v1_plan_watermark(
 
 /// Copies the handle-local diagnostic. Checkpoint 1 engine handles have an empty diagnostic.
 ///
+/// On a session (#2276) or an engine (#2321) the call claims the handle, and one that finds
+/// another call holding it returns [`RESULT_BUSY`] with `out` untouched; on a plan it takes no
+/// claim and runs concurrently with render.
+///
 /// # Safety
 ///
 /// `live_handle` must identify a live ABI handle and `out` must satisfy the bytes-output contract.
@@ -1609,7 +1664,12 @@ pub unsafe extern "C" fn miso_engine_v1_last_error(
         // prefix never aliases the plan's render-thread-exclusive state.
         let header = unsafe { &*live_handle.cast::<HandleHeader>() };
         if header.is_engine() {
+            // #2321: as for a session, the diagnostic belongs to the call that holds the engine.
             // SAFETY: The recognized header identifies a live engine handle.
+            let Some(_claim) = (unsafe { claim_engine(live_handle.cast::<Engine>()) }) else {
+                return RESULT_BUSY;
+            };
+            // SAFETY: As above; the claim excludes every other engine call's borrow.
             let engine = unsafe { &*live_handle.cast::<Engine>() };
             let bytes = engine.last_error.borrow();
             let len = engine.last_error_len.get().min(bytes.len());
@@ -1664,19 +1724,25 @@ pub unsafe extern "C" fn miso_engine_v1_session_destroy(session: *mut Session) {
             return;
         }
         // SAFETY: `session` passed the live-kind check.
-        let Some(call) = (unsafe { claim_session(session) }) else {
+        if !HandleClaim::claim_for_destroy(unsafe { &*session_busy_slot(session) }) {
             return;
-        };
-        // The claim is never released: the word goes with the session, so a call that reaches
-        // the handle before the free below is refused, not handed state that is being freed.
-        core::mem::forget(call);
+        }
         // SAFETY: The ABI contract guarantees unique live ownership, and the claim proves no
-        // session call is in flight.
+        // session call holds the session.
         drop(unsafe { Box::from_raw(session) });
     });
 }
 
 /// Destroys a render-plan handle off render; null is a no-op.
+///
+/// A destroy that finds a render-side call (`render_f32_planar` or `plan_prepare_seek`) holding
+/// the plan's render state (#2321) is refused: it frees nothing and returns, as `session_destroy`
+/// does (#2276), because freeing would free the plan under the running render. The plan stays
+/// live and valid, the call in flight and every later call proceed normally, and a later
+/// quiescent destroy frees it; a host that never destroys it again leaks it. The any-thread
+/// queries (`plan_resources`, `plan_watermark`, `last_error`) take no claim, so a destroy
+/// overlapping one of them, and a call that starts after a successful destroy, stay the host's
+/// to prevent.
 ///
 /// # Safety
 ///
@@ -1690,10 +1756,16 @@ pub unsafe extern "C" fn miso_engine_v1_plan_destroy(plan: *mut Plan) {
             return;
         }
         // SAFETY: Only the matching live kind may be reconstructed and destroyed.
-        if unsafe { plan_kind(plan) } == RESULT_OK {
-            // SAFETY: The ABI contract guarantees unique live ownership and quiescent destroy.
-            drop(unsafe { Box::from_raw(plan) });
+        if unsafe { plan_kind(plan) } != RESULT_OK {
+            return;
         }
+        // SAFETY: `plan` passed the live-kind check; the projection is disjoint from `state`.
+        if !HandleClaim::claim_for_destroy(unsafe { &*plan_busy_slot(plan) }) {
+            return;
+        }
+        // SAFETY: The ABI contract guarantees unique live ownership, and the claim proves no
+        // render-side call holds the plan.
+        drop(unsafe { Box::from_raw(plan) });
     });
 }
 
@@ -2050,6 +2122,14 @@ pub(crate) fn test_hold_render_claim(plan: *const Plan, held: bool) {
 pub(crate) fn test_hold_session_claim(session: *const Session, held: bool) {
     // SAFETY: Test callers retain the live session; the word is an atomic projection.
     unsafe { &*session_busy_slot(session) }.store(u32::from(held), Ordering::Release);
+}
+
+/// Holds (`true`) or releases (`false`) `engine`'s claim word, as an engine call on another
+/// thread would (#2321).
+#[cfg(test)]
+pub(crate) fn test_hold_engine_claim(engine: *const Engine, held: bool) {
+    // SAFETY: Test callers retain the live engine; the word is an atomic projection.
+    unsafe { &*engine_busy_slot(engine) }.store(u32::from(held), Ordering::Release);
 }
 
 #[cfg(test)]
@@ -4004,12 +4084,137 @@ mod tests {
         assert_eq!(test_lifecycle_counters().current_provider_disposed, 1);
     }
 
+    /// #2321 (follow-up from #2276 and #2293): a plan destroy that finds a render-side call
+    /// holding the plan frees nothing, so a control-thread teardown racing an audio callback
+    /// leaks the plan instead of freeing `PlanState` under the running render. The plan stays
+    /// live: released, it renders, and a quiescent destroy frees it.
+    ///
+    /// Test value: red if `plan_destroy` frees the plan without claiming `render_busy` (on base it
+    /// freed it: `current_plan_disposed: 1`), or if a refused destroy leaves the plan unusable.
+    #[test]
+    fn a_plan_destroy_while_a_render_side_call_holds_the_plan_frees_nothing() {
+        let (engine, session, plan) = compiled_fixture();
+        let mut pcm = vec![f32::NAN; 256];
+        let output = PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: 256,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        assert_eq!(test_render(plan, 0, &output), RESULT_OK);
+
+        test_reset_lifecycle_observer();
+        test_hold_render_claim(plan, true);
+        // SAFETY: The plan is live; the held claim stands in for a render call in flight.
+        unsafe { miso_engine_v1_plan_destroy(plan) };
+        assert_eq!(
+            test_lifecycle_counters(),
+            crate::runtime::TestOwnerCounters::default(),
+            "a destroy refused by a held render claim frees nothing"
+        );
+
+        test_hold_render_claim(plan, false);
+        pcm.fill(f32::NAN);
+        assert_eq!(test_render(plan, 128, &output), RESULT_OK);
+        assert!(pcm.iter().all(|sample| sample.is_finite()));
+        destroy_fixture(engine, session, plan);
+        assert_eq!(test_lifecycle_counters().current_plan_disposed, 1);
+    }
+
+    /// #2321: an engine call made while another holds the engine is refused with `RESULT_BUSY`
+    /// and touches nothing, so a host that breaks the engine thread rule gets a result code, not
+    /// two borrows of the engine's `RefCell` diagnostic at once; an engine destroy that finds the
+    /// engine held frees nothing. Released, the same engine serves calls again.
+    ///
+    /// Test value: red if `compile_session` or `last_error` on an engine reaches the engine's
+    /// diagnostic without claiming the engine, if a refused call writes the diagnostic or a
+    /// caller's bytes output, or if `engine_destroy` frees the engine without claiming it.
+    #[test]
+    fn an_engine_call_while_another_holds_the_engine_is_refused_not_raced() {
+        bench_support::alloc::assert_installed();
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        // A known diagnostic, so a refusal that writes one is seen.
+        let small = CompileLimits {
+            maximum_document_bytes: 1,
+            ..limits()
+        };
+        let document = b"{}";
+        let mut storage = [0xa5_u8; 64];
+        let mut bytes_out = || BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: storage.as_mut_ptr(),
+            capacity_bytes: 64,
+            required_bytes: u64::MAX,
+        };
+        let (mut diagnostics, mut error) = (bytes_out(), bytes_out());
+        let mut session = ptr::dangling_mut::<Session>();
+        let mut plan = ptr::dangling_mut::<Plan>();
+        let compile =
+            |diagnostics: &mut BytesOut, session: &mut *mut Session, plan: &mut *mut Plan| {
+                // SAFETY: Every pointer names a complete local ABI value or the live engine.
+                unsafe {
+                    miso_engine_v1_compile_session(
+                        engine,
+                        document.as_ptr(),
+                        document.len() as u64,
+                        &small,
+                        diagnostics,
+                        session,
+                        plan,
+                    )
+                }
+            };
+        assert_eq!(
+            compile(&mut bytes_out(), &mut session, &mut plan),
+            crate::RESULT_COMPILE_REJECTED
+        );
+        let diagnostic = read_last_error(engine.cast());
+        assert_eq!(diagnostic, b"capi.document.maximum_bytes\t$\n");
+        storage.fill(0xa5);
+
+        test_hold_engine_claim(engine, true);
+        let refused = [
+            compile(&mut diagnostics, &mut session, &mut plan),
+            last_error(engine.cast(), &mut error),
+        ];
+        assert_eq!(refused, [crate::RESULT_BUSY; 2]);
+        for out in [&diagnostics, &error] {
+            assert_eq!(out.required_bytes, u64::MAX);
+        }
+        assert!(storage.iter().all(|byte| *byte == 0xa5));
+        // A refused compile clears both handle outputs, as every rejection does, and publishes
+        // nothing.
+        assert!(session.is_null() && plan.is_null());
+
+        // A destroy that finds the engine held frees nothing.
+        let mark = bench_support::alloc::current_thread_counters();
+        destroy(engine);
+        let freed = bench_support::alloc::current_thread_delta_since(mark).deallocations;
+        assert_eq!(
+            freed, 0,
+            "a destroy refused by a held engine claim frees nothing"
+        );
+
+        test_hold_engine_claim(engine, false);
+        assert_eq!(read_last_error(engine.cast()), diagnostic);
+        let mark = bench_support::alloc::current_thread_counters();
+        destroy(engine);
+        let freed = bench_support::alloc::current_thread_delta_since(mark).deallocations;
+        assert!(freed > 0, "a quiescent destroy frees the engine");
+    }
+
     /// #2276: the claim every session call and both render-side calls take, on two threads.
     /// Each thread claims one word and, holding it, writes the state the word guards, then leaves:
     /// one by an early error return, the other by an unwind its entry point catches (as
     /// `catch_result` does). In every interleaving at most one thread holds the state (loom's
     /// `UnsafeCell` fails an access that is not ordered after the other's), at least one wins,
-    /// and both exits release the word.
+    /// and both exits release the word. `destroy_racing_a_call_loom` (#2321) races a handle's
+    /// destroy against one call on it.
     #[cfg(loom)]
     mod handle_claim_loom {
         use super::super::HandleClaim;
@@ -4025,6 +4230,9 @@ mod tests {
             state: UnsafeCell<u32>,
         }
 
+        /// What a destroy leaves in the state: the model's stand-in for freed memory.
+        const FREED: u32 = u32::MAX;
+
         /// One call on `handle`, which leaves by an unwind when `unwind` and by an early error
         /// return otherwise. `true` when it held the claim, `false` when it was refused.
         fn call(handle: &Handle, unwind: bool) -> bool {
@@ -4033,7 +4241,10 @@ mod tests {
                     return Ok(());
                 };
                 // SAFETY: loom checks this access against every other access to the cell.
-                handle.state.with_mut(|state| unsafe { *state += 1 });
+                handle.state.with_mut(|state| unsafe {
+                    assert_ne!(*state, FREED, "a call reached a destroyed handle's state");
+                    *state += 1;
+                });
                 if unwind {
                     // `resume_unwind` skips the panic hook, so the model prints nothing.
                     resume_unwind(Box::new("an unwinding call"));
@@ -4063,6 +4274,51 @@ mod tests {
                 // SAFETY: Both threads have finished; loom checks the access.
                 let held = handle.state.with(|state| unsafe { *state });
                 assert_eq!(held, u32::from(erring) + u32::from(unwinding));
+            });
+        }
+
+        /// A destroy of `handle`, as `engine_destroy`, `session_destroy` and `plan_destroy` do:
+        /// claim for destroy, then free. `true` when it freed the handle.
+        fn destroy(handle: &Handle) -> bool {
+            if !HandleClaim::claim_for_destroy(&handle.word) {
+                return false;
+            }
+            // SAFETY: loom checks this access against every other access to the cell.
+            handle.state.with_mut(|state| unsafe { *state = FREED });
+            true
+        }
+
+        /// #2321: a destroy racing one call on the same handle (a plan destroy against a render,
+        /// say). In every interleaving the free is ordered after the call's access or the call is
+        /// refused, so no call that holds the handle reaches freed state; a destroy that finds
+        /// the call holding the handle frees nothing and leaves it valid, and a later quiescent
+        /// destroy frees it; and a freed handle's word stays claimed.
+        #[test]
+        fn destroy_racing_a_call_loom() {
+            loom::model(|| {
+                let handle = Arc::new(Handle {
+                    word: ClaimWord::new(0),
+                    state: UnsafeCell::new(0),
+                });
+                let other = Arc::clone(&handle);
+                let caller = loom::thread::spawn(move || call(&other, false));
+                let destroyed = destroy(&handle);
+                let called = caller.join().expect("the calling thread");
+                assert!(
+                    destroyed || called,
+                    "the destroy and the call were both refused"
+                );
+                assert_eq!(
+                    handle.word.load(Ordering::Relaxed),
+                    u32::from(destroyed),
+                    "a freed handle's word was released, or a refused destroy kept it"
+                );
+                if !destroyed {
+                    assert!(destroy(&handle), "a quiescent destroy was refused");
+                }
+                // SAFETY: Both threads have finished; loom checks the access.
+                let state = handle.state.with(|state| unsafe { *state });
+                assert_eq!(state, FREED);
             });
         }
     }

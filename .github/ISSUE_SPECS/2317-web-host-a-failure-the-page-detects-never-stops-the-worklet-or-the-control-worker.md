@@ -22,7 +22,7 @@ What is already right, and stays:
 ## Decision
 - **One new internal message, `miso.fail.v1 { tag, result }`**, sent page to peer. `result` is the host's sticky error's code. It is not a request: it carries no request ID, takes no place in the request sequence and gets no reply, like `miso.service.v1`.
   - **The worklet** handles it first on its page port, in both modes, before the mode's dispatch. A `live` phase fails sticky with `result` (`fail(result, false)`), and `failurePosted` is set, since the page holds the error. Any other phase stays as it is: a failure already recorded keeps its code, and a final phase (`released`, `disposed`) is never left. Nothing is posted back. A malformed `miso.fail.v1` falls through to the existing unknown-message path, which is sticky.
-  - **The control Worker** handles it in `onPageMessage`, after the `disposed` check and before `receive`. A session that is neither failed nor disposing fails exactly as for the Worker's own first sticky error: `session_fail(handle, result)`, so the render half silences at its next block (#2267). Then `ready` is false, `stickyResult` is `result`, and the service tick stops. Nothing is posted back. A session already failed keeps its first code. A dispose already begun is left alone, because its release stops the worklet and its dispose frees the host. The shared part of `sticky` becomes `failSession(result)`, so the two paths cannot drift.
+  - **The control Worker** handles it in `onPageMessage`, once it holds a host (#2306's `holdsHost()`) and before `receive`. It acts only when `controlLive()` is true: the phase is `live` and there is no sticky error (#2306). The session then fails exactly as for the Worker's own first sticky error: `session_fail(handle, result)`, so the render half silences at its next block (#2267), and `stickyResult` becomes `result`. The tick stops through the phase, as for any sticky error. Its next run finds `controlLive()` false, stops and runs nothing. A dispose's tick is never stopped: in `disposing` the post does nothing, and the tick keeps the release deadline. Nothing is posted back. A session already failed keeps its first code. A dispose already begun is left alone, because its release stops the worklet and its dispose frees the host. The shared part of `sticky` becomes `failSession(result)`, so the two paths cannot drift.
 - **The host posts from `#fail` only.** `#fail(error, source, aware)` gains a third argument, `aware`: the peer that needs no post because it reported this failure itself, typed, or because its processor is gone (`processorerror`). `#receive(message, peer)` learns which port a message came from: the Worker's port is `PEER_WORKER`, and the worklet's port is `PEER_WORKLET` (in `single` mode, the only port). The two typed-error sites (lines 803 and 812) pass that peer. A malformed `miso.error.v1` is a schema failure that the page found, so it passes none. The failed record gains `workletKnows`. It is set once the worklet reported a failure, was posted one, or its processor failed.
   - **The Worker** is posted `miso.fail.v1` on the first entry into `failed` (`prior === null`), unless the failure is the Worker's own (`aware === PEER_WORKER`) or the Worker is gone (`FAIL_WORKER_GONE`). It owns the lifecycle word while it lives (#2267's Decision), so it is the one peer told while it lives. After the first entry it always knows: it was told, it reported the failure, or it is gone.
   - **The worklet** is posted `miso.fail.v1` when no live Worker will tell it, and it does not know yet. That is: in `single` mode, on the first entry; in `worker` mode, when the failure first marks the Worker gone, whether that is the first entry or a later one. A Worker can die before it handles the page's post, so the page cannot rely on that post.
@@ -50,7 +50,7 @@ What is already right, and stays:
 - `scripts/test-web-audioworklet.mjs` rows, red on base:
   - main realm: the routing table above, case by case, asserting exactly which `miso.fail.v1` each peer was posted (at most one, with the sticky code), plus a second failure that posts nothing more and a Worker `error` after a failure that the worklet did or did not know of;
   - worklet: `miso.fail.v1` fails a live phase sticky in both modes (silent `process()`, a later request refused with that code, no post back, no render-check report), leaves a failed phase's code standing and a released phase final, and a malformed one is sticky `INVALID_ARGUMENT`;
-  - control Worker: `miso.fail.v1` calls `session_fail` once with its code, posts nothing, stops the tick and refuses later requests with that code; a second one, or one after the Worker's own sticky error, calls nothing; one during a dispose calls nothing and the dispose completes.
+  - control Worker: `miso.fail.v1` calls `session_fail` once with its code, posts nothing, stops the tick at its next run and refuses later requests with that code. A second one, or one after the Worker's own sticky error, calls nothing. One during a dispose calls nothing, keeps the release deadline's tick, and the dispose completes or times out.
 - The mechanical mutant generator (#2279's `gen.py` and `run2.py`) is run over the changed lines. Every green mutant gets a row or a named equivalence.
 - `bash scripts/test-web-audioworklet.sh`, `bash scripts/check-workspace-policy.sh`, `cargo run --release -p realtime-policy`. No Rust changes, so no cargo gates apply beyond `cargo fmt --check`.
 
@@ -152,9 +152,39 @@ No Rust file changed, so no other cargo gate applies.
 **Follow-ups (not filed):**
 - Flagged by review; the coordinator tracks it. A well-formed meter, telemetry, control-event or watermark frame still reaches its listeners after the host has failed (`#receive` dispatches unsolicited frames before any failure check). A failed host should drop such a frame, or count it. This stays out of #2317 (see Non-goals).
 
-**Pending before review: the merge with #2306 (WEB-7).** #2306 replaces the Worker's `disposing`/`disposed` flags with one `this.phase` union: `unbooted | refused | live | disposing{…} | disposed{…}`. During a dispose, the Worker's tick keeps the release deadline. On the merged tree, `receiveHostFailure`'s `this.disposing` guard would be `undefined`. A `miso.fail.v1` during a dispose would then fail the session and stop the deadline tick. The row "a post during a dispose fails nothing" goes red on the three-way merge, so the conflict is caught. Once #2306 is on `main`:
-- merge `origin/main` in with a normal merge commit;
-- guard on `this.phase.kind !== "live"` plus the sticky latch;
-- never stop the tick outside `live`;
-- re-run the generators and update the tables above.
+### Attempt 1, merged with #2306 (WEB-7) (Terra, 2026-11-07)
+#2306 replaced the Worker's `disposing`/`disposed` flags with one `this.phase` union, `unbooted | refused | live | disposing{…} | disposed{…}`. During a dispose, its tick keeps the release deadline. On the merged tree, attempt 1's `this.disposing` guard would read `undefined`. A `miso.fail.v1` during a dispose would then fail the session and stop the deadline tick.
+
+`origin/main` at `08193b32e` was merged in with a normal merge commit. The one textual conflict was in `onPageMessage`: the old `disposed` branch is gone, and the post is now handled after `holdsHost()`. `receiveHostFailure` was adapted:
+- it now guards on `controlLive()` (the phase is `live` and there is no sticky error) instead of `this.disposing || stickyResult`;
+- its explicit `stopServiceTick()` was dropped. The tick stops through the phase at its next run, as #2306 does for every sticky error, and it is never stopped in `disposing`.
+
+Two rows were tightened:
+- "the tick stops at its next run, and runs no service step";
+- a new row: a post during a dispose leaves the deadline's tick running, and the tick still ends an unanswered release `release-timeout`.
+
+**Red on the merged base `08193b32e`.** The rows were run against each base file alone and gave the same three first failures as above: the host `who is told` (worklet `[]` vs `[255]`), the worklet `nothing is posted back` (`2 !== 1`), and the Worker `the lifecycle word is failed with the page's code` (`[1,1]` vs `[1,9]`).
+
+**Mutations, re-run on the merged tree:**
+- **The reviewer's generator over the whole host:** 823 mutants. 662 are RED, 9 are RED only in the MAX_SAFE run, and 152 are GREEN, unchanged. The host did not change in the merge.
+- **The widened generator:** 147 mutants, 138 RED and 9 GREEN. These are the same nine host equivalences as in the table above. There are now 25 Worker mutants, all RED.
+- **Hand mutants:** 16. Of the 14 RED:
+  - attempt 1's guard placed on the merged tree is RED at "a post during a dispose fails nothing";
+  - a sticky-only guard is RED at the same row;
+  - a phase-only guard is RED at "the next request ... is refused with the first code", because a second post would replace the code.
+
+  Two are GREEN, with these equivalences:
+  - An explicit `stopServiceTick()` after `failSession` (guarded) is equivalent. In `live` with a sticky error, the next tick stops itself and runs nothing, so stopping now and stopping at the next run cannot be told apart.
+  - Handling the post before `holdsHost()` is equivalent (this replaces the attempt-1 "before the `disposed` check" row in the table above). With no host, the phase is not `live`, so `controlLive()` is false and the post does nothing.
+
+**Gates on the merged tree (all green):**
+- `bash scripts/test-web-audioworklet.sh`, exit 0;
+- `cargo test --locked -p host-web --all-features`;
+- `cargo clippy --locked -p host-web --all-targets --all-features -- -D warnings`;
+- `cargo fmt --check`;
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p host-web`;
+- `bash scripts/check-workspace-policy.sh`, which reported `workspace policy: ok`;
+- `cargo run --locked --release -p realtime-policy`, which reported `realtime policy: ok (295 marked regions in 46 files)`.
+
+No Rust file changed. `host-web` is the crate of the touched host.
 - #2279's follow-ups stand: the factory-input, returned-plane, boot-reply and frame-schema clause swaps have no rows.
