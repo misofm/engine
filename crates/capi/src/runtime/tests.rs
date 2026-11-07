@@ -7283,16 +7283,18 @@ mod session_seek {
         );
     }
 
-    /// #2213: a render-side call made while another holds the plan is refused, not raced, and the
+    /// #2213, #2293: a render-side call made while another holds the plan is refused with
+    /// `RESULT_BUSY`, not raced, it leaves the holder's diagnostic as the holder left it, and the
     /// claim is released when the holder returns.
     ///
     /// Test value: red when the render-side guard does not exclude a second caller (the refused
-    /// call would form a second `&mut PlanState`), when either entry skips it, or when a call
-    /// never releases it (every later block is refused).
+    /// call would form a second `&mut PlanState`), when either entry skips it, when a call never
+    /// releases it (every later block is refused), or when a refused call writes the plan's
+    /// diagnostic over the holder's (#2293: on base the loser stored `render.busy` over it).
     #[test]
     fn a_render_side_call_during_render_is_refused_not_raced() {
         let mut rig = Rig::new(&two_sources());
-        let busy = crate::ffi::test_plan_last_error;
+        let last_error = crate::ffi::test_plan_last_error;
         let mut pcm = vec![0.0_f32; 256];
         let output = crate::PlanarOutput {
             struct_size: crate::PLANAR_OUTPUT_SIZE,
@@ -7303,26 +7305,36 @@ mod session_seek {
             plane_stride_samples: 128,
             reserved: [0; 2],
         };
+        // The holder's own refused block leaves a sticky diagnostic.
+        assert_eq!(
+            crate::ffi::test_render(rig.plan, rig.next() + 1, &output),
+            crate::RESULT_RENDER_REJECTED
+        );
+        assert_eq!(last_error(rig.plan), b"render.time.discontinuity");
         crate::ffi::test_hold_render_claim(rig.plan, true);
         assert_eq!(
             crate::ffi::test_render(rig.plan, rig.next(), &output),
-            crate::RESULT_RENDER_REJECTED
+            crate::RESULT_BUSY
         );
-        assert_eq!(busy(rig.plan), b"render.busy");
         assert_eq!(
             crate::ffi::test_plan_prepare_seek(rig.plan),
-            crate::RESULT_RENDER_REJECTED
+            crate::RESULT_BUSY
         );
-        assert_eq!(busy(rig.plan), b"render.busy");
+        assert_eq!(
+            last_error(rig.plan),
+            b"render.time.discontinuity",
+            "a refused call leaves the holder's diagnostic"
+        );
         crate::ffi::test_hold_render_claim(rig.plan, false);
         assert_eq!(
             crate::ffi::test_plan_prepare_seek(rig.plan),
             crate::RESULT_OK
         );
+        assert_eq!(last_error(rig.plan), b"");
         submit_c_to_block(rig.session, LONG, rig.block + 1, rig.block + 1, 0);
         rig.render();
         rig.render();
-        assert_eq!(busy(rig.plan), b"");
+        assert_eq!(last_error(rig.plan), b"");
     }
 
     /// Gate 5, a per-source seek leaves the timeline where it is.

@@ -533,11 +533,12 @@ impl Session {
 /// Opaque render-plan handle. C consumers only observe pointers to this type.
 ///
 /// Field ownership matches the "Thread ownership" block of `include/miso_engine_v1.h`:
-/// `header` and `queries` are immutable after construction, `last_error` is written by the render
-/// side and read from any thread, `render_busy` is the render side's claim word (#2213), and
-/// `state` is exclusive to the render side: the one render-side call that holds `render_busy`. `ffi.rs` never
-/// forms a reference to the whole value; it projects the individual fields with `&raw const` and
-/// `&raw mut` so a concurrent query can never alias the render thread's `&mut PlanState`.
+/// `header` and `queries` are immutable after construction, `render_busy` is the render side's
+/// claim word (#2213), and `state` and the writes of `last_error` belong to the one render-side
+/// call that holds `render_busy` (a refused call writes neither, #2293); `last_error` is read from
+/// any thread. `ffi.rs` never forms a reference to the whole value; it projects the individual
+/// fields with `&raw const` and `&raw mut` so a concurrent query can never alias the render
+/// thread's `&mut PlanState`.
 #[repr(C)]
 pub struct Plan {
     header: HandleHeader,
@@ -545,8 +546,8 @@ pub struct Plan {
     pub(crate) last_error: AtomicU32,
     /// `1` while a render-side call (`render_f32_planar` or `plan_prepare_seek`) holds the plan's
     /// render state, else `0` (#2213). A call claims it with one compare-exchange on entry and
-    /// releases it with one store on every exit; a call that finds it held is refused, never
-    /// waits, and touches no state.
+    /// releases it with one store on every exit; a call that finds it held is refused with
+    /// [`RESULT_BUSY`] (#2293), never waits, and touches no state, `last_error` included.
     pub(crate) render_busy: ClaimWord,
     pub(crate) state: PlanState,
     not_sync: PhantomData<core::cell::Cell<()>>,
