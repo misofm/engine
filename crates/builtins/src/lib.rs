@@ -1501,6 +1501,24 @@ impl<L: Lane> InputStage<L> {
         (self.ramping, self.filter_ramping) == self.countdowns_in_flight(0..2)
     }
 
+    /// Whether every section [`InputStage::plan`] elides is still an identity section over the
+    /// words it would run on: the cached plan's soundness, asserted at the render entries
+    /// (tracker #2258 GR-8). The cache may be more conservative than a fresh decision (an
+    /// in-flight section is forced off, and a settled block can bring integrators to `+0.0`
+    /// without a refresh), never less. While collapsed, channel `1` is decided over channel `0`'s
+    /// integrators, as [`InputStage::refresh_filter_plan`] decides it.
+    fn plan_is_sound(&self) -> bool {
+        (0..2).all(|channel| {
+            (0..2).all(|section| {
+                !self.plan.elided[channel][section]
+                    || section_is_identity::<L>(
+                        &self.coef.section[channel][section],
+                        &self.state.section[self.live_state_channel(channel)][section],
+                    )
+            })
+        })
+    }
+
     /// Recompute the elision plan while a filter target is in flight.  An in-flight section is
     /// conservative even when its current words still happen to be identity words: the target
     /// is already accepted and the ramp body must execute it.
@@ -1768,7 +1786,7 @@ impl<L: Lane> InputStage<L> {
         signed: impl Fn(f32) -> f32,
         smoothing_samples: u32,
     ) {
-        debug_assert!(lane < L::WIDTH);
+        debug_assert!(lane < self.members && lane < L::WIDTH);
         for channel in 0..2 {
             if !channels.covers(channel) {
                 continue;
@@ -2047,6 +2065,10 @@ impl<L: Lane> InputStage<L> {
             self.desymmetrize();
         }
         debug_assert!(self.ramp_flags_are_current(), "a ramp flag is stale");
+        debug_assert!(
+            self.plan_is_sound(),
+            "the elision plan elides a live section"
+        );
         let report = if self.filter_ramping {
             let prefix = self.filter_prefix_frames(frames, 0..2);
             if self.ramping {
@@ -2200,6 +2222,10 @@ impl<L: Lane> InputStage<L> {
             "a collapsed block needs every member lane's designed words channel-symmetric"
         );
         debug_assert!(self.ramp_flags_are_current(), "a ramp flag is stale");
+        debug_assert!(
+            self.plan_is_sound(),
+            "the elision plan elides a live section"
+        );
         // From here until the disengage copy, channel `0` is the only live state.
         self.collapsed = true;
         let report = if self.filter_ramping {

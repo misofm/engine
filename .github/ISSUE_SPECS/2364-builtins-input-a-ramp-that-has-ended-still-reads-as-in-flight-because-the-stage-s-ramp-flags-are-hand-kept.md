@@ -37,9 +37,11 @@ Every countdown writer is guarded to member lanes (`BuiltinInputBank` refuses `l
 before `set_trim_db`, `set_polarity_invert` and `apply_prepared_filter`; `import_lane` asserts
 it), so a padding lane's countdown is always `0` and the two spans agree.
 
-Not changed: `symmetry` already has the tracker's model (a debug assertion against a fresh walk
-at its point of use, `lane_channel_symmetry`), and `plan` is a conservative permission refreshed
-by every coefficient and state writer outside render; neither has a stale case found here.
+`symmetry` already has the tracker's model (a debug assertion against a fresh walk at its point
+of use, `lane_channel_symmetry`) and is not changed. `plan` is a conservative permission
+refreshed by every coefficient and state writer outside render, and no stale case was found.
+Nothing checked it, though: deleting `refresh_filter_plan()` from `apply_prepared_filter`
+survived every builtins test, test-support suites included (confirmed on attempt 1's fold).
 
 ## Decision / model
 - **One definition:** `InputStage::countdowns_in_flight(channels) -> (trim, filter)`, a
@@ -52,6 +54,15 @@ by every coefficient and state writer outside render; neither has a stale case f
 - **Checked where read:** `debug_assert!(self.ramp_flags_are_current())` (both flags against a
   fresh scan of both channels) at the three block-boundary readers: `process` (after the
   disengage copy), `process_mono` and `lanes_at_rest`.
+- **The plan's soundness is checked where render reads it:**
+  `debug_assert!(self.plan_is_sound())` at the `process` and `process_mono` entries. Every
+  section the cached plan elides must be elided by a fresh `section_is_identity` over its
+  coefficients and its live state channel (channel `0`'s integrators for channel `1` while
+  collapsed, as `refresh_filter_plan` decides). The cache may be more conservative than a fresh
+  decision, never less, so the check is the implication, not equality.
+- **The padding premise is checked at every countdown writer:** `set_trim_signed`'s bound is
+  `lane < self.members` (it was `lane < L::WIDTH`); `apply_prepared_filter` and `import_lane`
+  already asserted members.
 - The fields stay. A scan at the point of use would add about 6 ns per bank per block to the
   settled path (measured below), which is the path the trim flag exists to keep at "one `bool`
   test per bank per block". Keeping the fields also keeps `size_of::<InputStage<_>>()`, so no
@@ -102,7 +113,8 @@ whose two out-of-block writers no other test reaches (M6 and M7 below survive ev
 - Reset and import: an out-of-block countdown writer that does not republish; the import
   direction (a lane carried mid-ramp into a settled stage) is the one that would drop a ramp.
 
-**Mutations** (`cargo test --locked -p builtins --lib`, all on head):
+**Mutations** (M1-M8: `cargo test --locked -p builtins --lib`, all on head; the fold's
+mutants below need `--features test-support`, which the integration suites require):
 
 | Mutant | Result |
 |---|---|
@@ -114,6 +126,18 @@ whose two out-of-block writers no other test reaches (M6 and M7 below survive ev
 | M6 `import_lane` does not publish | RED: reset/import only |
 | M7 `reset_with_kind` does not publish | RED: reset/import only |
 | M8 `apply_prepared_filter` does not publish | RED: rest probe, collapsed filter, reset/import, three filter tests |
+| M9 `settle` publishes over `0..2` instead of its channels | RED only with `--features test-support`: `tests/determinism.rs` (`no_corpus_case_is_vacuous_or_carries_a_nan`), `tests/input_liveness.rs`, `tests/randomized.rs`; green in `--lib` |
+
+**Fold mutations** (`cargo test --locked -p builtins --features test-support --no-fail-fast`,
+on the fold head):
+
+| Mutant | Result |
+|---|---|
+| P1 `apply_prepared_filter` drops `refresh_filter_plan()` | RED, 3 binaries: `--lib` (5 tests), `--test filter_liveness`, `--test input_liveness`. With the two `plan_is_sound` assertions replaced by `true`, the same deletion is GREEN everywhere: the check is what kills it |
+| P2 `desymmetrize` drops `refresh_filter_plan()` | GREEN, equivalent: while collapsed the plan already decides channel `1` over channel `0`'s integrators, which the copy makes channel `1`'s own, so the refresh recomputes the same plan |
+| P3 `import_lane` drops `refresh_filter_plan()` | GREEN, equivalent today, as its comment says: a settled carried lane holds coefficients its successor prepared, and a ramping lane's body ignores the plan |
+| S1 `apply_prepared_filter` drops `refresh_channel_symmetry()` | GREEN: follow-up (below) |
+| S2 `import_lane` drops `refresh_channel_symmetry_lane(lane)` | GREEN: follow-up (below) |
 
 **No bit moved.** A temporary (uncommitted) probe module drove `InputStage` at W=1, 4 and 8, 12
 seeds each, 3000 blocks per seed: random members (padding present), random trim, polarity and
@@ -133,9 +157,10 @@ The same probe in a debug build ran the three point-of-use assertions over all 3
 **Cost.** Release, best of 5 x 10^7 calls, on a loaded machine (load average about 15):
 `countdowns_in_flight(0..2)` is 6.2 ns at every width. Base's inline scans, for comparison: trim
 0.5-0.8 ns, filter 3.0 / 10.0 / 19.4 ns at W=1/4/8. The settled block path adds nothing in a
-release build (the assertions are debug-only). A ramping block's settles now publish both flags
-(at most two scans, about 12 ns, against ramp blocks of roughly 240-3300 ns here), and each
-retarget adds one scan. Whole-block timings on this machine were too noisy to resolve the
+release build (the assertions are debug-only). A ramping block's settles now publish both flags:
+two scans (about 12 ns) on a block with one ramp body, and three (about 18 ns) on the dual
+filter-and-trim arm with a suffix (`settle(prefix)`, `settle_filter(prefix)`,
+`settle(suffix)`), against ramp blocks of roughly 240-3300 ns here. Each retarget adds one scan. Whole-block timings on this machine were too noisy to resolve the
 difference (two head runs of the same trim-ramp loop gave 768 and 606 ns/block at W=4).
 
 **Gates.** All pass: `cargo test --locked -p builtins` (every suite), `-p rack`,
@@ -145,3 +170,24 @@ difference (two head runs of the same trim-ramp loop gave 768 and 606 ns/block a
 `-p builtins --all-targets -D warnings`, fmt, doc (`-p builtins`), workspace policy and
 `realtime_policy` (298 marked regions in 48 files): clean. `size_of::<InputStage<_>>()` does not
 change (no field added or removed), so `graph_fixture` was not regenerated.
+
+## Verdict (attempt 1)
+Sol: **PASS** (head `4c28f88fe`). The review verified all 7,839 additional rest claims as correct,
+1,874 of them on collapsed stages. Minor findings, folded on the same branch after a merge of
+`origin/main`:
+- `plan`'s soundness is asserted at the render entries (above). P1 was a survivor and is now
+  killed.
+- `set_trim_signed`'s bound is `lane < self.members`.
+- The cost note now gives three scans on the dual filter-and-trim arm with a suffix.
+- The mutation record says which mutants need `--features test-support`.
+
+**Follow-up (not in this issue):** S1 and S2 survive. The symmetry refresh in
+`apply_prepared_filter` and `import_lane` is backed only by `lane_channel_symmetry`'s debug check
+at its point of use, and no test reaches a collapse decision between those writers and a refresh
+by another writer. A test that retargets one channel's filter, or imports an asymmetric lane, and
+then reads `lane_symmetry` would kill them.
+
+**Fold gates.** `cargo test --locked -p builtins --features test-support` (all 18 suites),
+`cargo test --locked -p graph-compiler` (fixture test included), clippy
+`-p builtins --all-targets --all-features -D warnings`, fmt, rustdoc `-D warnings`, workspace
+policy and `realtime_policy` (298 marked regions in 48 files): all pass. graph-compiler: 23 suites, all pass; no fixture moved.
