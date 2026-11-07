@@ -134,6 +134,16 @@ impl PreparedNativeEffectBank for Recorder {
     ) -> Result<(), StatePayloadError> {
         Ok(())
     }
+
+    /// The restore above, which takes every payload (issue #2350).
+    fn validate_track_state_payload(
+        &self,
+        _track_index: u32,
+        _state_layout_version: u32,
+        _input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        Ok(())
+    }
 }
 
 fn bound(log: &Arc<Mutex<Log>>) -> PreparedEffectBank {
