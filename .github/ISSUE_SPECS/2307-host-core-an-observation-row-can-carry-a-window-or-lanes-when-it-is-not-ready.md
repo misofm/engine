@@ -85,9 +85,10 @@ Model chosen: the tracker's `enum Row { Ready{window, left, right}, .. }`, with 
 - The wire layout, `protocol::ObservationReadRow` and its validator.
 - `tap: Option<..>`, which is `None` only in a default row. A default row exists only for
   `read_into`'s caller-owned table, and only tests call `read_into`.
-- The arm-tag-zero case: a slot armed with tag `0` while no record is issued would read `Ready`
-  with `arm_tag == 0`, which the wire validator refuses. That is a separate status-rule question,
-  not this layout.
+- The arm-tag-zero case. A slot armed with tag `0` while no record is issued would read `Ready`
+  with `arm_tag == 0`, which the wire validator refuses. The review found it unreachable: every
+  arm tag comes from `next_arm_tag`, which starts at 1, and the wire maps an arm to 0, meaning
+  "issue fresh".
 - `crates/host-core/src/spectrum.rs`, `source.rs`, `meters.rs` and `warm.rs`. Other agents own
   them; `window_since_arm` in `meters.rs` is called, not changed.
 
@@ -187,10 +188,32 @@ The probe was then removed (the source equals the pre-probe copy).
   - the realtime policy tool, because no render-path code changed;
   - `scripts/test-web-audioworklet.sh`, because no web or JS file and no wire byte changed.
 
-## Follow-ups (not in this issue)
-- `read_into` has no production caller. Only tests use it, and it is the only reason
-  `ObservationRow` needs `Default` and `tap: Option`. Removing it, or making `tap` non-optional,
-  is a separate change.
-- A `Ready` row's `arm_tag` can be `0` if a slot is armed with tag `0` and no record is issued.
-  The wire validator refuses that. Whether any host can arm with tag `0` belongs to the status
-  rule, not this layout.
+## Follow-ups (not in this issue; the coordinator tracks them in #2258)
+- Remove `read_into`. It has no production caller and only tests use it. It is the only reason
+  `ObservationRow` needs `Default` and `tap: Option`, so both go with it.
+- Optionally type the engine's `ObservationState` so that `armed` and `arm_tag` cannot disagree,
+  for example an armed state that carries its tag.
+
+## Verdict (attempt 1)
+**PASS** (Sol's adversarial review). The reviewer confirmed three points:
+- the wire mapping is identical for all three readings;
+- the new test is legitimate, because it is the only test that catches M2;
+- tag 0 is not reachable (see Non-goals).
+
+Two minors and the follow-up list are folded in on the same branch, after a merge of
+`origin/main`:
+1. `read_row` builds `Ready` from the window `window_since_arm` returns. It used to test that
+   result and then store the slot's own window, which depended on the function returning its
+   input.
+2. The doc of `Unarmed`'s `state` said "as for `Pending`", which implied the state is armed. It
+   now says the state is the published state at or above the issued tag, and that it either reads
+   unarmed or is superseded by an issued disarm.
+3. The follow-ups above.
+
+Re-run after the fold:
+- `cargo test --locked` for host-core and control-plane, with test-support and control-provider;
+- clippy `-D warnings`;
+- `cargo fmt --check`;
+- rustdoc `-D warnings`.
+
+All pass. The tests ran 66 binaries and 715 tests. `scripts/check-workspace-policy.sh` is also ok.
