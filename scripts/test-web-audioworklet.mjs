@@ -2102,6 +2102,62 @@ async function testMainRealm() {
       assert.equal(trappedHost.dispose(), trappedDispose, "a later dispose returns the same rejection");
       assert.equal(events.filter((event) => event[1] === "miso.dispose.v1").length, disposesBefore + 1,
         "one dispose is sent");
+
+      // Issue #2279 (WEB-6): a dispose racing a failure. A request sent before the dispose
+      // fails the host while the dispose is in flight; the worklet handles messages in arrival
+      // order and still answers the dispose, so the dispose is settled by its own reply. Test
+      // value: a dispose rejected with the other request's sticky error and left retryable, its
+      // node connected, though the worklet disposed (a retry then waits out the bound for a reply
+      // an ended worklet never sends).
+      const racedHost = await create();
+      const racedNode = FakeNode.latest;
+      holdAll = true;
+      const failing = racedHost.control(new Uint8Array([1]));
+      const racedDispose = racedHost.dispose();
+      holdAll = false;
+      controlMutation = (reply) => ({ tag: "miso.error.v1", requestId: reply.requestId, result: 9 });
+      for (const respond of heldAll.splice(0)) respond();
+      controlMutation = null;
+      await errorResult(failing, 9);
+      await racedDispose;
+      assert.equal(racedNode.disconnectCount, 1, "the dispose's own reply tears down");
+      assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "and restarts no tick");
+      // What does settle a dispose in flight at once: its own reply failing the host, and the
+      // processor's `processorerror`. Test value: a dispose left waiting out its bound for a reply
+      // that already came (as an error) or that a crashed processor cannot send; and a retryable
+      // refusal of a failed host's dispose restarting the service tick.
+      const ownReplyHost = await create();
+      holdAll = true;
+      const ownReply = ownReplyHost.dispose();
+      holdAll = false;
+      const disposeId = events.findLast((event) => event[1] === "miso.dispose.v1")[2];
+      FakeNode.latest.port.onmessage({ data: { tag: "miso.error.v1", requestId: disposeId, result: 7 } });
+      assert.equal(await settledState(ownReply), "rejected", "its own failed reply settles the dispose");
+      await errorResult(ownReply, 7);
+      assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "a failed host runs no tick");
+      for (const respond of heldAll.splice(0)) respond();
+      await ownReplyHost.dispose();
+      const crashedHost = await create();
+      const crashedNode = FakeNode.latest;
+      holdAll = true;
+      const crashed = crashedHost.dispose();
+      holdAll = false;
+      crashedNode.onprocessorerror();
+      assert.equal(await settledState(crashed), "rejected", "a processor error settles the dispose");
+      await errorResult(crashed, 255);
+      assert.equal(crashedNode.disconnectCount, 1, "and tears down");
+      for (const respond of heldAll.splice(0)) respond();
+
+      // Issue #2279 (WEB-6): the first failure stands. Test value: a later failure (here
+      // the processor's `processorerror`) replacing the typed sticky error a request already
+      // rejected with, so later calls reject with a different cause.
+      const stuckHost = await create();
+      controlMutation = (reply) => ({ tag: "miso.error.v1", requestId: reply.requestId, result: 9 });
+      await errorResult(stuckHost.control(new Uint8Array([1])), 9);
+      controlMutation = null;
+      FakeNode.latest.onprocessorerror();
+      await errorResult(stuckHost.control(new Uint8Array([1])), 9);
+      await stuckHost.dispose();
     }
 
     // Issue #1332 S7 (D1, D2, D6, D7): `worker` mode on an isolated page. A fake control Worker
@@ -2405,6 +2461,22 @@ async function testMainRealm() {
           await new Promise((resolve) => setImmediate(resolve));
           await errorResult(failing.control(new Uint8Array([1])), 9);
           await failing.dispose();
+        }
+
+        // Issue #2279 (WEB-6), the worker-mode row: a render failure posted while the
+        // dispose is with the Worker fails the host, and the Worker's own reply still settles the
+        // dispose, cleanly. Test value: a dispose rejected with the render failure and the Worker
+        // terminated before it answered.
+        {
+          const raced = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          const racedWorker = workers.at(-1);
+          const disposal = raced.dispose();
+          FakeNode.latest.port.onmessage({ data: { tag: "miso.error.v1", requestId: 0, result: 9 } });
+          await disposal;
+          assert.equal(racedWorker.terminated, true, "the Worker ends after its dispose reply");
         }
 
         // #1332 S8: a worklet whose construction failed (perhaps after it adopted the half): the
