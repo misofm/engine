@@ -3030,7 +3030,6 @@ where
         render_diagnostics: prepare_render_diagnostic_slots()?,
         render_diagnostic_head: 0,
         render_diagnostic_len: 0,
-        protocol_reliable_pending: false,
         monitor,
         observation: controls::ObservationBindings::new(),
         observation_pending: Box::default(),

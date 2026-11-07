@@ -204,7 +204,12 @@ export class FakeLockManager {
   #pending = new Map()
   requests = []
 
-  async request(name, _options, work) {
+  // A request honours `signal` as the Web Locks API does: an already-aborted signal rejects
+  // without queueing, and an abort while the request waits rejects it with the signal's reason
+  // and gives up its place in the queue. An abort after the grant changes nothing.
+  async request(name, options, work) {
+    const signal = options?.signal
+    if (signal?.aborted) throw signal.reason
     this.requests.push(name)
     const previous = this.#tails.get(name) ?? Promise.resolve()
     this.#pending.set(name, (this.#pending.get(name) ?? 0) + 1)
@@ -214,7 +219,24 @@ export class FakeLockManager {
     })
     const tail = previous.then(() => gate)
     this.#tails.set(name, tail)
-    await previous
+    let removeAbort = () => {}
+    const granted = new Promise((resolve, reject) => {
+      previous.then(() => resolve(true))
+      if (signal === undefined) return
+      const abort = () => reject(signal.reason)
+      signal.addEventListener("abort", abort, { once: true })
+      removeAbort = () => signal.removeEventListener("abort", abort)
+    })
+    try {
+      await granted
+    } catch (reason) {
+      // The queue behind this request waits only for `previous` now.
+      decrement(this.#pending, name)
+      release()
+      throw reason
+    } finally {
+      removeAbort()
+    }
     decrement(this.#pending, name)
     this.#held.set(name, (this.#held.get(name) ?? 0) + 1)
     try {

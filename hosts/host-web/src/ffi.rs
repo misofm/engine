@@ -1231,6 +1231,23 @@ pub extern "C" fn miso_engine_web_v1_declare_discontinuity(handle: u32) -> u32 {
     })
 }
 
+/// Fail the session sticky with `result`, for a failure the host found outside the engine
+/// (#2267): in `worker` mode, a protocol fault the control Worker detects in JavaScript. The
+/// session's lifecycle word goes to the failed state, so the render half in the worklet silences
+/// from its next block and every later control call is refused, as for a failure the engine
+/// records itself; the status's last result is `result`, and the session diagnostic is
+/// `web.host.failed`. Control side only: the control Worker, never `process()`.
+///
+/// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle or a zero `result`;
+/// [`RESULT_WRONG_STATE`] for a session that is not ready (already failed or disposed), which
+/// changes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_session_fail(handle: u32, result: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.fail_session(result)
+    })
+}
+
 /// Return the control request staging address for a frame of `len` bytes (issue #1562a D1), or
 /// zero for an invalid handle, a host that is not ready, or a `len` that is zero or over the boot's
 /// `maximum_control_frame_bytes`. The page writes one command frame there, then calls

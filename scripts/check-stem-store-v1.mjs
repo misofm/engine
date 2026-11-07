@@ -261,6 +261,99 @@ async function runMutationLedger() {
       expectedFailure: "same-session replacement waited on its own predecessor pin lock",
     },
     {
+      name: "commit a superseded open after its predecessor close",
+      file: "web/stem-store/session-gate.js",
+      search:
+        "        await displaced.close()\n        opening.signal.throwIfAborted()\n",
+      replace: "        await displaced.close()\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the aborted open committed (same-session open, predecessor close)",
+    },
+    {
+      name: "commit a superseded open once its resume settles",
+      file: "web/stem-store/session-gate.js",
+      search:
+        "      // The abort can land after `resumed` settles and before this line runs.\n      opening.signal.throwIfAborted()\n",
+      replace: "",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the aborted open committed (same-session open, after the resume settles",
+    },
+    {
+      name: "wait out a superseded open's resume",
+      file: "web/stem-store/session-gate.js",
+      search: "const resumed = await abortable(resumeOutcome, opening.signal)",
+      replace: "const resumed = await resumeOutcome",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the aborted open never settled (same-session open, resume wait)",
+    },
+    {
+      name: "wait on the resume of an open aborted before the wait began",
+      file: "web/stem-store/session-gate.js",
+      search: "  if (signal.aborted) return Promise.reject(signal.reason)\n  let abort\n",
+      replace: "  let abort\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the aborted open never settled (same-session open, from ready)",
+    },
+    {
+      name: "leave the gate loading after a throwing resume aborts the open in flight",
+      file: "web/stem-store/session-gate.js",
+      search: '      if (this.#state === "loading") this.#state = "refused"\n',
+      replace: "",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a refused open left the gate loading with no open in flight",
+    },
+    {
+      name: "let close() write idle after its await",
+      file: "web/stem-store/session-gate.js",
+      search: '    this.#state = "idle"\n    await lease?.close()\n',
+      replace: '    this.#state = "idle"\n    await lease?.close()\n    this.#state = "idle"\n',
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "close() reported idle while a later open was loading",
+    },
+    {
+      name: "stop forwarding the caller's signal once the lease is granted",
+      file: "web/stem-store/session-gate.js",
+      search: "        onProgress: options.onProgress,\n      })\n",
+      replace: "        onProgress: options.onProgress,\n      })\n      removeParentAbort()\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the aborted open never settled (caller signal, resume wait)",
+    },
+    {
+      name: "check gate ownership by identity instead of the opening's signal",
+      file: "web/stem-store/session-gate.js",
+      edits: [
+        {
+          search:
+            "      // The abort can land after `resumed` settles and before this line runs.\n      opening.signal.throwIfAborted()\n",
+          replace:
+            "      // The abort can land after `resumed` settles and before this line runs.\n      if (this.#opening !== opening) throw new DOMException(\"x\", \"AbortError\")\n",
+        },
+        {
+          search: "        await displaced.close()\n        opening.signal.throwIfAborted()\n",
+          replace:
+            "        await displaced.close()\n        if (this.#opening !== opening) throw new DOMException(\"x\", \"AbortError\")\n",
+        },
+      ],
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the aborted open committed (caller signal, predecessor close)",
+    },
+    {
+      name: "refuse a throwing resume only when no lease is current",
+      file: "web/stem-store/session-gate.js",
+      search: '      if (this.#state === "loading") this.#state = "refused"\n',
+      replace: '      if (this.#lease === undefined) this.#state = "refused"\n',
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a refused open left the gate loading behind a current lease",
+    },
+    {
+      name: "omit AbortSignal from the session pin lock wait",
+      file: "web/stem-store/opfs-store.js",
+      search: '      { mode: "exclusive", signal },\n      async () => {\n        acquired()',
+      replace: '      { mode: "exclusive" },\n      async () => {\n        acquired()',
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the aborted open never settled (same-session open, queued on the pin)",
+    },
+    {
       name: "treat missing index as an empty authoritative index",
       file: "web/stem-store/opfs-store.js",
       search:
