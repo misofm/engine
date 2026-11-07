@@ -988,8 +988,7 @@ class MisoAudioWorkletHost {
     const phase = this.#phase;
     if (phase.kind === "disposed") return;
     const prior = this.#failure();
-    // A follow-up that tells the engine of a failure the page detected posts it here, on the first
-    // entry (`prior === null`), to every peer `source` does not name as gone.
+    // `prior === null` is the host's one entry into `failed`; no other site makes it.
     const failure = Object.freeze({
       kind: "failed",
       error: prior?.error ?? error,

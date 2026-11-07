@@ -77,6 +77,7 @@ Base `76ff20b54`.
 **Gates run:**
 - `node scripts/test-web-audioworklet.mjs`: passed. `bash scripts/test-web-audioworklet.sh`: exit 0, including the safe-integer allocator mutation and every policy self-test.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- SDK evals over the real module: `bash scripts/build-web-audioworklet.sh <dir>` (nightly-2026-08-20), then `MISO_ENGINE_SDK_ARTIFACTS_HEX=<dir> node --test 'test/*-evals.mjs' ../hosts/host-web/tests/stem-store-hash-v1.mjs` from `sdk/` (the `check-sdk-headless.sh` invocation): 710 tests, 710 pass. These evals drive the shipped host through `engine.close()` and the dispose paths.
 - No Rust or render path was changed, so cargo test, clippy, fmt, doc, the realtime-policy tool and a no-bit-moved comparison do not apply.
 
 **Test value.**
