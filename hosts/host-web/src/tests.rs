@@ -1827,6 +1827,32 @@ fn a_host_found_failure_silences_the_released_render_half_and_overwrites_nothing
     assert_eq!(host.status().state, STATE_DISPOSED);
 }
 
+/// Issue #2346: the status shell a release leaves, the status `miso_engine_web_v1_status_ptr`
+/// names to the control Worker while the half is away, mirrors the lifecycle a render-side failure
+/// moved at the next control call it records.
+///
+/// Test value: red if `record` stops mirroring the lifecycle state into the shell, so the Worker
+/// reports a session the render half failed as ready. The #2267 and #2298 tests fail the session
+/// through `end_session`, which writes the shell itself.
+#[test]
+fn the_released_status_shell_shows_a_render_side_failure_at_the_next_control_call() {
+    let mut host = prepared_host(128);
+    let mut render = host.release_render().expect("the render half");
+    assert_eq!(
+        render.fail(RESULT_INTERNAL, b"web.instance.stack_canary\t$\n"),
+        RESULT_INTERNAL
+    );
+    assert_eq!(
+        host.control_command_with_document(1, &[]),
+        RESULT_WRONG_STATE
+    );
+    assert_eq!(
+        (host.status().state, host.status().last_result),
+        (STATE_FAILED, RESULT_WRONG_STATE)
+    );
+    assert!(host.adopt_render(render).is_ok());
+}
+
 /// Issue #2298: a failure of the render half after the control half failed or disposed the
 /// session leaves the lifecycle where the first ended it. The worklet's render export checks the
 /// half's own status, which learns of the control half's failure or dispose only at the half's
