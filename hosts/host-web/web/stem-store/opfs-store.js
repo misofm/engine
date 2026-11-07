@@ -190,7 +190,7 @@ export class OpfsStemStore {
 
     throwIfAborted(options.signal)
     const pin = `session:${this.#tabId}:${sessionId}`
-    const releasePinLock = await this.#acquireSessionPinLock(pin)
+    const releasePinLock = await this.#acquireSessionPinLock(pin, options.signal)
     try {
       await this.#mutateIndex((index) => {
         for (const stem of stems) {
@@ -1164,7 +1164,10 @@ export class OpfsStemStore {
     return changed
   }
 
-  async #acquireSessionPinLock(pin) {
+  // The pin lock is exclusive and another lease of the same session can hold it for as long
+  // as that session stays open, so the wait takes the open's signal: an aborted open gives up
+  // its place in the queue (a granted lock is unaffected; the lease owns it).
+  async #acquireSessionPinLock(pin, signal) {
     if (typeof this.#locks?.request !== "function") return () => {}
     let acquired
     let acquisitionFailed
@@ -1178,7 +1181,7 @@ export class OpfsStemStore {
     })
     const request = this.#locks.request(
       this.#sessionPinLockName(pin),
-      { mode: "exclusive" },
+      { mode: "exclusive", signal },
       async () => {
         acquired()
         await hold

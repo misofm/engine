@@ -4,6 +4,15 @@ import { StemStoreError } from "./opfs-store.js"
  * Session-open orchestration. `resume()` is invoked synchronously, before the
  * first await, so a browser counts it inside the user's gesture; interaction
  * remains closed until the store lease proves every stem at this open.
+ *
+ * Each open owns one AbortController, `opening`, and it owns the gate only
+ * while that controller is unaborted: a newer open, `close()` and the caller's
+ * own signal all abort it. An open writes `#lease` and `#state` only after
+ * `opening.signal.throwIfAborted()` with no await in between, so a superseded
+ * open can never commit, and its store lease (with its session pin lock) is
+ * closed on the way out instead of blocking a newer open of the same session.
+ * The wait for `resume()` ends at that abort too, and the store open takes the
+ * same signal; only the bounded lease closes are awaited to completion.
  */
 export class StemSessionGate {
   #store
@@ -49,6 +58,9 @@ export class StemSessionGate {
     } catch (error) {
       this.#opening = undefined
       removeParentAbort()
+      // An open in flight was aborted above and will no longer write the
+      // state, so this refusal is the gate's terminal state.
+      if (this.#state === "loading") this.#state = "refused"
       throw new StemStoreError(
         "session.resume.failed",
         "The audio context could not resume inside the user gesture",
@@ -64,7 +76,6 @@ export class StemSessionGate {
     this.#state = "loading"
     options.onProgress?.({ stage: "loading", sessionId: options.sessionId })
     let lease
-    let storeOpening
     try {
       // The lease holds a Web Lock whose name includes the session ID. Release
       // an identically named predecessor before asking the store to acquire its
@@ -75,24 +86,25 @@ export class StemSessionGate {
         this.#lease = undefined
         await replaced.close()
       }
-      storeOpening = this.#store.openSession({
+      lease = await this.#store.openSession({
         sessionId: options.sessionId,
         stems: options.stems,
         resolver: this.#resolver,
         signal: opening.signal,
         onProgress: options.onProgress,
       })
-      const [opened, resumed] = await Promise.all([
-        storeOpening,
-        resumeOutcome,
-      ])
+      // A resume that never settles must not keep a superseded open's lease
+      // (and its pin) alive, so the wait for it ends at the abort.
+      const resumed = await abortable(resumeOutcome, opening.signal)
       if (!resumed.ok) throw resumed.error
-      lease = opened
-      if (this.#opening !== opening) {
-        await lease.close()
-        throw new DOMException("Superseded by another session open", "AbortError")
+      // The abort can land after `resumed` settles and before this line runs.
+      opening.signal.throwIfAborted()
+      const displaced = this.#lease
+      if (displaced !== undefined) {
+        this.#lease = undefined
+        await displaced.close()
+        opening.signal.throwIfAborted()
       }
-      await this.#lease?.close()
       this.#lease = lease
       this.#state = "interactive"
       options.onProgress?.({
@@ -101,9 +113,8 @@ export class StemSessionGate {
       })
       return lease
     } catch (error) {
-      opening.abort(error)
-      const orphanedLease = await storeOpening?.catch(() => undefined)
-      if (orphanedLease !== lease) await orphanedLease?.close().catch(() => {})
+      // Every path here has seen the store open settle, or never started it,
+      // so `lease` is the only lease this open can hold.
       await lease?.close().catch(() => {})
       if (this.#opening === opening) this.#state = "refused"
       throw error
@@ -113,13 +124,27 @@ export class StemSessionGate {
     }
   }
 
+  // Every write happens before the await, so an open started while the lease
+  // closes owns the state from then on.
   async close() {
     this.#opening?.abort(new DOMException("Session gate closed", "AbortError"))
     this.#opening = undefined
-    await this.#lease?.close()
+    const lease = this.#lease
     this.#lease = undefined
     this.#state = "idle"
+    await lease?.close()
   }
+}
+
+/** Settles as `promise` does, or rejects with the abort reason once `signal` aborts. */
+function abortable(promise, signal) {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  let abort
+  return new Promise((resolve, reject) => {
+    abort = () => reject(signal.reason)
+    signal.addEventListener("abort", abort, { once: true })
+    promise.then(resolve, reject)
+  }).finally(() => signal.removeEventListener("abort", abort))
 }
 
 function forwardAbort(signal, controller) {

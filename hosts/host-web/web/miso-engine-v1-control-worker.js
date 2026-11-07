@@ -552,7 +552,20 @@ class ControlWorker {
       .map((plane) => plane.buffer))];
   }
 
+  /// Every sticky error of this Worker goes through here (`fatal` too). Issue #2267: the first one
+  /// also fails the session in Rust (`session_fail`), so the lifecycle word the render half reads
+  /// before every block says failed and the worklet stops rendering, as for a failure the engine
+  /// records itself; a sticky error found only here (an out-of-order request ID, an unknown tag, a
+  /// session map the engine cannot have written) would otherwise leave the worklet playing. Later
+  /// sticky replies only post their code.
   sticky(result, requestId, planes) {
+    if (this.stickyResult === RESULT_OK && this.handle !== 0) {
+      try {
+        this.exports.miso_engine_web_v1_session_fail(this.handle, result);
+      } catch (_) {
+        // A trapped instance: the page still gets the sticky error below.
+      }
+    }
     this.ready = false;
     this.stickyResult = result;
     const message = { tag: "miso.error.v1", requestId, result };

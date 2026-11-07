@@ -73,6 +73,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_response_frame_reply_ptr",
     "miso_engine_web_v1_response_frame_submit",
     "miso_engine_web_v1_service",
+    "miso_engine_web_v1_session_fail",
     "miso_engine_web_v1_session_prepare_seek",
     "miso_engine_web_v1_session_seek",
     "miso_engine_web_v1_session_seek_at",
