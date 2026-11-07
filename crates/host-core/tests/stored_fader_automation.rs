@@ -2429,9 +2429,11 @@ fn a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold() {
 /// grid events from 1,100 (remembered, so a move is owed), makes the move due at the entry `W`;
 /// an offsets write `S = -6` dB at `W` does not cancel it. The due move lands at `W` over the
 /// fader length and replaces the jump's ramp, so from `W` the output is the same, bit for bit,
-/// whether that ramp is 1 or 480 samples, and from the first grid completion sample after the
-/// move's end `W + 480` it equals the never-muted session taking the same write at `W`. (This pins the base rule; whether the due move should
-/// override a jump whose own hold is newer is an open question for the owner, #2362.)
+/// whether that ramp is 1 or 480 samples. From the first grid completion sample after the move's
+/// end the lane has also converged to the never-muted session taking the same write at `W` (the
+/// composed curve, the coincident -6 dB included); that alone does not pin the due move, which
+/// the ramp comparison does. (This pins the base rule; whether the due move should override
+/// a jump whose own hold is newer is an open question for the owner, #2362.)
 ///
 /// Test value: red if the R17-10 release of the ended unmute overwrites the hold the offsets
 /// jump set at the same entry (the fade's grid events from 1,100 cut the 480-sample ramp); and
@@ -2442,8 +2444,8 @@ fn a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold() {
 fn an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp() {
     use builtins::BuiltinLaneSelector::Both;
     const FRAMES: u64 = 4_096;
-    // The fader length (10 ms at 48 kHz) the due move lands over.
-    const SETTLED: usize = 480;
+    // The fader grid: a retarget's completion sample is `GRID k + GRID - 1`.
+    const GRID: usize = 64;
     let (model, _) = muted_ride(
         vec![
             segment(AutomationShape::Linear, 0, 1_100, -30.0, -30.0),
@@ -2451,6 +2453,8 @@ fn an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp() {
         ],
         10.0,
     );
+    // The fader length the due move lands over (10 ms at 48 kHz).
+    let move_len = controls::LiveRamps::for_session(&model).fader_samples as usize;
     let twin = never_muted(&model);
     let freeing = Act {
         mute: Some((Both, false, 0)),
@@ -2525,8 +2529,10 @@ fn an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp() {
         };
         let (short, long) = (due(1), due(480));
         let w = window as usize;
-        // Once the due move has completed, the lane is where the never-muted session that takes
-        // the same write at `W` is (an absolute pin of the due move's target).
+        // Once the due move has completed and the grid has retargeted, the lane has converged to
+        // the never-muted composed curve, coincident -6 dB write included. This pins the
+        // convergence only, not the due move or its target: a lane whose due move never fires (or
+        // is cancelled, m3) converges there too; the ramp comparison above is what pins the move.
         let (settled, _) = acted(
             &twin,
             quantum,
@@ -2536,9 +2542,9 @@ fn an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp() {
                 ..act(u64::from(window))
             }],
         );
-        // The first completion sample `64k + 63` at or after the move's end `W + 480`: the
-        // grid's next retarget, from which both lanes follow the same composed curve.
-        let after = (w + SETTLED) | 63;
+        // The first grid completion sample at or after the move's end `W + move_len`: the grid's
+        // next retarget, from which both lanes follow the same composed curve.
+        let after = (w + move_len) | (GRID - 1);
         for plane in 0..2 {
             assert_eq!(
                 first_difference(&long[plane][w..], &short[plane][w..]).map(|at| at + w),

@@ -248,6 +248,10 @@ rule is unchanged.
   after the move's end `W + 480`: 1,791, 1,727 and 1,727 at quanta 128, 64 and 37.
   - A one-time probe placed the last differing sample at 1,790, 1,726 and 1,726, one sample
     before each bound. So the bound is exact, not padded.
+  - What this assertion pins is convergence: once the move and the grid's next retarget are
+    done, the lane is on the never-muted composed curve, coincident -6 dB write included. It does
+    not pin the due move or its target. m3 and a "due move never fires" mutant both pass it on
+    their own; the ramp comparison is what pins the move.
 
 **Mutants (merged tree):**
 Each mutant was applied alone. The suites run were host-core `stored_*_automation` and
@@ -274,6 +278,22 @@ mutants that was red is caught by some other test besides these two.
 - Workspace policy: ok.
 - The attempt-3 commits change only host-core tests and this spec, so render code is untouched
   and attempt 2's no-bit-moved comparison stands.
+
+## Verdict (attempt 3)
+Sol: **PASS** at head `58115e249`, with two MINORs. Both are folded in after the verdict.
+- **The move length and grid are derived, not hard-coded.** The contrast case takes the move's
+  length from `controls::LiveRamps::for_session(&model).fader_samples`, as the arrival test does,
+  and writes the bound as `(w + move_len) | (GRID - 1)` with a local `const GRID: usize = 64`.
+- **The convergence assertion is described accurately.** The test's comment and doc, and the
+  attempt-3 evidence above, now say it pins convergence to the never-muted composed curve, not
+  the due move's target.
+- **The optional target pin was tried and dropped.** It compared the move's completion sample
+  `W + 479` with `checked_fader_gain(vca_compose_db(curve(W + 479), S))`, and that did not hold
+  (q128, plane 0: bits `1017889684` against `1017621431`). The landing targets the curve at the
+  jump's completion through the ramp kernel, not that sample's composed value. Pinning the target
+  exactly would need the kernel's own arithmetic, so it is left out rather than approximated.
+- After the folds, host-core `--test stored_fader_automation` (test-support: 35 tests), clippy
+  `-D warnings` and fmt pass.
 
 ## Follow-ups (not this issue)
 - **Owner ruling needed.** On base, a move that comes due at an entry (`EndsAtBlockEnd`, owed)
