@@ -2805,10 +2805,10 @@ impl LiveControlEffectBankStage {
                 // whether or not its bank ran while it was bypassed: its state alone is reset,
                 // keeping parameters, before this block's targets and spans reach it, and it holds
                 // dry for the effect's warm-up.
-                if channel.take_rest() {
+                if let Some(rest) = channel.take_rest() {
                     self.processor
                         .reset_lane(lane, ResetKind::DiscontinuityKeepParameters);
-                    channel.begin_hold(self.warmup);
+                    channel.begin_hold(rest, self.warmup);
                 }
                 // #1371 D2: the lane's link switch reaches the processor here, before the chain
                 // decides the block's mode or asks which lanes rest. It moves both channels'
