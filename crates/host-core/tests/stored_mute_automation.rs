@@ -997,7 +997,7 @@ fn a_fader_ride_under_a_curve_mute_is_remembered_and_moves_at_the_unmute_end() {
 /// would not owe the move, or an in-block unmute's `E` would get no cut), if `E` is off by one
 /// (the move would land on a held stage and be only remembered, or a sample late), if an owed
 /// event below `E` is dropped, if a re-mute keeps the old cut, or if the hold at a block's end
-/// does not carry into the next block (`due_at_entry`, `held_through`).
+/// does not carry into the next block (`HoldAtBlockEnd`).
 #[test]
 fn a_hold_that_starts_and_ends_inside_a_block_moves_at_its_end() {
     const MS: f32 = 1.0;

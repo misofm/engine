@@ -1211,17 +1211,45 @@ struct HeldRampObligation {
     /// A gain event the stage only remembered is outstanding. Kept through a ramp that ends
     /// muted (constraint 4); cleared by the move, by a seek `Set` exactly at the hold's end
     /// (R17-8), or when a live write freed the gain at a block entry (it discharges the
-    /// obligation there, R17-10).
+    /// obligation there, R17-10). Independent of [`Self::hold`]: a remembered event outlives the
+    /// hold it was remembered under when the ramp ends muted.
     owed: bool,
-    /// The held ramp ends on the last sample of the block just rendered: the move is due at the
-    /// next block's first sample, which is the first sample the stage reports the gain free.
-    due_at_entry: bool,
-    /// The stage held the gain through the last sample of the block just rendered. A next block
-    /// that finds the gain free with no move due had its hold cleared by a live write at its
-    /// entry, so the cell's hold of the ramp that write ended is released there, owed or not
-    /// (R17-10). An offsets jump applied on the free lane at that entry clears it: the jump's own
-    /// hold is newer than the ramp the write ended (U2 fold 3, F1).
-    held_through: bool,
+    /// Where the stage's hold of the gain stood at the last sample of the block just rendered.
+    hold: HoldAtBlockEnd,
+}
+
+/// Where the stage's hold of one automated channel's gain stood at the last sample of the block
+/// just rendered (#1647 D1.6, R17-10, #2362): what the next block's
+/// [`HeldRampObligation::block`] owes at its first sample.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum HoldAtBlockEnd {
+    /// The gain was free at the block's last sample (or its hold ended inside the block, at the
+    /// sample the cell's own hold ended): the next block owes nothing at its entry.
+    #[default]
+    Free,
+    /// The stage held the gain through the block's last sample, and the hold runs on. A next
+    /// block that finds the gain free had its hold cleared by a live write at its entry, so the
+    /// cell's hold of the ramp that write ended is released there, owed or not (R17-10). An
+    /// offsets jump applied on the free lane at that entry makes it [`Self::Free`]: the jump's
+    /// own hold is newer than the ramp the write ended (U2 fold 3, F1).
+    HeldThrough,
+    /// The held ramp ends on the block's last sample: an owed move is due at the next block's
+    /// first sample, which is the first sample the stage reports the gain free. A gain the
+    /// stage finds free there ended by itself, so nothing is released; an offsets jump at that
+    /// entry leaves it as it is.
+    EndsAtBlockEnd,
+}
+
+impl HoldAtBlockEnd {
+    /// An offsets jump was applied on the free lane at a block entry (U2 fold 3, F1): its hold
+    /// is newer than a held ramp a live write ended there, so that ramp's R17-10 release must
+    /// not cut it. A ramp that ended by itself at the entry ([`Self::EndsAtBlockEnd`]) releases
+    /// nothing, so it is kept.
+    fn jumped_at_entry(&mut self) {
+        if *self == Self::HeldThrough {
+            *self = Self::Free;
+        }
+    }
 }
 
 /// One automated mute channel as a fader owner holds it (#1651 D1, batch 18 amendment): its cell
@@ -1257,32 +1285,27 @@ struct LaneFaderAutomation {
     channels: [Option<AutomatedFaderCell>; 2],
     /// `[left, right]`; `None` for a channel no mute entry drives (#1651).
     mute: [Option<AutomatedMuteCell>; 2],
-    /// The lane's floored input arrival `a(n)` (#1647a, R17-2): the graph compiler's, given to a
-    /// bank lane at the end of `compile_with_builtins`; `0` until then.
+    /// The lane's floored input arrival `a(n)` (#1647a, R17-2): the graph compiler's, given to the
+    /// lane when lowering builds it (#2362), so no lane exists without its own.
     arrival: u64,
     /// The node-time mapping of the block the graph last set (#1647a, R17-3):
     /// `timeline_block(r + ΣP - a(n))`, `None` in a plan with no timeline. The event driver builds
     /// the lane's `NodeSpan` from it.
     span: Option<TimelineSpan>,
-    /// The fader row's jump length of that block, from the three lengths the graph holds (#1639
-    /// D2); `None` in a plan with no jump-length cell. The event driver passes it to
-    /// `CellEvents::new`.
-    fader_jump: Option<u32>,
-    /// The mute row's jump length of that block (`LiveRamps::for_row(Mute)`, #1651 D1), from the
-    /// same three lengths; `None` exactly when [`Self::fader_jump`] is.
-    mute_jump: Option<u32>,
-    /// The VCA rows' jump lengths of that block, `[offset_db, mute]` (`LiveRamps::for_row` of
-    /// `VcaOffset` and `VcaMute`, #1655): a composed channel's VCA cursors take them; `None`
-    /// exactly when [`Self::fader_jump`] is.
-    vca_jumps: Option<[u32; 2]>,
+    /// The fader, mute and VCA rows' jump lengths of that block, from the three lengths the graph
+    /// holds (#1639 D2, #1651 D1, #1655); `None` in a plan with no jump-length cell. The event
+    /// driver passes the fader row's to `CellEvents::new`, the mute row's to the mute cells, and
+    /// the VCA rows' to a composed channel's VCA cursors.
+    jumps: Option<BlockJumps>,
     /// The lane has rendered no block yet (#1647 D2): its first block takes a `Set` when the
     /// curve at that block's node time differs from the value it was seeded with.
     fresh: bool,
 }
 
 impl LaneFaderAutomation {
-    /// The lane's automation, from its prepared cells, sharing each fader channel's offsets cell.
-    /// Control side: a composed channel allocates its cursor table (#1655 V2).
+    /// The lane's automation, from its prepared cells, sharing each fader channel's offsets cell,
+    /// at its member's floored input arrival `arrival` (`a(n)`, #1647a R17-2). Control side: a
+    /// composed channel allocates its cursor table (#1655 V2).
     ///
     /// # Errors
     ///
@@ -1292,6 +1315,7 @@ impl LaneFaderAutomation {
     fn new(
         program: &Arc<automation::Program>,
         strip: &PreparedStripAutomation,
+        arrival: u64,
     ) -> Result<Self, automation::ComposeError> {
         let mut mute = [None, None];
         for (slot, cell) in mute.iter_mut().zip(&strip.mute) {
@@ -1322,11 +1346,9 @@ impl LaneFaderAutomation {
             program: Arc::clone(program),
             mute,
             channels,
-            arrival: 0,
+            arrival,
             span: None,
-            fader_jump: None,
-            mute_jump: None,
-            vca_jumps: None,
+            jumps: None,
             fresh: true,
         })
     }
@@ -1455,9 +1477,7 @@ impl LaneFaderAutomation {
     /// oracle per strip.
     fn take_block_time(&mut self, time: &GraphBlockTime<'_>, jumps: Option<BlockJumps>) {
         self.span = time.node_span(self.arrival);
-        self.fader_jump = jumps.map(|jumps| jumps.fader);
-        self.mute_jump = jumps.map(|jumps| jumps.mute);
-        self.vca_jumps = jumps.map(|jumps| [jumps.vca_offset, jumps.vca_mute]);
+        self.jumps = jumps;
     }
 
     /// #1651 D1, the drain branch: a mute value the block drain read for channel `channel`, whose
@@ -1496,7 +1516,7 @@ impl LaneFaderAutomation {
         // mute length. So the swap block lands at most one `SetMute` per channel. A lane with no
         // node time this block renders no curve and keeps the cell owed: the carried target is
         // the curve it holds.
-        let at_node = match (cell.reposition, self.mute_jump, self.span) {
+        let at_node = match (cell.reposition, self.jumps, self.span) {
             (true, Some(_), Some(span)) => node_time_at(span, 0)
                 .and_then(|time| cell.curve.mutes_at(&self.program, time))
                 .map(|muted| muted || terms),
@@ -1823,7 +1843,7 @@ impl AutomatedFaderCell {
         // This jump's hold is newer than the held ramp a live write ended at this entry, so the
         // block's R17-10 release must not cut it (#1647 U2 fold 3, F1). A successor's carried
         // record takes this same path at its first block, with the carried obligation.
-        self.obligation.held_through = false;
+        self.obligation.hold.jumped_at_entry();
         let hold = start.map(|start| automation::completion_of(completion, start, ramp));
         // A newer live move keeps its own length: a jump an adoption deferred to the end of the
         // ramp this one replaces is dropped (#1711 D1).
@@ -2194,10 +2214,9 @@ impl FaderCellCursor<'_> {
         self.end = None;
         let frames = self.frames;
         let obligation = &mut *self.obligation;
-        obligation.due_at_entry = false;
         if muted {
             self.free_from = frames;
-            obligation.held_through = true;
+            obligation.hold = HoldAtBlockEnd::HeldThrough;
             return;
         }
         // The M > 0 arm is defensive: a muted span is at least 64 samples, so a grid event before
@@ -2210,7 +2229,7 @@ impl FaderCellCursor<'_> {
         if samples == 0 {
             self.free_from = 0;
             obligation.owed = false;
-            obligation.held_through = false;
+            obligation.hold = HoldAtBlockEnd::Free;
             return;
         }
         match u32::try_from(u64::from(at) + u64::from(samples)) {
@@ -2223,12 +2242,15 @@ impl FaderCellCursor<'_> {
                     self.end.is_some(),
                     "an end inside a checked block has a node time"
                 );
-                obligation.held_through = false;
+                obligation.hold = HoldAtBlockEnd::Free;
             }
             end => {
                 self.free_from = frames;
-                obligation.due_at_entry = end == Ok(frames);
-                obligation.held_through = true;
+                obligation.hold = if end == Ok(frames) {
+                    HoldAtBlockEnd::EndsAtBlockEnd
+                } else {
+                    HoldAtBlockEnd::HeldThrough
+                };
             }
         }
     }
@@ -2405,15 +2427,20 @@ impl<'a> FaderEventDriver<'a> {
                 channels,
                 mute,
                 span,
-                fader_jump,
-                mute_jump,
-                vca_jumps,
+                jumps,
                 fresh,
                 ..
             } = automation;
             let first_block = core::mem::replace(fresh, false);
-            let (Some(span), Some(jump), Some(mute_jump), Some([vca_offset_jump, vca_mute_jump])) =
-                (*span, *fader_jump, *mute_jump, *vca_jumps)
+            let (
+                Some(span),
+                Some(BlockJumps {
+                    fader: jump,
+                    mute: mute_jump,
+                    vca_offset: vca_offset_jump,
+                    vca_mute: vca_mute_jump,
+                }),
+            ) = (*span, *jumps)
             else {
                 continue;
             };
@@ -2756,8 +2783,7 @@ impl HeldRampObligation {
     /// ended inside the previous block, or on its last sample) needs no release: the cell's hold
     /// of it ended at the same sample.
     fn block(&mut self, hold: Option<ChannelHold>, frames: u32) -> (u32, Option<u32>, bool) {
-        let due = core::mem::take(&mut self.due_at_entry);
-        let held_through = core::mem::take(&mut self.held_through);
+        let entry = core::mem::take(&mut self.hold);
         match hold {
             Some(ChannelHold {
                 held: true,
@@ -2768,23 +2794,26 @@ impl HeldRampObligation {
                 if remaining < frames {
                     (remaining, Some(remaining), false)
                 } else {
-                    self.due_at_entry = remaining == frames;
-                    self.held_through = true;
+                    self.hold = if remaining == frames {
+                        HoldAtBlockEnd::EndsAtBlockEnd
+                    } else {
+                        HoldAtBlockEnd::HeldThrough
+                    };
                     (frames, None, false)
                 }
             }
             Some(ChannelHold { held: true, .. }) => {
-                self.held_through = true;
+                self.hold = HoldAtBlockEnd::HeldThrough;
                 (frames, None, false)
             }
-            Some(_) if due && self.owed => (0, Some(0), false),
+            Some(_) if entry == HoldAtBlockEnd::EndsAtBlockEnd && self.owed => (0, Some(0), false),
             Some(_) => {
                 // A live write that freed a held stage at this entry (an exact unmute) discharges
                 // the move the hold owed; a stale `owed` would land a move over `J` at a later
                 // hold's end with nothing remembered there (#1711 G4,
                 // `an_exact_unmute_that_frees_a_held_lane_discharges_the_owed_move`).
                 self.owed = false;
-                (0, None, held_through && !due)
+                (0, None, entry == HoldAtBlockEnd::HeldThrough)
             }
             None => (0, None, false),
         }
@@ -3311,7 +3340,11 @@ pub fn test_only_take_fader_events() -> (Vec<TestOnlyFaderEvent>, bool) {
 /// `mute`; lane 0 left, 1 right; `None` for a lane no entry drives.
 pub type VcaCells = [[Option<u32>; 2]; 2];
 
-/// A fader owner's lane automation at bind ([`LaneFaderAutomation::new`]). Control side.
+/// One row of `GraphCompileReport::input_arrivals`: a node and its floored input arrival `a(n)`.
+type InputArrival = (GraphNodeId, effect_contract::LatencySamples);
+
+/// A fader owner's lane automation at bind ([`LaneFaderAutomation::new`]), at its node's floored
+/// input arrival `arrival`. Control side.
 ///
 /// # Panics
 ///
@@ -3321,8 +3354,9 @@ pub type VcaCells = [[Option<u32>; 2]; 2];
 fn bound_lane_automation(
     program: &Arc<automation::Program>,
     strip: &PreparedStripAutomation,
+    arrival: u64,
 ) -> LaneFaderAutomation {
-    match LaneFaderAutomation::new(program, strip) {
+    match LaneFaderAutomation::new(program, strip, arrival) {
         Ok(automation) => automation,
         Err(error) => panic!("a prepared lane binds its automation: {error:?}"),
     }
@@ -5078,7 +5112,7 @@ fn test_only_record_fader_lane_times(automation: &[Option<LaneFaderAutomation>])
                 lane,
                 arrival: slot.arrival,
                 span: slot.span,
-                fader_jump: slot.fader_jump,
+                fader_jump: slot.jumps.map(|jumps| jumps.fader),
             };
             match times.entries.get_mut(times.len) {
                 Some(free) => {
@@ -5321,14 +5355,6 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     }
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
-    }
-    /// #1647a (R17-2): each automated lane keeps its member's `a(n)`.
-    fn set_input_arrivals(&mut self, arrivals: &[u64]) {
-        for (slot, &arrival) in self.automation.iter_mut().zip(arrivals) {
-            if let Some(slot) = slot {
-                slot.arrival = arrival;
-            }
-        }
     }
     // REALTIME_POLICY_BEGIN
     /// #1647a (R17-3): each automated lane takes the block's node-time mapping
@@ -7086,19 +7112,20 @@ impl PreparedBuiltinsSession {
     ///
     /// Every track is bound per node here, so this is the scalar oracle's lowering and exists only
     /// for tests and `test-support` (issue #1059); [`Self::into_graph_artifact_with_banks`] is the
-    /// lowering every shipped build takes.
+    /// lowering every shipped build takes. `arrivals` is as there.
     #[cfg(any(test, feature = "test-support"))]
     pub fn into_graph_artifact<R>(
         mut self,
         graph: PreparedGraphPlan,
         report: R,
+        arrivals: &[(GraphNodeId, effect_contract::LatencySamples)],
     ) -> PreparedBuiltinsGraphArtifact<R> {
         // #1646 D2: the scalar oracle rebuilds the ramped fader from the prepared parameters here.
         // Defensive for direct oracle callers; `into_graph_artifact_with_banks` already holds it.
         let _canonical = lane::CanonicalFpEnv::enter();
         let automation_program = self.automation_program();
         let mut processors = core::mem::take(&mut self.processors);
-        processors.append(&mut self.strip_bindings());
+        processors.append(&mut self.strip_bindings(arrivals));
         PreparedBuiltinsGraphArtifact {
             graph,
             builtin_processors: processors,
@@ -7125,14 +7152,18 @@ impl PreparedBuiltinsSession {
     /// The scalar oracle's half of lowering (issue #1059): a vector dispatch leaves no strip
     /// behind, so shipped builds bind through [`Self::unbanked_strip_bindings`] instead.
     #[cfg(any(test, feature = "test-support"))]
-    fn strip_bindings(&mut self) -> Vec<graph::GraphNodeBinding> {
+    fn strip_bindings(&mut self, arrivals: &[InputArrival]) -> Vec<graph::GraphNodeBinding> {
         let mut bindings = Vec::with_capacity(self.strips.len() * 3);
         let fader_automation = self.fader_automation.take();
         for strip in core::mem::take(&mut self.strips) {
-            // #1646 R17-4: the oracle installs the same lane automation as a fader bank lane.
+            // #1646 R17-4: the oracle installs the same lane automation as a fader bank lane, at
+            // its fader node's `a(n)` (#1647b), by the same lookup.
             let automation = fader_automation.as_ref().and_then(|plan| {
-                plan.strip(&strip.track_id)
-                    .map(|cells| Box::new(bound_lane_automation(&plan.program, cells)))
+                plan.strip(&strip.track_id).map(|cells| {
+                    let node = stage_node(strip.graph_id.clone(), TrackStage::PostFader);
+                    let arrival = graph::floored_input_arrival(arrivals, &node);
+                    Box::new(bound_lane_automation(&plan.program, cells, arrival))
+                })
             });
             let StripPreparation {
                 graph_id,
@@ -7452,13 +7483,17 @@ impl PreparedBuiltinsSession {
     /// [`Self::strip_bindings`]. Without it there are none to make: every dispatch a shipped build
     /// can name has a bank width, and the planner banks every strip at a bank width, so a strip
     /// left over here would be a planner defect, and it is refused rather than dropped (#1059).
-    fn unbanked_strip_bindings(&mut self) -> Vec<graph::GraphNodeBinding> {
+    fn unbanked_strip_bindings(
+        &mut self,
+        arrivals: &[InputArrival],
+    ) -> Vec<graph::GraphNodeBinding> {
         #[cfg(any(test, feature = "test-support"))]
         {
-            self.strip_bindings()
+            self.strip_bindings(arrivals)
         }
         #[cfg(not(any(test, feature = "test-support")))]
         {
+            let _ = arrivals;
             assert!(
                 self.strips.is_empty(),
                 "a bank-width dispatch banks every strip; the per-node strip owners are compiled \
@@ -7479,6 +7514,12 @@ impl PreparedBuiltinsSession {
     /// the plan on error, so the read-only preflight is what makes the attach transactional and
     /// the `expect`s here are this crate's own planner invariants.
     ///
+    /// `arrivals` is the compiled graph's `GraphCompileReport::input_arrivals` (#1285 D2: every
+    /// node with a nonzero floored input arrival, sorted by node ID): each automated fader lane is
+    /// built with its member's `a(n)` (#1647a R17-2, #1647b; [`graph::floored_input_arrival`]),
+    /// so no lane exists before its arrival is known (#2362). A caller with no compile report
+    /// passes `&[]`: every arrival is 0.
+    ///
     /// Kept out of line: `scripts/check-scalar-oracle-absent.py` reads this symbol in the shipped
     /// wasm and C ABI artifacts as its positive control (#1765 moved its body into
     /// `lower_strip_banks`, which let the optimizer inline it).
@@ -7487,6 +7528,7 @@ impl PreparedBuiltinsSession {
         mut self,
         graph: PreparedGraphPlan,
         report: R,
+        arrivals: &[(GraphNodeId, effect_contract::LatencySamples)],
         dispatch: Backend,
         levels: &[DependencyLevel],
         classes: &SessionPoolClasses,
@@ -7496,7 +7538,7 @@ impl PreparedBuiltinsSession {
         let _canonical = lane::CanonicalFpEnv::enter();
         let Some(width) = BankWidth::for_backend(dispatch) else {
             #[cfg(any(test, feature = "test-support"))]
-            return self.into_graph_artifact(graph, report);
+            return self.into_graph_artifact(graph, report, arrivals);
             #[cfg(not(any(test, feature = "test-support")))]
             panic!(
                 "the whole-plan scalar lowering is compiled only with builtins-compiler/test-support \
@@ -7507,7 +7549,7 @@ impl PreparedBuiltinsSession {
         let plan = planned_strip_banks(&self.seal.tracks, dispatch, levels, classes);
         if plan.iter().all(|(_, groups)| groups.is_empty()) {
             let mut processors = core::mem::take(&mut self.processors);
-            processors.append(&mut self.unbanked_strip_bindings());
+            processors.append(&mut self.unbanked_strip_bindings(arrivals));
             return PreparedBuiltinsGraphArtifact {
                 graph,
                 builtin_processors: processors,
@@ -7521,10 +7563,10 @@ impl PreparedBuiltinsSession {
         let resource = self
             .strip_bank_resource(&plan, width)
             .expect("preflighted builtin-bank resource");
-        let (graph_banks, selected) = self.lower_strip_banks(plan, dispatch, width);
+        let (graph_banks, selected) = self.lower_strip_banks(plan, arrivals, dispatch, width);
         let mut processors = core::mem::take(&mut self.processors);
         processors.retain(|binding| !selected.contains(&binding.node));
-        processors.append(&mut self.unbanked_strip_bindings());
+        processors.append(&mut self.unbanked_strip_bindings(arrivals));
 
         let graph = graph
             .with_builtin_banks(graph_banks, resource)
@@ -7547,6 +7589,7 @@ impl PreparedBuiltinsSession {
     fn lower_strip_banks(
         &mut self,
         plan: [(TrackStage, Vec<Box<[GraphNodeId]>>); 3],
+        arrivals: &[InputArrival],
         dispatch: Backend,
         width: BankWidth,
     ) -> (Vec<GraphPreparedBuiltinBank>, BTreeSet<GraphNodeId>) {
@@ -7623,23 +7666,28 @@ impl PreparedBuiltinsSession {
                         }
                         // #1646 D1: one slot per bank lane when a member's fader is automated,
                         // charged by `fader_automation_bank_resource`.
-                        let automation: Box<[Option<LaneFaderAutomation>]> =
-                            match fader_automation.as_ref() {
-                                Some(plan)
-                                    if members
-                                        .iter()
-                                        .any(|member| plan.strip(track_of(member)).is_some()) =>
-                                {
-                                    (0..lanes)
-                                        .map(|lane| {
-                                            let track = members.get(lane).map(track_of)?;
-                                            let cells = plan.strip(track)?;
-                                            Some(bound_lane_automation(&plan.program, cells))
-                                        })
-                                        .collect()
-                                }
-                                _ => Box::default(),
-                            };
+                        let automation: Box<[Option<LaneFaderAutomation>]> = match fader_automation
+                            .as_ref()
+                        {
+                            Some(plan)
+                                if members
+                                    .iter()
+                                    .any(|member| plan.strip(track_of(member)).is_some()) =>
+                            {
+                                (0..lanes)
+                                    .map(|lane| {
+                                        let member = members.get(lane)?;
+                                        let cells = plan.strip(track_of(member))?;
+                                        // #1647a (R17-2): the lane keeps its member's
+                                        // `a(n)`.
+                                        let arrival =
+                                            graph::floored_input_arrival(arrivals, member);
+                                        Some(bound_lane_automation(&plan.program, cells, arrival))
+                                    })
+                                    .collect()
+                            }
+                            _ => Box::default(),
+                        };
                         Box::new(FaderBankProcessor {
                             bank: BuiltinFaderBank::new(dispatch, width, parameters)
                                 .expect("planner emits 1..=W members at the selected width"),
@@ -7901,23 +7949,6 @@ fn restore_graph_bind_failure<R>(
 }
 
 impl<R> PreparedBuiltinsGraphArtifact<R> {
-    /// Give each builtin bank its members' floored input arrivals `a(n)` (#1647a, R17-2), from
-    /// `GraphCompileReport::input_arrivals`. The graph compiler's one call at the end of
-    /// `compile_with_builtins`; it changes nothing but what the banks hold of `a(n)`. Off the
-    /// render thread.
-    #[doc(hidden)]
-    pub fn install_builtin_input_arrivals(
-        &mut self,
-        arrivals: &[(GraphNodeId, effect_contract::LatencySamples)],
-    ) {
-        self.graph.install_builtin_input_arrivals(arrivals);
-        // #1647b (R17-4): the scalar oracle's bound fader owners take their node's `a(n)` by the
-        // same lookup.
-        for binding in &mut self.builtin_processors {
-            let arrival = graph::floored_input_arrival(arrivals, &binding.node);
-            binding.set_input_arrival(arrival);
-        }
-    }
     /// Immutable caller-owned graph report.
     #[must_use]
     /// The sealed graph, by shared reference.
@@ -9396,9 +9427,6 @@ impl GraphRuntimeProcessor for AutomatedFaderProcessor {
             block.first_sample,
         )
     }
-    fn set_input_arrival(&mut self, arrival: u64) {
-        self.automation.arrival = arrival;
-    }
     fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
         self.automation.take_block_time(time, block_jumps(time));
     }
@@ -9635,11 +9663,6 @@ impl GraphRuntimeProcessor for LiveControlFaderProcessor {
             block.first_sample,
         )?;
         Ok(())
-    }
-    fn set_input_arrival(&mut self, arrival: u64) {
-        if let Some(automation) = self.automation.as_deref_mut() {
-            automation.arrival = arrival;
-        }
     }
     fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
         if let Some(automation) = self.automation.as_deref_mut() {
@@ -11224,7 +11247,7 @@ mod tests {
         let (graph, levels) = track_graph_variant(n, variant);
         let classes = SessionPoolClasses::from_session(&compiled);
         let mut artifact =
-            builtins.into_graph_artifact_with_banks(graph, (), dispatch, &levels, &classes);
+            builtins.into_graph_artifact_with_banks(graph, (), &[], dispatch, &levels, &classes);
         let bank_count = artifact.graph.prepared_builtin_bank_count();
         let captures: Vec<_> = (0..n)
             .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
@@ -11446,7 +11469,7 @@ mod tests {
             .checked_add_runtime_metadata(runtime_resource)
             .expect("fixture runtime metadata estimate fold");
         let mut artifact =
-            builtins.into_graph_artifact_with_banks(graph, (), backend, &levels, &classes);
+            builtins.into_graph_artifact_with_banks(graph, (), &[], backend, &levels, &classes);
         if let Some(capture) = post_matrix_capture {
             artifact
                 .builtin_observers
@@ -11559,7 +11582,7 @@ mod tests {
             )
             .expect("fixture runtime metadata estimate fold");
         let artifact =
-            builtins.into_graph_artifact_with_banks(graph, (), backend, &levels, &classes);
+            builtins.into_graph_artifact_with_banks(graph, (), &[], backend, &levels, &classes);
         let envelope = artifact.graph.envelope;
         let mut nodes = (0..n)
             .map(|index| {
@@ -12452,7 +12475,7 @@ mod tests {
             }
             let classes = SessionPoolClasses::from_session(&compiled);
             let mut artifact =
-                builtins.into_graph_artifact_with_banks(graph, (), backend, &levels, &classes);
+                builtins.into_graph_artifact_with_banks(graph, (), &[], backend, &levels, &classes);
             let node = GraphNodeId::TrackStage {
                 track_id: StableGraphId::parse(&track_name(selected)).unwrap(),
                 stage: TrackStage::PostFader,
@@ -14751,7 +14774,7 @@ mod tests {
             );
             automation.push(plan.as_ref().and_then(|plan| {
                 plan.strip(id).map(|cells| {
-                    LaneFaderAutomation::new(&plan.program, cells).expect("the lane binds")
+                    LaneFaderAutomation::new(&plan.program, cells, 0).expect("the lane binds")
                 })
             }));
         }
@@ -14791,9 +14814,12 @@ mod tests {
                     start: i64::try_from(self.first).expect("time"),
                     step: None,
                 });
-                slot.fader_jump = Some(fader);
-                slot.mute_jump = Some(mute);
-                slot.vca_jumps = Some([vca_offset, vca_mute]);
+                slot.jumps = Some(BlockJumps {
+                    fader,
+                    mute,
+                    vca_offset,
+                    vca_mute,
+                });
             }
             let width = self.processor.bank.width().lanes() as usize;
             let samples = width * frames as usize;
@@ -15749,7 +15775,7 @@ mod tests {
         let plan = planned_strip_banks(&prepared.seal.tracks, backend, &levels, &classes);
         let (banks, _) = {
             let _canonical = lane::CanonicalFpEnv::enter();
-            prepared.lower_strip_banks(plan, backend, width)
+            prepared.lower_strip_banks(plan, &[], backend, width)
         };
         let strip_of = |member: &GraphNodeId| {
             let GraphNodeId::TrackStage { track_id, stage } = member else {
@@ -15911,9 +15937,12 @@ mod tests {
                             start: i64::try_from(self.first).expect("time"),
                             step: None,
                         });
-                        slot.fader_jump = Some(96);
-                        slot.mute_jump = Some(64);
-                        slot.vca_jumps = Some([32, 32]);
+                        slot.jumps = Some(BlockJumps {
+                            fader: 96,
+                            mute: 64,
+                            vca_offset: 32,
+                            vca_mute: 32,
+                        });
                     }
                     chain
                         .run(planes, self.frames, self.first, snapshot)

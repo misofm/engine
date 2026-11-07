@@ -2545,13 +2545,6 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     fn fire_fade_in(&mut self, lane: usize, ramp_samples: u32) {
         let _ = (lane, ramp_samples);
     }
-    /// Take the floored input arrival `a(n)` of each member, in lane order (#1647a, R17-2):
-    /// `arrivals[l]` is lane `l`'s, and a lane past the slice is padding. The graph compiler calls
-    /// it once, off the render thread, at the end of `compile_with_builtins`, from
-    /// `GraphCompileReport::input_arrivals` (#1285). The default keeps nothing.
-    fn set_input_arrivals(&mut self, arrivals: &[u64]) {
-        let _ = arrivals;
-    }
     /// Take this block's node-time context (#1647a, R17-3). The graph calls it on every builtin
     /// slot of a bank unit once per block, before the unit's chain runs, so `begin_block` and
     /// `process` of the same block read what it kept. The context borrows the source set only for
@@ -2856,21 +2849,6 @@ impl PreparedGraphPlan {
                 width: bank.scratch.width(),
                 members: &bank.members,
             })
-    }
-    /// Give each builtin bank its members' floored input arrivals `a(n)` (#1647a, R17-2), through
-    /// [`GraphPreparedBuiltinBankProcessor::set_input_arrivals`]. `arrivals` is
-    /// `GraphCompileReport::input_arrivals` (#1285 D2): every node with a nonzero floored arrival,
-    /// sorted by node ID; a member absent from it has arrival 0. Off the render thread, once,
-    /// after the banks are attached and before bind.
-    pub fn install_builtin_input_arrivals(&mut self, arrivals: &[(GraphNodeId, LatencySamples)]) {
-        for bank in &mut self.builtin_banks {
-            let lanes: Vec<u64> = bank
-                .members
-                .iter()
-                .map(|member| floored_input_arrival(arrivals, member))
-                .collect();
-            bank.processor.set_input_arrivals(&lanes);
-        }
     }
     /// Attach sealed fixed-stage banks before binding.  The graph compiler remains responsible
     /// for deciding eligibility; this validates only the immutable graph shape.
@@ -3967,14 +3945,6 @@ impl GraphNodeBinding {
             processor: None,
         }
     }
-    /// Give the bound processor its node's floored input arrival `a(n)` through
-    /// [`GraphRuntimeProcessor::set_input_arrival`] (#1647b); an identity binding has none. Off
-    /// the render thread, before bind.
-    pub fn set_input_arrival(&mut self, arrival: u64) {
-        if let Some(processor) = self.processor.as_mut() {
-            processor.set_input_arrival(arrival);
-        }
-    }
 }
 pub struct GraphBindingBlock<'a> {
     pub left: &'a mut [f32],
@@ -4008,14 +3978,6 @@ pub trait GraphRuntimeProcessor: Send + Any {
     /// A bound node that *does* have graph inputs is handed its reduction, exactly as before, and
     /// may read the block it is given.
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
-
-    /// Take the node's floored input arrival `a(n)` (#1647b, R17-4): the scalar oracle's bound
-    /// fader owners take it as a builtin bank takes its members' through
-    /// [`GraphPreparedBuiltinBankProcessor::set_input_arrivals`]. Called once, off the render
-    /// thread, before bind ([`GraphNodeBinding::set_input_arrival`]). The default keeps nothing.
-    fn set_input_arrival(&mut self, arrival: u64) {
-        let _ = arrival;
-    }
 
     /// Take this block's node-time context (#1647b, R17-4): the executor calls it on a bound node
     /// right before [`Self::process`] of the same block, as it sets a bank's builtin slots before
