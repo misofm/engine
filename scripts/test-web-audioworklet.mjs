@@ -3187,6 +3187,25 @@ async function testMainRealm() {
             `${what}: the post is the tag and the code alone`);
             await host.dispose().catch(() => undefined);
           }
+          // Issue #2317's generator reached `#fail`'s clear of the shared status read: a failure
+          // while a read is in flight, with a later request sent after it, leaves no read behind, so
+          // a status call on the failed host rejects with the sticky error. Test value: the clear
+          // dropped, so the call joins a follow-up of a read that already failed and never settles.
+          {
+            const host = await boot("single");
+            holdAll = true;
+            const read = host.status();
+            const later = host.control(new Uint8Array([1]));
+            holdAll = false;
+            inject(FakeNode.latest.port, { tag: "miso.meter.v1" });
+            await errorResult(read, 255);
+            await errorResult(later, 255);
+            const after = host.status();
+            assert.equal(await settledState(after), "rejected", "a status call on the failed host settles");
+            await errorResult(after, 255);
+            heldAll.length = 0;
+            await host.dispose().catch(() => undefined);
+          }
         }
 
         // #1332 S8: a worklet whose construction failed (perhaps after it adopted the half): the
@@ -3264,6 +3283,33 @@ async function testMainRealm() {
           await disposal.catch(() => undefined);
           if (!gone) assert.equal(worker.posts.filter((message) => message.tag === "miso.dispose.v1").length, 1,
             `${what}: the dispose is sent to the live Worker`);
+          // Issue #2317: an early failure reaches the peer still alive: the worklet when the Worker
+          // is gone, the Worker otherwise.
+          assert.deepEqual(
+            [worker.posts.filter((message) => message.tag === "miso.fail.v1").length,
+              FakeNode.latest.port.failPosts.length],
+            gone ? [0, 1] : [1, 0], `${what}: who is told`);
+        }
+        // Issue #2317: the Worker's typed error posted before the host took the Worker over is the
+        // Worker's own: the host fails with it, typed, and tells the Worker nothing. Test value: the
+        // early messages replayed as if the worklet had sent them (the Worker is then posted a
+        // failure it reported itself), or not replayed at all (the host starts live).
+        {
+          const gate = snapshotGate();
+          readyGate = gate;
+          const pending = createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          await gate.started;
+          const worker = workers.at(-1);
+          worker.onmessage({ data: { tag: "miso.error.v1", requestId: 0, result: 9 } });
+          gate.release();
+          const failedHost = await pending;
+          await errorResult(failedHost.control(new Uint8Array([1])), 9);
+          assert.equal(worker.posts.filter((message) => message.tag === "miso.fail.v1").length, 0,
+            "an early typed error from the Worker tells the Worker nothing");
+          await failedHost.dispose().catch(() => undefined);
         }
         // D6: a Worker `error` or `messageerror` before the boot reply rejects with `worker-failed`,
         // no worklet starts and nothing falls back to `single` mode. A refused boot rejects with
@@ -6081,9 +6127,17 @@ async function testControlWorker() {
       assert.equal(tick.cleared, true, "the tick stops");
       send({ tag: "miso.fail.v1", result: 4 });
       assert.deepEqual(fake.calls.sessionFail, [[1, 9]], "a second post fails nothing more");
-      send({ tag: "miso.status.v1", requestId: 2 });
-      assert.deepEqual(posts.at(-1), { tag: "miso.error.v1", requestId: 2, result: 9 },
-        "the next request (its ID next in sequence) is refused with the first code");
+      // A source request, so the refusal also hands its planes back (a sticky refusal's planes
+      // were otherwise unpinned on this side).
+      send({
+        tag: "miso.source.v1", requestId: 2, sourceId: "drums", generation: 1n, startFrame: 0n,
+        sampleRateHz: 48000, planes: [new Float32Array([0.5]), new Float32Array([0.25])], frames: 1,
+        endOfRegion: false,
+      });
+      const refusal = posts.at(-1);
+      assert.deepEqual([refusal.tag, refusal.requestId, refusal.result, refusal.planes?.map((plane) => plane[0])],
+        ["miso.error.v1", 2, 9, [0.5, 0.25]],
+        "the next request (its ID next in sequence) is refused with the first code, its planes returned");
     }
     {
       const { send } = await boot();

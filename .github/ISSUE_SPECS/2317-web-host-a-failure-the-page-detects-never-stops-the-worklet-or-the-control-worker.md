@@ -55,5 +55,100 @@ What is already right, and stays:
 - `bash scripts/test-web-audioworklet.sh`, `bash scripts/check-workspace-policy.sh`, `cargo run --release -p realtime-policy`. No Rust changes, so no cargo gates apply beyond `cargo fmt --check`.
 
 ## Evidence
-### Attempt 1 (Terra)
-(filled in below)
+### Attempt 1 (Terra, 2026-11-07)
+Base `5d403acd8`, which includes #2304 (#2291's worklet trap containment), so no merge was needed.
+
+**Red on base.** The new rows were run against base copies of the three shipped files through the suite's module overrides (`MISO_ENGINE_WEB_HOST_TEST_MODULE`, `..._WORKLET_...`, `..._CONTROL_WORKER_...`), one file at a time. Each run stops at its first new row:
+
+```
+host:   AssertionError [ERR_ASSERTION]: single: a malformed meter frame: who is told
+        + worklet: []   - worklet: [ 255 ]
+worklet: AssertionError [ERR_ASSERTION]: single: nothing is posted back   2 !== 1
+worker: AssertionError [ERR_ASSERTION]: the lifecycle word is failed with the page's code
+        [ [ 1, + 1  - 9 ] ]
+```
+
+On base the worklet and the Worker read `miso.fail.v1` as an unknown request: each refuses it sticky `INVALID_ARGUMENT` on the page's port, and the Worker fails the word with 1, not the page's code.
+
+**Rows** (`scripts/test-web-audioworklet.mjs`, all "Issue #2317"):
+- **Main realm: the routing table.** It has 22 cases, seven in `single` mode and fifteen in `worker` mode. They cover:
+  - page-found failures: a malformed frame, a stray reply, a malformed reply or typed error, a `messageerror` on either port, a fence that cannot be posted;
+  - typed errors from each peer: request ID 0, and a request (a control call to the Worker, a lease to the worklet);
+  - `processorerror`;
+  - the Worker's `error`, alone and after each other kind of failure.
+
+  Each case asserts exactly which codes each peer was posted. A second failure must post nothing more, and a post must carry `tag` and `result` only.
+- **Main realm: the early-failure loop.** It now also asserts who is told after an early `error`, an early `messageerror`, or both.
+- **Main realm: an early typed error.** A typed error the Worker posts before the host takes it over is the Worker's own.
+- **Main realm: the status read.** A status call on a host that failed while a read was in flight, with a later request sent after the read, settles with the sticky error.
+- **Worklet.** `miso.fail.v1` is tested in both modes:
+  - the output is silent, and nothing is posted back;
+  - the published view says failed;
+  - a later request is refused with the first code, and the dispose still runs;
+  - a render check reports nothing;
+  - a release still hands the half back;
+  - a released or disposed instance stays final;
+  - four malformed shapes are each sticky 1.
+- **Control Worker:**
+  - `session_fail` is called once with the page's code, nothing is posted back, and the tick stops;
+  - a second post fails nothing;
+  - a later source request is refused with the first code, and its planes come back;
+  - a post after the Worker's own failure fails nothing;
+  - a post during a dispose, or after it, fails nothing, and the dispose completes;
+  - three malformed shapes take the unknown-message path.
+
+**Mutations.** I ran #2279's generator three ways, plus a hand list:
+- **The reviewer's `gen.py`/`run2.py`, over the whole host.**
+  - Base, lines 466-1590: 794 mutants. 633 are RED, 9 are RED only in the MAX_SAFE run, and 152 are GREEN. These are #2279's attempt-4 counts exactly.
+  - This branch, lines 466-1640: 823 mutants. 662 are RED, 9 are RED only in the MAX_SAFE run, and 152 are GREEN.
+  - Compared by line text and mutation, no mutant that was red on base is green here. The only GREEN entries not on base are two. One is `early?.messages ?? []` with `||`, the same mutant as base's, on a changed line. The other is a factory-input clause past base's range cutoff (#2279's follow-up).
+- **`gen2.py`/`run3.py`.** This is the generator widened to the three files, run over every line this diff adds plus the whole of `#fail` and `#tell`. To #2279's mutators it adds:
+  - `aware` swaps, peer-token swaps and `#tell` target swaps;
+  - the code argument;
+  - deletion of each one-line statement and of each later `&&` conjunct.
+
+  It made 150 mutants: 141 RED and 9 GREEN. The GREEN ones are below.
+- **Hand mutants**, for the first conjuncts and disjuncts the generator does not drop. There are 13, and 12 are RED:
+  - `tellWorker` without `prior === null`, or without `!workerGone`;
+  - `tellWorklet` without `workletKnows`, without `aware`, without the mode, or without `workerGone`;
+  - `workletKnows` without each of its three terms;
+  - `workerGone` without `prior`;
+  - the Worker's guard without `disposing`;
+  - the worklet's guard widened to any phase that is not final.
+
+Each GREEN mutant, with its equivalence:
+
+| Line | Mutant | Equivalence |
+|---|---|---|
+| 593 | `early?.messages ?? []` to `\|\|` | `messages` is an array, or there is no early record (`undefined`); `\|\|` and `??` agree. Also GREEN on base. |
+| 816 | `#fail` source `null` to `pending` | This site requires `requestId === 0`, and no request has ID 0 (IDs start at 1), so `pending` is `null` there. Also GREEN on base (its line 803). |
+| 1012 | `if (phase.kind === "disposed") return;` deleted, or set `false` | Unreachable. `#teardown` nulls every handler that calls `#fail`: the ports, `onprocessorerror` and `worker.onerror`. The fence and `#failWorker` run only from those handlers or the constructor. This is #2279's equivalence, upheld. |
+| 1016 | `tellWorker` without `this.#worker !== undefined` | In `single` mode, `#tell(undefined, ...)` throws a `TypeError` inside `#tell`'s `try`, and nothing is posted. The guard states the intent, and the catch makes its removal invisible. |
+| 1022 | `prior?.error ?? error` to `\|\|` | `prior.error` is a frozen error record, never falsy. Pre-existing. |
+| 1028 | the Worker's post: `failure.error.result` to `error.result` | The Worker is posted only on the first entry, where `failure.error` is `error`. The worklet's post (line 1029) can come after a first failure, and its swap is RED ("the Worker's typed error, then its error"). |
+| 1034 | `this.#inFlight.clear()` deleted | #2279's equivalence: once the host has failed, no bounded request is sent again. |
+| 1037 | `this.#statusFollow = null` deleted | Once the host has failed, `#statusRead` is `null` and no read is kept again (`#request` refuses one). So `#statusFollow` is not read before the teardown, which rejects an already-rejected deferred, a no-op. (The neighbouring `#statusRead = null` was GREEN too, and is now RED at the status-read row.) |
+| Worker `onPageMessage` | `miso.fail.v1` handled before the `disposed` check (hand) | `disposing` stays set once a dispose has begun, so a disposed Worker is also `disposing`, and `receiveHostFailure` returns. A boot that failed never gets a host, and so never gets a post. |
+
+**Render path.** No render code changed. `process()`, `render_next` and every `REALTIME_POLICY` region are untouched. The worklet's new handler runs on the message port, outside `process()`. So no bit-for-bit comparison applies. No cross-thread protocol was added: the Worker stores into the lifecycle word through the existing `session_fail`, as #2267 does, so no loom model is needed.
+
+**Gates (all green):**
+- `bash scripts/test-web-audioworklet.sh`, exit 0. This runs the hermetic suite, both MAX_SAFE copies, the source policy, the opcode, module-shape, timer and capability self-tests, the call-graph self-test, and the qualification, live-control, metadata, session-map and UTF-8 mutation gates.
+- `bash scripts/check-workspace-policy.sh`, which reported `workspace policy: ok`.
+- `cargo run --locked --release -p realtime-policy`, which reported `realtime policy: ok (294 marked regions in 46 files)`.
+- `cargo fmt --check`.
+
+No Rust file changed, so no other cargo gate applies.
+
+**Not run here:** the built-artifact legs (the SDK package checks and the Playwright browser legs). They need the pinned browser nightly. The SDK's shipped files are the three files themselves, and no export or SDK type changed.
+
+**Test value.**
+- Routing table: red if a failure the page found (or, in `worker` mode, one the worklet posted) reaches no live peer, so the session keeps playing or the Worker keeps ticking. It is also red if a peer is told twice, or told of a failure it posted itself; if a gone Worker is posted; if the worklet is left playing when the Worker dies before it could fail the word; or if a later post carries a code other than the sticky error's. No existing row reads what the host posts on a failure.
+- Early typed error: red if the early messages are replayed as if the worklet had sent them, or are not replayed at all.
+- Status read: red if a failure leaves the shared read behind, so a status call on the failed host never settles.
+- Worklet: red if the worklet keeps rendering after the page's post, answers or refuses the post on the page's port, reports it again on a render check, lets a later post replace the first code, revives a final phase, or accepts a malformed post.
+- Control Worker: red if the Worker leaves the lifecycle word ready or keeps ticking after the post, reads it as a request, calls `session_fail` again for a later post or for one during a dispose, or drops a sticky refusal's planes.
+
+**Follow-ups (not filed):**
+- A well-formed unsolicited frame on a failed host still reaches its listener: meter, telemetry, control event or watermark. A failed host should drop it, or count it.
+- #2279's follow-ups stand: the factory-input, returned-plane, boot-reply and frame-schema clause swaps have no rows.
