@@ -67,8 +67,10 @@ both states unrepresentable instead.
 - No render-path code changes.
 
 ## Gates
-- No red-on-base test (unreachable, see the proof). The existing gates defend the placement; see
-  the mutation evidence.
+- No red-on-base test for the two `None`s (unreachable, see the proof). The existing gates defend
+  the placement; see the mutation evidence. The misaligned-entries refusal folded in after review
+  has its own test, red without the refusal.
+- `graph.effect.control_layout` had no test; one now covers it on both compile paths.
 - A one-time no-bit-moved comparison over the session fixture corpus, base against head.
 - `cargo test --locked -p graph-compiler`.
 - `cargo clippy --locked -p graph-compiler --all-targets -- -D warnings`.
@@ -84,8 +86,10 @@ touched.
 
 **Fix.**
 - `crates/graph-compiler/src/ids.rs`:
-  - `EffectNodeIds` (`of_validated`, `get(slot)`, `iter`) replaces `Vec<Option<EffectNodeId>>` and
-    `prepared_effect_node`.
+  - `EffectNodeIds` (`get(slot)`, `iter`) replaces `Vec<Option<EffectNodeId>>` and
+    `prepared_effect_node`. As attempt 1 first shipped it, it was built by its own
+    `of_validated`; the review fold moved it into `PreparedEffectIndex::from_entries` (see the
+    verdict).
   - `EffectPlacement { PerNode, Banked { kept } }` is the only input `into_effects` lowers.
 - `compile.rs`:
   - `graph_front` builds `EffectNodeIds` once, after validation, and the node loop reads it
@@ -142,5 +146,58 @@ The two outputs are byte-identical: sha256 of both files
 **Follow-ups (not in this issue).**
 - `compile_with_builtins` keeps a banked member's supplied processor as a per-node
   `GraphPreparedEffect` beside its bank, and no graph-compiler test observes it (the surviving
-  mutation above). Either a consumer needs it and should have a test, or it is retained dead weight
-  that `#2199`'s "never both for one instance" rule should also cover on this path.
+  mutation above). The reviewer confirmed it is dead weight, unobserved and freed at bind; the
+  coordinator tracks it in #2258.
+
+## Verdict (attempt 1)
+**PASS** (Sol's adversarial review), with these folded in on the same branch after merging
+`origin/main` (`5f75ca78d`):
+1. **Misaligned entry lists.** `GraphProjection::effects_mut` exposes the public `entries` `Vec`,
+   so a caller could change it between `project` and `compile_projected`, and attempt 1's zips
+   then dropped or mispaired entries silently. `graph_back` now rebuilds the nodes from its own
+   entries and refuses with `graph.internal.invariant`, handing every input back, unless they
+   equal the front's. That is stronger than a length check: it also catches reordered or re-keyed
+   entries. Narrowing `effects_mut` to per-entry lane attachment was not done. Its one caller,
+   host-core, hands it to `effect_compiler::attach_projected_effect_live_controls(&mut
+   EffectProjectedSession)`, so narrowing it changes an effect-compiler API and host-core. Even a
+   slice would still let a caller re-key entries through their public fields, which the
+   comparison catches anyway.
+2. **One slot space.** `PreparedEffectIndex::from_entries` returns `IndexedEffects { index, ids,
+   duplicates }`, and `EffectNodeIds::of_validated` is deleted. The nodes come back `None` as a
+   whole only when some entry's ID is not a stable ID. Such an entry matches no declared key, so
+   validation refuses it first, and the front's one remaining arm is `graph.internal.invariant`.
+   `rack_chains`' unreachable `effects.entry(slot.index())` arm is replaced by
+   `EffectInputs::at(slot)`.
+3. **`graph.effect.control_layout` test.**
+   `projected_compile::a_lane_other_than_the_planned_one_is_refused_on_both_compile_paths` plans
+   lanes (`plan_projected_effect_live_controls`), attaches none, and expects
+   `graph.effect.control_layout` from both `compile_projected` and `compile_with_builtins`.
+4. **Follow-up.** The kept banked processor goes to #2258.
+
+**Fold tests and mutations (each reverted).**
+- `a_projected_compile_refuses_entries_changed_since_its_projection` removes the per-node delay,
+  or swaps the first and last entries, through `effects_mut`.
+  - With the refusal disabled (`if false && ...`), both cases compile: red, "a
+    projection whose entries were removed compiled" when run alone, and "...swapped compiled".
+  - Removing a banked last entry instead is already refused, by the bank bind. So the test removes
+    the per-node one, which only the new check catches.
+  - Test value: red when the back half lowers entries other than the front's, pairing each with
+    another entry's node, bank and placement.
+- `a_lane_other_than_the_planned_one_is_refused_on_both_compile_paths`:
+  - Reviewer's M3: the `Vec` supply's pending-diagnostic refusal removed. Red on the prepared path
+    ("a prepared compile without its planned lanes compiled").
+  - The `control_layout` push removed: red on the projected path ("a projected compile without
+    its planned lanes compiled").
+  - Test value: red when a back half lowers a plan whose estimate charged lanes it does not hold.
+
+**No bit moved (re-run after the fold, one-time, not committed).** The same probe ran on the
+merge parent `5f75ca78d` (`origin/main` as merged) and on head `50e4147fa`. Both outputs are
+byte-identical, sha256 `1f453d5d2a8f2a5743fbb544d2d87611ec345370bf540d466e9feb61ff8bac87`, which
+is also attempt 1's value: 140 configurations, 84 compiled and rendered, 940 bank lines.
+
+**Gates (head after the fold).**
+- `cargo test --locked -p graph-compiler`: 23 test binaries, 206 passed, 0 failed, 2 ignored.
+- `cargo clippy --locked -p graph-compiler --all-targets -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p graph-compiler`: clean.
+- `bash scripts/check-workspace-policy.sh`: ok.
