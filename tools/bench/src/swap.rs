@@ -573,11 +573,12 @@ impl Stream {
     /// with `lead_blocks`, `Primed` with `not_before` at the render clock (the next block's
     /// start). Returns `not_before` for a primed candidate.
     ///
-    /// A primed candidate's flags are written first (#1320 D4, the order #1403 D3 states): every
-    /// ring whose producer the running set holds reads `true` exactly when the candidate carries
-    /// it (holds it vacant), and every ring the candidate created reads `false`. Only then does the
-    /// candidate's set take the carried producers, and the commit's `Release` orders the stores
-    /// before render's load of the candidate.
+    /// A primed candidate's flags follow `host_core::publish_primed`'s rule (#1320 D4, #2273):
+    /// every ring reads `true` exactly when the candidate carries it
+    /// (`SourceControlSet::carries`), whichever set holds its producer, so the flags do not depend
+    /// on when the producers move. The commit's `Release` orders the stores before render's load
+    /// of the candidate. (The bench's host-core has no `control-provider`, so it cannot call
+    /// `publish_primed` itself.)
     fn publish(
         &mut self,
         host: PreparedHost,
@@ -603,11 +604,11 @@ impl Stream {
             (Some(not_before), Some(lead_blocks)) => {
                 let mut flagged = 0;
                 self.sources.set_prime_flags(|id| {
-                    let carried = sources.holds_vacant(id);
+                    let carried = sources.carries(id);
                     flagged += usize::from(carried);
                     carried
                 });
-                sources.set_prime_flags(|_| false);
+                sources.set_prime_flags(|id| sources.carries(id));
                 self.flagged = flagged;
                 PlanAdoption::Primed {
                     not_before,
@@ -620,7 +621,7 @@ impl Stream {
             .publisher
             .reserve_replacement(plan, adoption)
             .unwrap_or_else(|_| panic!("reserve the successor"));
-        // After the flags: W's set takes the producers of the rings it carries.
+        // W's set takes the producers of the rings it carries.
         sources.adopt_persisting(&mut self.sources);
         self.pending = Some(inventory.source_read_offset());
         reservation.commit(self.revision);

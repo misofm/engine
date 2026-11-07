@@ -5472,11 +5472,10 @@ where
     /// Sets the prime flags of the newest pending candidate's carry again, as its own
     /// `publish_primed` set them (#1403 D3, #2044), before it is republished.
     ///
-    /// Its publication moved every producer it held vacant in from the epoch it succeeds, which
-    /// then holds those entries vacant. So the candidate carries exactly the rings whose
-    /// producers it holds and whose IDs that epoch holds vacant (a redeclared source's entry
-    /// there keeps its own producer); every producer that epoch still holds is of a ring the
-    /// candidate does not carry. No allocation.
+    /// The same rule as `publish_primed`: a ring reads `true` exactly when the candidate carries
+    /// it ([`host_core::SourceControlSet::carries`], fixed at its preparation), wherever its
+    /// producer now is (#2273). Its publication moved every producer it carries in from the epoch
+    /// it succeeds, so that epoch's own producers are of rings it does not carry. No allocation.
     fn restore_prime_flags(&self, epoch: u64) {
         let len = self.pending_providers.len();
         let Some(candidate) = self.pending_providers.last() else {
@@ -5490,12 +5489,9 @@ where
             0 | 1 => &self.providers,
             _ => &self.pending_providers[len - 2],
         };
-        holder
-            .sources
-            .set_prime_flags(|id| candidate.sources.holds_vacant(id));
-        candidate
-            .sources
-            .set_prime_flags(|id| holder.sources.holds_vacant(id));
+        let carried = |id: &[u8]| candidate.sources.carries(id);
+        holder.sources.set_prime_flags(carried);
+        candidate.sources.set_prime_flags(carried);
     }
 
     /// The transition fallback across the pending `Primed` candidate W, the donor (#1397 D2): the
@@ -6368,16 +6364,14 @@ where
             }
             None => None,
         };
-        // #1403 D3: a warm candidate's flags and `Primed` schedule, before its set takes any
-        // producer or donated ring: each entry it holds vacant is then a ring it carries from the
-        // plan it displaces, whose producer is still in that plan's set, or, across a withdrawn
-        // candidate, in the withdrawn candidate's. It sets the prime flags of rings render reads,
-        // so it runs after the last refusal: the commit below cannot refuse once its predicate
-        // passed above, with no controller write between. #2044: it runs before the protocol
-        // commit, so a panic here or in the commit (no lock is held) leaves the controller as it
-        // was and republishes the withdrawn candidate (#2010). Its flags are then the
-        // successor's: `rebuild_withdrawn` sets a `Primed` candidate's again before it republishes
-        // it (`restore_prime_flags`).
+        // #1403 D3: a warm candidate's flags and `Primed` schedule. A ring's flag is whether the
+        // candidate carries it, fixed at its preparation, so the producer moves below do not
+        // change it (#2273). It sets the prime flags of rings render reads, so it runs after the
+        // last refusal: the commit below cannot refuse once its predicate passed above, with no
+        // controller write between. #2044: it runs before the protocol commit, so a panic here
+        // or in the commit (no lock is held) leaves the controller as it was and republishes the
+        // withdrawn candidate (#2010). Its flags are then the successor's: `rebuild_withdrawn`
+        // sets a `Primed` candidate's again before it republishes it (`restore_prime_flags`).
         let mut primed = warm_lead_blocks.map(|lead_blocks| {
             let (running, withdrawn_sources) = if superseding {
                 let len = self.pending_providers.len();

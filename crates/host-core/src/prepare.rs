@@ -63,7 +63,7 @@ use crate::route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
     route_producer_position, route_record,
 };
-use crate::source::{ControlSourceBuilder, SourceControlSet};
+use crate::source::{ControlSourceBuilder, PreparedProducer, SourceControlSet};
 use crate::spectrum::{
     SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionRequest,
     SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumPrepareError,
@@ -3482,7 +3482,7 @@ fn prepare_or_project(
                 u32::from(source.channels),
                 0,
                 source.frames,
-                None,
+                PreparedProducer::Carried,
             );
             graph_sources.push(SourceGraphSource::vacant(u32::from(source.channels)));
             carried_sources.push((index, predecessor_index));
@@ -3496,7 +3496,7 @@ fn prepare_or_project(
                 u32::from(source.channels),
                 0,
                 source.frames,
-                None,
+                PreparedProducer::Projected,
             );
             graph_sources.push(SourceGraphSource::projected(
                 u32::from(source.channels),
@@ -3515,7 +3515,7 @@ fn prepare_or_project(
                 u32::from(source.channels),
                 0,
                 source.frames,
-                Some(producer.into_host_chunk_provider(compiled.sample_rate())),
+                PreparedProducer::Fresh(producer.into_host_chunk_provider(compiled.sample_rate())),
             );
             graph_sources.push(SourceGraphSource::new(consumer, resources, 0, 0));
         }
