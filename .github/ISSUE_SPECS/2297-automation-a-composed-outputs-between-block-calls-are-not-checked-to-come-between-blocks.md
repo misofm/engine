@@ -71,7 +71,7 @@ mid block:      [(0, false), (64, true), (128, true), (192, true), (200, false)]
 The event the cursor had already pulled at offset 0 escapes the deferral and retargets the output,
 cutting the column jump short (R19-3).
 
-**Model** (as folded after the attempt-1 verdict, below).
+**Model** (as folded after the attempt-1 and attempt-2 verdicts, below).
 - `Composed::start(&'a mut self, &'a Program, span, mode) -> BlockWalk<'a, T>`. The walk holds the
   output's borrow, the program, the span and mode, and an `ended` flag.
 - Three methods live only on the walk:
@@ -80,9 +80,12 @@ cutting the column jump short (R19-3).
     between-block closure.
   - `restart(&mut self, compose, span, mode)` drains the block and begins the next block or piece
     on the same output and program.
-- `Drop` covers a walk abandoned before its end: each cursor whose event was pulled but not decided
-  returns to the state its pull started from (`before`). The walk therefore stops at its last
-  decided offset and loses no event, and a between-block call made after the drop sees that state.
+- `Drop` covers a walk abandoned before its end (attempt 3). The walk records `at`, one past the
+  last merged offset (`0` at `start` and `restart`). Every cursor replays from the state its last
+  pull started from up to `at`, which is the state a block ending there leaves. The walk therefore
+  stops at its last decided offset and loses no event, and a between-block call made after the drop
+  sees that state. This covers a walk abandoned between calls, not one unwound in the middle of an
+  offset's merge; release builds abort on panic.
 - The `block` word is gone, and `copy_from` no longer copies it.
 - `walk` is `start` followed by `next_event` until `None`.
 - The per-cursor scratch stays in the preallocated table, so no allocation is added, but only a
@@ -205,8 +208,11 @@ tests of that run passed on both.
       abandons a walk today, so no other test reaches it.
   - **Mutations.**
     - Restore line deleted from `Drop`: red, case 1.
-    - Restore moved from `Drop` into `start`, the reviewer's placement: red, case 2 (`a deferral
-      made after a dropped walk`).
+    - Restore moved from `Drop` into `start`, the reviewer's placement. Exactly: in `Drop`, the
+      early return made unconditional (`if self.ended || true { return; }`); in
+      `Composed::start`'s cursor loop, before `cursor.next = None;`, added
+      `if cursor.next.is_some() && !cursor.consumed { cursor.state = cursor.before; }`. Red, case 2
+      (`a deferral made after a dropped walk`).
   - **No bit moved, again.** The same instrumentation and scratch generator were re-applied to the
     folded head. The run skipped only the new test, since its walks have no base counterpart. The
     per-binary digests are identical to the base table above: 138,498 walks in all, every ordered
@@ -214,10 +220,6 @@ tests of that run passed on both.
     caller ever drops an unfinished walk, and the restore never fires on their paths.
   - **Doc.** `BlockWalk`'s doc now says a dropped walk stops at its last decided offset and loses
     no event; it no longer describes the loss as acceptable.
-- Doctest wording: the `compile_fail` twin is the plain twin with the `retarget` line moved, and
-  the doc says rustdoc checks `E0499` only on nightly.
-- `cursor_history_valid`'s untested re-arm is tracked by the coordinator in #2258.
-
   - **Placement.** The restore body is `BlockWalk::abandon`, inside the marked realtime region.
     The one-line `impl Drop` that calls it sits just after the region, because the policy's text
     predicate reads `fn drop(` as a `drop(` call. That is the same placement as the engine's other
@@ -227,8 +229,11 @@ tests of that run passed on both.
     with `drop(block)`. The plain twin drops the walk and then calls `retarget`. The `compile_fail`
     twin is that text with the `retarget` line moved above the drain. The pointer-instead-of-borrow
     mutation above was run at `59ae78d70`, before `drop(block)` was added.
+- Doctest wording: the `compile_fail` twin is the plain twin with the `retarget` line moved, and
+  the doc says rustdoc checks `E0499` only on nightly.
+- `cursor_history_valid`'s untested re-arm is tracked by the coordinator in #2258.
 
-**Gates after the fold (head).**
+**Gates after the attempt-1 fold (`3cefe1ca7`).**
 - `cargo test --locked --no-fail-fast -p automation -p graph -p builtins-compiler -p host-core
   --all-targets --features builtins-compiler/test-support,graph/test-support,host-core/test-support`:
   719 passed (the new test included), 0 failed.
@@ -238,6 +243,86 @@ tests of that run passed on both.
   clean.
 - `bash scripts/check-workspace-policy.sh`: ok.
 - `cargo run --locked --release -p realtime-policy`: `ok (292 marked regions in 46 files)`.
+
+**Verdict (attempt 2, `3cefe1ca7`): FAIL, one MAJOR and three MINORs.** The review found the
+borrow model, the builtins-compiler equivalence, the doctests, the `Drop` placement and the merge
+sound.
+- **MAJOR: a walk dropped mid-block did not stop at its last decided offset.** `abandon` restored
+  only cursors with `next.is_some() && !consumed`, and only to their state at `resume`. Two errors
+  followed:
+  - (a) a cursor that pulled ahead from an earlier `resume` went back too far (in the reviewer's
+    case a re-deferred jump came back stale, 2202 instead of 2304);
+  - (b) a cursor whose pull found nothing stayed at the block's end.
+
+  The reviewer's differential (`scratchpad/review-2297b/zz_mid_block_drop_differential.patch`:
+  3,000 random two-cell outputs, each dropped after every `k >= 1` events and compared with a walk
+  finished at that offset) found 1,115 of 16,772 state mismatches. 37 of them emitted different
+  events in the next span. The attempt-2 test only dropped before the first event, so it missed
+  both.
+- MINOR: say that the restore covers an abandoned walk, not one unwound in the middle of an offset.
+- MINOR: record the builtins-compiler mute-walk refusal path in the no-bit-moved section.
+- MINOR: state the exact "restore moved into `start`" mutation. It is now in the attempt-1 fold
+  record above.
+
+**Attempt 3.** First, a normal merge of `origin/main` (`d11fed9b4`) into the branch: `9ca094303`.
+main had moved graph's `runtime.rs` (#2302) and touched neither automation nor builtins-compiler.
+- **Fix** (`4c5d13f28`), as the reviewer verified:
+  - `BlockWalk` records `at = offset + 1` after each merged offset in `next_event`, and resets it
+    to `0` in `start` and `restart`.
+  - `abandon` calls `replay(cursor, program, &span, mode, at)` for every cursor, then clears
+    `consumed`. `replay` clears `next`; it is already in the marked region and allocates nothing.
+  - `BlockWalk`'s doc and `abandon`'s doc say what a dropped walk leaves, and that the restore
+    covers an abandoned walk, not one unwound mid-offset (release builds abort on panic).
+- **Test.** `a_dropped_block_walk_loses_no_pulled_event` is replaced by
+  `a_dropped_block_walk_stops_at_its_last_decided_offset`, a seeded subset of the reviewer's
+  differential, extended to cover what the old test covered.
+  - 400 trials of two random cells: restartable or `no_restart`, value or gate, both hold rules,
+    both seek modes. Each output is positioned by one block and given random between-block calls.
+  - Each walk is dropped after `k` events, `k = 0` included: 2,570 drops, 2,207 of them mid-block.
+  - The cursor states, heard bits, output state and target must equal those of a walk finished at
+    the last decided offset. Then both outputs take a `defer_jump` (a between-block call after the
+    drop), and the next span's events must be equal.
+  - Red on `3cefe1ca7` (the attempt-2 `abandon`): `trial 1, dropped after 0 events`. A gate
+    cursor whose pull found nothing kept its block-end state, with `deferred` lost.
+  - Test value: red if a dropped walk leaves any cursor anywhere but where a block ending at its
+    last decided offset would leave it, or if the restore waits for the next `start`.
+  - The reviewer's full differential, run once on the fix and not committed (3.7 s): 0 of 16,772
+    state mismatches and 0 event mismatches.
+- **Mutations** (each run is the new test):
+  - `replay` removed from `abandon`: red, `trial 0, dropped after 0 events`.
+  - `self.at = next;` deleted (so `at` stays `0`): red, `trial 1, dropped after 11 events`.
+  - Replay limited to cursors with `next.is_some()`: red, `trial 1, dropped after 0 events`.
+  - `self.at = next;` moved inside `if event.is_some()`: green. This is an equivalent mutant: a
+    walk can be dropped only after `next_event` returns, and the offset it last merged is then
+    the returned event's own.
+- **No bit moved** (attempt 3). The base is now the merged `origin/main` `d11fed9b4`. Its four
+  touched source files were restored into the worktree with `git restore --source=origin/main`,
+  and the base instrumentation was applied. The head is the same instrumentation on `4c5d13f28`,
+  skipping only the new test. Both used the scratch seeded generator and the same command as
+  above. Base and head per-binary digests are identical, and equal to the table above: 138,498
+  block walks, every ordered and sorted digest the same, and the generator at `a31771ff..39e4`.
+  All 722 tests of each run passed.
+  - The one path where head differs from base is unreachable. In `FaderEventDriver::new`, a
+    composed mute walk is started and then refused at `driver.mutes.get_mut(mutes_used)`
+    (`refused()`, then `continue`, around `builtins-compiler/src/lib.rs:2513-2518`). The walk is
+    dropped there before its first pull is decided. On head `abandon` returns its cursors to the
+    block's start; on base they stood where the first pulls left them. The refusal needs more than
+    `MAXIMUM_FADER_CELLS` mute cursors in one driver, which the two-channels-per-lane bound
+    excludes, and it fails a `debug_assert`.
+
+**Gates (attempt 3, on the merged tree).**
+- `cargo test --locked --no-fail-fast -p automation -p graph -p builtins-compiler -p host-core
+  --all-targets --features builtins-compiler/test-support,graph/test-support,host-core/test-support`:
+  722 passed, 0 failed. The first two tries of this run, on a machine at load 300 to 430, were
+  killed: one by the 3,000 s `timeout` wrapper, one by an external SIGTERM. No test failed in
+  either before it was killed.
+- Doctests on the same set: all pass, including both `BlockWalk` twins.
+- clippy `-D warnings` on the same set: clean. `cargo fmt --check`: clean.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps -p automation -p graph -p builtins-compiler`:
+  clean.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- `cargo run --locked --release -p realtime-policy`: `ok (295 marked regions in 46 files)`. The
+  region count comes from main's merge.
 
 **Follow-ups (not in this issue).**
 - `cursor_history_valid`'s re-arm at a fader walk's start has no test that reaches it (mutation
