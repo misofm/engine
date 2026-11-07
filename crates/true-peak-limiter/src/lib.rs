@@ -2614,7 +2614,7 @@ fn channel_frame_uniform<L: Lane>(
 ///
 /// Under `LinkMode::Maximum` both channels feed the same linked peak `max(p_R, p_L)` to their gain
 /// computers. When, lane by lane, the two channels also carry the same designed words
-/// ([`designed_gain_agree`]) and the same gain words (the `gain_linked` record on
+/// ([`designed_gain_agree`]) and the same gain words (the [`LinkRecord`] on
 /// [`LimiterCore`]), the right channel's steps 1-6 of [`channel_frame_uniform`] are the left's:
 /// the same operations, in the same order, on the same operands. So they produce the same words,
 /// including a `-0.0`, a subnormal and a NaN payload, and computing them once is class A.
@@ -3100,7 +3100,7 @@ fn limiter_block<L: Lane>(
 /// `linked` is the caller's statement that the pair is linked (every lane at `LinkMode::Maximum`,
 /// issue #1368), that its
 /// designed words agree on every lane ([`designed_gain_agree`]) and that its gain words agree (the
-/// `gain_linked` record). A uniform cohort then renders its gain path once
+/// [`LinkRecord`]). A uniform cohort then renders its gain path once
 /// ([`linked_frame_uniform`]); a cohort that is not uniform renders the per-lane body, which needs
 /// no such branch: it computes both channels' gain words from equal operands and leaves them equal.
 #[inline(always)]
@@ -4056,6 +4056,217 @@ mod silent {
 
 use silent::SilentClaim;
 
+/// The #990 linked-agreement record and its issue #1370 D5 re-derivation in their own module, so
+/// that their words are private to the methods that move them (#2285): no other code in this
+/// crate can write either.
+mod link {
+    use super::{ChannelState, gain_rings_agree, gain_state_agrees, reduction_agrees};
+
+    /// Issue #990's linked-agreement record and its D5 re-derivation, made explicit (#2285).
+    ///
+    /// **Invariant:** while [`linked`](Self::linked) answers `true`, every lane's two channels
+    /// hold bit-equal gain words ([`gain_state_agrees`]). That licenses
+    /// [`super::limiter_block_uniform`] to compute a linked pair's gain path once, with the
+    /// per-block legs that every lane is `Maximum`, that both channels are uniform and that the
+    /// designed words agree ([`super::designed_gain_agree`]). The invariant is asserted where it
+    /// is trusted, the linked decision of [`super::LimiterCore::process_block`], in debug builds.
+    ///
+    /// The record is in one of three states, and its state is private, so it moves only through
+    /// these methods:
+    ///
+    /// * **Linked**, with a D5 countdown that may still be running. A link switch never leaves
+    ///   the record linked ([`arm`](Self::arm)), but an establishing event can land inside the
+    ///   countdown: a restore, the disengage copy or a §4.4 recovery states the record from the
+    ///   words, and the words can agree while a bank-mate's glide is still in flight. The glide's
+    ///   next block unlinks the record again ([`unlink`](Self::unlink)), so the countdown must
+    ///   survive the establishing event to bring the record back after the glide (gate 4,
+    ///   `the_linked_pair_returns_once_the_words_agree`). While the record stays linked, the end of
+    ///   the countdown changes nothing.
+    /// * **Apart**, with a countdown: no proof that the gain words agree. When the countdown
+    ///   reaches zero on a dual path ([`tick`](Self::tick)), the glide has ended and both gain
+    ///   rings have been rewritten under the lanes' modes, and the record is re-derived from the
+    ///   words, once. A countdown of zero re-derives nothing: once apart, the record returns only
+    ///   through an establishing event, because a pair whose designed words come back together
+    ///   has no proof that its gain words did.
+    /// * **Watching** (root ruling of 2026-10-25): the countdown ended with the gain rings agreeing
+    ///   ([`gain_rings_agree`]) and the reduction words `d` apart. `d` is recursive and re-agrees
+    ///   only on a frame where both channels take the attack arm, which stationary material can put
+    ///   off for thousands of frames, so each dual block that keeps the rings agreeing
+    ///   ([`watch`](Self::watch)) compares the `W` reduction words, and the record returns on the
+    ///   first block they agree. Any other block, a collapsed one, a reset or a restore ends the
+    ///   watch. A watch never carries a countdown and is never linked.
+    ///
+    /// The events, and the method each one takes:
+    ///
+    /// * **Stated** ([`stated`](Self::stated)) at construction and by a full reset, from
+    ///   [`super::lane_shapes_agree`], which is exact after `clear_runtime`; no countdown.
+    /// * **Restated** ([`restate`](Self::restate)), the countdown kept: by a restore, from a full
+    ///   comparison of every lane's gain words; by a dual block's §4.4 recovery, from
+    ///   [`super::lane_shapes_agree`] after the whole reset and from a full comparison after a
+    ///   per-lane one (#1091); and by the disengage copy, which makes the right channel's words
+    ///   the left's.
+    /// * **Narrowed** ([`narrow`](Self::narrow)) by a lane reset, by the reset lane's words, and
+    ///   by the linked decision ([`decide`](Self::decide)) of every dual block that renders the
+    ///   body and of every skipped block that does not take the fast path: a block that renders
+    ///   with a lane at `DualMono` (issue #1368: the mode is per lane, and the record is one per
+    ///   bank) or with a designed word apart leaves the record apart.
+    /// * **Unlinked** ([`unlink`](Self::unlink)) by every block with a glide in flight (issue
+    ///   #1370 D3: the glide body never links and leaves the channels' gain words apart) and by
+    ///   every collapsed block (only the left channel advances), the watch included.
+    /// * **Armed** ([`arm`](Self::arm)) by a link switch: apart, with the countdown raised.
+    ///
+    /// Kept by everything else, the silent fast path included: it advances each channel's phase
+    /// by a function of that phase and the lane's window, and at silent rest the box sum *is* the
+    /// window, so equal box sums mean equal windows.
+    ///
+    /// This is per-bank control state, read and moved at block boundaries, never a lane word of
+    /// the frame loop.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct LinkRecord(State);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum State {
+        /// The gain words agree. `countdown`: frames of a D5 countdown still to run.
+        Linked { countdown: u32 },
+        /// No proof. `countdown`: frames until the record is re-derived, or zero for never.
+        Apart { countdown: u32 },
+        /// D5's watch of the reduction words, after a countdown ended with the rings agreeing.
+        Watching,
+    }
+
+    impl LinkRecord {
+        /// The record a full reset or a preparation states: linked iff `agrees`, no countdown.
+        pub(super) const fn stated(agrees: bool) -> Self {
+            Self(if agrees {
+                State::Linked { countdown: 0 }
+            } else {
+                State::Apart { countdown: 0 }
+            })
+        }
+
+        /// Whether the gain words are proved to agree on every lane.
+        pub(super) const fn linked(self) -> bool {
+            matches!(self.0, State::Linked { .. })
+        }
+
+        /// The D5 countdown still to run, zero while watching.
+        const fn countdown(self) -> u32 {
+            match self.0 {
+                State::Linked { countdown } | State::Apart { countdown } => countdown,
+                State::Watching => 0,
+            }
+        }
+
+        /// Restates the record from a comparison of the words (`agrees`), keeping the countdown
+        /// and ending any watch: a restore, a §4.4 recovery and the disengage copy.
+        pub(super) const fn restate(&mut self, agrees: bool) {
+            let countdown = self.countdown();
+            self.0 = if agrees {
+                State::Linked { countdown }
+            } else {
+                State::Apart { countdown }
+            };
+        }
+
+        /// Keeps a linked record only where `holds`; an apart record and a watch are unchanged.
+        pub(super) const fn narrow(&mut self, holds: bool) {
+            if let State::Linked { countdown } = self.0
+                && !holds
+            {
+                self.0 = State::Apart { countdown };
+            }
+        }
+
+        /// Issue #990: the whole-block linked-pair decision, and the record it leaves. A block
+        /// whose `licence` holds (every lane at `Maximum`, every designed word agreeing) leaves
+        /// agreeing gain words behind whichever body runs it, so the record after the block is
+        /// exactly the decision. `licence` is read only while the record is linked.
+        pub(super) fn decide(&mut self, licence: impl FnOnce() -> bool) -> bool {
+            let linked = self.linked() && licence();
+            self.narrow(linked);
+            linked
+        }
+
+        /// A block the record's proof does not survive: a glide's (D3) and a collapsed one. The
+        /// record is apart after it, the countdown kept and any watch ended.
+        pub(super) const fn unlink(&mut self) {
+            self.0 = State::Apart {
+                countdown: self.countdown(),
+            };
+        }
+
+        /// D5: a link switch. The record is apart and the countdown raised to at least `frames`,
+        /// the glide's remaining frames and the `N + R` frames after it that rewrite both gain
+        /// rings, never lowered, so it never falls below any lane's glide remaining.
+        pub(super) fn arm(&mut self, frames: u32) {
+            self.0 = State::Apart {
+                countdown: self.countdown().max(frames),
+            };
+        }
+
+        /// D5: counts the countdown down by `frames` rendered or skipped frames. When it ends on
+        /// a dual path (`dual`) over an apart record, the record is re-derived from the words,
+        /// once: linked when the gain words agree, watching when only the rings do.
+        pub(super) fn tick(
+            &mut self,
+            frames: usize,
+            dual: bool,
+            left: &ChannelState,
+            right: &ChannelState,
+        ) {
+            let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+            match &mut self.0 {
+                State::Linked { countdown } => *countdown = countdown.saturating_sub(frames),
+                State::Apart { countdown } if *countdown > 0 => {
+                    *countdown = countdown.saturating_sub(frames);
+                    if *countdown == 0 && dual && gain_rings_agree(left, right) {
+                        self.0 = if reduction_agrees(left, right) {
+                            State::Linked { countdown: 0 }
+                        } else {
+                            State::Watching
+                        };
+                    }
+                }
+                State::Apart { .. } | State::Watching => {}
+            }
+        }
+
+        /// D5's watch, at a dual block's end. While the block kept the rings agreeing
+        /// (`keeps_rings`: every lane `Maximum` and the designed words agreeing; a glide's block
+        /// ended the watch before it rendered, through [`unlink`](Self::unlink)), `W` compares of
+        /// the reduction words decide the record; any other block ends the watch.
+        /// Bounded by the lane count, allocation-free.
+        pub(super) fn watch(
+            &mut self,
+            keeps_rings: impl FnOnce() -> bool,
+            left: &ChannelState,
+            right: &ChannelState,
+        ) {
+            if !matches!(self.0, State::Watching) {
+                return;
+            }
+            if !keeps_rings() {
+                self.0 = State::Apart { countdown: 0 };
+            } else if reduction_agrees(left, right) {
+                *self = Self::stated(gain_state_agrees(left, right));
+            }
+        }
+
+        /// The record as the three words it replaced (`gain_linked`, `relink_frames`,
+        /// `relink_watch`), for the gates.
+        #[cfg(test)]
+        pub(super) const fn words(self) -> [u32; 3] {
+            [
+                self.linked() as u32,
+                self.countdown(),
+                matches!(self.0, State::Watching) as u32,
+            ]
+        }
+    }
+}
+
+use link::LinkRecord;
+
 /// Everything one prepared instance or bank owns, at one width.
 struct LimiterCore<L: Lane> {
     /// The prepared sample rate: the release coefficient's rate at automation, reset, a failed
@@ -4091,53 +4302,10 @@ struct LimiterCore<L: Lane> {
     /// claim's ramp legs) and [`advance_clocks`](Self::advance_clocks) advances the left channel's
     /// phase alone, as the collapsed silent path does: the effect contract's collapsed-bank rule.
     collapsed: bool,
-    /// Issue #990: the linked-agreement record.
-    ///
-    /// **Invariant:** when this is `true`, then on every lane the two channels' gain words are
-    /// bit-equal -- both gain rings, `prefix`, `phase`, `box_sum` and `reduction`
-    /// ([`gain_state_agrees`]). It licenses [`limiter_block_uniform`] to compute a linked pair's gain
-    /// path once, together with the per-block legs that the prepared link is `Maximum`, that both
-    /// channels are uniform and that the designed words agree ([`designed_gain_agree`]).
-    ///
-    /// * **Established** at construction and by [`reset`](Self::reset) (including the whole §4.4
-    ///   reset of a non-finite block) iff every lane's window shape agrees ([`lane_shapes_agree`],
-    ///   which is exact after `clear_runtime`); by [`desymmetrize`](Self::desymmetrize), which
-    ///   copies the left channel over the right; and by [`restore_track`](Self::restore_track) and
-    ///   a dual block's per-lane §4.4 recovery (#1091), from a full comparison of every lane's gain
-    ///   words.
-    /// * **Kept** by a dual block that renders under `Maximum` with the designed words agreeing:
-    ///   linked, it mirrors every write; dual (the per-lane body), it computes both channels' words
-    ///   from equal operands. The silent fast path keeps it too: it advances each channel's phase
-    ///   by a function of that phase and the lane's window, and at silent rest the box sum *is* the
-    ///   window, so equal box sums mean equal windows.
-    /// * **Cleared** by a dual block with any lane at `DualMono` (issue #1368: the mode is per
-    ///   lane, and the record is one per bank) or with a designed word apart on any lane, by
-    ///   every collapsed block (only the left channel advances), by a restore whose comparison
-    ///   fails, and by a link switch and every block with a glide in flight (issue #1370 D5: a
-    ///   glide's per-channel peaks differ). After a switch, the end of
-    ///   [`relink_frames`](Self::relink_frames) re-derives it from the words, once. Once cleared it stays cleared until one of the three establishing events: a pair
-    ///   whose designed words come back together has no proof its gain words did.
-    gain_linked: bool,
-    /// Issue #1370 D5: frames until the #990 record is re-derived after a link switch.
-    ///
-    /// A switch (a [`retarget_link`](Self::retarget_link) that changes a lane's mode or leaves
-    /// its weight in flight, or a restore that brings a glide) clears the record and raises this
-    /// to at least the glide's length plus the `N + R` frames that rewrite both gain rings
-    /// ([`arm_relink`](Self::arm_relink)), never lowering it, so it
-    /// never falls below any lane's glide remaining. Every frame the bank renders or skips counts
-    /// it down; when it reaches zero on a dual path, the glide has ended and both gain rings have
-    /// been rewritten under the lanes' modes, and the record is re-derived from the words
-    /// ([`gain_state_agrees`]), once. A collapsed bank lets it lapse: `desymmetrize`
-    /// re-establishes the record.
-    relink_frames: u32,
-    /// Issue #1370 D5 (root ruling of 2026-10-25): the countdown ended with the gain rings
-    /// agreeing ([`gain_rings_agree`]) and the reduction words `d` apart. `d` is recursive and
-    /// re-agrees only on a frame where both channels take the attack arm, which stationary
-    /// material can put off for thousands of frames, so each dual block that keeps the rings
-    /// agreeing (every lane `Maximum`, designed words agreeing, no glide) compares the `W`
-    /// reduction words, and the record returns on the first block they agree. Any other block,
-    /// a collapsed one, a reset or a restore ends the watch.
-    relink_watch: bool,
+    /// Issue #990: the linked-agreement record, with its issue #1370 D5 re-derivation
+    /// ([`LinkRecord`], #2285). While it is linked, every lane's two channels hold bit-equal gain
+    /// words, which licenses [`limiter_block_uniform`] to compute a linked pair's gain path once.
+    link: LinkRecord,
     /// Blocks the fast path actually took, for the engagement-rate gate. Test-only, like
     /// [`nonfinite_report`](Self::nonfinite_report): instrumentation is not render state.
     #[cfg(test)]
@@ -4159,7 +4327,7 @@ impl<L: Lane> LimiterCore<L> {
         let rate = metadata.sample_rate;
         let left = ChannelState::new::<L>(width, &shape, &left_defaults, rate);
         let right = ChannelState::new::<L>(width, &shape, &right_defaults, rate);
-        let gain_linked = lane_shapes_agree(&left, &right);
+        let link = LinkRecord::stated(lane_shapes_agree(&left, &right));
         Some(
             Self {
                 coefficients: LimiterCoef::new(metadata.link_mode, metadata.bypass),
@@ -4170,9 +4338,7 @@ impl<L: Lane> LimiterCore<L> {
                 active: every_lane(width),
                 silent: SilentClaim::new(metadata.bypass),
                 collapsed: false,
-                gain_linked,
-                relink_frames: 0,
-                relink_watch: false,
+                link,
                 #[cfg(test)]
                 silent_engagements: 0,
                 sample_rate: metadata.sample_rate,
@@ -4221,9 +4387,9 @@ impl<L: Lane> LimiterCore<L> {
     /// The lane's mode, and with it the link mask and the all-`Maximum` leg, becomes `mode` at
     /// once, so a glide that arrives lands on `mode`'s own law; the weight of both channels,
     /// retargeted from the word in force, carries the transition. A switch clears the #990
-    /// record and raises [`relink_frames`](Self::relink_frames) (D5). `false`, changing nothing,
-    /// for a lane past the width or padded, a mode the descriptor does not support or a glide
-    /// longer than `LINK_GLIDE_MAX_SAMPLES`. Allocation-free and bounded by the lane count.
+    /// record and raises its D5 countdown ([`arm_relink`](Self::arm_relink)). `false`, changing
+    /// nothing, for a lane past the width or padded, a mode the descriptor does not support or a
+    /// glide longer than `LINK_GLIDE_MAX_SAMPLES`. Allocation-free and bounded by the lane count.
     fn retarget_link(&mut self, lane: usize, mode: LinkMode, samples: u32) -> bool {
         if lane >= L::WIDTH
             || self.active & (1 << lane) == 0
@@ -4257,50 +4423,26 @@ impl<L: Lane> LimiterCore<L> {
     /// gain `N` frames old, and the box ring's `R` slots all come from the new law only `N + R - 1`
     /// frames after the glide. The van Herk `prefix` and the box sum follow the rings.
     fn arm_relink(&mut self, remaining: u32) {
-        self.gain_linked = false;
-        self.relink_watch = false;
         let rewrite = (self.shape.n + self.shape.ring) as u32;
-        self.relink_frames = self.relink_frames.max(remaining.saturating_add(rewrite));
+        self.link.arm(remaining.saturating_add(rewrite));
     }
 
     /// D5: counts the countdown down by `frames` rendered or skipped frames, and when it ends on
     /// a dual path re-derives the #990 record from the words, once.
     fn tick_relink(&mut self, frames: usize) {
-        if self.relink_frames == 0 {
-            return;
-        }
-        self.relink_frames = self
-            .relink_frames
-            .saturating_sub(u32::try_from(frames).unwrap_or(u32::MAX));
-        if self.relink_frames == 0
-            && !self.collapsed
-            && !self.gain_linked
-            && gain_rings_agree(&self.left, &self.right)
-        {
-            self.gain_linked = reduction_agrees(&self.left, &self.right);
-            self.relink_watch = !self.gain_linked;
-        }
+        self.link
+            .tick(frames, !self.collapsed, &self.left, &self.right);
     }
 
     /// D5's watch, at a dual block's end: while every lane is `Maximum`, the designed words agree
     /// and no glide ran, the rings still agree, so `W` compares of the reduction words decide
-    /// the record. Any other block ends the watch. Bounded by the lane count, allocation-free.
-    fn watch_relink(&mut self, glided: bool) {
-        if !self.relink_watch {
-            return;
-        }
-        if glided
-            || self.gain_linked
-            || !self.coefficients.link_all
-            || !designed_gain_agree(&self.left, &self.right)
-        {
-            self.relink_watch = false;
-            return;
-        }
-        if reduction_agrees(&self.left, &self.right) {
-            self.relink_watch = false;
-            self.gain_linked = gain_state_agrees(&self.left, &self.right);
-        }
+    /// the record. Any other block ends the watch (a glide's block ended it before it rendered,
+    /// [`LinkRecord::unlink`]). Bounded by the lane count, allocation-free.
+    fn watch_relink(&mut self) {
+        let link_all = self.coefficients.link_all;
+        let (left, right) = (&self.left, &self.right);
+        self.link
+            .watch(|| link_all && designed_gain_agree(left, right), left, right);
     }
 
     /// Frames of this block a link glide is in flight for on the rendered channels: the
@@ -4363,11 +4505,9 @@ impl<L: Lane> LimiterCore<L> {
                 self.rest_link(lane);
             }
         }
-        self.relink_frames = 0;
-        self.relink_watch = false;
         self.cursors = Cursors::default();
         // #990: both channels now hold `clear_runtime`'s words.
-        self.gain_linked = lane_shapes_agree(&self.left, &self.right);
+        self.link = LinkRecord::stated(lane_shapes_agree(&self.left, &self.right));
     }
 
     // REALTIME_POLICY_BEGIN
@@ -4416,10 +4556,12 @@ impl<L: Lane> LimiterCore<L> {
         // #990: every other lane's gain words are as they were; the reset lane's rings are `1.0`
         // on both channels, so its planar gain words decide.
         let (left, right) = (&self.left, &self.right);
-        self.gain_linked &= left.phase[lane] == right.phase[lane]
-            && left.prefix[lane].to_bits() == right.prefix[lane].to_bits()
-            && left.box_sum[lane].to_bits() == right.box_sum[lane].to_bits()
-            && left.reduction[lane].to_bits() == right.reduction[lane].to_bits();
+        self.link.narrow(
+            left.phase[lane] == right.phase[lane]
+                && left.prefix[lane].to_bits() == right.prefix[lane].to_bits()
+                && left.box_sum[lane].to_bits() == right.box_sum[lane].to_bits()
+                && left.reduction[lane].to_bits() == right.reduction[lane].to_bits(),
+        );
     }
     // REALTIME_POLICY_END
 
@@ -4478,10 +4620,11 @@ impl<L: Lane> LimiterCore<L> {
             return [0, 0];
         }
         // Issue #1370 D3: the glide's frames render through the glide body, which never links
-        // and leaves the two channels' gain words apart, so the record is cleared.
+        // and leaves the two channels' gain words apart, so the record is unlinked, its watch
+        // ended.
         let split = glide * L::WIDTH;
         if glide > 0 {
-            self.gain_linked = false;
+            self.link.unlink();
             limiter_block_glide::<L>(
                 &mut left_io[..split],
                 &mut right_io[..split],
@@ -4498,10 +4641,16 @@ impl<L: Lane> LimiterCore<L> {
             // that renders with every lane at `Maximum` (issue #1368) and every designed word
             // agreeing leaves agreeing gain words behind whichever body runs it, so the record
             // after the block is exactly the decision.
-            let linked = self.coefficients.link_all
-                && self.gain_linked
-                && designed_gain_agree(&self.left, &self.right);
-            self.gain_linked = linked;
+            let link_all = self.coefficients.link_all;
+            let (left, right) = (&self.left, &self.right);
+            let linked = self
+                .link
+                .decide(|| link_all && designed_gain_agree(left, right));
+            // #2285: the record is trusted here, so a stale one is caught here.
+            debug_assert!(
+                !linked || gain_state_agrees(&self.left, &self.right),
+                "a linked record the gain words refute"
+            );
             limiter_block_linkable::<L>(
                 &mut left_io[split..words],
                 &mut right_io[split..words],
@@ -4514,7 +4663,7 @@ impl<L: Lane> LimiterCore<L> {
                 linked,
             );
         }
-        self.watch_relink(glide > 0);
+        self.watch_relink();
         self.tick_relink(frames);
         // Earn or lose the claim (issue #1745 D2): this block was quiet and every lane of both
         // channels, padded lanes included, is at rest by the per-lane predicate. The predicate is
@@ -4553,9 +4702,10 @@ impl<L: Lane> LimiterCore<L> {
         if self.reset_failed_lanes(failed) {
             left_io.fill(0.0);
             right_io.fill(0.0);
-            // #990: the whole §4.4 reset re-establishes the record exactly as `reset` does.
-            self.gain_linked = lane_shapes_agree(&self.left, &self.right);
-            self.relink_watch = false;
+            // #990: the whole §4.4 reset re-establishes the record exactly as `reset` does, and
+            // keeps the D5 countdown: a glide the recovery leaves in flight still needs it.
+            self.link
+                .restate(lane_shapes_agree(&self.left, &self.right));
         } else {
             zero_lanes::<L>(left_io, failed);
             zero_lanes::<L>(right_io, failed);
@@ -4563,8 +4713,8 @@ impl<L: Lane> LimiterCore<L> {
             // for, and the reset ones hold `clear_runtime`'s, so the record is read back from the
             // words, every lane, as `restore_track` reads it. No cheaper statement is exact after a
             // partial reset, and this runs only on a block that failed the check.
-            self.gain_linked = gain_state_agrees(&self.left, &self.right);
-            self.relink_watch = false;
+            self.link
+                .restate(gain_state_agrees(&self.left, &self.right));
         }
         charged
     }
@@ -4635,9 +4785,10 @@ impl<L: Lane> LimiterCore<L> {
         frames: usize,
     ) {
         // The oracle never links, and keeps the record honest for a core it drives.
-        self.gain_linked = self.coefficients.link_all
-            && self.gain_linked
-            && designed_gain_agree(&self.left, &self.right);
+        let link_all = self.coefficients.link_all;
+        let (left, right) = (&self.left, &self.right);
+        self.link
+            .decide(|| link_all && designed_gain_agree(left, right));
         limiter_block_runtime_oracle::<L>(
             left_io,
             right_io,
@@ -4663,10 +4814,9 @@ impl<L: Lane> LimiterCore<L> {
     /// failed members on both channels, since the right plane the seam writes is the left one.
     fn process_block_mono(&mut self, left_io: &mut [f32], frames: usize) -> [u32; 2] {
         // #990: only the left channel advances from here, the silent path included, so the right
-        // channel's gain words go stale until `desymmetrize` copies the left over them.
-        self.gain_linked = false;
-        // Issue #1370 D5: and the watch ends; `desymmetrize` re-establishes the record.
-        self.relink_watch = false;
+        // channel's gain words go stale until `desymmetrize` copies the left over them. Issue
+        // #1370 D5: and the watch ends; `desymmetrize` re-establishes the record.
+        self.link.unlink();
         // #1894: and so does every right word the rest predicate reads.
         self.collapsed = true;
         let words = frames * L::WIDTH;
@@ -4736,7 +4886,7 @@ impl<L: Lane> LimiterCore<L> {
 
     #[cfg(test)]
     fn process_block_mono_runtime_oracle(&mut self, left_io: &mut [f32], frames: usize) {
-        self.gain_linked = false;
+        self.link.unlink();
         self.collapsed = true;
         limiter_block_mono_runtime_oracle::<L>(
             left_io,
@@ -4753,8 +4903,9 @@ impl<L: Lane> LimiterCore<L> {
     /// See [`ChannelState::copy_state_from`] for the word-by-word list and why it is exhaustive.
     fn desymmetrize(&mut self) {
         self.right.copy_state_from(&self.left);
-        // #990: every word of the right channel is now the left's, the gain words included.
-        self.gain_linked = true;
+        // #990: every word of the right channel is now the left's, the gain words included. The
+        // D5 countdown is kept: a glide the copy lands inside still needs it.
+        self.link.restate(true);
         self.collapsed = false;
     }
 
@@ -4889,7 +5040,7 @@ impl<L: Lane> LimiterCore<L> {
     /// A collapsed bank advances its left channel's phase alone (#1894), as the collapsed block
     /// would: its right channel is stale by contract and [`desymmetrize`](Self::desymmetrize)
     /// overwrites it before any dual block reads it. The #990 record stays cleared there, as the
-    /// collapsed block leaves it, since `gain_linked` is already `false`.
+    /// collapsed block leaves it, since the record is already apart.
     ///
     /// Bounded by the lane count: one remainder per lane and per cursor, never a per-frame step.
     fn advance_clocks(&mut self, lanes: u32, frames: usize) {
@@ -4901,9 +5052,10 @@ impl<L: Lane> LimiterCore<L> {
         self.cursors.advance(frames, &self.shape);
         let whole = lanes == every_lane(L::WIDTH);
         if !self.silent.proved_under(self.coefficients.bypass) {
-            self.gain_linked = self.coefficients.link_all
-                && self.gain_linked
-                && designed_gain_agree(&self.left, &self.right);
+            let link_all = self.coefficients.link_all;
+            let (left, right) = (&self.left, &self.right);
+            self.link
+                .decide(|| link_all && designed_gain_agree(left, right));
         }
         self.silent.settle_skipped(whole, self.coefficients.bypass);
         // Issue #1370 D5: a skipped block's frames count, after its linked decision, as a
@@ -5386,8 +5538,8 @@ impl<L: Lane> LimiterCore<L> {
         // themselves, every lane of the bank, on this payload call (bounded by the prepared
         // state, and allocation-free: the plan-swap carry makes it in the swap block, #1278). A rejected restore returns
         // above without writing anything and leaves the record as true as it was.
-        self.gain_linked = gain_state_agrees(&self.left, &self.right);
-        self.relink_watch = false;
+        self.link
+            .restate(gain_state_agrees(&self.left, &self.right));
         // Issue #1370 D6: the weights land only under the mode they glide to. A payload taken
         // under another mode (the plan-swap carry into a successor prepared with a new mode)
         // leaves the lane's own mode at rest, as before the glide existed. A glide brought in
@@ -9857,7 +10009,7 @@ mod tests {
             // #990: a collapsed block leaves the linked record cleared, a recovery included, since
             // only its left channel advanced.
             assert!(
-                !(mono && self.bank.gain_linked),
+                !(mono && self.bank.link.linked()),
                 "{label}: collapsed but linked"
             );
             let lane_of = |plane: &[f32], lane: usize| -> Vec<f32> {
@@ -10806,7 +10958,7 @@ mod tests {
                 self.label
             );
             assert!(
-                !self.shipped.gain_linked,
+                !self.shipped.link.linked(),
                 "{} {at}: collapsed but linked",
                 self.label
             );
@@ -10880,7 +11032,7 @@ mod tests {
                 oracle.nonfinite_report(),
                 "{label}: non-finite report"
             );
-            if shipped.gain_linked {
+            if shipped.link.linked() {
                 assert!(
                     gain_state_agrees(&shipped.left, &shipped.right),
                     "{label}: the linked-agreement record is set over disagreeing gain words"
@@ -11478,6 +11630,53 @@ mod tests {
         lane::each_lane!(|L, W| run::<L>(&width_label(W)));
     }
 
+    /// **A linked record the gain words refute is caught where it is trusted** (issue #2285).
+    ///
+    /// A bank of the fixture's shape at `Maximum` renders hot blocks, linked. Then one word of
+    /// lane 0's right box ring moves *without* the #990 record being restated, as a future
+    /// between-block writer of gain words that forgot to restate it would leave it, and one more
+    /// block asks the linked decision to believe the record. In debug builds it must refuse with
+    /// its record-implies-agreement assertion.
+    ///
+    /// Test value: deleting or weakening the assertion in `process_block` turns this red. Without
+    /// it, such a writer would render the right channel from the left's gain path on a uniform
+    /// bank, silently. Every writer today restates the record, so no other test reaches a stale
+    /// one, and `LinkedPair::compare` checks the record only inside its own harness.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_stale_linked_record_is_refused_where_it_is_trusted() {
+        fn run<L: Lane>(label: &str) {
+            use std::panic::{AssertUnwindSafe, catch_unwind};
+            let mut core =
+                linked_core::<L>(&fixture_tracks(L::WIDTH), LinkMode::Maximum, false, 48_000);
+            let mut draw = Draw(0x2285_0001);
+            let spans = no_spans(L::WIDTH);
+            for _ in 0..4 {
+                let (mut left, mut right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &core);
+                drive_dual(&mut core, &mut left, &mut right, &spans, 0);
+            }
+            assert!(core.link.linked(), "{label}: the hot bank is linked");
+            core.right.box_ring[0] = 0.5;
+            let (mut left, mut right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &core);
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                drive_dual(&mut core, &mut left, &mut right, &spans, 0);
+            }));
+            let Err(payload) = outcome else {
+                panic!("{label}: a stale linked record was believed");
+            };
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            assert!(
+                message.contains("a linked record the gain words refute"),
+                "{label}: {message}"
+            );
+        }
+        lane::each_lane!(|L, W| run::<L>(&width_label(W)));
+    }
+
     /// Renders `blocks` hot dual blocks of 128 frames with no automation and returns the engaged
     /// count.
     fn hot_blocks<L: Lane>(
@@ -11752,7 +11951,7 @@ mod tests {
             }
             assert_eq!(pair.shipped.nonfinite_report().nonfinite_lanes, 1);
             assert!(
-                pair.shipped.gain_linked,
+                pair.shipped.link.linked(),
                 "{label}: one lane's recovery re-derives the record"
             );
             assert_eq!(
