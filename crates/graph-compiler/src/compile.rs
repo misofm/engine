@@ -1278,11 +1278,13 @@ fn attach_builtins(
 ) -> PreparedGraphBuiltinsArtifact {
     // Issue #2136: the builtin strip banks are bucketed by the placement the rack chains were.
     let levels = compiled.placement.levels().to_vec();
-    // #1647a (R17-2): each builtin bank takes its members' floored input arrivals `a(n)`.
+    // #1647a (R17-2): each automated fader lane is built with its member's floored input arrival
+    // `a(n)` (#2362: a lowering input, not a later install).
     let arrivals = compiled.report.input_arrivals.clone();
-    let mut artifact = builtins.into_graph_artifact_with_banks(
+    builtins.into_graph_artifact_with_banks(
         compiled.graph,
         compiled.report,
+        &arrivals,
         dispatch,
         &levels,
         // The *same* object the rack-bank planner was handed inside the compile. This is the
@@ -1290,9 +1292,7 @@ fn attach_builtins(
         // derivation and both planners read it, so they cannot form different opinions about a
         // track and silently decline the strip's chain merges.
         &compiled.pool_classes,
-    );
-    artifact.install_builtin_input_arrivals(&arrivals);
-    artifact
+    )
 }
 
 /// A graph projected from a session's projected effects and its builtins (issue #2199,
