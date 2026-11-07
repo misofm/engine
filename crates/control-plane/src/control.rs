@@ -133,9 +133,9 @@ pub struct ProviderEpoch {
 /// its plan), and [`ProviderEpoch::park`] as it leaves `providers` for `retired_providers`
 /// (render displaced its plan). A pending candidate that a supersession withdraws, and a parked
 /// epoch whose plan is reclaimed, drop in their phase. So a running epoch holds no candidate's
-/// captures and no declared discontinuity, a pending one keeps no committed base and awaits no
-/// pairing, and a parked one keeps no base: what a transition leaves behind drops in it, on
-/// the control thread, and nothing is cleared by hand.
+/// captures, `Primed` record or declared discontinuity, a pending one keeps no committed base
+/// and awaits no pairing, and a parked one keeps no base: what a transition leaves behind drops
+/// in it, on the control thread, and nothing is cleared by hand.
 #[allow(
     clippy::large_enum_variant,
     reason = "one per held epoch, in place; boxing would allocate at promotion"
@@ -143,12 +143,14 @@ pub struct ProviderEpoch {
 pub(crate) enum EpochPhase {
     /// A candidate published and not yet adopted, or withdrawn and held by the rebuild that may
     /// supersede it.
-    ///
-    /// #2258 PR-7: the `Primed` record of a warm candidate (`SessionState::primed`) describes a
-    /// pending candidate and drops when render adopts it or a supersession drops it, so it can
-    /// join this variant as `prime: Option<host_core::PrimedCandidate>`, which
-    /// [`ProviderEpoch::promote`] then drops with the phase.
     Pending {
+        /// The record of this candidate published `Primed` (#1403 D4, #2258 PR-7), read from its
+        /// own reservation once its schedule was final (`host_core::PrimedCandidate::of`), or
+        /// `None` for any other candidate. It lives and drops with this phase: render's adoption
+        /// ([`ProviderEpoch::promote`]) and a supersession or a declared stop, which drops the
+        /// candidate (#1310 D5 step 6), drop it; a withdrawal leaves the epoch pending, so a
+        /// refused or panicked supersession republishes the candidate with its record.
+        prime: Option<host_core::PrimedCandidate>,
         /// This epoch's plan was prepared at a host-declared discontinuity (#1323 D2): no floors,
         /// only its source consumers carried. A successor that supersedes it unadopted is
         /// prepared at the same discontinuity, since render never played this plan.
@@ -937,6 +939,7 @@ impl ProviderEpoch {
             revision_gate,
             carried,
             phase: EpochPhase::Pending {
+                prime: None,
                 discontinuity,
                 spectrum,
             },
@@ -999,6 +1002,24 @@ impl ProviderEpoch {
         }
     }
 
+    /// This pending candidate's `Primed` record (#1403 D4), or `None` for any other candidate and
+    /// always for a running or parked epoch.
+    pub(crate) fn prime(&self) -> Option<host_core::PrimedCandidate> {
+        match self.phase {
+            EpochPhase::Pending { prime, .. } => prime,
+            EpochPhase::Running { .. } | EpochPhase::Parked { .. } => None,
+        }
+    }
+
+    /// The slot of this pending candidate's `Primed` record, or `None` for a running or parked
+    /// epoch, which holds none.
+    pub(crate) fn prime_mut(&mut self) -> Option<&mut Option<host_core::PrimedCandidate>> {
+        match &mut self.phase {
+            EpochPhase::Pending { prime, .. } => Some(prime),
+            EpochPhase::Running { .. } | EpochPhase::Parked { .. } => None,
+        }
+    }
+
     /// This pending candidate's spectrum half, or `None` for a running or parked epoch.
     pub(crate) fn candidate_spectrum_mut(
         &mut self,
@@ -1056,9 +1077,10 @@ impl ProviderEpoch {
     }
 
     /// The transition from `Pending` to `Running`, as render's adoption of this epoch's plan is
-    /// promoted: the epoch keeps no base yet and awaits no pairing, and the candidate's spectrum
-    /// half moves out to be installed. `None`, with the phase unchanged, for an epoch that is
-    /// not pending, which a promotion checks before it moves anything.
+    /// promoted: the epoch keeps no base yet and awaits no pairing, its `Primed` record drops with
+    /// the phase, and the candidate's spectrum half moves out to be installed. `None`, with the
+    /// phase unchanged, for an epoch that is not pending, which a promotion checks before it moves
+    /// anything.
     pub(crate) fn promote(&mut self) -> Option<crate::spectrum::CandidateSpectrum> {
         let running = EpochPhase::Running {
             kept: None,
@@ -1611,12 +1633,6 @@ pub struct SessionState<A: ControlAdapter> {
     /// `None`, no rebuild is classified and every rebuild takes today's path. Every product
     /// session holds `None` until #1360 and #1361 build the production bounds.
     pub(crate) warm: Option<host_core::WarmConfig>,
-    /// The record of the pending candidate published `Primed` (#1403 D4), at most one because at
-    /// most one candidate is pending. Set by the publication; dropped when render adopts it
-    /// (`synchronize_plan_epochs`), by a withdrawal that does not return its candidate
-    /// (`withdraw_pending_candidate`), and when a supersession or a declared stop drops the
-    /// candidate (#1310 D5 step 6). A refused supersession republishes the candidate and keeps it.
-    pub(crate) primed: Option<host_core::PrimedCandidate>,
 }
 
 /// A delivered response capture that `service` has not yet queued (#1578 D4).
@@ -3838,10 +3854,11 @@ where
         TEST_PUBLISHED_ADOPTION.with(core::cell::Cell::take)
     }
 
-    /// The record of the pending warm candidate (#1403 D4), if one is pending.
+    /// The record of the pending warm candidate (#1403 D4), if one is pending: what the deadline
+    /// step reads (`newest_prime`).
     #[cfg(feature = "test-support")]
     pub fn test_primed(&self) -> Option<host_core::PrimedCandidate> {
-        self.primed
+        self.newest_prime()
     }
 
     /// The provider's counter snapshot, every counter, as `COUNTERS_GET` would read it now, without
@@ -4087,13 +4104,6 @@ where
             self.promote_pending_provider(active_epoch)?;
         }
         self.settle_observation_pairings();
-        // #1403 D4: render adopted the warm candidate, or a candidate published after it.
-        if self
-            .primed
-            .is_some_and(|record| self.providers.epoch >= record.epoch)
-        {
-            self.primed = None;
-        }
 
         // Keep exactly the rows a reader can still ask for: the atomic's (possibly lagging), the
         // current provider's, and every pending candidate's. The atomic is read under the lock,
@@ -5606,40 +5616,42 @@ where
         }
     }
 
-    /// The warm-successor deadline step (#1358 D3): run once per control call while a `Primed`
-    /// record is held. `None` when there is no record, its deadline has not passed
-    /// ([`host_core::warm::prime_deadline_samples`] render samples past its `not_before`; a paused
-    /// render clock never passes it), or the record is stale (not the newest epoch: it is dropped
-    /// and nothing is withdrawn). Past the deadline it runs the transition fallback, whose one
-    /// withdrawal answers it: render adopted W first (`Taken`, `Nothing`: the record drops and the
-    /// revision completes `EXACT` through the watermark), the transition was published in W's
-    /// place, or the re-preparation was refused and W was republished whole with its record, so
-    /// the next call's step is past the deadline at once.
+    /// The warm-successor deadline step (#1358 D3): run once per control call while the newest
+    /// pending candidate holds a `Primed` record ([`Self::newest_prime`]). `None` when it holds
+    /// none, or its deadline has not passed ([`host_core::warm::prime_deadline_samples`] render
+    /// samples past its `not_before`; a paused render clock never passes it). The record lives on
+    /// the candidate it names (#2258 PR-7), so it is never stale. Past the deadline it runs the
+    /// transition fallback, whose one withdrawal answers it: render adopted W first (`Taken`,
+    /// `Nothing`: W's promotion drops the record and the revision completes `EXACT` through the
+    /// watermark), the transition was published in W's place, or the re-preparation was refused
+    /// and W was republished whole with its record, so the next call's step is past the deadline
+    /// at once.
     ///
-    /// **Acked-batch question (D4): can an ack ever precede a drop? No.** The step drops only a
-    /// record; every candidate it withdraws is either the donor of a transition prepared from the
+    /// **Acked-batch question (D4): can an ack ever precede a drop? No.** The step itself drops
+    /// nothing; every candidate it withdraws is either the donor of a transition prepared from the
     /// committed model or republished whole, and it adds no queue. One step does at most one
     /// withdrawal, one re-preparation and one republication, and never waits on render.
     pub(crate) fn check_prime_deadline(&mut self) -> Result<Option<TransitionStep>, CommandError> {
-        let Some(record) = self.primed else {
+        let Some(record) = self.newest_prime() else {
             return Ok(None);
         };
         let model = self.controller.session().compiled().normalized_model();
         let (sample_rate_hz, quantum_frames) = (model.sample_rate_hz, model.quantum_frames);
         match host_core::warm::check_prime_deadline(
             &self.publisher,
-            self.newest_plan_epoch(),
             &record,
             sample_rate_hz,
             quantum_frames,
         ) {
             host_core::warm::DeadlineStep::Pending => Ok(None),
-            host_core::warm::DeadlineStep::Stale => {
-                self.primed = None;
-                Ok(None)
-            }
             host_core::warm::DeadlineStep::Due => self.fall_back_pending_warm().map(Some),
         }
+    }
+
+    /// The `Primed` record of the newest pending candidate (#1403 D4, #2258 PR-7): the candidate a
+    /// withdrawal takes back. `None` while nothing is pending or the newest candidate is not warm.
+    fn newest_prime(&self) -> Option<host_core::PrimedCandidate> {
+        self.pending_providers.last().and_then(ProviderEpoch::prime)
     }
 
     /// Withdraws the pending candidate, rebuilds, and republishes the candidate when the rebuild
@@ -5706,9 +5718,13 @@ where
             // protocol commit's own steps) leaves the flags of the rings the candidate carries
             // as the successor set them. A `Primed` candidate is judged by them, so every
             // republished one gets its own flags back first (idempotent: a refusal before
-            // `publish_primed` writes the same values again).
+            // `publish_primed` writes the same values again). The candidate's epoch is still
+            // pending, with its record: the supersession pops it only after the take.
             let epoch = candidate.epoch().0;
-            if self.primed.is_some_and(|record| record.epoch == epoch) {
+            if self
+                .newest_prime()
+                .is_some_and(|record| record.epoch() == epoch)
+            {
                 self.restore_prime_flags(epoch);
             }
             self.publisher.republish(candidate);
@@ -5755,13 +5771,15 @@ where
     /// admission is not run again: W's submit admitted this re-preparation with the reprepare
     /// peak (#1398 D4, #1403).
     ///
-    /// **A refused re-preparation is a defect (D2 step 3).** W is republished whole, its record is
-    /// set again unchanged and `transition_reprepare_refusals` rises (counted, not asserted: root
-    /// ruling on #1358). W's revision stays pending and the next step retries. **Acked-batch
+    /// **A refused re-preparation is a defect (D2 step 3).** W is republished whole, still pending
+    /// with its record, and `transition_reprepare_refusals` rises (counted, not asserted: root
+    /// ruling on #1358). W's revision stays pending and the next step retries. A withdrawal of
+    /// another candidate than W, a broken invariant, republishes it, drops W's record and is
+    /// `Internal`, once. **Acked-batch
     /// question (D4): can an ack ever precede a drop? No:** W drops only after its replacement is prepared from the committed model, which holds
     /// every acked edit, and its rings move by a donation checked before anything is published.
     fn fall_back_pending_warm(&mut self) -> Result<TransitionStep, CommandError> {
-        let Some(record) = self.primed else {
+        let Some(record) = self.newest_prime() else {
             return Ok(TransitionStep::NotPending);
         };
         if !self.shared.plan_alive.load(Ordering::Acquire) {
@@ -5781,17 +5799,28 @@ where
         let mut withdrawn = self.withdraw_pending_candidate()?;
         match withdrawn.as_ref() {
             None => return Ok(TransitionStep::NotPending),
-            Some(candidate) if candidate.epoch().0 != record.epoch => {
-                // A record of another epoch is stale and was dropped with the withdrawal; the
-                // deadline step's epoch check makes this unreachable (#1358 D3).
+            Some(candidate) if candidate.epoch().0 != record.epoch() => {
+                // The record is the newest pending epoch's, and a withdrawal takes back the newest
+                // candidate published, which is that epoch (every publication pushes its epoch):
+                // unreachable (#1358 D3). Should it happen, the candidate goes back, the record
+                // drops so the next call's step does not withdraw again, and the step reports the
+                // broken invariant once as an internal fault (the service step's
+                // `ServiceFailure::Deadline`) instead of repeating silently on every call (#2328).
                 if let Some(candidate) = withdrawn.take() {
                     self.publisher.republish(candidate);
+                }
+                if let Some(prime) = self
+                    .pending_providers
+                    .last_mut()
+                    .and_then(ProviderEpoch::prime_mut)
+                {
+                    *prime = None;
                 }
                 debug_assert!(
                     false,
                     "#1358 D3: a withdrawal of another epoch than the record's"
                 );
-                return Ok(TransitionStep::NotPending);
+                return Err(CommandError::Internal);
             }
             Some(_) => {}
         }
@@ -5817,8 +5846,7 @@ where
         match result {
             Ok(_) => Ok(TransitionStep::Published),
             Err(_) => {
-                // W's record stays: the withdrawal of the epoch it names keeps it.
-                debug_assert_eq!(self.primed, Some(record));
+                // W's record stays on W's epoch, which a refusal leaves pending.
                 // Root ruling (#1358): a refusal is counted, never asserted, since a real one
                 // reaches this path through the service step (#1360 D2).
                 self.transition_reprepare_refusals =
@@ -5853,26 +5881,19 @@ where
             engine::realtime::Withdrawal::Withdrawn(candidate) => {
                 #[cfg(feature = "test-support")]
                 update_test_owners(|owners| owners.candidate_withdrawn += 1);
-                // #1403 D4: the record goes with its candidate to the path that withdrew it; a
-                // record of another epoch is stale.
-                if self
-                    .primed
-                    .is_some_and(|record| record.epoch != candidate.epoch().0)
-                {
-                    self.primed = None;
-                }
+                // #1403 D4: the candidate's epoch stays pending, with its `Primed` record, for the
+                // path that withdrew it: a supersession drops both, a republication keeps both.
                 Ok(Some(candidate))
             }
             engine::realtime::Withdrawal::Taken => {
                 #[cfg(feature = "test-support")]
                 update_test_owners(|owners| owners.candidate_taken += 1);
-                self.primed = None;
+                // The promotion drops a `Primed` record with the pending phase (#2258 PR-7).
                 self.promote_pending_provider(newest)?;
                 Ok(None)
             }
             // An earlier withdrawal found it taken: render runs it.
             engine::realtime::Withdrawal::Nothing => {
-                self.primed = None;
                 self.promote_pending_provider(newest)?;
                 Ok(None)
             }
@@ -6621,7 +6642,7 @@ where
         // or in the commit (no lock is held) leaves the controller as it was and republishes the
         // withdrawn candidate (#2010). Its flags are then the successor's: `rebuild_withdrawn`
         // sets a `Primed` candidate's again before it republishes it (`restore_prime_flags`).
-        let mut primed = warm_lead_blocks.map(|lead_blocks| {
+        if let Some(lead_blocks) = warm_lead_blocks {
             let (running, withdrawn_sources) = if superseding {
                 let len = self.pending_providers.len();
                 // A superseding rebuild holds the withdrawn candidate as its newest pending
@@ -6644,8 +6665,8 @@ where
                 &candidate_provider.sources,
                 withdrawn_sources.map(|withdrawn| &withdrawn.sources),
                 lead_blocks,
-            )
-        });
+            );
+        }
         #[cfg(feature = "test-support")]
         if take_test_fault_state(TestStructuralFaultPhase::PanicAtPrimedPublication) {
             panic!("test fault: a rebuild panics after it publishes the primed schedule");
@@ -6796,9 +6817,10 @@ where
             // `S` as a two-phase removal or a duck-swap does.
             if let Some(not_before) = next_duck.not_before() {
                 let reservation = reservation.inner.as_mut().expect("reservation is live");
-                match primed.as_mut() {
-                    Some(record) => record.hold_until(reservation, not_before),
-                    None => reservation.set_adoption(PlanAdoption::NoEarlierThan(not_before)),
+                if warm_lead_blocks.is_some() {
+                    host_core::hold_primed_until(reservation, not_before);
+                } else {
+                    reservation.set_adoption(PlanAdoption::NoEarlierThan(not_before));
                 }
             }
             let held = self
@@ -6870,6 +6892,17 @@ where
         let configured_epoch = self.spectrum.commit(spectrum_configuration);
         if let Some(candidate) = candidate_provider.candidate_spectrum_mut() {
             candidate.epoch = configured_epoch;
+        }
+        // #1403 D4, #2258 PR-7: a warm candidate's record, read from its reservation now that its
+        // schedule is final (`publish_primed`, then the duck's hold), goes on the candidate's own
+        // pending epoch. A record of a candidate B supersedes drops with that candidate's epoch
+        // (#1310 D5 step 6, #1323's stop).
+        if warm_lead_blocks.is_some()
+            && let Some(prime) = candidate_provider.prime_mut()
+        {
+            *prime = host_core::PrimedCandidate::of(
+                reservation.inner.as_ref().expect("reservation is live"),
+            );
         }
         let candidate_epoch = candidate_provider.epoch;
         self.pending_providers.push(candidate_provider);
@@ -6946,15 +6979,6 @@ where
         // payload carries the revision its gate carries, for the watermark's claim settle (#1482
         // R1).
         reservation.commit(revision);
-        // #1403 D4: B is the one pending candidate now. A record that named a candidate B
-        // superseded drops with it (#1310 D5 step 6, #1323's stop); B's own replaces it.
-        debug_assert!(
-            self.primed.is_none_or(|record| superseded
-                .as_ref()
-                .is_some_and(|(_, donor)| donor.epoch == record.epoch)),
-            "a record names the one pending candidate"
-        );
-        self.primed = primed;
         drop(reports);
         #[cfg(feature = "test-support")]
         {
@@ -10407,12 +10431,12 @@ mod tests {
                 }
             );
             assert_eq!(
-                rig.primed(),
-                Some(PrimedCandidate {
-                    epoch: rig.children.session.newest_plan_epoch(),
-                    not_before,
-                    lead_blocks: 4,
-                })
+                rig.primed().map(|record| (
+                    record.epoch(),
+                    record.not_before(),
+                    record.lead_blocks()
+                )),
+                Some((rig.children.session.newest_plan_epoch(), not_before, 4))
             );
             rig.render(3);
             assert!(rig.swaps().is_empty(), "held while the prime is not fed");
@@ -10458,12 +10482,12 @@ mod tests {
                 "a removed unused source"
             );
             assert_eq!(
-                rig.primed(),
-                Some(PrimedCandidate {
-                    epoch: rig.children.session.newest_plan_epoch(),
-                    not_before,
-                    lead_blocks: 4,
-                })
+                rig.primed().map(|record| (
+                    record.epoch(),
+                    record.not_before(),
+                    record.lead_blocks()
+                )),
+                Some((rig.children.session.newest_plan_epoch(), not_before, 4))
             );
             rig.render(3);
             assert!(rig.swaps().is_empty(), "held while the prime is not fed");
@@ -10925,11 +10949,11 @@ mod tests {
             let record = rig.primed().expect("W's record");
             let revision = rig.revision();
             rig.children.session.test_refuse_next_reprepare();
-            rig.render_to(record.not_before + DEADLINE);
+            rig.render_to(record.not_before() + DEADLINE);
             assert_eq!(rig.children.session.test_take_published_adoption(), None);
             assert_eq!(rig.children.session.test_transition_reprepare_refusals(), 1);
             assert_eq!(rig.primed(), Some(record), "W keeps its record");
-            assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+            assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch());
             rig.serviced = false;
             rig.render(1);
             rig.serviced = true;
@@ -11320,8 +11344,8 @@ mod tests {
             assert!(rig.transact(&b).is_err(), "B is refused");
             rig.children.session.limits.maximum_effect_state_bytes = cap;
             assert_eq!(rig.primed(), Some(record), "W keeps its record");
-            assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
-            rig.render_to(record.not_before + DEADLINE - QUANTUM);
+            assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch());
+            rig.render_to(record.not_before() + DEADLINE - QUANTUM);
             assert_eq!(rig.deadline(), None);
             rig.render(1);
             let Some(PlanAdoption::NoEarlierThan(s)) =
@@ -11408,12 +11432,12 @@ mod tests {
                 }
             );
             assert_eq!(
-                rig.primed(),
-                Some(PrimedCandidate {
-                    epoch: rig.children.session.newest_plan_epoch(),
-                    not_before: s,
-                    lead_blocks: 4,
-                })
+                rig.primed().map(|record| (
+                    record.epoch(),
+                    record.not_before(),
+                    record.lead_blocks()
+                )),
+                Some((rig.children.session.newest_plan_epoch(), s, 4))
             );
             let s_block = usize::try_from(s / QUANTUM).expect("block");
             assert!(s_block > BEFORE);
@@ -11664,7 +11688,7 @@ mod tests {
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.transact(&b)));
                     assert!(caught.is_err(), "B panics");
                     assert_eq!(rig.primed(), Some(record), "W keeps its record");
-                    assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+                    assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch());
                 }
                 let unused = rig
                     .feeds
@@ -11729,7 +11753,8 @@ mod tests {
                     render_clock + LEAD
                 );
                 assert_eq!(
-                    rig.primed().map(|record| (record.epoch, record.not_before)),
+                    rig.primed()
+                        .map(|record| (record.epoch(), record.not_before())),
                     primed.then(|| (rig.children.session.newest_plan_epoch(), render_clock)),
                     "after an adopted W, B warm: {primed}"
                 );
@@ -11743,9 +11768,9 @@ mod tests {
                 let adoption = rig.rebuild(b);
                 assert_eq!(matches!(adoption, PlanAdoption::Primed { .. }), primed);
                 let newest = rig.children.session.newest_plan_epoch();
-                assert_ne!(newest, record.epoch);
+                assert_ne!(newest, record.epoch());
                 assert_eq!(
-                    rig.primed().map(|record| record.epoch),
+                    rig.primed().map(|record| record.epoch()),
                     primed.then_some(newest),
                     "W superseded, B warm: {primed}"
                 );
@@ -11795,7 +11820,7 @@ mod tests {
                 "B over a source-only overlay"
             );
             assert_eq!(
-                rig.primed().map(|record| record.epoch),
+                rig.primed().map(|record| record.epoch()),
                 Some(rig.children.session.newest_plan_epoch())
             );
 
