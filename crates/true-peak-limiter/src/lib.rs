@@ -4752,7 +4752,10 @@ impl<L: Lane> LimiterCore<L> {
     /// mode, and the glide legs here cover it. A D7 recovery, which runs inside a block after the
     /// claim is settled, returns a lane to `clear_runtime`'s words, which are the rest state the
     /// claim names. In debug builds the claim is checked against the scan here and on both silent
-    /// fast paths (#2264).
+    /// fast paths (#2264). This site keeps its own check rather than `SilentClaim::trusted`
+    /// because what it believes is not the claim alone but
+    /// [`silent_claim_stands`](Self::silent_claim_stands), the claim with the ramp and glide legs,
+    /// and `trusted` would check (and answer) the bare claim (#2378 C1).
     fn lanes_at_rest(&self) -> u32 {
         if self.silent_claim_stands() {
             // #2264: the one place a stale claim would be believed without a scan.
