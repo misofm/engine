@@ -5787,15 +5787,25 @@ async function testProcessor() {
     {
       // A header that says it was replaced with no set cut for its successor is a protocol
       // fault: sticky and silent, never a frame read through views over a retired plan.
+      // Issue #2382: the fault is found after the block's output was written, and it fails the
+      // block as a trap there does (#2370): the block is silenced, and it is not folded into the
+      // telemetry window. The faulting block is the window's 128th, so red if the block's output
+      // stands or a failed instance posts a telemetry frame.
       const { processor, fake } = makeProcessor();
       const left = new Float32Array(64);
       const right = new Float32Array(64);
       processor.receive({ tag: "miso.meters.v1", requestId: 1, enabled: true });
+      processor.receive({ tag: "miso.telemetry.v1", requestId: 2, enabled: true });
+      for (let block = 1; block < 128; block += 1) {
+        processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      }
       fake.calls.adoptOnNextRender = true;
       fake.calls.meterWindows = 1;
       const posts = processor.port.posts.length;
       assert.equal(processor.process([], [[left, right]]), true);
-      assert.equal(processor.port.posts.length, posts);
+      assert.equal(processor.port.posts.length, posts, "a failed block posts no frame");
+      assert(left.every((sample) => Object.is(sample, 0))
+        && right.every((sample) => Object.is(sample, 0)), "a failed block is silenced");
       assert.equal(processor.stickyResult, 255);
       assert.equal(processor.ready, false);
     }
@@ -6056,6 +6066,42 @@ async function testProcessor() {
       assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: 0n },
         "worker mode: a meter_header_ptr trap: the release answers no token");
       assert.deepEqual(after, [], "worker mode: a meter_header_ptr trap: no export runs after it");
+    }
+    // Issue #2382, `worker` mode: after a trap the control Worker's port calls no export. Its
+    // meter view cuts nothing (a failed instance posts no frame), and its status read is answered
+    // from the failure record: the code is the trap's, and the control allocation count is the one
+    // last read before the trap. Red if either message calls `meter_header_ptr` or
+    // `control_allocation_count` on the trapped instance, or if the count is not the last read's.
+    {
+      const fake = createFakeExports(64);
+      const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
+      processor.port.onmessage({ data: { tag: "miso.meters.v1", requestId: 1, enabled: true } });
+      fake.calls.controlAllocations = 6;
+      assert.equal(renderStatus(processor, fromWorker, controlPosts).singleModeControlAllocations, 6,
+        "worker mode: an untrapped status read reads the count");
+      fake.exports.miso_engine_web_v1_render = () => {
+        throw new Error("synthetic wasm trap from the render export");
+      };
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      const after = [];
+      for (const [name, value] of Object.entries(fake.exports)) {
+        if (typeof value !== "function") continue;
+        fake.exports[name] = (...args) => {
+          after.push(name);
+          return value(...args);
+        };
+      }
+      fake.calls.controlAllocations = 7;
+      fromWorker({
+        tag: "miso.meter-view.v1", header: fake.successorHeader.byteOffset,
+        memoryBytes: fake.memory.buffer.byteLength,
+      });
+      assert.equal(processor.pendingMeterSet, null, "worker mode: a trapped instance cuts no view");
+      const status = renderStatus(processor, fromWorker, controlPosts);
+      assert.equal(status.lastResult, 255, "worker mode: the status carries the trap's code");
+      assert.equal(status.singleModeControlAllocations, 6,
+        "worker mode: the count is the last one read before the trap");
+      assert.deepEqual(after, [], "worker mode: no export runs on the Worker's port after a trap");
     }
     // R-S7-meters (3): `process()` switches to the pre-cut set only when the header render reports,
     // its frame pointer and its strip counts all match; otherwise it skips the frame and counts it.
