@@ -274,3 +274,8 @@ Every landed row except C9 was judged sound.
 - **C1.** `LimiterCore::lanes_at_rest`'s doc says it keeps its own check because it believes
   `silent_claim_stands` (the claim with the ramp and glide legs), which `trusted` would not check.
 - **Remaining rows.** Recorded above; the three successor specs are written for root to file.
+- **Gates (attempt 2 head, `-j 4`).** origin/main (`dfc3ac325`) is already merged. Green:
+  `cargo test --locked` for `protocol` (221), `control-plane --features test-support` (102),
+  `de-esser` (21), `dynamic-eq` (18) and `true-peak-limiter` (79); clippy `-D warnings` over
+  them (and `capi`), with and without `--all-features`; `cargo doc -D warnings`;
+  `cargo fmt --all --check`; `scripts/check-workspace-policy.sh`.
