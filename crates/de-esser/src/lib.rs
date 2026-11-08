@@ -606,9 +606,11 @@ fn codec_error(error: payload::StatePayloadError) -> StatePayloadError {
     StatePayloadError { code: error.code }
 }
 
-/// `true` for a finite whole number in `[+0.0, limit]`. A countdown or run clock is written as
-/// `u32 as f32`, never `-0.0`, so `-0.0` is refused (#2378 C3): the kernel would never step it,
-/// but the rest scan's exact `+0.0` test would never report the lane at rest.
+/// `true` for a finite whole number in `[+0.0, limit]` (#2378 C3). The engine never holds `-0.0`
+/// in a word this checks: a ramp's or link weight's countdown is written as `u32 as f32`, and a
+/// silence clock counts up from `+0.0` (`lane::kernels::silence_advance`). A `-0.0` countdown
+/// would never step, and the rest scan's exact `+0.0` test would never report its lane at rest; a
+/// `-0.0` clock is refused only because it is a word the engine never writes.
 fn integral_within(value: f32, limit: f32) -> bool {
     value.is_finite() && value.is_sign_positive() && value <= limit && value == value.floor()
 }

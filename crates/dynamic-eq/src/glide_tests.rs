@@ -920,10 +920,11 @@ fn a_collapsed_glide_matches_the_dual_glide_and_survives_the_disengage() {
 /// one (each parameter ramp's, each link weight's and the two run clocks), on either channel,
 /// while the `+0.0` each holds at rest restores, and a refused restore writes nothing.
 ///
-/// Test value: red if a countdown's check admits `-0.0` (the base's `integral_within` did): the
-/// kernel never steps such a word, but the rest scan's exact `+0.0` test never reports it at rest,
-/// so a restored lane would never be silent-skipped. The engine's own snapshots write each
-/// countdown as `u32 as f32`, never `-0.0`.
+/// Test value: red if a countdown's or clock's check admits `-0.0` (the base's `integral_within`
+/// did). The engine never writes `-0.0` in any of these words. In a ramp's or link weight's
+/// countdown the kernel never steps it, and the rest scan's exact `+0.0` test never reports the lane
+/// at rest, so a restored lane would never be silent-skipped. The rest scan does not read the clocks,
+/// so a `-0.0` clock is refused only because the engine never writes one.
 #[test]
 fn a_negative_zero_countdown_is_refused() {
     let values = oracle_values();
