@@ -16,6 +16,7 @@ export class FakeOpfsBackend {
     this.entriesBlocker = options.entriesBlocker
     this.getFileHandleBlocker = options.getFileHandleBlocker
     this.getFileBlocker = options.getFileBlocker
+    this.moveBlocker = options.moveBlocker
   }
 
   get usage() {
@@ -188,6 +189,10 @@ class FakeFileHandle {
   }
 
   async move(destinationOrName, maybeName) {
+    // Awaited only when set, so a run without the hook keeps its microtask order.
+    if (this.backend.moveBlocker !== undefined) {
+      await this.backend.moveBlocker({ name: this.name })
+    }
     if (this.backend.moveError !== undefined) throw this.backend.moveError
     let destination
     let name
