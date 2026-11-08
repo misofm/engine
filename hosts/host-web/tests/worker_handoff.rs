@@ -839,7 +839,9 @@ fn an_orphaned_render_half_is_freed_by_the_worker_that_adopts_it_back() {
                 "the refused dispose leaves the half in place"
             );
             step.wait();
-            // The Worker disposed meanwhile; the half goes back late.
+            // The Worker disposes; then the half goes back late. (A half released before the
+            // dispose is freed by the dispose itself, #2373.)
+            step.wait();
             let back = host_web::miso_engine_web_v1_host_release(handle);
             assert_ne!(back, 0, "the orphaned half is still released");
             shared.lock().expect("shared").1 = back;
@@ -860,6 +862,7 @@ fn an_orphaned_render_half_is_freed_by_the_worker_that_adopts_it_back() {
         );
         assert!(native_staging::render_status(handle).is_none());
         step.wait();
+        step.wait();
         let back = shared.lock().expect("shared").1;
         assert_eq!(
             host_web::miso_engine_web_v1_host_adopt(back),
@@ -875,6 +878,121 @@ fn an_orphaned_render_half_is_freed_by_the_worker_that_adopts_it_back() {
         assert!(
             native_staging::render_status(handle).is_none(),
             "nothing is left on the Worker"
+        );
+    });
+}
+
+/// #2373: an orphaned render half that comes back after its Worker booted a new host is freed by
+/// that host's dispose, and one that comes back before the next boot is freed by that boot. The
+/// Worker cannot adopt either into its slot (a booted host takes back only its own half), so
+/// before the fix each such re-boot left one half in the registry for the life of the memory,
+/// and with it one of the registry's four entries.
+///
+/// The render-only instance here binds no reservation (the release's canary check passes on an
+/// unbound instance, and the sweep runs on the Worker alone), so the binary's reservation count
+/// is unchanged.
+///
+/// Test value: red if the dispose of a booted host leaves a disposed session's half in the
+/// registry, or if a boot does; red too if the sweep frees a half whose session is live (another
+/// control instance's half, released and pending adoption, must survive the boot). No existing
+/// test releases an orphan while the Worker holds a host.
+#[test]
+fn an_orphan_released_after_a_re_boot_is_freed_by_the_next_dispose_or_boot() {
+    use std::sync::mpsc::{Sender, channel};
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(native_staging::handoff_occupied(), 0, "an empty registry");
+    // The worklet's requests: adopt `token` and render a block (`Some`), or release (`None`).
+    let (to_worklet, worklet_inbox) = channel::<(u32, Option<u64>)>();
+    let (to_worker, worker_inbox) = channel::<u64>();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let _guard = AbortOnPanic;
+            while let Ok((handle, request)) = worklet_inbox.recv() {
+                let reply = match request {
+                    Some(token) => {
+                        assert_eq!(host_web::miso_engine_web_v1_host_adopt(token), RESULT_OK);
+                        render_blocks(handle, 1, &mut Vec::new());
+                        0
+                    }
+                    None => host_web::miso_engine_web_v1_host_release(handle),
+                };
+                to_worker.send(reply).expect("the Worker");
+            }
+        });
+        let _guard = AbortOnPanic;
+        let ask = |worklet: &Sender<(u32, Option<u64>)>, handle: u32, request: Option<u64>| {
+            worklet.send((handle, request)).expect("the worklet");
+            worker_inbox.recv().expect("the worklet's reply")
+        };
+        // Boot a host, hand its half to the worklet, and dispose it while the half is away.
+        let orphan = |worklet: &Sender<(u32, Option<u64>)>| {
+            let handle = boot();
+            let token = host_web::miso_engine_web_v1_host_release(handle);
+            assert_ne!(token, 0);
+            ask(worklet, handle, Some(token));
+            assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+            handle
+        };
+
+        // Released after the re-boot: the dispose of the new host frees it.
+        let first = orphan(&to_worklet);
+        let rebooted = boot();
+        let back = ask(&to_worklet, first, None);
+        assert_ne!(back, 0, "the orphan is released");
+        assert_eq!(native_staging::handoff_occupied(), 1);
+        assert_eq!(
+            host_web::miso_engine_web_v1_host_adopt(back),
+            RESULT_WRONG_STATE,
+            "the new host's slot is taken"
+        );
+        assert_eq!(host_web::miso_engine_web_v1_dispose(rebooted), RESULT_OK);
+        assert_eq!(
+            native_staging::handoff_occupied(),
+            0,
+            "the dispose freed the orphan"
+        );
+
+        // Released before the next boot: that boot frees it, and leaves alone a live session's
+        // half that another control instance released.
+        let second = orphan(&to_worklet);
+        let (other_released, other_released_inbox) = channel::<u64>();
+        let (other_go, other_go_inbox) = channel::<()>();
+        let other = scope.spawn(move || {
+            let _guard = AbortOnPanic;
+            let handle = boot();
+            let token = host_web::miso_engine_web_v1_host_release(handle);
+            assert_ne!(token, 0);
+            other_released.send(token).expect("the Worker");
+            other_go_inbox.recv().expect("the go-ahead");
+            assert_eq!(
+                host_web::miso_engine_web_v1_host_adopt(token),
+                RESULT_OK,
+                "the live session's half survived the boot"
+            );
+            assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+        });
+        // The other instance's boot sweeps too, so the orphan comes back after it.
+        let _ = other_released_inbox
+            .recv()
+            .expect("the other host's release");
+        assert_ne!(ask(&to_worklet, second, None), 0, "the orphan is released");
+        assert_eq!(native_staging::handoff_occupied(), 2);
+        let next = boot();
+        assert_eq!(
+            native_staging::handoff_occupied(),
+            1,
+            "the boot freed the orphan and kept the live half"
+        );
+        other_go.send(()).expect("the other host");
+        other.join().expect("the other host");
+        drop(to_worklet);
+        assert_eq!(host_web::miso_engine_web_v1_dispose(next), RESULT_OK);
+        assert_eq!(
+            native_staging::handoff_occupied(),
+            0,
+            "the last dispose leaves the registry empty"
         );
     });
 }

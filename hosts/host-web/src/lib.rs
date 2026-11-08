@@ -2860,7 +2860,10 @@ impl AudioWorkletEngineHost {
     /// Take back a render half [`Self::release_render`] released (#1332 S5, the Rust form of
     /// S6's `host_adopt`), or hand it back unchanged when this host already has one, has no
     /// control half, or is not the session the render half renders. A render failure recorded
-    /// while it was away becomes this host's diagnostic.
+    /// while it was away becomes this host's diagnostic, and the half's status takes the control
+    /// fields the status shell showed (#2373): the lifecycle state and the last result (the
+    /// blocking rebuilds cannot move while the half is away). A session that failed while the
+    /// half was away is silent from here.
     ///
     /// It allocates and frees nothing (#1332 S6, #2332): the half's box moves back into the slot,
     /// and the status shell it displaces is forgotten.
@@ -2877,10 +2880,21 @@ impl AudioWorkletEngineHost {
             return Err(render);
         }
         let RenderHost { mut half } = render;
-        if let Some(failure) = half.failure.take()
-            && let Some(control) = self.control.as_mut()
-        {
-            control.staging.write_diagnostic(failure);
+        if let Some(control) = self.control.as_mut() {
+            if let Some(failure) = half.failure.take() {
+                control.staging.write_diagnostic(failure);
+            }
+            // #2373: the half's status is the host's again, so it takes the control fields the
+            // shell showed: the last result the shell recorded, and the lifecycle word's state,
+            // which the shell mirrors only at a control call. A session either half failed is the
+            // half's failure at once, its silence included, as a failure with the half here makes
+            // it (`end_session`). The blocking rebuilds already agree: a rebuild counts only
+            // while the half is here (`run_control`), so the count the half took away is the
+            // shell's. The render clock and counters stay the half's own.
+            if !control.ready() {
+                half.silence();
+            }
+            half.status.last_result = self.render.status().last_result;
         }
         // The slot was checked `Away` above: the shell it held is a status only, and it is
         // forgotten, so no drop glue joins the call.
@@ -3530,6 +3544,15 @@ impl RenderHost {
             .ready
             .as_ref()
             .map_or(&EMPTY_METER_HEADER, |ready| &ready.shape.meter_header)
+    }
+
+    /// Whether the session this half renders was disposed (#2373): its control half is gone, so
+    /// no host takes it back and only freeing it is left. A half with no session counts as one.
+    pub(crate) fn session_disposed(&self) -> bool {
+        self.half
+            .ready
+            .as_ref()
+            .is_none_or(|ready| ready.lifecycle.state() == STATE_DISPOSED)
     }
 
     /// The fixed diagnostic of the render half's sticky failure, or empty.

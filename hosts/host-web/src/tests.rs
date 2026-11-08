@@ -1853,6 +1853,87 @@ fn the_released_status_shell_shows_a_render_side_failure_at_the_next_control_cal
     assert!(host.adopt_render(render).is_ok());
 }
 
+/// Issue #2373: the adoption back publishes, in the half's status, the control fields the shell
+/// showed while the half was away: the lifecycle state and the last result (the blocking-rebuild
+/// count, which moves only while the half is here, agrees already). A control failure the half has not yet rendered is the half's at once: its state and
+/// its silence, as a failure with the half here makes them. The render clock and counters stay
+/// the half's own.
+///
+/// Test value: red if `adopt_render` installs the half's status as the worklet left it, so a
+/// status read through `status_ptr` after the adoption back (the Worker's `finishDispose`) shows
+/// a session the control half failed as ready, with the half's own last result; and red if the
+/// adoption copies the shell's state but not the lifecycle word's, so a render failure recorded
+/// after the last control call reads as ready. No test reads the status after `adopt_render`
+/// once the control half has moved on.
+#[test]
+fn an_adopted_half_publishes_the_control_fields_the_shell_showed() {
+    let mut host = prepared_host(128);
+    let mut render = host.release_render().expect("the render half");
+    assert_eq!(render.render_next(), RESULT_OK);
+    assert_eq!(host.fail_session(RESULT_INVALID_ARGUMENT), RESULT_OK);
+    let shell = *host.status();
+    let half = *render.status();
+    assert_eq!(
+        (shell.state, half.state),
+        (STATE_FAILED, STATE_READY),
+        "the half has not rendered since the control failure"
+    );
+    // A last block that is not silence, so the adoption's silence is seen.
+    render
+        .half
+        .buffers
+        .as_mut()
+        .expect("prepared buffers")
+        .output_pcm
+        .fill(-1.0);
+    assert!(host.adopt_render(render).is_ok());
+    let adopted = *host.status();
+    assert_eq!(
+        (
+            adopted.state,
+            adopted.last_result,
+            adopted.blocking_rebuilds
+        ),
+        (shell.state, shell.last_result, shell.blocking_rebuilds),
+        "the control fields are the shell's"
+    );
+    assert_eq!(
+        WebStatus {
+            state: half.state,
+            last_result: half.last_result,
+            blocking_rebuilds: half.blocking_rebuilds,
+            ..adopted
+        },
+        half,
+        "the render fields are the half's own"
+    );
+    assert!(
+        host.output_pcm()
+            .expect("prepared output")
+            .iter()
+            .all(|sample| sample.to_bits() == 0),
+        "the adopted half of a failed session is silent"
+    );
+
+    let mut host = prepared_host(128);
+    let mut render = host.release_render().expect("the render half");
+    assert_eq!(
+        render.fail(RESULT_INTERNAL, b"web.test\t$\n"),
+        RESULT_INTERNAL
+    );
+    assert_eq!(
+        host.status().state,
+        STATE_READY,
+        "no control call has mirrored the render failure into the shell"
+    );
+    assert!(host.adopt_render(render).is_ok());
+    assert_eq!(
+        host.status().state,
+        STATE_FAILED,
+        "the lifecycle word's state, not the stale shell's"
+    );
+}
+
 /// Issue #2298: a failure of the render half after the control half failed or disposed the
 /// session leaves the lifecycle where the first ended it. The worklet's render export checks the
 /// half's own status, which learns of the control half's failure or dispose only at the half's

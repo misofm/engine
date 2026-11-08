@@ -717,6 +717,9 @@ fn boot_staged(len: u32) -> u32 {
         });
         return 0;
     }
+    // #2373: an orphan released since the last dispose is freed before this boot allocates, so
+    // its entry is free for this host's release.
+    handoff::free_disposed();
     let booted = BOOT_STAGING.with(|staging| {
         let Ok(mut staging) = staging.try_borrow_mut() else {
             return None;
@@ -1591,6 +1594,10 @@ pub extern "C" fn miso_engine_web_v1_status_ptr(handle: u32) -> u32 {
 /// #1332 S8: on an instance that bound no reservation, a render-only session (a half adopted
 /// after its host was disposed) is freed; a bound (render-only) instance refuses with
 /// [`RESULT_WRONG_STATE`] and frees nothing.
+///
+/// #2373: on an instance that bound no reservation, a dispose, like a boot, also frees every
+/// released half in the handoff registry whose session was disposed: an orphan that came back
+/// after this instance booted another host, which no host can take back.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
     if handle == 0 {
@@ -1624,6 +1631,11 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
                 None => return RESULT_INTERNAL,
             };
             boot.reset_after_dispose();
+            // #2373: this instance bound no reservation (checked above for the one session a
+            // bound instance holds, and a bound instance boots none), so it may free. An orphan
+            // released after this host booted is freed here, and so is this host's own half if
+            // it was released and never taken back: its session is disposed now.
+            handoff::free_disposed();
             result
         })
     })
@@ -1987,6 +1999,12 @@ pub mod native_staging {
     #[cfg(feature = "test-support")]
     pub fn overwrite_canary(reservation: &crate::Reservation) {
         crate::handoff::overwrite_canary_for_test(reservation);
+    }
+
+    /// How many handoff registry entries hold a released render half (#2373).
+    #[cfg(feature = "test-support")]
+    pub fn handoff_occupied() -> usize {
+        crate::handoff::occupied_for_test()
     }
 
     /// Bind this thread's instance to the reservation at `record`, as
