@@ -329,3 +329,28 @@ Folded on the same branch, over `363b63a56`.
 - the recheck demotion is now bounded at retry time.
 
 The ingest's two removals of a final are now described as best-effort. The paragraph is rewrapped (finding 5).
+
+**Verdict: PASS** (Sol). Two minors are folded on the same branch, and nothing else changed.
+1. Nothing tested the signal on the retry's wait: the suite stayed green with `options.signal` dropped from it.
+2. Nothing tested that a hard error from the fallback-final removal now lets the retry run: the suite stayed green with non-`StemStoreError` errors rethrown.
+
+**Fold** (tests and ledger only; `opfs-store.js` is unchanged).
+- Two new legs of `aStemLockStepNeverOutlastsItsDeadline`, which now has 22:
+  - `staging abort (integrity, aborted)`: the open is aborted while its staging abort is wedged. Once that abort's best-effort wait expires, the retry's wait must refuse at once with `AbortError`. Without the signal it would wait out its deadline and fail `storage.write_stalled`. The lock stays held until the wedged abort settles.
+  - `integrity removal rejected`: only the first fallback copy is corrupt, and the removal of that final rejects at once. It has settled, so the retry runs and the open succeeds.
+- The leg loop also takes an expected error `name`, which the aborted leg uses.
+- Two new ledger entries, 32 in the #2397 block:
+  - "give a retry's wait for fenced steps no signal", red at `a wedged staging abort (integrity, aborted) failed with the wrong error`;
+  - "fail an open on a rejected fallback-final removal", which rethrows non-`StemStoreError` errors, red at `a wedged integrity removal rejected failed the open`.
+- Test value:
+  - the aborted leg is red if the retry's wait ignores the open's abort;
+  - the rejected leg is red if a removal that has already failed stops the retry.
+  - Both legs hold behaviour attempt 4 already had, so they are green on attempt 4, and their ledger entries are the red evidence.
+
+**Merged `origin/main`** (`3375b619b`). There is no overlap with this branch's files.
+
+**Green** after the merge:
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS, 133 `RED` lines (101 plus 32).
+- `stem-store-core-v1.mjs`: PASS.
+- `stem-pump-v1.mjs`: PASS.
