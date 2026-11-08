@@ -2972,8 +2972,31 @@ impl<L: Lane> InputStage<L> {
     /// A collapsed stage takes the disengage copy first (issue #2274): the imported lane carries
     /// real state on both channels, and a copy taken after it -- the dual body's, or the chain's --
     /// would overwrite the lane's right channel with its left.
+    ///
+    /// `state` is engine-produced: an [`Self::export_lane`] record ([`settled_on_target`] says why
+    /// it is not built through `LinearRamp::from_words`). Its settled words are on their targets
+    /// because of the writers that end a countdown. For the trim these are
+    /// [`Self::set_trim_signed`] with no window, [`Self::settle`] and [`Self::reset_with_kind`].
+    /// For the filter they are [`Self::apply_prepared_filter`] when no word moves,
+    /// [`Self::settle_filter`] and [`Self::reset_with_kind`]. The ramp kernels assign the target on
+    /// the frame a countdown runs out. Debug builds assert it on every carried word.
     fn import_lane(&mut self, lane: usize, state: &InputLaneState) {
         debug_assert!(lane < self.members && lane < L::WIDTH);
+        debug_assert!(
+            state.channels.iter().all(|carried| {
+                settled_on_target(carried.ramp[0], carried.ramp[1], carried.remaining)
+                    && carried.sections.iter().all(|words| {
+                        words
+                            .coef
+                            .iter()
+                            .zip(&words.target)
+                            .all(|(&coef, &target)| {
+                                settled_on_target(coef, target, words.remaining)
+                            })
+                    })
+            }),
+            "a carried input lane's settled ramps are on their targets"
+        );
         if self.collapsed {
             self.desymmetrize();
         }
@@ -3088,6 +3111,49 @@ fn svf_coef_words_mut<L: Lane>(coef: &mut SvfCoef<L>) -> [&mut L; 6] {
         m2,
     } = coef;
     [c1, a2, a3, m0, m1, m2]
+}
+// REALTIME_POLICY_END
+
+// REALTIME_POLICY_BEGIN
+/// Whether one ramped word of a carried lane is in the phase its `u32` countdown gives it: a
+/// settled word (`remaining == 0`) holds its target bit for bit. This is the settled half of
+/// `effect_runtime::ramp::LinearRamp::from_words`'s phase invariant, and the half a stage could
+/// render wrongly: its settled path renders from the current word. Every stage's `import_lane`
+/// debug-asserts it on the lane it writes (issue #2390).
+///
+/// # Why the stages do not build their lanes through `LinearRamp::from_words`
+///
+/// * **No word from outside the engine reaches an import.** The fields of
+///   [`InputLaneState`], [`FaderLaneState`] and [`MatrixLaneState`] are private, and only the
+///   stages' `export_lane` builds one. `import_lane` has two callers: `builtins-compiler`'s
+///   plan-swap carry (`adopt_lane`, which imports the predecessor's `export_lane`) and the
+///   stages' own `swap_lanes`. So there is no restore to refuse. The invariant belongs to the
+///   writers that settle a lane, and each stage's `import_lane` names them. This assertion makes
+///   a writer that breaks the invariant fail on every carry in a debug build. A release build
+///   copies the words unchanged, and so renders what the predecessor would have rendered.
+/// * **Three of the four settled phases keep their step.** These settles assign the target and
+///   leave the step word as it was: the matrix's ([`MatrixStage::end_ramp_window`],
+///   [`MatrixStage::reset`]), the trim's ([`InputStage::settle`]) and the input filter's
+///   ([`InputStage::settle_filter`]). Every lane export carries that step, so `from_words` would
+///   refuse these engine-produced records, and clearing the step at a settle would move
+///   exported state words. A settled step is dead. Every ramp kernel selects the target on a
+///   lane whose countdown has run out, and every retarget derives the step afresh from
+///   `current`. The fader's settles alone clear the step, so no stage asserts the other half,
+///   a `+0.0` step.
+/// * **The filter's coefficient ramp is not D11.** After its first
+///   `lane::kernels::builtins::INPUT_FILTER_LEADING_UPDATES` steps, a word is computed from its
+///   target, step and countdown, not by adding a step to the previous word (#1407,
+///   `docs/rulings/builtins-input-liveness-d2.md`). Its step also marks a recursion word frozen
+///   for the length of a disable.
+/// * **The countdown is a `u32` outside the lane words.** The kernels' `f32` countdown word is
+///   per-block residue. Before every ramp kernel the stage rebuilds it from the `u32`, clamped to
+///   `2^24`. The kernel runs it below zero (`remaining - 1`, done at `<= 0`), and it is not the
+///   phase.
+///
+/// `builtins` does not depend on `effect-runtime`, and this rule needs nothing else from it.
+#[inline]
+const fn settled_on_target(current: f32, target: f32, remaining: u32) -> bool {
+    remaining != 0 || current.to_bits() == target.to_bits()
 }
 // REALTIME_POLICY_END
 
@@ -3805,8 +3871,21 @@ impl<L: Lane> FaderRampStage<L> {
     /// copied: an unmute ramp with no frames left imports as the open lane the countdown's end
     /// makes it, so no record can leave the lane's gain held for good. A record
     /// [`Self::export_lane`] wrote always holds such a pair already, so this changes no carry.
+    ///
+    /// The record is engine-produced ([`settled_on_target`] says why it is not built through
+    /// `LinearRamp::from_words`). Its settled gains are on their targets because of the writers
+    /// that end a countdown: [`Self::retarget`] with no window, [`Self::end_ramp_windows`] and
+    /// [`Self::reset`]. The ramp kernel assigns the target on the frame the countdown runs out.
+    /// Those writers also clear the step, though nothing reads a settled lane's step. Debug builds
+    /// assert the gain on both channels.
     fn import_lane(&mut self, lane: usize, state: &FaderLaneState) {
         debug_assert!(lane < L::WIDTH);
+        debug_assert!(
+            state.channels.iter().all(|carried| {
+                settled_on_target(carried.current, carried.target, carried.remaining)
+            }),
+            "a carried fader lane's settled gains are on their targets"
+        );
         for (channel, carried) in state.channels.iter().enumerate() {
             put_lane::<L>(&mut self.ramp[channel].current, lane, carried.current);
             put_lane::<L>(&mut self.ramp[channel].target, lane, carried.target);
@@ -4199,8 +4278,27 @@ impl<L: Lane> MatrixStage<L> {
     /// Overwrite one populated lane with `state`, word for word, and re-derive what those words
     /// feed: the countdown the ramp kernel reads and the settled coefficients with their identity
     /// mask. The lane then renders exactly what the lane it was exported from would have.
+    ///
+    /// The clamp to [`MATRIX_RAMP_COUNTDOWN_MAXIMUM`] is not a settle rule. It writes the
+    /// kernel's `f32` countdown residue, which [`Self::process`] rebuilds from the `u32` before
+    /// every ramp kernel. The lane's phase is the `u32` countdown, copied as it is.
+    ///
+    /// The record is engine-produced ([`settled_on_target`] says why it is not built through
+    /// `LinearRamp::from_words`). Its settled coefficients are on their targets because of the
+    /// writers that end a countdown: [`Self::set_target_over`] with no window,
+    /// [`Self::end_ramp_window`] and [`Self::reset`]. The ramp kernel assigns the target on the
+    /// frame the countdown runs out. Their step is not cleared, and nothing reads it while the
+    /// lane is settled. Debug builds assert it on all four coefficients.
     fn import_lane(&mut self, lane: usize, state: &MatrixLaneState) {
         debug_assert!(lane < L::WIDTH);
+        debug_assert!(
+            state
+                .current
+                .iter()
+                .zip(&state.target)
+                .all(|(&current, &target)| settled_on_target(current, target, state.remaining)),
+            "a carried matrix lane's settled coefficients are on their targets"
+        );
         for index in 0..4 {
             put_lane::<L>(&mut self.ramp.current[index], lane, state.current[index]);
             put_lane::<L>(&mut self.ramp.target[index], lane, state.target[index]);
