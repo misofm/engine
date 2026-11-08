@@ -184,3 +184,49 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
     only at `-0.0`, which no engine payload holds, so no carry or lane swap of an engine payload
     decides differently and no rendered bit moves; both crates' suites (39 tests, the bank and
     rest suites' restores and swaps among them) are green.
+
+**Remaining (not landed in attempt 1; the bundle reached its half-day bound).** Each is
+independent of the rows above and can be split into its own issue.
+- **C2.** (a) Pairing `lane_default_bytes` with `validate_track_state_payload` (and
+  `exchange_lane_defaults`) at the type level, e.g. one `Option<&dyn LaneSwap>` hook: a
+  `PreparedNativeEffectBank` trait change over the eight banking effects, `rack`'s and
+  `effect-contract`'s test banks, and `rack`'s and `live.rs`'s callers. `swap_bank_lanes` runs on
+  the render thread (`Runtime::pack_lanes`), so a returned trait object adds `call_indirect`
+  sites there that the call-graph gate pins; that needs a decision before it is built.
+  (b) Tying the limiter's `history[k]` bitwise to its main-ring word: first prove the relation
+  across both resets, the D7 recovery, the collapse disengage copy, restores and lookahead moves,
+  or a live lane's own snapshot becomes unrestorable (the #2324 failure shape).
+- **C4.** A trait-level `Drained` token. #2326 recorded why it left the trait unchanged: a token in
+  `BankStage::process` touches 41 impls, and every `begin_block` override outside `rack` would
+  have to mint one, so the type would prove nothing. A shape that does prove something (a token
+  only `rack` can mint, handed to the stages it drives) is a design question for this row's owner.
+- **C7.** Removing the whole-path solo's clone of the committed compilation
+  (`TransactionForm::MonitorWhole(CompiledSession)`, `crates/protocol/src/model.rs:1769`) needs
+  `compiled()`'s readers (`control-plane`'s non-in-place branch, the controller's
+  `removed_arm_tags`) to read the store's compilation instead; folding the controller's
+  `(monitor_only, session_committed)` match (`controller.rs:3350`) into the token's form is the
+  same change. Protocol and `control-plane`.
+- **C12.** One generated source for both MSB1 seek-case consumers: a packaging change across the
+  pinned engine artifact (`scripts/build-web-audioworklet.sh`, the SDK's `ARTIFACT_SET`) and the
+  SDK's staged prelude (`sdk/codegen/stage-package.mjs`), as #2282 recorded.
+
+**Gates (attempt 1 head, one crate at a time, `-j 4`).**
+- `cargo test --locked`: `protocol` (all targets), `control-plane --features test-support` (102),
+  `host-core --features test-support,control-provider` (628), `capi` (238),
+  `host-web --features test-support` (200), `graph-compiler` (206), `effect-compiler --features
+  test-support` (59), `builtins` (163), `true-peak-limiter` + `effect-runtime` (165),
+  `de-esser` + `dynamic-eq` (39): all green.
+- `cargo clippy --locked --all-targets -- -D warnings`, with and without `--all-features`, over
+  `protocol control-plane host-core builtins graph-compiler true-peak-limiter effect-runtime
+  de-esser dynamic-eq`: clean. `cargo fmt --all --check`: clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` over the same crates: clean, and `host-core`
+  without `control-provider` (C10) too.
+- `bash scripts/check-workspace-policy.sh`: ok. `realtime_policy` (release): ok, 298 marked
+  regions in 48 files. `graph_fixture --check`: exit 0.
+- Web: `bash scripts/test-web-audioworklet.sh` green; `check-web-audioworklet-callgraph.py
+  --self-test` passes; the shipped artifact rebuilt locally (`build-web-audioworklet.sh
+  --named-twin`, nightly-2026-08-20) passes `check-web-audioworklet.sh
+  --without-metadata-regeneration`, so the kernel-keyed `INDIRECT_SITES` (C11) match the real
+  closure (`render` 11 sites over 5 members, `meter_poll` 2). Not run here: the Playwright
+  Chromium and WebKit legs, which need a PulseAudio sink this host lacks; C14 changes only the
+  main-realm host's input checks, which the hermetic suite drives.
