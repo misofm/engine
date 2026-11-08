@@ -735,9 +735,10 @@ pub fn exchange_lane_link_word(link: LinkMode, word: &mut [u8]) -> LinkMode {
 
 /// The longest detector link glide, in samples, that
 /// [`PreparedNativeEffect::retarget_link`] and [`PreparedNativeEffectBank::retarget_link`] accept
-/// (issue #1370): `2^24`, the largest count a kernel's `f32` countdown holds exactly. About 175 s
+/// (issue #1370): `2^24`, the largest count a kernel's `f32` countdown holds exactly
+/// ([`lane::kernels::EXACT_COUNTDOWN`], the one spelling of that bound, issue #2410). About 175 s
 /// at 96 kHz, far past any session ramp key.
-pub const LINK_GLIDE_MAX_SAMPLES: u32 = 1 << 24;
+pub const LINK_GLIDE_MAX_SAMPLES: u32 = lane::kernels::EXACT_COUNTDOWN;
 
 /// The two detector link weights a lane rests at in `mode` (issue #1370 D2): `[w_link, w_avg]`,
 /// where `w_link` is `0` for own (dual mono) and `1` for the linked combination, and `w_avg` is
