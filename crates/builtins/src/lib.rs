@@ -58,7 +58,7 @@ use effect_contract::{
 use lane::{
     Backend, Lane, Simd4,
     kernels::{
-        SvfCoef,
+        EXACT_COUNTDOWN, SvfCoef,
         builtins::{
             GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
             Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, fader_matrix_block_without_identity,
@@ -1094,9 +1094,11 @@ pub(crate) struct InputStage<L: Lane> {
     ramp: InputTrimRamp<L>,
     /// Per-lane frames left in the current trim ramp, `[channel][lane]`.
     ///
-    /// The authoritative countdown, in the same relationship to the kernel's `f32` word that
-    /// [`FaderRampStage::remaining`] has to [`GainMuteRamp::remaining`]: the kernel's word is
-    /// recomputed from this at the top of every ramping block and never carried across one.
+    /// The authoritative countdown. The kernel's `f32` word, `ramp.remaining`, is rebuilt from
+    /// this, clamped to [`EXACT_COUNTDOWN`], at the top of every ramping block
+    /// ([`InputStage::load_countdown`]), and no lane carry exports or imports it (issue #2410):
+    /// the one residue rule every builtins stage follows, as [`FaderRampStage::remaining`] and
+    /// [`MatrixStage::remaining`] do.
     remaining: [[u32; MAX_BANK_LANES]; 2],
     /// Whether any member lane of either channel is mid-ramp.
     ///
@@ -1571,8 +1573,8 @@ impl<L: Lane> InputStage<L> {
                     "a filter countdown exceeds the ramp length"
                 );
                 for (lane, word) in section_words.iter_mut().enumerate() {
-                    *word = self.filter_remaining[channel][section][lane]
-                        .min(Self::RAMP_COUNTDOWN_MAXIMUM) as f32;
+                    *word =
+                        self.filter_remaining[channel][section][lane].min(EXACT_COUNTDOWN) as f32;
                 }
             }
         }
@@ -1764,12 +1766,6 @@ impl<L: Lane> InputStage<L> {
         self.refresh_channel_symmetry();
     }
 
-    /// Largest ramp countdown that is exact in `f32`.
-    ///
-    /// The same clamp, for the same reason, as [`FADER_RAMP_COUNTDOWN_MAXIMUM`] and
-    /// [`MATRIX_RAMP_COUNTDOWN_MAXIMUM`].
-    const RAMP_COUNTDOWN_MAXIMUM: u32 = 1 << 24;
-
     /// Retargets one lane's trim on the addressed channels, over an explicit ramp window.
     ///
     /// `signed` is the whole coefficient: its magnitude is the trim gain and its sign is the
@@ -1870,7 +1866,7 @@ impl<L: Lane> InputStage<L> {
         for channel in 0..2 {
             let mut words = [0.0_f32; MAX_BANK_LANES];
             for (lane, word) in words.iter_mut().enumerate() {
-                *word = self.remaining[channel][lane].min(Self::RAMP_COUNTDOWN_MAXIMUM) as f32;
+                *word = self.remaining[channel][lane].min(EXACT_COUNTDOWN) as f32;
             }
             self.ramp.remaining[channel] = lane_words::<L>(&words);
         }
@@ -1961,9 +1957,10 @@ impl<L: Lane> InputStage<L> {
     ///
     /// * **No ramp in flight anywhere in the bank.** A trim or filter ramp on any lane runs the
     ///   whole bank through the ramp bodies, which rewrite every lane's kernel countdown residue
-    ///   (`ramp.remaining`, a word the lane export carries) by the block's length and re-derive
-    ///   the elision plan and the symmetry cache. So the whole bank declines while `ramping` or
-    ///   `filter_ramping` holds: sound, and a ramp lasts a few blocks.
+    ///   (`ramp.remaining`, a word the stage holds although no lane carry exports it) by the
+    ///   block's length and re-derive the elision plan and the symmetry cache. So the whole bank
+    ///   declines while `ramping` or `filter_ramping` holds: sound, and a ramp lasts a few
+    ///   blocks.
     /// * **Every integrator of both sections of both channels at `+0.0` bits** (`-0.0` is not
     ///   rest).
     ///
@@ -2400,7 +2397,10 @@ impl<L: Lane> InputStage<L> {
     /// words, and they are residue: `InputStage::load_countdown` overwrites them from the
     /// authoritative `[[u32; 8]; 2]` at the top of every ramping block, so what they hold between
     /// blocks is whatever the last kernel run counted down to, which is `-frames` for a settled
-    /// lane and depends on how the caller partitioned its blocks.
+    /// lane and depends on how the caller partitioned its blocks. They are this stage's own words:
+    /// no lane carry exports or imports them (issue #2410), so a lane swap or a plan-swap carry
+    /// leaves each lane position's residue where it was, and they describe the lane position's
+    /// last ramping block, not the strip now in it.
     ///
     /// Two consequences, both relied on in the suites: comparing them across two arms is sound
     /// **only when the arms rendered the same block sizes** (which is what
@@ -2943,7 +2943,6 @@ impl<L: Lane> InputStage<L> {
                     read(self.ramp.current[channel]),
                     read(self.ramp.target[channel]),
                     read(self.ramp.step[channel]),
-                    read(self.ramp.remaining[channel]),
                 ],
                 remaining: self.remaining[channel][lane],
                 silence: read(self.state.silence[self.live_state_channel(channel)]),
@@ -3018,7 +3017,8 @@ impl<L: Lane> InputStage<L> {
             put(&mut self.ramp.current[channel], lane, carried.ramp[0]);
             put(&mut self.ramp.target[channel], lane, carried.ramp[1]);
             put(&mut self.ramp.step[channel], lane, carried.ramp[2]);
-            put(&mut self.ramp.remaining[channel], lane, carried.ramp[3]);
+            // No write of the kernel's `f32` countdown word: `load_countdown` rebuilds it from the
+            // `u32` countdown below before every ramp kernel reads it (issue #2410).
             self.remaining[channel][lane] = carried.remaining;
             put(&mut self.state.silence[channel], lane, carried.silence);
             for (section, words) in carried.sections.iter().enumerate() {
@@ -3147,8 +3147,9 @@ fn svf_coef_words_mut<L: Lane>(coef: &mut SvfCoef<L>) -> [&mut L; 6] {
 ///   for the length of a disable.
 /// * **The countdown is a `u32` outside the lane words.** The kernels' `f32` countdown word is
 ///   per-block residue. Before every ramp kernel the stage rebuilds it from the `u32`, clamped to
-///   `2^24`. The kernel runs it below zero (`remaining - 1`, done at `<= 0`), and it is not the
-///   phase.
+///   [`EXACT_COUNTDOWN`]. The kernel runs it below zero (`remaining - 1`, done at `<= 0`), and it
+///   is not the phase. So no lane record carries it and no import writes it (issue #2410), and
+///   the fader does not store it at all.
 ///
 /// `builtins` does not depend on `effect-runtime`, and this rule needs nothing else from it.
 #[inline]
@@ -3162,7 +3163,7 @@ const fn settled_on_target(current: f32, target: f32, remaining: u32) -> bool {
 ///
 /// Plain data, fixed size, no heap: the filter integrators, the coefficients in use, any
 /// coefficient ramp in flight (target, per-sample step and countdown), the trim ramp
-/// (current, target, step, the kernel's countdown word and the authoritative countdown), and the
+/// (current, target, step and the authoritative countdown), and the
 /// input's silence counter (issue #1328, amendment A9). The
 /// polarity is the trim's sign. In-memory state handed across a plan replacement, never persisted
 /// (AGENTS.md, R6b).
@@ -3175,8 +3176,9 @@ pub struct InputLaneState {
 struct InputChannelState {
     /// `coef.trim`, the live trim word the kernel loads.
     trim: f32,
-    /// `ramp.{current, target, step, remaining}`.
-    ramp: [f32; 4],
+    /// `ramp.{current, target, step}`. The kernel's `f32` countdown word is not carried: the
+    /// stage rebuilds it from [`Self::remaining`] before every ramp kernel (issue #2410).
+    ramp: [f32; 3],
     /// The authoritative trim countdown.
     remaining: u32,
     /// `state.silence`: the input's run of exactly-zero frames (issue #1328, amendment A9), so the
@@ -3369,8 +3371,10 @@ impl<L: Lane> FaderStage<L> {
 ///
 /// # Ramp independence, and why partition invariance follows
 ///
-/// Every lane owns its countdown, its step and its current gain, and
-/// [`gain_mute_ramp_block`] advances all three in place per frame. A lane's ramp therefore evolves
+/// Every lane owns its countdown, its step and its current gain. [`gain_mute_ramp_block`]
+/// advances the gain in place per frame, counting down an `f32` word that [`Self::process_plane`]
+/// builds from the lane's `u32` countdown for that block alone, and the stage then advances the
+/// `u32` by the frames the kernel ran ([`Self::end_ramp_windows`]). A lane's ramp therefore evolves
 /// by its own additions, in its own order, regardless of the block size, of where the block
 /// boundaries fall, or of which other tracks share its bank. That is what makes a banked lane's
 /// bits equal the same track's bits rendered alone, and it is the same argument
@@ -3395,6 +3399,9 @@ pub(crate) struct FaderRampStage<L: Lane> {
     /// Each lane's fader gain, independent of mute, `[channel][lane]`.
     fader_gain: [[f32; MAX_BANK_LANES]; 2],
     /// Frames left in each lane's ramp, `[channel][lane]`.
+    ///
+    /// The only countdown the stage holds (issue #2410, #2378 C15): the kernel's `f32` countdown
+    /// word is a local of [`Self::process_plane`], built from this before each ramp kernel.
     remaining: [[u32; MAX_BANK_LANES]; 2],
     /// Each lane's mute and arm phase, `[channel][lane]` (issues #1638 D2, #1288 D2, #2280).
     ///
@@ -3409,15 +3416,6 @@ pub(crate) struct FaderRampStage<L: Lane> {
     /// lane is not armed.
     phase: [[FaderPhase; MAX_BANK_LANES]; 2],
 }
-
-/// Largest ramp countdown that is exact in `f32`.
-///
-/// The same clamp, for the same reason, as [`MATRIX_RAMP_COUNTDOWN_MAXIMUM`]: a window may be up to
-/// `u32::MAX` updates but the in-kernel countdown is an `f32` integer. It is invisible because a
-/// lane can only reach zero inside a block when its remaining count is at most the block length,
-/// and because the authoritative countdown is the `u32` in [`FaderRampStage::remaining`] -- the
-/// kernel's leftover word is recomputed from it at the top of every ramping block, never carried.
-const FADER_RAMP_COUNTDOWN_MAXIMUM: u32 = 1 << 24;
 
 impl<L: Lane> FaderRampStage<L> {
     /// Builds a settled stage from one prepared fader per populated lane and channel.
@@ -3444,7 +3442,6 @@ impl<L: Lane> FaderRampStage<L> {
                 current,
                 target: current,
                 step: L::zero(),
-                remaining: L::zero(),
                 mute: mask_from_flags::<L>(&flags[channel][..L::WIDTH]),
             }
         });
@@ -3667,9 +3664,9 @@ impl<L: Lane> FaderRampStage<L> {
     ///
     /// A settled lane of a bank in which another lane ramps runs the ramp kernel, which assigns
     /// it its target (equal in bits to its current gain, since a settle assigns `current =
-    /// target`) and leaves its value words where they were; the kernel's `f32` countdown word
-    /// it also rewrites is residue that `process_plane` recomputes from the `u32` countdown
-    /// before every read and that the lane export does not carry, so it is not state.
+    /// target`) and leaves its value words where they were; the kernel's `f32` countdown word is
+    /// a local of `process_plane`, built from the `u32` countdown for that block, so the stage
+    /// holds no word it rewrites.
     ///
     /// State only, `&self`, allocation-free and bounded by the lane count.
     fn lanes_at_rest(&self) -> u32 {
@@ -3767,13 +3764,19 @@ impl<L: Lane> FaderRampStage<L> {
             return;
         }
         let ramp_frames = (maximum as usize).min(frames);
+        // The kernel's `f32` countdown word, built from the `u32` countdown for this block only:
+        // the stage does not store it (issue #2410, #2378 C15).
         let mut countdown = [0.0_f32; MAX_BANK_LANES];
         for (lane, word) in countdown.iter_mut().enumerate() {
-            *word = self.remaining[channel][lane].min(FADER_RAMP_COUNTDOWN_MAXIMUM) as f32;
+            *word = self.remaining[channel][lane].min(EXACT_COUNTDOWN) as f32;
         }
-        self.ramp[channel].remaining = lane_words::<L>(&countdown);
         let split = ramp_frames * L::WIDTH;
-        gain_mute_ramp_block::<L>(&mut plane[..split], ramp_frames, &mut self.ramp[channel]);
+        gain_mute_ramp_block::<L>(
+            &mut plane[..split],
+            ramp_frames,
+            lane_words::<L>(&countdown),
+            &mut self.ramp[channel],
+        );
         let mut window = [0; 2];
         window[channel] = ramp_frames;
         self.end_ramp_windows(window);
@@ -3864,8 +3867,9 @@ impl<L: Lane> FaderRampStage<L> {
 
     /// Overwrite one populated lane with `state`, word for word, and re-derive the lane's bit of
     /// the mute mask the kernel loads. The kernel's `f32` countdown word needs no import: the
-    /// ramp path rebuilds it from the `u32` countdown before every read. The lane then renders
-    /// exactly what the lane it was exported from would have.
+    /// stage does not hold one, and [`Self::process_plane`] builds it from the `u32` countdown
+    /// before each ramp kernel. The lane then renders exactly what the lane it was exported from
+    /// would have.
     ///
     /// The phase is re-derived with the countdown ([`FaderPhase::at_countdown`], issue #2280), not
     /// copied: an unmute ramp with no frames left imports as the open lane the countdown's end
@@ -3890,8 +3894,6 @@ impl<L: Lane> FaderRampStage<L> {
             put_lane::<L>(&mut self.ramp[channel].current, lane, carried.current);
             put_lane::<L>(&mut self.ramp[channel].target, lane, carried.target);
             put_lane::<L>(&mut self.ramp[channel].step, lane, carried.step);
-            // No write of the kernel's `f32` countdown word: `process_plane` rebuilds it from the
-            // `u32` countdown below before every ramp kernel reads it (issue #2377 T2).
             self.remaining[channel][lane] = carried.remaining;
             self.fader_gain[channel][lane] = carried.fader_gain;
             self.phase[channel][lane] = carried.phase.at_countdown(carried.remaining);
@@ -3901,9 +3903,8 @@ impl<L: Lane> FaderRampStage<L> {
     // REALTIME_POLICY_END
 
     /// Snaps every lane to its target and cancels any ramp in flight. An unmute ramp ends with
-    /// its countdown; an arm stays, as only its fire ends it. The kernel's `f32` countdown word is
-    /// not written: `process_plane` rebuilds it from the `u32` countdown before every ramp kernel
-    /// reads it, as [`Self::import_lane`] relies on (issue #2377 T2, #2378 C15).
+    /// its countdown; an arm stays, as only its fire ends it. Zeroing the `u32` countdown is the
+    /// whole countdown reset: the stage holds no `f32` countdown word (issue #2410, #2378 C15).
     fn reset(&mut self) {
         for channel in 0..2 {
             self.ramp[channel].current = self.ramp[channel].target;
@@ -3933,13 +3934,6 @@ pub(crate) struct MatrixStage<L: Lane> {
     /// Per-lane frames left in the current ramp.
     remaining: [u32; MAX_BANK_LANES],
 }
-
-/// Largest ramp countdown that is exact in `f32`.
-///
-/// A window may be up to `u32::MAX` updates. The in-kernel countdown is an `f32` integer, so it is
-/// clamped here; the clamp is invisible, because a lane can only reach zero inside a block when
-/// its remaining count is at most the block length.
-const MATRIX_RAMP_COUNTDOWN_MAXIMUM: u32 = 1 << 24;
 
 impl<L: Lane> MatrixStage<L> {
     /// Builds a settled stage from one prepared matrix and window per populated lane.
@@ -4240,7 +4234,7 @@ impl<L: Lane> MatrixStage<L> {
         let ramp_frames = (maximum as usize).min(frames);
         let mut countdown = [0.0_f32; MAX_BANK_LANES];
         for (lane, word) in countdown.iter_mut().enumerate() {
-            *word = self.remaining[lane].min(MATRIX_RAMP_COUNTDOWN_MAXIMUM) as f32;
+            *word = self.remaining[lane].min(EXACT_COUNTDOWN) as f32;
         }
         self.ramp.remaining = lane_words::<L>(&countdown);
         let split = ramp_frames * L::WIDTH;
@@ -4276,12 +4270,12 @@ impl<L: Lane> MatrixStage<L> {
     }
 
     /// Overwrite one populated lane with `state`, word for word, and re-derive what those words
-    /// feed: the countdown the ramp kernel reads and the settled coefficients with their identity
-    /// mask. The lane then renders exactly what the lane it was exported from would have.
+    /// feed: the settled coefficients with their identity mask. The lane then renders exactly what
+    /// the lane it was exported from would have.
     ///
-    /// The clamp to [`MATRIX_RAMP_COUNTDOWN_MAXIMUM`] is not a settle rule. It writes the
-    /// kernel's `f32` countdown residue, which [`Self::process`] rebuilds from the `u32` before
-    /// every ramp kernel. The lane's phase is the `u32` countdown, copied as it is.
+    /// The kernel's `f32` countdown residue is neither carried nor written: [`Self::process`]
+    /// rebuilds it from the `u32` before every ramp kernel (issue #2410). The lane's phase is the
+    /// `u32` countdown, copied as it is.
     ///
     /// The record is engine-produced ([`settled_on_target`] says why it is not built through
     /// `LinearRamp::from_words`). Its settled coefficients are on their targets because of the
@@ -4304,11 +4298,8 @@ impl<L: Lane> MatrixStage<L> {
             put_lane::<L>(&mut self.ramp.target[index], lane, state.target[index]);
             put_lane::<L>(&mut self.ramp.step[index], lane, state.step[index]);
         }
-        put_lane::<L>(
-            &mut self.ramp.remaining,
-            lane,
-            state.remaining.min(MATRIX_RAMP_COUNTDOWN_MAXIMUM) as f32,
-        );
+        // No write of the kernel's `f32` countdown word: `process` rebuilds it from the `u32`
+        // countdown below before every ramp kernel reads it (issue #2410).
         self.smoothing_samples[lane] = state.smoothing_samples;
         self.remaining[lane] = state.remaining;
         self.sync_settled();
@@ -7561,9 +7552,9 @@ pub mod test_support {
     }
 
     /// Exact retained words for one fader-bank lane: per channel current/target/step, the
-    /// authoritative countdown and the remembered gain, followed by both mute flags. The kernel's
-    /// `f32` countdown word is scratch, rebuilt from the countdown before every ramp kernel reads
-    /// it (issue #2377 T2), so it is left out.
+    /// authoritative countdown and the remembered gain, followed by both mute flags. That is every
+    /// per-lane word the stage holds: the kernel's `f32` countdown word is a local of the render
+    /// path (issue #2377 T2, #2410).
     #[must_use]
     pub fn fader_bank_lane_words(bank: &BuiltinFaderBank, lane: usize) -> [u32; 12] {
         fn words<L: crate::Lane>(stage: &crate::FaderRampStage<L>, lane: usize) -> [u32; 12] {

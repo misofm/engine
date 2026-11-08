@@ -261,6 +261,9 @@ pub fn ramp_toward<L: Lane>(current: L, step: L, target: L) -> L {
 /// State of a ramping fader/mute, one set per lane (issue #212, the banked strip fader).
 ///
 /// One channel of one bank: every array is `[lane]`, and a dual-mono stage carries two of these.
+/// The ramp's countdown is not among them: [`gain_mute_ramp_block`] takes it as an argument,
+/// because the caller's authoritative countdown is an integer and the kernel's `f32` word is
+/// per-block scratch built from it (issue #2410, #2378 C15).
 #[derive(Clone, Copy)]
 pub struct GainMuteRamp<L: Lane> {
     /// The gain applied to the current frame.
@@ -269,8 +272,6 @@ pub struct GainMuteRamp<L: Lane> {
     pub target: L,
     /// Per-sample increment, `(target - start) / n`, computed once per event.
     pub step: L,
-    /// Frames left in this lane's ramp, as an exact `f32` integer (the caller clamps to `2^24`).
-    pub remaining: L,
     /// Muted lanes. A muted lane is cleared from the frame its ramp settles on, never after.
     pub mute: L::Mask,
 }
@@ -297,16 +298,23 @@ pub struct GainMuteRamp<L: Lane> {
 /// "every sample of a completed mute is `+0.0`" true of the settling sample too. An unmuted lane
 /// has an all-zero mask and is one multiply, so gain `1.0` still preserves signed zero.
 ///
-/// `remaining` and `current` are advanced in place, so a lane's ramp carries across block
-/// boundaries and evolves by its own additions regardless of block size or of its neighbours:
-/// partition and cohort invariance hold by construction, exactly as they do for
-/// [`matrix2x2_ramp_block`].
+/// `remaining` is each lane's frames left in its ramp at the block's first frame, as an exact
+/// `f32` integer: the caller builds it from its integer countdown, clamped to
+/// [`EXACT_COUNTDOWN`](super::EXACT_COUNTDOWN), and the kernel counts it down in a register only.
+/// `current` is advanced in place, and the caller advances its countdown by the frames it ran, so
+/// a lane's ramp carries across block boundaries and evolves by its own additions regardless of
+/// block size or of its neighbours: partition and cohort invariance hold by construction, exactly
+/// as they do for [`matrix2x2_ramp_block`].
 #[inline(always)]
-pub fn gain_mute_ramp_block<L: Lane>(io: &mut [f32], frames: usize, r: &mut GainMuteRamp<L>) {
+pub fn gain_mute_ramp_block<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    mut remaining: L,
+    r: &mut GainMuteRamp<L>,
+) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
     let one = L::splat(1.0);
     let zero = L::zero();
-    let mut remaining = r.remaining;
     let mut current = r.current;
     for frame in io.chunks_exact_mut(L::WIDTH) {
         remaining = remaining.sub(one);
@@ -317,7 +325,6 @@ pub fn gain_mute_ramp_block<L: Lane>(io: &mut [f32], frames: usize, r: &mut Gain
             .andnot(L::mask_and(done, r.mute))
             .store(frame);
     }
-    r.remaining = remaining;
     r.current = current;
 }
 
@@ -535,7 +542,8 @@ pub struct Matrix2x2Ramp<L: Lane> {
     pub target: [L; 4],
     /// Per-sample increment, `(target - start) / n`, computed once per event.
     pub step: [L; 4],
-    /// Frames left in this lane's ramp, as an exact `f32` integer (the caller clamps to `2^24`).
+    /// Frames left in this lane's ramp, as an exact `f32` integer (the caller clamps to
+    /// [`EXACT_COUNTDOWN`](super::EXACT_COUNTDOWN)).
     pub remaining: L,
 }
 
@@ -821,8 +829,9 @@ fn input_chain_block_body<L: Lane>(
 ///
 /// Every array is `[channel]`, and each element carries one lane word: `current[0]` is the left
 /// channel's per-lane trim applied to the frame being rendered. The shape is
-/// [`GainMuteRamp`]'s, minus the mute mask -- the trim has no mute endpoint -- and the arithmetic
-/// is the same D11 form, which is what makes a trim ramp obey the same smoother law the fader and
+/// [`GainMuteRamp`]'s, minus the mute mask -- the trim has no mute endpoint -- plus the kernel's
+/// `f32` countdown word, which the stage keeps here and rebuilds before every ramp kernel. The
+/// arithmetic is the same D11 form, which is what makes a trim ramp obey the same smoother law the fader and
 /// the matrix already obey.
 #[derive(Clone, Copy)]
 pub struct InputTrimRamp<L: Lane> {
@@ -832,7 +841,8 @@ pub struct InputTrimRamp<L: Lane> {
     pub target: [L; 2],
     /// Per-sample increment, `(target - start) / n`, computed once per event.
     pub step: [L; 2],
-    /// Frames left in this lane's ramp, as an exact `f32` integer (the caller clamps to `2^24`).
+    /// Frames left in this lane's ramp, as an exact `f32` integer (the caller clamps to
+    /// [`EXACT_COUNTDOWN`](super::EXACT_COUNTDOWN)).
     pub remaining: [L; 2],
 }
 
