@@ -45,6 +45,8 @@ export class OpfsStemStore {
   #opening
   #inFlight = new Map()
   #localLockTails = new Map()
+  // identity -> the unsettled removals of its final, for each stem lock this store holds now.
+  #stemFences = new Map()
 
   /**
    * @param {{
@@ -618,15 +620,14 @@ export class OpfsStemStore {
       // A timed-out OPFS operation may never settle. Start cleanup, but do not
       // re-await that same writable before returning typed cancellation. The
       // second removal attempt runs if a late create/abort eventually settles.
+      // Both removals fence the stem lock, which stays held until they settle.
       if (writablePromise !== undefined) {
-        void abortFallbackWritable(
-          writablePromise,
-          error,
-          this.#directory,
-          finalName
+        this.#fence(
+          stem.identity,
+          abortFallbackWritable(writablePromise, error, this.#directory, finalName)
         )
       }
-      void removeEntry(this.#directory, finalName).catch(() => {})
+      this.#fence(stem.identity, removeEntry(this.#directory, finalName))
       void reader?.cancel(error).catch(() => {})
       throw error
     } finally {
@@ -821,25 +822,30 @@ export class OpfsStemStore {
   }
 
   // An aborted open evicts nothing once its abort is seen: both lock waits take its signal, and the
-  // mutation checks it again after the index read. The removal runs under the index lock, so it is
-  // deadlined; a timed-out removal leaves the row, the index is not rewritten, and a removal that
-  // lands later leaves a row with no file, which verify-on-open demotes and re-ingests.
+  // mutation checks it again after the index read. The row goes first, as in #demote, so no OPFS
+  // step of the eviction runs under the index lock. The removal then runs under the stem lock
+  // alone: past its deadline it fails the open typed, and the stem lock stays held until it settles.
+  // A removal that fails leaves unindexed debris, which the open-time sweep removes.
   async #evictUnpinned(identity, signal) {
     return this.#withStemLock(identity, signal, async () => {
       let evicted = false
-      await this.#mutateIndex(async (index) => {
+      await this.#mutateIndex((index) => {
         throwIfAborted(signal)
         const row = index.stems[identity]
         if (row === undefined || row.pins.length !== 0) return
-        await withDeadline(
-          removeEntry(this.#directory, stemFileName(identity)),
-          this.#readDeadlineMs,
-          "storage.remove_stalled",
-          `Evicting ${identity} made no progress`
-        )
         delete index.stems[identity]
         evicted = true
       }, signal)
+      if (evicted) {
+        await this.#removeFinal(identity, (removal) =>
+          withDeadline(
+            removal,
+            this.#readDeadlineMs,
+            "storage.remove_stalled",
+            `Evicting ${identity} made no progress`
+          )
+        )
+      }
       return evicted
     })
   }
@@ -898,15 +904,17 @@ export class OpfsStemStore {
     // The row goes first, so a delete that hangs on a handle that already
     // failed cannot keep the stem indexed. The delete is deadlined and
     // best-effort: a final left behind is unindexed debris that the next
-    // open sweeps.
+    // open sweeps. It runs under the stem lock, held until it settles.
     await this.#mutateIndex((index) => {
       delete index.stems[identity]
     })
-    await withDeadline(
-      removeEntry(this.#directory, stemFileName(identity)),
-      this.#readDeadlineMs,
-      "storage.remove_stalled",
-      `Removing ${identity} made no progress`
+    await this.#removeFinal(identity, (removal) =>
+      withDeadline(
+        removal,
+        this.#readDeadlineMs,
+        "storage.remove_stalled",
+        `Removing ${identity} made no progress`
+      )
     ).catch(() => {})
   }
 
@@ -952,15 +960,18 @@ export class OpfsStemStore {
 
   // Runs inside the index lock, so the listing and every removal are deadlined like the hashing
   // and the index write; a stall fails the rebuild typed and leaves the damaged index for a retry.
+  // A stalled hash is a stall, not damage, so it never removes the final.
   async #rebuildIndex() {
     const rebuilt = emptyIndex()
     const liveLocks = await this.#liveLockNames()
-    const remove = (name) =>
-      withDeadline(
-        removeEntry(this.#directory, name),
-        this.#readDeadlineMs,
-        "storage.remove_stalled",
-        `Removing ${name} made no progress`
+    const remove = (identity, name) =>
+      this.#removeFinal(identity, (removal) =>
+        withDeadline(
+          removal,
+          this.#readDeadlineMs,
+          "storage.remove_stalled",
+          `Removing ${name} made no progress`
+        )
       )
     const iterator = this.#directory.entries()
     try {
@@ -986,7 +997,8 @@ export class OpfsStemStore {
             stage: "verify-rebuild",
             identity,
           })
-        } catch {
+        } catch (error) {
+          if (error instanceof StemStoreError && error.code === "storage.read_stalled") throw error
           observed = undefined
         }
         if (observed?.hex === match[1]) {
@@ -996,7 +1008,7 @@ export class OpfsStemStore {
             pins: [],
           }
         } else {
-          await remove(name)
+          await remove(identity, name)
         }
       }
     } finally {
@@ -1146,10 +1158,8 @@ export class OpfsStemStore {
         index.stems[identity] === undefined &&
         !liveLocks?.has(this.#stemLockName(identity))
       ) {
-        await this.#sweepStep(
-          removeEntry(this.#directory, name),
-          budgetEnd,
-          `Removing ${name}`
+        await this.#removeFinal(identity, (removal) =>
+          this.#sweepStep(removal, budgetEnd, `Removing ${name}`)
         )
       }
     })
@@ -1222,6 +1232,12 @@ export class OpfsStemStore {
   // its place in the queue (a granted lock is unaffected; the lease owns it).
   async #acquireSessionPinLock(pin, signal) {
     if (typeof this.#locks?.request !== "function") return () => {}
+    return this.#holdLock(this.#sessionPinLockName(pin), { mode: "exclusive", signal })
+  }
+
+  // Takes a Web Lock and holds it until the returned release runs. With `ifAvailable` it never
+  // waits, and resolves null when the lock is held or queued for.
+  async #holdLock(name, options) {
     let acquired
     let acquisitionFailed
     let release
@@ -1232,18 +1248,95 @@ export class OpfsStemStore {
     const hold = new Promise((resolve) => {
       release = resolve
     })
-    const request = this.#locks.request(
-      this.#sessionPinLockName(pin),
-      { mode: "exclusive", signal },
-      async () => {
-        acquired()
-        await hold
-      }
-    )
+    const request = this.#locks.request(name, options, async (lock) => {
+      if (lock === null) return acquired(null)
+      acquired(release)
+      await hold
+    })
     request.catch(acquisitionFailed)
-    await ready
+    const granted = await ready
     request.catch(() => {})
-    return release
+    return granted
+  }
+
+  // A stem lock's wait takes `signal`, or, with `ifAvailable`, never waits (the Web Locks API
+  // refuses the two together) and resolves null when another holder has the lock.
+  async #acquireStemLock(identity, signal, ifAvailable = false) {
+    throwIfAborted(signal)
+    const name = this.#stemLockName(identity)
+    if (typeof this.#locks?.request === "function") {
+      return this.#holdLock(
+        name,
+        ifAvailable ? { mode: "exclusive", ifAvailable } : { mode: "exclusive", signal }
+      )
+    }
+    const previous = this.#localLockTails.get(name)
+    if (ifAvailable && previous !== undefined) return null
+    let open
+    const gate = new Promise((resolve) => {
+      open = resolve
+    })
+    const tail = (previous ?? Promise.resolve()).then(() => gate)
+    this.#localLockTails.set(name, tail)
+    await previous
+    return () => {
+      open()
+      if (this.#localLockTails.get(name) === tail) this.#localLockTails.delete(name)
+    }
+  }
+
+  // Runs `work` under the stem lock and settles with it, but holds the lock until every removal of
+  // the stem's final fenced during the hold has settled (#2381). A timed-out removal may still land,
+  // and a later holder could otherwise verify and pin the very file it then deletes.
+  async #withStemLock(identity, signal, work) {
+    const release = await this.#acquireStemLock(identity, signal)
+    const fences = new Set()
+    this.#stemFences.set(identity, fences)
+    try {
+      throwIfAborted(signal)
+      return await work()
+    } finally {
+      void this.#releaseOnceSettled(identity, fences, release)
+    }
+  }
+
+  async #releaseOnceSettled(identity, fences, release) {
+    while (fences.size !== 0) await Promise.allSettled(fences)
+    // No newer hold of this lock exists in this store before `release()`, so the entry is ours.
+    this.#stemFences.delete(identity)
+    release()
+  }
+
+  // Keeps this store's current hold of the stem lock, if any, until `operation` settles.
+  #fence(identity, operation) {
+    const settled = Promise.resolve(operation).then(
+      () => {},
+      () => {}
+    )
+    const fences = this.#stemFences.get(identity)
+    if (fences !== undefined) {
+      fences.add(settled)
+      void settled.then(() => fences.delete(settled))
+    }
+    return settled
+  }
+
+  // Removes a stem's final only under its stem lock, and never releases that lock before the
+  // removal settles. Inside this store's own hold the removal fences that hold. Otherwise the lock
+  // is taken without waiting, since the caller may hold the index lock; a final whose lock another
+  // holder has belongs to that holder, so it is left alone and this returns false. `deadline` bounds
+  // the caller's wait only, never the lock.
+  async #removeFinal(identity, deadline) {
+    let release
+    if (!this.#stemFences.has(identity)) {
+      release = await this.#acquireStemLock(identity, undefined, true)
+      if (release === null) return false
+    }
+    const removal = removeEntry(this.#directory, stemFileName(identity))
+    if (release === undefined) this.#fence(identity, removal)
+    else void removal.then(release, release)
+    await deadline(removal)
+    return true
   }
 
   async #fileHandle(name, create) {
@@ -1265,10 +1358,6 @@ export class OpfsStemStore {
 
   #sessionPinLockName(pin) {
     return `${LOCK_PREFIX}:${this.#folderName}:pin:${pin}`
-  }
-
-  #withStemLock(identity, signal, work) {
-    return this.#withLock(this.#stemLockName(identity), signal, work)
   }
 
   #withIndexLock(work, signal) {

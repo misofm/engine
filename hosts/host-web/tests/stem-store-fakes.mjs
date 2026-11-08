@@ -15,6 +15,7 @@ export class FakeOpfsBackend {
     this.removeEntryBlocker = options.removeEntryBlocker
     this.entriesBlocker = options.entriesBlocker
     this.getFileHandleBlocker = options.getFileHandleBlocker
+    this.getFileBlocker = options.getFileBlocker
   }
 
   get usage() {
@@ -136,6 +137,10 @@ class FakeFileHandle {
   }
 
   async getFile() {
+    // Awaited only when set, so a run without the hook keeps its microtask order.
+    if (this.backend.getFileBlocker !== undefined) {
+      await this.backend.getFileBlocker({ name: this.name })
+    }
     const blob = new Blob([this.node.bytes])
     Object.defineProperty(blob, "lastModified", { value: this.node.lastModified })
     return blob
@@ -211,10 +216,12 @@ export class FakeLockManager {
 
   // A request honours `signal` as the Web Locks API does: an already-aborted signal rejects
   // without queueing, and an abort while the request waits rejects it with the signal's reason
-  // and gives up its place in the queue. An abort after the grant changes nothing.
+  // and gives up its place in the queue. An abort after the grant changes nothing. With
+  // `ifAvailable` a lock that is held or queued for is not waited on: `work` runs with null.
   async request(name, options, work) {
     const signal = options?.signal
     if (signal?.aborted) throw signal.reason
+    if (options?.ifAvailable && this.#tails.has(name)) return work(null)
     this.requests.push(name)
     const previous = this.#tails.get(name) ?? Promise.resolve()
     this.#pending.set(name, (this.#pending.get(name) ?? 0) + 1)

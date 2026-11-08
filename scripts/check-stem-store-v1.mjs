@@ -184,10 +184,18 @@ async function runMutationLedger() {
     {
       name: "remove Web Lock single-flight",
       file: "web/stem-store/opfs-store.js",
-      search:
-        'if (typeof this.#locks?.request === "function") {\n      return this.#locks.request(name, { mode: "exclusive", signal }, async () => {',
-      replace:
-        'if (false) {\n      return this.#locks.request(name, { mode: "exclusive", signal }, async () => {',
+      edits: [
+        {
+          search:
+            'if (typeof this.#locks?.request === "function") {\n      return this.#locks.request(name, { mode: "exclusive", signal }, async () => {',
+          replace:
+            'if (false) {\n      return this.#locks.request(name, { mode: "exclusive", signal }, async () => {',
+        },
+        {
+          search: 'if (typeof this.#locks?.request === "function") {\n      return this.#holdLock(\n        name,',
+          replace: 'if (false) {\n      return this.#holdLock(\n        name,',
+        },
+      ],
       test: "stem-store-core-v1.mjs",
     },
     {
@@ -425,92 +433,279 @@ async function runMutationLedger() {
       expectedFailure: "the dropped open's unhandled rejection (after the pin phase)",
     },
     // Issue #2381: every OPFS step under the index lock is deadlined, so no wedged step stalls every
-    // later lease close; a stalled index read fails typed instead of rebuilding away every pin; and
-    // an aborted open evicts nothing once its abort is seen. One entry per guard.
+    // later lease close; a stall fails typed and is never treated as damage; a final is removed only
+    // under its stem lock, which outlives the removal; and an aborted open evicts nothing once its
+    // abort is seen. One entry per guard.
     {
-      name: "remove an eviction's file under the index lock with no deadline",
+      name: "put an eviction's raw removal back under the index lock",
       file: "web/stem-store/opfs-store.js",
-      search:
-        "        await withDeadline(\n          removeEntry(this.#directory, stemFileName(identity)),\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Evicting ${identity} made no progress`\n        )\n",
-      replace: "        await removeEntry(this.#directory, stemFileName(identity))\n",
+      edits: [
+        {
+          search:
+            "      await this.#mutateIndex((index) => {\n        throwIfAborted(signal)\n",
+          replace: "      await this.#mutateIndex(async (index) => {\n        throwIfAborted(signal)\n",
+        },
+        {
+          search:
+            "        delete index.stems[identity]\n        evicted = true\n      }, signal)\n      if (evicted) {\n        await this.#removeFinal(identity, (removal) =>\n          withDeadline(\n            removal,\n            this.#readDeadlineMs,\n            \"storage.remove_stalled\",\n            `Evicting ${identity} made no progress`\n          )\n        )\n      }\n",
+          replace: "        await removeEntry(this.#directory, stemFileName(identity))\n        delete index.stems[identity]\n        evicted = true\n      }, signal)\n",
+        },
+      ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a lease close waited on an eviction's wedged removal",
     },
     {
+      name: "let an eviction wait on its removal with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        await this.#removeFinal(identity, (removal) =>\n          withDeadline(\n            removal,\n            this.#readDeadlineMs,\n            \"storage.remove_stalled\",\n            `Evicting ${identity} made no progress`\n          )\n        )\n",
+          replace: "        await this.#removeFinal(identity, (removal) => removal)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "an eviction waited on its wedged removal past the deadline",
+    },
+    {
+      name: "remove an evicted final without fencing its stem lock",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        await this.#removeFinal(identity, (removal) =>\n          withDeadline(\n            removal,\n            this.#readDeadlineMs,\n            \"storage.remove_stalled\",\n            `Evicting ${identity} made no progress`\n          )\n        )\n",
+          replace: "        await withDeadline(\n          removeEntry(this.#directory, stemFileName(identity)),\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Evicting ${identity} made no progress`\n        )\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "an open verified a final that a timed-out eviction was still removing",
+    },
+    {
+      name: "release a stem lock as soon as its work settles",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      void this.#releaseOnceSettled(identity, fences, release)\n",
+          replace: "      release()\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a verify ran while a demote's delete of its final was unsettled",
+    },
+    {
+      name: "remove a demoted final without fencing its stem lock",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    await this.#removeFinal(identity, (removal) =>\n      withDeadline(\n        removal,\n        this.#readDeadlineMs,\n        \"storage.remove_stalled\",\n        `Removing ${identity} made no progress`\n      )\n    ).catch(() => {})\n",
+          replace: "    await withDeadline(\n      removeEntry(this.#directory, stemFileName(identity)),\n      this.#readDeadlineMs,\n      \"storage.remove_stalled\",\n      `Removing ${identity} made no progress`\n    ).catch(() => {})\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a verify ran while a demote's delete of its final was unsettled",
+    },
+    {
+      name: "leave a fallback writable's late abort and removal unfenced",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        this.#fence(\n          stem.identity,\n          abortFallbackWritable(",
+          replace: "        void (\n          stem.identity,\n          abortFallbackWritable(",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a fallback cleanup released the stem lock before its writable abort settled",
+    },
+    {
+      name: "leave a fallback final's immediate removal unfenced",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      this.#fence(stem.identity, removeEntry(this.#directory, finalName))\n",
+          replace: "      void removeEntry(this.#directory, finalName).catch(() => {})\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a fallback cleanup released the stem lock before its immediate removal settled",
+    },
+    {
+      name: "release a stem lock taken for a removal before the removal settles",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    else void removal.then(release, release)\n",
+          replace: "    else release()\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a rebuild released a final's stem lock before its removal settled",
+    },
+    {
+      name: "remove a final whose stem lock another holder has",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      if (release === null) return false\n",
+          replace: "",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a final was removed while another holder had its stem lock",
+    },
+    {
+      name: "remove swept debris without its stem lock",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        await this.#removeFinal(identity, (removal) =>\n          this.#sweepStep(removal, budgetEnd, `Removing ${name}`)\n        )\n",
+          replace: "        await this.#sweepStep(removeEntry(this.#directory, name), budgetEnd, `Removing ${name}`)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a final was removed while another holder had its stem lock",
+    },
+    {
+      name: "remove a rebuild's unverifiable final without its stem lock",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    const remove = (identity, name) =>\n      this.#removeFinal(identity, (removal) =>\n",
+          replace: "    const remove = (identity, name) =>\n      ((identity, deadline) => deadline(removeEntry(this.#directory, stemFileName(identity))))(identity, (removal) =>\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a rebuild released a final's stem lock before its removal settled",
+    },
+    {
+      name: "remove an unverifiable final in an index rebuild with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    const remove = (identity, name) =>\n      this.#removeFinal(identity, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing ${name} made no progress`\n        )\n      )\n",
+          replace: "    const remove = (identity, name) => this.#removeFinal(identity, (removal) => removal)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lease close waited on a rebuild's wedged removal",
+    },
+    {
+      name: "remove a good final whose hash stalled in a rebuild",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "          if (error instanceof StemStoreError && error.code === \"storage.read_stalled\") throw error\n          observed = undefined\n",
+          replace: "          observed = undefined\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a rebuild removed a good final whose hash stalled",
+    },
+    {
       name: "open the index file with no deadline",
       file: "web/stem-store/opfs-store.js",
-      search:
-        "      const handle = await withDeadline(\n        this.#directory.getFileHandle(INDEX_FILE),\n        this.#readDeadlineMs,\n        \"storage.read_stalled\",\n        \"Opening the stem index made no progress\"\n      )\n",
-      replace: "      const handle = await this.#directory.getFileHandle(INDEX_FILE)\n",
+      edits: [
+        {
+          search:
+            "      const handle = await withDeadline(\n        this.#directory.getFileHandle(INDEX_FILE),\n        this.#readDeadlineMs,\n        \"storage.read_stalled\",\n        \"Opening the stem index made no progress\"\n      )\n",
+          replace: "      const handle = await this.#directory.getFileHandle(INDEX_FILE)\n",
+        },
+      ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a lease close waited on a wedged index open",
     },
     {
       name: "rebuild the index after a stalled index read",
       file: "web/stem-store/opfs-store.js",
-      search:
-        "      if (error instanceof StemStoreError && error.code === \"storage.read_stalled\") throw error\n",
-      replace: "",
+      edits: [
+        {
+          search:
+            "    } catch (error) {\n      if (error instanceof StemStoreError && error.code === \"storage.read_stalled\") throw error\n      if (error?.name === \"NotFoundError\") {\n",
+          replace: "    } catch (error) {\n      if (error?.name === \"NotFoundError\") {\n",
+        },
+      ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a stalled index read rebuilt the index and dropped a live pin",
     },
     {
       name: "list the store for an index rebuild with no deadline",
       file: "web/stem-store/opfs-store.js",
-      search:
-        "        const step = await withDeadline(\n          iterator.next(),\n          this.#readDeadlineMs,\n          \"storage.read_stalled\",\n          \"Listing the stem store made no progress\"\n        )\n",
-      replace: "        const step = await iterator.next()\n",
+      edits: [
+        {
+          search:
+            "        const step = await withDeadline(\n          iterator.next(),\n          this.#readDeadlineMs,\n          \"storage.read_stalled\",\n          \"Listing the stem store made no progress\"\n        )\n",
+          replace: "        const step = await iterator.next()\n",
+        },
+      ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a lease close waited on a rebuild's wedged listing",
     },
     {
-      name: "remove an unverifiable final in an index rebuild with no deadline",
-      file: "web/stem-store/opfs-store.js",
-      search:
-        "    const remove = (name) =>\n      withDeadline(\n        removeEntry(this.#directory, name),\n        this.#readDeadlineMs,\n        \"storage.remove_stalled\",\n        `Removing ${name} made no progress`\n      )\n",
-      replace: "    const remove = (name) => removeEntry(this.#directory, name)\n",
-      test: "stem-store-core-v1.mjs",
-      expectedFailure: "a lease close waited on a rebuild's wedged removal",
-    },
-    {
       name: "give an open's evictions no signal",
       file: "web/stem-store/opfs-store.js",
-      search: "    await this.#preflight(missing, protectedIdentities, options.signal)\n",
-      replace: "    await this.#preflight(missing, protectedIdentities)\n",
+      edits: [
+        {
+          search:
+            "    await this.#preflight(missing, protectedIdentities, options.signal)\n",
+          replace: "    await this.#preflight(missing, protectedIdentities)\n",
+        },
+      ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "an aborted open evicted a stem (stem lock)",
     },
     {
       name: "queue an eviction on the victim's stem lock without the open's signal",
       file: "web/stem-store/opfs-store.js",
-      search:
-        "    return this.#withStemLock(identity, signal, async () => {\n      let evicted = false\n",
-      replace:
-        "    return this.#withStemLock(identity, undefined, async () => {\n      let evicted = false\n",
+      edits: [
+        {
+          search:
+            "    return this.#withStemLock(identity, signal, async () => {\n      let evicted = false\n",
+          replace: "    return this.#withStemLock(identity, undefined, async () => {\n      let evicted = false\n",
+        },
+      ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "the aborted open waited for the stem lock holder",
     },
     {
       name: "queue an eviction on the index lock without the open's signal",
       file: "web/stem-store/opfs-store.js",
-      search: "        evicted = true\n      }, signal)\n",
-      replace: "        evicted = true\n      })\n",
+      edits: [
+        {
+          search:
+            "        evicted = true\n      }, signal)\n",
+          replace: "        evicted = true\n      })\n",
+        },
+      ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "the aborted open waited for the index lock holder",
     },
     {
       name: "skip an eviction's signal check after its index read",
       file: "web/stem-store/opfs-store.js",
-      search: "      await this.#mutateIndex(async (index) => {\n        throwIfAborted(signal)\n",
-      replace: "      await this.#mutateIndex(async (index) => {\n",
+      edits: [
+        {
+          search:
+            "      await this.#mutateIndex((index) => {\n        throwIfAborted(signal)\n",
+          replace: "      await this.#mutateIndex((index) => {\n",
+        },
+      ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "an aborted open evicted a stem (index read)",
     },
     {
       name: "omit AbortSignal from the session pin lock wait",
       file: "web/stem-store/opfs-store.js",
-      search: '      { mode: "exclusive", signal },\n      async () => {\n        acquired()',
-      replace: '      { mode: "exclusive" },\n      async () => {\n        acquired()',
+      search: 'this.#holdLock(this.#sessionPinLockName(pin), { mode: "exclusive", signal })',
+      replace: 'this.#holdLock(this.#sessionPinLockName(pin), { mode: "exclusive" })',
       test: "stem-pump-v1.mjs",
       expectedFailure: "the aborted open never settled (same-session open, queued on the pin)",
     },

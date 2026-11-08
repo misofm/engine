@@ -74,7 +74,111 @@ Base `dfc3ac325`; branch `codex/issue-2381-index-lock-deadlines`.
 
 **Docs.** `docs/STEM_STORE_V1.md` lists the deadlined index-lock steps and their typed codes, says that a stalled index read never rebuilds, and states the abort rule for evictions.
 
-**Follow-ups (not filed).**
-- A timed-out removal that lands late, after its stem lock is released, can remove a final that a concurrent verify of the same identity has just passed. The pinned session then fails typed at read. The same is true of `#demote`'s and the promote cleanup's unawaited removals. A fence would hold the stem lock until the removal settles, as `#stalledIndexWrite` does for the index.
-- A rebuild still treats a stalled hash of a final as damage and removes that final, as base did. The final is good and gets re-downloaded; nothing is lost.
-- `#liveLockNames`'s `locks.query()` runs under the index lock with no deadline. It is Web Locks, not OPFS, so it is outside this contract.
+**Follow-ups.**
+- A timed-out removal that lands late, after its stem lock is released, can remove a final that a concurrent verify of the same identity has just passed. The pinned session then fails typed at read. The same is true of `#demote`'s and the promote cleanup's unawaited removals. A fence would hold the stem lock until the removal settles, as `#stalledIndexWrite` does for the index. Fixed in attempt 2.
+- A rebuild still treats a stalled hash of a final as damage and removes that final, as base did. The final is good and gets re-downloaded; nothing is lost. Fixed in attempt 2.
+- `#liveLockNames`'s `locks.query()` runs under the index lock with no deadline. It is Web Locks, not OPFS, so it is outside this contract. Successor #SUCCESSOR.
+
+**Verdict: FAIL** (Sol, one BLOCKER and one MAJOR).
+- BLOCKER: this attempt introduces a new hazard. A timed-out eviction removal releases both locks while the raw `removeEntry` is still in flight. A concurrent open of the victim's own stem can then verify and pin the file before the removal lands, and its `lease.read` fails `stem.read.failed`. Base fenced this by holding both locks for the whole removal. The reviewer's reproducer shows it. Required:
+  - never release a stem lock while a removal of its final is unsettled: the row first, then the removal under the stem lock alone, held until the removal settles;
+  - the rebuild's removal takes the stem lock with `ifAvailable`;
+  - the same fence for `#demote` and the promote cleanup;
+  - correct the code comment and the docs claim that verify-on-open re-ingests a late removal.
+- MAJOR: a rebuild still treats a stalled hash of a good final as damage. It removes the final, and it holds the index lock for about twice the deadline per stalled final, which contradicts the new docs paragraph.
+- MINOR: write a successor spec for the `locks.query()` deadline.
+
+### Attempt 2 (Terra, 2026-11-08)
+**Rule.** A final is removed only under its stem lock, and that lock is never released before the removal settles. A timed-out removal may still land, so the caller's deadline bounds only the caller's wait, never the lock. This is the stem-lock counterpart of `#stalledIndexWrite`.
+
+**Mechanism** (`opfs-store.js`).
+- `#withStemLock` returns the work's outcome as soon as the work settles. It keeps the lock until every removal fenced during the hold has settled (`#stemFences`, `#releaseOnceSettled`). The lock is built on `#acquireStemLock`, and the local no-Web-Locks fallback keeps its FIFO tails.
+- `#holdLock` is the shared Web Locks acquire-and-hold. `#acquireSessionPinLock` now delegates to it with unchanged options. `#acquireStemLock` takes either the signal or `ifAvailable`, never both, because the Web Locks API refuses that combination.
+- `#fence(identity, operation)` keeps this store's current hold of that stem lock until the operation settles.
+- `#removeFinal(identity, deadline)` is the one way a final is removed. Inside this store's own hold, it fences that hold. Otherwise it takes the stem lock with `ifAvailable`, which never waits, so it is safe under the index lock. If another holder has the lock, it skips the final and returns `false`. If it takes the lock, it holds it until the removal settles.
+
+**Sites.**
+- Eviction:
+  - The row is deleted first, by a pure-JavaScript mutation under `#mutateIndex(…, signal)` that keeps the signal check.
+  - The deadlined removal then runs under the stem lock alone.
+  - Past the deadline, the open fails typed `storage.remove_stalled` at once while the stem lock waits for the removal.
+  - A removal that fails leaves unindexed debris, which the open-time sweep removes.
+  - No OPFS step of an eviction runs under the index lock now.
+- `#demote` goes through `#removeFinal`. From verify-on-open and `verify()`, it fences the caller's hold. From `read()`'s failure path, which holds no stem lock, it takes the lock with `ifAvailable`, and it leaves the file to the holder if another holder has the lock. The row deletion is unchanged.
+- Promote fallback cleanup: the immediate `removeEntry` and the `abortFallbackWritable` chain are each fenced instead of `void`-ed. The caller still gets its typed error at once. If a fallback writable never settles, its stem lock stays held for the tab's lifetime. That is the rule: nothing else may touch that final while a write to it is unsettled. Every wait on a stem lock is signalled, and #2372's `gate.close()` never waits on a wait that holds no pin.
+- The rebuild and the open-time sweep (`#removeUnindexedFinals`) remove through `#removeFinal`. Both run under the index lock with a `liveLocks` snapshot that can be stale, so the `ifAvailable` lock is what protects a final another holder took after the snapshot.
+- MAJOR: the rebuild's hash catch rethrows `storage.read_stalled`, as `#readIndex` does. A stalled hash fails the rebuild typed within one deadline and keeps the final. A mismatch and any other hash error still remove the final.
+- Unchanged, because neither has the gap:
+  - `#ingestAttempt`'s quota-path removal of the final is awaited inside the stem lock;
+  - `#promote`'s integrity-failure removal is awaited.
+- Fakes:
+  - `FakeLockManager.request` honours `ifAvailable`: a lock that is held or queued runs `work(null)`.
+  - `FakeOpfsBackend` gains `getFileBlocker({ name })`, awaited only when set.
+
+**Not covered, by reason.** One hold can start a demotion (in `#ensureIngested`'s recheck) and then promote a fresh final while the timed-out removal of the old one is still in flight. That needs an indexed row that appeared after the open's own verify loop, under that loop's own stem lock, and is corrupt. The verify loop demotes a corrupt indexed stem under its own hold, and the ingest waits for that hold's fence. So only another tab's newly indexed corrupt row reaches the case. It is not hardened here.
+
+**Tests** (`stem-store-core-v1.mjs`).
+- New `aTimedOutEvictionHoldsTheStemLockUntilItsRemovalSettles`, the reviewer's reproducer as a row. A same-stem open started during the eviction's wedged removal must not settle until the removal lands. It then reads the re-ingested stem.
+- New `aFallbackCleanupHoldsTheStemLockUntilItsRemovalsSettle`, two legs. Each leg leaves exactly one of the cleanup's two removals unsettled (the late writable abort, or the immediate removal) and asserts that the stem lock is still held.
+- New `aSweepNeverRemovesAFinalWhoseStemLockIsTaken`. A holder takes the debris final's stem lock after the open's `liveLocks` snapshot, during the listing, and the final must survive. A rebuild leg was written and dropped. It removes through the same `#removeFinal`, so the sweep row holds the skip, and the rebuild's own use of `#removeFinal` is held by the lock assertion below.
+- `aWedgedIndexRebuildNeverHoldsTheIndex`:
+  - its removal leg also asserts that the stem lock is still held after the typed failure;
+  - a new `hash` leg stalls the good pinned final's first read and asserts that the final stays and the close fails `storage.read_stalled`.
+- `wedgedDemoteDeleteIsBounded`: its second verify of the same stem now must wait while the first verify's timed-out delete is unsettled. The delete then fails and leaves the corrupt final, so the index-write half runs as before. Its old premise, that a second verify could run while the delete was wedged forever, is exactly the hazard.
+- `aWedgedEvictionNeverHoldsTheIndex`: the open's typed failure now has its own message. That assertion is the guard of the eviction's deadline.
+
+**Red** (each test or leg run alone; "a1" is the attempt-1 store `767fd0d6b`, "base" is `dfc3ac325`):
+- The reproducer row:
+  - a1: `an open verified a final that a timed-out eviction was still removing`;
+  - base: hangs, exit 13, because base holds both locks for the whole removal with no deadline.
+- Demote fence: a1 and base `a verify ran while a demote's delete of its final was unsettled`.
+- Fallback legs: a1 and base `... before its writable abort settled` and `... before its immediate removal settled`.
+- Sweep skip: a1 and base `a final was removed while another holder had its stem lock`.
+- Rebuild removal lock:
+  - a1 `a rebuild released a final's stem lock before its removal settled`;
+  - base fails earlier at `a lease close waited on a rebuild's wedged removal`.
+- Rebuild hash stall: a1 and base `a rebuild removed a good final whose hash stalled`.
+- The reviewer's two scratch reproducers on this attempt:
+  - `late-evict.mjs`: B stays unsettled until the removal lands, then `B read OK bytes 4096`;
+  - `rebuild-stall.mjs`: `lease close: storage.read_stalled after 21 ms`, `good final still on disk: true`.
+
+**Mutation ledger** (`--self-test --budgets`, all `RED` at their targets). The #2381 block now has 20 entries.
+- Retargeted from attempt 1:
+  - the index open;
+  - the stall-rebuild;
+  - the rebuild listing;
+  - the rebuild removal deadline;
+  - the four signal entries.
+- New, one per guard:
+  - the eviction's raw removal back under the index lock (the original defect form);
+  - the eviction removal's deadline;
+  - the eviction without its fence;
+  - the stem lock released as soon as its work settles;
+  - the demotion without its fence;
+  - the fallback writable abort unfenced;
+  - the fallback immediate removal unfenced;
+  - the `ifAvailable` lock released before its removal settles;
+  - a final removed although another holder has its lock;
+  - the sweep's raw removal;
+  - the rebuild's raw removal;
+  - the rebuild's stalled hash treated as damage.
+- Two older entries anchored on code this attempt reshaped. Both are retargeted and still `RED`:
+  - `omit AbortSignal from the session pin lock wait` now mutates the `#holdLock` call;
+  - `remove Web Lock single-flight` now also drops the stem lock's Web Lock path.
+- `#releaseOnceSettled` deletes its map entry with no ownership check. A new hold of the same stem lock in this store can start only after `release()`, which runs after the delete, so such a check could never fail and would be an unguarded line.
+
+**Green** at the attempt-2 commit:
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS, 74 entries `RED` at their targets.
+- `stem-store-core-v1.mjs`: 8 parallel runs and 3 serial `--budgets` runs, all PASS.
+- `stem-pump-v1.mjs`: 4 parallel runs, PASS.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- Not applicable: no Rust and no render path changed, so cargo, the realtime policy tool, no-bit-moved and loom do not apply. The suite runs in Node against the fakes, so the two-browser gate does not apply.
+
+**Docs.** The attempt-1 claim that verify-on-open re-ingests a late removal is gone. `docs/STEM_STORE_V1.md` now states:
+- the stem-lock removal rule and its fence;
+- the `ifAvailable` skip;
+- that a stalled hash is not damage;
+- that every wait on a fenced lock ends at the waiting open's abort.
+
+**Successor.** #SUCCESSOR covers the `locks.query()` deadline, which the coordinator files.

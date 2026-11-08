@@ -137,16 +137,29 @@ late writable settlement retries removal, and the unindexed-final sweep remains
 the crash backstop.
 
 Every OPFS step taken while holding the index lock has that local-store
-deadline (#2381): opening, reading and writing the index; a rebuild's directory
-listing, hashing and removal of a final that cannot self-verify; and an
-eviction's removal of its victim. On expiry the step fails typed
-(`storage.read_stalled`, `storage.write_stalled` or `storage.remove_stalled`)
-and the lock is released, so one wedged step cannot stall every later index
-mutation, every lease close's pin release among them. A timed-out eviction
-keeps its row; if the removal lands later, verify-on-open finds the row's file
-missing and re-ingests it. An eviction takes its open's signal on the victim's
-stem lock and on the index lock, and checks it again after the index read, so an
-aborted open evicts nothing once its abort is seen.
+deadline (#2381): opening, reading and writing the index, and a rebuild's
+directory listing, hashing and removal of a final that cannot self-verify. On
+expiry the step fails typed (`storage.read_stalled`, `storage.write_stalled` or
+`storage.remove_stalled`) and the lock is released, so one wedged step cannot
+stall every later index mutation, every lease close's pin release among them.
+A stall is never treated as damage: a rebuild whose hash of a final stalls
+fails typed and keeps that final.
+
+A final is removed only under its stem lock, and that lock is not released
+until the removal settles, even after the caller's deadline has passed. A
+timed-out removal may still land, and a later holder could otherwise verify and
+pin the very file it then deletes. Eviction and demotion drop the row first,
+under the index lock, then remove the file under the stem lock alone. Past its
+deadline an eviction fails its open typed `storage.remove_stalled` and a
+demotion leaves its final as debris; either way the stem lock waits for the
+removal, and a wait for that lock ends at the waiting open's abort. A failed
+fallback copy's unawaited removals hold the stem lock the same way. A removal
+made under the index lock (a rebuild's or the open-time sweep's), or with no
+stem lock held (a demotion after a read failure), takes the stem lock without
+waiting and leaves the final alone when another holder has it. An eviction
+takes its open's signal on the victim's stem lock and on the index lock, and
+checks it again after the index read, so an aborted open evicts nothing once its
+abort is seen.
 
 ## Hash implementation and provenance
 
