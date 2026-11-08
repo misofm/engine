@@ -45,3 +45,11 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
   The `WarmConfig` doc now names the function in plain code and adds the link only under
   `cfg_attr(feature = "control-provider")`; the build is green with and without the feature, and
   the featured page still links `host_core::warm::production_config`. Doc only: no bit moves.
+- **C15, done.** `FaderRampStage::reset` no longer writes `ramp[c].remaining`. The kernel's `f32`
+  countdown word has one writer, `process_plane` (`crates/builtins/src/lib.rs:3708`), which
+  rebuilds it from the `u32` countdown immediately before its one reader,
+  `gain_mute_ramp_block`; `fader_bank_lane_words` already leaves it out. So the zero was
+  overwritten before any read. No production render path calls this reset at all (its callers
+  are `BuiltinFaderBank::reset` and `FaderMuteRampBuiltins::reset`, which `graph` never calls), so
+  no rendered bit can move; the `builtins` suite (163 tests, `tests/randomized.rs` resetting banks
+  against scalar references among them) is green.
