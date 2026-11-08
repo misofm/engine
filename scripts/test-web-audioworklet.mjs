@@ -6070,15 +6070,19 @@ async function testProcessor() {
     // Issue #2382, `worker` mode: after a trap the control Worker's port calls no export. Its
     // meter view cuts nothing (a failed instance posts no frame), and its status read is answered
     // from the failure record: the code is the trap's, and the control allocation count is the one
-    // last read before the trap. Red if either message calls `meter_header_ptr` or
-    // `control_allocation_count` on the trapped instance, or if the count is not the last read's.
-    {
+    // last read before the trap: at a status read, or at boot when none came first. Red if either
+    // message calls `meter_header_ptr` or `control_allocation_count` on the trapped instance, or if
+    // the count is not the last read's.
+    for (const readBefore of [true, false]) {
       const fake = createFakeExports(64);
       const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
       processor.port.onmessage({ data: { tag: "miso.meters.v1", requestId: 1, enabled: true } });
-      fake.calls.controlAllocations = 6;
-      assert.equal(renderStatus(processor, fromWorker, controlPosts).singleModeControlAllocations, 6,
-        "worker mode: an untrapped status read reads the count");
+      const counted = readBefore ? 6 : fake.calls.controlAllocations;
+      if (readBefore) {
+        fake.calls.controlAllocations = counted;
+        assert.equal(renderStatus(processor, fromWorker, controlPosts).singleModeControlAllocations,
+          counted, "worker mode: an untrapped status read reads the count");
+      }
       fake.exports.miso_engine_web_v1_render = () => {
         throw new Error("synthetic wasm trap from the render export");
       };
@@ -6099,8 +6103,8 @@ async function testProcessor() {
       assert.equal(processor.pendingMeterSet, null, "worker mode: a trapped instance cuts no view");
       const status = renderStatus(processor, fromWorker, controlPosts);
       assert.equal(status.lastResult, 255, "worker mode: the status carries the trap's code");
-      assert.equal(status.singleModeControlAllocations, 6,
-        "worker mode: the count is the last one read before the trap");
+      assert.equal(status.singleModeControlAllocations, counted,
+        `worker mode (read before: ${readBefore}): the count is the last one read before the trap`);
       assert.deepEqual(after, [], "worker mode: no export runs on the Worker's port after a trap");
     }
     // R-S7-meters (3): `process()` switches to the pre-cut set only when the header render reports,
