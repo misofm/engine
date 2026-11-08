@@ -179,9 +179,11 @@ LEGACY_HASH = re.compile(r"17h[0-9a-f]{16}E$")
 V0_CRATE_HASH = re.compile(r"Cs[0-9A-Za-z]*_")
 
 # Issue #1333 D4.3: the pinned `call_indirect` sites of each render-thread export's direct-call
-# closure, by member name without its mangling hash, with the count and the reason for each.
-# Measured on the named twin of the artifact this table was set with; a change to any entry is a
-# review of new dynamic dispatch on the render thread, never a re-pin without its reason.
+# closure, by member key (`kernel_key`: the name without its mangling hash, its impl-block index
+# or its back-reference offsets, #2378 C11), with the count and the reason for each. Keyed so,
+# reordering or inserting an impl block renames no pin. Measured on the named twin of the
+# artifact this table was set with; a change to any entry is a review of new dynamic dispatch on
+# the render thread, never a re-pin without its reason.
 INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
     "miso_engine_web_v1_render": {
         # Issue #1381b: the block that adopted a plan hands the plan's tables over together with
@@ -190,24 +192,22 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
         # `render_next` now copies a render failure's diagnostic after the render half's call, so
         # `RenderHalf::render_next` and `RenderReady::adopt_shape` are no longer inlined into it;
         # the sites and their count are unchanged (4 before, 2 + 2 after).
-        "_RNvMs2_Cs_8host_webNtB5_11RenderReady11adopt_shape": (
+        "_RNvMCs_8host_webNtB_11RenderReady11adopt_shape": (
             2,
             "`PlanState::active_attachment_mut::<RenderCompanions>()` at the adoption block "
             "(#1381b): the active plan's `Box<dyn HostAttachment>` answers `as_any_mut` and the "
             "downcast asks its `type_id`, one `call_indirect` each, neither of which allocates or "
             "drops",
         ),
-        "_RNvMs3_Cs_8host_webNtB5_10RenderHalf11render_next": (
+        "_RNvMCs_8host_webNtB_10RenderHalf11render_next": (
             2,
             "the same pair in the meter fold that runs after the block while the protocol's meter "
             "table is on without the lease (#1588b, `poll_meter_delivery`, inlined)",
         ),
         # Issue #1381a D4: the browser renders through the plan owner, so the block boundary's
         # swap decision is in the closure. The plan's own `render` entry is not: the owner calls
-        # `render_inner` and counts a failed block itself. The `Ms7` impl index moved from `Ms6`
-        # when #1396 added `impl PlanClocks` above `impl RealtimePlanOwner`; the sites and their
-        # count are unchanged (owner-approved pin edit, 2026-10-16).
-        "_RNvMs7_NtNtCs_6engine8realtime13plan_exchangeNtB5_17RealtimePlanOwner11enter_block": (
+        # `render_inner` and counts a failed block itself.
+        "_RNvMNtNtCs_6engine8realtime13plan_exchangeNtB_17RealtimePlanOwner11enter_block": (
             4,
             "`running.prime_ready(...)`, the running plan's readiness hook, asked for a `Primed` "
             "candidate only (#1311), and `carry_from`'s executor hand-over at an adopted swap "
@@ -218,12 +218,12 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
             "its read of the successor executor's `observer_carries()` record (#1327 D3); the "
             "runtime render-locked count covers them",
         ),
-        "_RNvMs7_NtNtCs_6engine8realtime13plan_exchangeNtB5_17RealtimePlanOwner22copy_response_snapshot": (
+        "_RNvMNtNtCs_6engine8realtime13plan_exchangeNtB_17RealtimePlanOwner22copy_response_snapshot": (
             1,
             "#1577: the response capture copies the plan's snapshot through the executor trait "
             "object (`Box<dyn PreparedPlanExecutor>`), once per armed job; no allocation, no drop",
         ),
-        "_RNvMs4_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan12render_inner": (
+        "_RNvMNtNtCs_6engine8realtime4planNtB_18PreparedRenderPlan12render_inner": (
             2,
             "`executor.begin_live_block(snapshot)` (#1502 D2: hands the block's live snapshot to "
             "the executor) and `executor.render(...)` (the whole plan executor), both through the "
@@ -245,7 +245,7 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
     "miso_engine_web_v1_meter_poll": {
         # #1332 S5: `RenderHalf::poll_meters` has a second caller (`RenderHost::poll_meters`), so
         # it is no longer inlined into the host's; the same two sites, by inlining only.
-        "_RNvMs3_Cs_8host_webNtB5_10RenderHalf11poll_meters": (
+        "_RNvMCs_8host_webNtB_10RenderHalf11poll_meters": (
             2,
             "`PlanState::active_attachment_mut::<RenderCompanions>()` (#1381a D3): the active "
             "plan's `Box<dyn HostAttachment>` answers `as_any_mut` and the downcast asks its "
@@ -718,15 +718,19 @@ def kernel_key(name: str) -> str:
     return "".join(out)
 
 
-def indirect_sites(members: list[Function]) -> dict[str, int]:
-    """Each member that contains `call_indirect`, by unhashed name, with its total count."""
+def indirect_sites(members: list[Function]) -> tuple[dict[str, int], dict[str, list[str]]]:
+    """Each member that contains `call_indirect`, by `kernel_key`, with its total count; and each
+    key that members of different unhashed names share, with those names (#2378 C11)."""
     sites: dict[str, int] = {}
+    owners: dict[str, set[str]] = {}
     for function in members:
         count = function.opcodes.count("call_indirect")
         if count:
-            name = unhashed(function.name)
-            sites[name] = sites.get(name, 0) + count
-    return sites
+            key = kernel_key(function.name)
+            sites[key] = sites.get(key, 0) + count
+            owners.setdefault(key, set()).add(unhashed(function.name))
+    shared = {key: sorted(names) for key, names in owners.items() if len(names) > 1}
+    return sites, shared
 
 
 def check_render_thread(
@@ -762,7 +766,16 @@ def check_render_thread(
         print(f"FAIL {export}: no pinned call_indirect table for this export", file=sys.stderr)
         return failures
     expected = {name: count for name, (count, _reason) in table[export].items()}
-    actual = indirect_sites(members)
+    actual, shared = indirect_sites(members)
+    if shared:
+        failures += 1
+        print(
+            f"FAIL {export}: render-thread members with call_indirect share a pin key; "
+            "a collision needs a more specific key:",
+            file=sys.stderr,
+        )
+        for key, names in sorted(shared.items()):
+            print(f"  {key}: {', '.join(names)}", file=sys.stderr)
     if actual != expected:
         failures += 1
         print(
@@ -1640,6 +1653,32 @@ def self_test() -> int:
             f"(h1d) hash-free pin of {hashed}",
             render_thread(renamed, {"miso_engine_web_v1_render": {pinned_name: (1, "x")}}) == 0,
         )
+    # (h1e) #2378 C11: a pin survives an impl-index move (`Ms2_` -> `Ms5_`, with its
+    # back-reference offset), and two members whose names share a key fail.
+    def named(text: str, name: str) -> str:
+        return text.replace("<render_next>", f"<{name}>").replace(
+            "call 1 <render_next>", f"call 1 <{name}>"
+        )
+
+    half = "_RNvMs{}_Cs5yx8Jh2iHKX_8host_webNtB{}_10RenderHalf11render_next"
+    half_pin = {"miso_engine_web_v1_render": {kernel_key(half.format("2", "5")): (1, "x")}}
+    expect(
+        "(h1e) a pinned site matches its member after an impl-index move",
+        render_thread(named(dispatching, half.format("5", "6")), half_pin) == 0,
+    )
+    shared_key = named(dispatching, half.format("5", "6")) + (
+        f"000030 func[2] <{half.format('2', '5')}>:\n" + indirect_line
+        + " 000031: 0b                         | end\n"
+    )
+    shared_key = shared_key.replace(
+        "000020 func[1] <", " 000013: 10 02                      | call 2 <x>\n000020 func[1] <", 1
+    )
+    shared_pin = {"miso_engine_web_v1_render": {kernel_key(half.format("2", "5")): (2, "x")}}
+    expect("(h1e) two members sharing a pin key fail", render_thread(shared_key, shared_pin) == 1)
+    expect(
+        "(h1e) the shipped indirect-site table is keyed by kernel_key",
+        all(kernel_key(name) == name for sites in INDIRECT_SITES.values() for name in sites),
+    )
     # (h2) a member that registers a thread-local destructor fails, by either std path.
     for registrar in (
         "_ZN3std3sys12thread_local11destructors4list8register17h0123456789abcdefE",

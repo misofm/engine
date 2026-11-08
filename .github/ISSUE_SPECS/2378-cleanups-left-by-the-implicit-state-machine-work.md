@@ -124,3 +124,16 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
     "detached document" and "Int8Array document", stay green; deleting the kept `byteLength`
     call turns "SharedArrayBuffer document" red (`expected rejection`,
     `test-web-audioworklet.mjs:644`), so the row that pins the refusal still discriminates.
+- **C11, done.** `scripts/check-web-audioworklet-callgraph.py` keys `INDIRECT_SITES` by the
+  analyser's existing `kernel_key` (#1889: the unhashed name without the `M`/`X` impl
+  disambiguator and with every back-reference as `B_`) instead of the unhashed name, so the
+  `Ms2`/`Ms3` pins of `RenderReady::adopt_shape`, `RenderHalf::render_next` and
+  `RenderHalf::poll_meters`, and the `Ms7`/`Ms4` pins of `RealtimePlanOwner` and
+  `PreparedRenderPlan`, no longer move when an impl block is added or reordered (the `Ms6` to
+  `Ms7` re-pin of 2026-10-16 is the cost this removes). Each key is the old pin through
+  `kernel_key`, so the same artifact meets the same keys. `indirect_sites` also reports a key that
+  members of different names share, and the export then fails, as the kernel roster already
+  does. Self-test rows (h1e): a pin survives `Ms2_`/`B5_` to `Ms5_`/`B6_`, two members sharing a
+  key fail, and the shipped table is in key form. Mutations: keying by `unhashed` again fails
+  "(h1e) a pinned site matches its member after an impl-index move"; dropping the shared-key
+  check fails "(h1e) two members sharing a pin key fail". `--self-test` passes.
