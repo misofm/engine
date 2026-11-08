@@ -130,12 +130,15 @@ compilation) again, even if only for a moment. No other test measures it. No tes
   the revision, the applied operations, the lent compilation's revision, `monitor_edits`,
   `set_control_rows`, `observe_bindings`, `observe_writes` and `next_arm_tag_after`, then the same
   after `materialize`, and one commit. The output was 1000 lines, byte-identical on base and head
-  (sha256 `9fc2ea9f...54f3688e`), with 118 accepted monitor-only preparations and 852 refusals.
+  (sha256 `9fc2ea9f8688f0136f7e12086e14c55158548af614090602020af3ee54f3688e`), with 118 accepted monitor-only preparations and 852 refusals.
 - Controller level, in `controller/tests.rs`, on the canonical fixture: 11 transactions, each committed
   with `EditPath::Live` and with `ModelOnly`. It printed the prepare-time refusal bytes, or, for a
   token, its form, revision, monitor edits and rows, the response bytes, the exact-replay bytes, the
   reliable-event queue report, the revision after the commit and the snapshot length. The 21 lines were
-  byte-identical (sha256 `a3f3df5f...cd84ba32`).
+  byte-identical (sha256 `a3f3df5f89cd7c4a8cfe36dc42d93c6efa49668188d085ef97cac3e0cd84ba32`).
+- The two probes' bodies are in the issue's evidence comment (#2403), so the comparison can be
+  reproduced. Paste them at the end of the `model.rs` tests module and of `controller/tests.rs`, and run
+  each with `PROBE_OUT=<file> cargo test -p protocol --lib probe_2403`.
 
 No render code changed.
 
@@ -150,3 +153,29 @@ No render code changed.
 **Dropped claims.** None.
 
 **Follow-ups.** None.
+
+### Sol verdict on attempt 1 (`9a60edb37`): PASS, minor findings only
+
+Folded on the same branch, after merging origin/main:
+1. **The precondition check holds in release builds.** The `debug_assert!` before the compile is
+   now a release-mode check. When a monitor-only transaction's candidate is `Cow::Owned`, the
+   preparation returns the new typed internal error `SessionStoreError::MonitorCandidateWritten`. Such
+   an edit is never accepted and then silently dropped. The controller answers it `Internal` with no
+   diagnostics, as it does for `ArmTagsExhausted`. The check costs one discriminant test.
+   - Mutation: an injected `let _ = candidate.to_mut();` in the monitor `SetControl` branch, before
+     its `continue`, makes every solo preparation return the error. Six `protocol` tests go RED,
+     including `a_solo_and_a_master_of_one_strip_are_two_monitor_writes_on_both_paths` ("prepares:
+     MonitorCandidateWritten") and `a_transaction_of_monitor_writes_commits_no_model_revision_or_event`
+     (no token).
+2. **The `Observe` case is named.** The `solo_allocation` doc comment now says that an
+   `Observe`-only transaction takes the same borrowed-candidate decision. The test measures the solo.
+3. **The probe evidence can be reproduced.** The full sha256 values are above, and the probe bodies are
+   in the issue comment. Both probes were rerun on the folded tree and were byte-identical to the base's
+   (the same two digests).
+
+Gates on the merged, folded tree: `cargo test --locked -j 4` for `protocol` (`--all-targets
+--features test-support`) and `control-plane` (`--features test-support,protocol/test-support`),
+and `cargo clippy --locked -p protocol -p control-plane -p host-core --all-targets --all-features --
+-D warnings`. `cargo fmt --check` and `scripts/check-workspace-policy.sh` also ran. Results are
+below.
+

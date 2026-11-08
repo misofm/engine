@@ -21,7 +21,9 @@ fn requested_bytes<T>(body: impl FnOnce() -> T) -> (T, u64) {
 ///
 /// The preparation builds its monitor-edit vector and nothing else of note, so the ceiling is one
 /// model clone: a preparation that clones the model or the compilation (which holds the model)
-/// requests at least that much.
+/// requests at least that much. A transaction of `Observe` edits only is monitor-only too and
+/// takes the same borrowed-candidate decision in `prepare_transaction_with`; this test measures
+/// the solo.
 #[test]
 fn a_whole_path_solo_preparation_clones_no_model_or_compilation() {
     assert_installed();

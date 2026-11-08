@@ -1343,6 +1343,10 @@ pub enum SessionStoreError {
     /// The host's arm-tag counter cannot tag the transaction's observation records (#1585 D4):
     /// an internal error, refused before anything is written.
     ArmTagsExhausted,
+    /// A transaction of monitor edits only wrote its candidate model (#2403): an internal error.
+    /// Such a transaction commits no model, so the write would be acknowledged and then dropped.
+    /// It is refused before anything is written.
+    MonitorCandidateWritten,
     /// One edit could not resolve against the candidate. Index is in wire order.
     Edit {
         /// Zero-based operation index.
@@ -1763,10 +1767,12 @@ impl SessionStore {
             candidate.to_mut().control_smoothing = control_smoothing;
             set_control_rows = None;
         }
-        debug_assert!(
-            !monitor_only || matches!(candidate, Cow::Borrowed(_)),
-            "a monitor-only transaction wrote or cloned its candidate"
-        );
+        // A monitor-only transaction is not compiled, so a write to its candidate would be
+        // accepted and then dropped. No edit makes one (see above). If one ever did, it is
+        // refused here and never acknowledged.
+        if monitor_only && matches!(candidate, Cow::Owned(_)) {
+            return Err(SessionStoreError::MonitorCandidateWritten);
+        }
         // Not a mutation: the committed compilation, at the committed revision, which the store
         // holds and the transaction does not copy (#2394).
         let compiled = if monitor_only {
