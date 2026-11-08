@@ -217,11 +217,18 @@ export class FakeLockManager {
   // A request honours `signal` as the Web Locks API does: an already-aborted signal rejects
   // without queueing, and an abort while the request waits rejects it with the signal's reason
   // and gives up its place in the queue. An abort after the grant changes nothing. With
-  // `ifAvailable` a lock that is held or queued for is not waited on: `work` runs with null.
+  // `ifAvailable` a lock that is held or queued for is not waited on: `work` runs with null, from a
+  // queued task. As in the Web Locks API, `signal` and `ifAvailable` together are refused.
   async request(name, options, work) {
     const signal = options?.signal
+    if (options?.ifAvailable && signal !== undefined) {
+      throw domError("NotSupportedError", "signal and ifAvailable cannot be combined")
+    }
     if (signal?.aborted) throw signal.reason
-    if (options?.ifAvailable && this.#tails.has(name)) return work(null)
+    if (options?.ifAvailable && (this.#held.has(name) || this.#pending.has(name))) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return work(null)
+    }
     this.requests.push(name)
     const previous = this.#tails.get(name) ?? Promise.resolve()
     this.#pending.set(name, (this.#pending.get(name) ?? 0) + 1)

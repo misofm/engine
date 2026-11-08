@@ -182,3 +182,99 @@ Base `dfc3ac325`; branch `codex/issue-2381-index-lock-deadlines`.
 - that every wait on a fenced lock ends at the waiting open's abort.
 
 **Successor.** #SUCCESSOR covers the `locks.query()` deadline, which the coordinator files.
+
+**Verdict: FAIL** (Sol, one BLOCKER and one MAJOR). Both earlier reproducers are fixed. The two new hazards predate this branch, but both fall within the claim that a final is removed only under its stem lock.
+- BLOCKER: `#removeFinal` asked `#stemFences.has(identity)`. That means "some hold in this store is live", not "the caller is inside a hold". So `read()`'s failure demotion, the rebuild and the sweep removed at once during another same-store hold, and fenced into that hold. A late landing then deleted the final the other hold had just promoted (reproducer `same-store-bypass`).
+- MAJOR: the "not hardened" recheck case is reachable without corruption. A stalled read in `#verifyIndexed` demotes, the demotion's removal stalls, and the same hold then promotes a fresh final that the late removal deletes (reproducer `recheck-stall`).
+- MINORs:
+  - `FakeLockManager`'s `ifAvailable` was not faithful;
+  - deleting the local fallback's `ifAvailable` line left every suite green;
+  - a same-store waiter on a draining lock waited silently;
+  - a test comment still said the eviction removal runs under the index lock;
+  - keep the `#SUCCESSOR` placeholder.
+
+### Attempt 3 (Terra, 2026-11-08)
+**Explicit holds.**
+- `#withStemLock` passes `work` a hold token, `{ identity, fences }`. The token is threaded through `#verifyIndexed`, `#demote(identity, hold)`, the eviction, `#ingestAttempt` and `#promote`, which uses it for both fallback-cleanup fences.
+- `#removeFinal(identity, hold, deadline)` fences into `hold` only when the caller passes one. Otherwise it always takes the stem lock with `ifAvailable`. A hold of the same store is a held lock like any other, so a holdless removal leaves that hold's final alone.
+- The ambient `#stemFences` map is gone. In its place, `#stemDrains` records only the holds whose work has ended and that are waiting on fences.
+
+**The recheck.** Two changes, one for each way into it:
+- `#promote` first waits up to `readDeadlineMs` for `hold.fences`. On expiry it fails typed `storage.remove_stalled`, and the lock drains. This covers a recheck that demotes a corrupt row.
+- `#verifyIndexed` rethrows `storage.read_stalled` instead of demoting. That is the stall-is-not-damage rule `#readIndex` and the rebuild already follow. In the reviewer's `recheck-stall`, the demotion it removes would also have dropped the other tab's pinned row, and once the removal landed, deleted the file that tab plays from. The open now fails `storage.read_stalled` and the stem is untouched.
+
+**Same-store waiters (MINOR 5).** `#waitForStemLock` gives every same-store stem-lock wait its own abort controller, linked to the caller's signal. When a hold of that lock starts draining, every registered waiter is notified, including a waiter that registers while the drain is already running. A notified waiter aborts its own wait one deadline later with `storage.remove_stalled`. This covers `verify()` with no signal, an open's verify loop and its ingest. An `#inFlight` joiner awaits the ingest's promise, which settles when its work ends, so it is never held by a drain itself. A waiter in another tab sees only a held lock. `docs/STEM_STORE_V1.md` states that its wait ends at its own signal or at the release.
+
+**No-Web-Locks fallback (MINOR 4).**
+- The local stem-lock queue now honours the signal. An abandoned place opens its gate, so the queue behind it waits only for the place before it.
+- Each place deletes its own tail entry once its turn has passed. Before, a stale tail left by an aborted last waiter would have made every later `ifAvailable` answer "held".
+- `ifAvailable` keeps its no-wait answer, and the new holdless-demotion row guards it.
+
+**Fakes (MINOR 3).** `FakeLockManager.request`:
+- with `ifAvailable`, tests `#held` and `#pending`, not `#tails`;
+- rejects `signal` together with `ifAvailable` with `NotSupportedError`;
+- runs the null callback from a queued task.
+
+**Tests** (`stem-store-core-v1.mjs`).
+- New `aHoldlessDemoteLeavesAFinalAnotherHoldOwns`, the `same-store-bypass` shape, with a Web Locks leg and a no-Web-Locks leg.
+  - A read failure's demotion runs while another hold of this store re-ingests the stem. It must neither remove the final nor wait for that hold.
+  - Once every hold is gone, the next read failure's demotion must remove the file.
+- New `aHoldNeverWritesAFinalItIsStillRemoving`, the recheck through corruption. Another tab indexes a corrupt row after the open's verify loop, and the recheck's demotion removal wedges. The open must fail `storage.remove_stalled`.
+- New `aStalledVerifyNeverDemotesAStem`, the `recheck-stall` shape reduced to one store. A stalled verify-on-open read fails the open `storage.read_stalled`, keeps the other session's pin, re-downloads nothing, and the pinned session still reads.
+- `aTimedOutEvictionHoldsTheStemLockUntilItsRemovalSettles` now has three legs:
+  - another tab, which waits and then re-ingests;
+  - the same tab, which refuses typed within the deadline;
+  - the same tab with no Web Locks, which does the same.
+
+  After the removal lands, each leg must get the lock: the waiting open in the other tab, a fresh open in the same tab. That proves the local queue passes an abandoned place.
+- `wedgedDemoteDeleteIsBounded`: the second verify of the same stem must now refuse typed (`storage.remove_stalled`), not wait silently.
+- The comment on `aWedgedEvictionNeverHoldsTheIndex` is reworded (MINOR 6).
+
+**Red** (each test run alone; "a2" is the attempt-2 store `3315395f8`, "base" is `dfc3ac325`):
+- `aHoldlessDemoteLeavesAFinalAnotherHoldOwns`: a2 and base `a demotion with no hold removed a final another hold of this store had (Web Locks)`.
+- `aHoldNeverWritesAFinalItIsStillRemoving`: a2 and base `a hold wrote a final while its own removal of that final was unsettled`.
+- `aStalledVerifyNeverDemotesAStem`: a2 and base `a stalled verify demoted a pinned stem`.
+- `wedgedDemoteDeleteIsBounded`:
+  - a2 `a verify waited silently on a demote's unsettled delete`;
+  - base `a verify ran while a demote's delete of its final was unsettled`.
+- `aTimedOutEvictionHoldsTheStemLockUntilItsRemovalSettles`:
+  - a2 `a same-store open waited silently on an unsettled removal (same tab)`;
+  - base hangs, exit 13.
+- The reviewer's reproducers on this attempt:
+  - `same-store-bypass`: the demotion's removal never starts while B holds the lock, the final survives, and `B read OK bytes 4096`;
+  - `recheck-stall`: `A open failed: storage.read_stalled`;
+  - `rebuild-stall`: `storage.read_stalled after 21 ms`, final kept;
+  - `late-evict`: B is in the same store, so it now refuses typed `storage.remove_stalled` instead of waiting. The script does not catch that rejection.
+
+**Mutation ledger** (`--self-test --budgets`, 83 lines `RED` at their targets). The #2381 block has 29 entries, one per guard.
+- New in attempt 3:
+  - a holdless removal fenced into whichever same-store hold is live, which restores the ambient check;
+  - the promote fence guard;
+  - the stalled verify-on-open treated as damage;
+  - a new same-store waiter not told of a running drain;
+  - queued same-store waiters not notified when a drain starts;
+  - the local wait ignoring its signal;
+  - an abandoned local place left blocking the queue;
+  - a finished local place never dropped;
+  - a local `ifAvailable` request that waits.
+- Attempt-2 entries retargeted to the new signatures.
+- Two older anchors retargeted for the new signatures, both still `RED`:
+  - `insert index before promote verification`;
+  - the verify-on-open length arm, which now reads `#demote(stem.identity, hold)`.
+- Equivalent, by reason: `#waitForStemLock`'s `finally` cleanup (`clearTimeout`, the forward removal, the waiter deletion). A timer that fires after the grant aborts a controller whose request has already been granted, which neither Web Locks nor the local queue observes. A stale notifier only starts such a timer. These are leaks with no visible effect.
+
+**Green** at the attempt-3 commit:
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS.
+- `stem-store-core-v1.mjs`: 8 parallel runs and 3 serial `--budgets` runs, all PASS.
+- `stem-pump-v1.mjs`: 4 parallel runs, PASS.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- Not applicable: no Rust and no render path changed. The suite runs in Node against the fakes.
+
+**Docs.** `docs/STEM_STORE_V1.md` states:
+- that a stalled verify-on-open read never demotes;
+- the in-hold write rule;
+- that a removal belongs to a hold only when its caller is inside it;
+- the same-store waiter's typed refusal, and the cross-tab wait;
+- the local fallback's queue.

@@ -166,9 +166,9 @@ async function runMutationLedger() {
   }
   const verifyOnOpenArm = {
     search:
-      "      if (\n        observed.bytes !== stem.bytes ||\n        observed.hex !== stemDigest(stem.identity)\n      ) {\n        await this.#demote(stem.identity)",
+      "      if (\n        observed.bytes !== stem.bytes ||\n        observed.hex !== stemDigest(stem.identity)\n      ) {\n        await this.#demote(stem.identity, hold)",
     replace:
-      "      if (observed.hex !== stemDigest(stem.identity)) {\n        await this.#demote(stem.identity)",
+      "      if (observed.hex !== stemDigest(stem.identity)) {\n        await this.#demote(stem.identity, hold)",
   }
   const mutations = [
     {
@@ -210,9 +210,9 @@ async function runMutationLedger() {
       name: "insert index before promote verification",
       file: "web/stem-store/opfs-store.js",
       search:
-        "await this.#promote(stem, handle, stagingName, options)\n      await this.#indexPromoted(stem)",
+        "await this.#promote(stem, handle, stagingName, options, hold)\n      await this.#indexPromoted(stem)",
       replace:
-        "await this.#indexPromoted(stem)\n      await this.#promote(stem, handle, stagingName, options)",
+        "await this.#indexPromoted(stem)\n      await this.#promote(stem, handle, stagingName, options, hold)",
       test: "stem-store-core-v1.mjs",
     },
     {
@@ -447,7 +447,7 @@ async function runMutationLedger() {
         },
         {
           search:
-            "        delete index.stems[identity]\n        evicted = true\n      }, signal)\n      if (evicted) {\n        await this.#removeFinal(identity, (removal) =>\n          withDeadline(\n            removal,\n            this.#readDeadlineMs,\n            \"storage.remove_stalled\",\n            `Evicting ${identity} made no progress`\n          )\n        )\n      }\n",
+            "        delete index.stems[identity]\n        evicted = true\n      }, signal)\n      if (evicted) {\n        await this.#removeFinal(identity, hold, (removal) =>\n          withDeadline(\n            removal,\n            this.#readDeadlineMs,\n            \"storage.remove_stalled\",\n            `Evicting ${identity} made no progress`\n          )\n        )\n      }\n",
           replace: "        await removeEntry(this.#directory, stemFileName(identity))\n        delete index.stems[identity]\n        evicted = true\n      }, signal)\n",
         },
       ],
@@ -460,8 +460,8 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "        await this.#removeFinal(identity, (removal) =>\n          withDeadline(\n            removal,\n            this.#readDeadlineMs,\n            \"storage.remove_stalled\",\n            `Evicting ${identity} made no progress`\n          )\n        )\n",
-          replace: "        await this.#removeFinal(identity, (removal) => removal)\n",
+            "        await this.#removeFinal(identity, hold, (removal) =>\n          withDeadline(\n            removal,\n            this.#readDeadlineMs,\n            \"storage.remove_stalled\",\n            `Evicting ${identity} made no progress`\n          )\n        )\n",
+          replace: "        await this.#removeFinal(identity, hold, (removal) => removal)\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
@@ -473,12 +473,12 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "        await this.#removeFinal(identity, (removal) =>\n          withDeadline(\n            removal,\n            this.#readDeadlineMs,\n            \"storage.remove_stalled\",\n            `Evicting ${identity} made no progress`\n          )\n        )\n",
+            "        await this.#removeFinal(identity, hold, (removal) =>\n          withDeadline(\n            removal,\n            this.#readDeadlineMs,\n            \"storage.remove_stalled\",\n            `Evicting ${identity} made no progress`\n          )\n        )\n",
           replace: "        await withDeadline(\n          removeEntry(this.#directory, stemFileName(identity)),\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Evicting ${identity} made no progress`\n        )\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
-      expectedFailure: "an open verified a final that a timed-out eviction was still removing",
+      expectedFailure: "an open verified a final that a timed-out eviction was still removing (another tab)",
     },
     {
       name: "release a stem lock as soon as its work settles",
@@ -486,7 +486,7 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "      void this.#releaseOnceSettled(identity, fences, release)\n",
+            "      void this.#releaseOnceSettled(hold, release)\n",
           replace: "      release()\n",
         },
       ],
@@ -499,7 +499,7 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "    await this.#removeFinal(identity, (removal) =>\n      withDeadline(\n        removal,\n        this.#readDeadlineMs,\n        \"storage.remove_stalled\",\n        `Removing ${identity} made no progress`\n      )\n    ).catch(() => {})\n",
+            "    await this.#removeFinal(identity, hold, (removal) =>\n      withDeadline(\n        removal,\n        this.#readDeadlineMs,\n        \"storage.remove_stalled\",\n        `Removing ${identity} made no progress`\n      )\n    ).catch(() => {})\n",
           replace: "    await withDeadline(\n      removeEntry(this.#directory, stemFileName(identity)),\n      this.#readDeadlineMs,\n      \"storage.remove_stalled\",\n      `Removing ${identity} made no progress`\n    ).catch(() => {})\n",
         },
       ],
@@ -512,8 +512,8 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "        this.#fence(\n          stem.identity,\n          abortFallbackWritable(",
-          replace: "        void (\n          stem.identity,\n          abortFallbackWritable(",
+            "        this.#fence(\n          hold,\n          abortFallbackWritable(",
+          replace: "        void (\n          hold,\n          abortFallbackWritable(",
         },
       ],
       test: "stem-store-core-v1.mjs",
@@ -525,12 +525,126 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "      this.#fence(stem.identity, removeEntry(this.#directory, finalName))\n",
+            "      this.#fence(hold, removeEntry(this.#directory, finalName))\n",
           replace: "      void removeEntry(this.#directory, finalName).catch(() => {})\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a fallback cleanup released the stem lock before its immediate removal settled",
+    },
+    {
+      name: "fence a holdless removal into whichever hold of this store is live",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    const hold = { identity, fences: new Set() }\n",
+          replace: "    const hold = { identity, fences: new Set() }\n    ;(this.__live ??= new Map()).set(identity, hold)\n",
+        },
+        {
+          search:
+            "    this.#stemDrains.delete(hold.identity)\n    }\n    release()\n",
+          replace: "    this.#stemDrains.delete(hold.identity)\n    }\n    this.__live?.delete(hold.identity)\n    release()\n",
+        },
+        {
+          search:
+            "  async #removeFinal(identity, hold, deadline) {\n    let release\n",
+          replace: "  async #removeFinal(identity, hold, deadline) {\n    hold ??= this.__live?.get(identity)\n    let release\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a demotion with no hold removed a final another hold of this store had (Web Locks)",
+    },
+    {
+      name: "write a final while this hold's own removal of it is unsettled",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    if (hold.fences.size !== 0) {\n      await withDeadline(\n        settled(hold.fences),\n        this.#readDeadlineMs,\n        \"storage.remove_stalled\",\n        `An earlier removal of ${stem.identity} has not settled`,\n        options.signal\n      )\n    }\n",
+          replace: "",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a hold wrote a final while its own removal of that final was unsettled",
+    },
+    {
+      name: "let a new same-store waiter wait silently behind a draining hold",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    if (this.#stemDrains.has(identity)) notify()\n",
+          replace: "",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a verify waited silently on a demote's unsettled delete",
+    },
+    {
+      name: "never tell queued same-store waiters that a hold is draining",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      for (const notify of this.#stemWaiters.get(hold.identity) ?? []) notify()\n",
+          replace: "",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a same-store open waited silently on an unsettled removal (same tab)",
+    },
+    {
+      name: "let the local stem lock wait ignore its signal",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      await abortable(previous ?? Promise.resolve(), signal)\n",
+          replace: "      await previous\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a same-store open waited silently on an unsettled removal (same tab, no Web Locks)",
+    },
+    {
+      name: "leave an abandoned local stem lock place blocking the queue",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      // An abandoned place passes straight through: the queue behind it waits only for `previous`.\n      open()\n      throw error\n",
+          replace: "      throw error\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "the stem lock stayed taken after the removal settled (same tab, no Web Locks)",
+    },
+    {
+      name: "never drop a finished local stem lock place",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    void tail.then(() => {\n      if (this.#localLockTails.get(name) === tail) this.#localLockTails.delete(name)\n    })\n",
+          replace: "",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a demotion with no hold left a final whose lock was free (no Web Locks)",
+    },
+    {
+      name: "let a local ifAvailable stem lock request wait",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    if (ifAvailable && previous !== undefined) return null\n",
+          replace: "",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a read failure's demotion waited on another hold (no Web Locks)",
     },
     {
       name: "release a stem lock taken for a removal before the removal settles",
@@ -564,7 +678,7 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "        await this.#removeFinal(identity, (removal) =>\n          this.#sweepStep(removal, budgetEnd, `Removing ${name}`)\n        )\n",
+            "        await this.#removeFinal(identity, undefined, (removal) =>\n          this.#sweepStep(removal, budgetEnd, `Removing ${name}`)\n        )\n",
           replace: "        await this.#sweepStep(removeEntry(this.#directory, name), budgetEnd, `Removing ${name}`)\n",
         },
       ],
@@ -577,8 +691,8 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "    const remove = (identity, name) =>\n      this.#removeFinal(identity, (removal) =>\n",
-          replace: "    const remove = (identity, name) =>\n      ((identity, deadline) => deadline(removeEntry(this.#directory, stemFileName(identity))))(identity, (removal) =>\n",
+            "    const remove = (identity, name) =>\n      this.#removeFinal(identity, undefined, (removal) =>\n",
+          replace: "    const remove = (identity, name) =>\n      ((identity, _hold, deadline) => deadline(removeEntry(this.#directory, stemFileName(identity))))(identity, undefined, (removal) =>\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
@@ -590,8 +704,8 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "    const remove = (identity, name) =>\n      this.#removeFinal(identity, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing ${name} made no progress`\n        )\n      )\n",
-          replace: "    const remove = (identity, name) => this.#removeFinal(identity, (removal) => removal)\n",
+            "    const remove = (identity, name) =>\n      this.#removeFinal(identity, undefined, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing ${name} made no progress`\n        )\n      )\n",
+          replace: "    const remove = (identity, name) => this.#removeFinal(identity, undefined, (removal) => removal)\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
@@ -609,6 +723,19 @@ async function runMutationLedger() {
       ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a rebuild removed a good final whose hash stalled",
+    },
+    {
+      name: "demote a stem whose verify-on-open read stalled",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      if (error instanceof StemStoreError && error.code === \"storage.read_stalled\") throw error\n      await this.#demote(stem.identity, hold)\n",
+          replace: "      await this.#demote(stem.identity, hold)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stalled verify demoted a pinned stem",
     },
     {
       name: "open the index file with no deadline",
@@ -668,8 +795,8 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "    return this.#withStemLock(identity, signal, async () => {\n      let evicted = false\n",
-          replace: "    return this.#withStemLock(identity, undefined, async () => {\n      let evicted = false\n",
+            "    return this.#withStemLock(identity, signal, async (hold) => {\n      let evicted = false\n",
+          replace: "    return this.#withStemLock(identity, undefined, async (hold) => {\n      let evicted = false\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
