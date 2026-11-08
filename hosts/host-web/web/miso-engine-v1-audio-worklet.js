@@ -307,7 +307,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.receive(message);
         // A service tick is no request: an error it finds belongs to none, never to the last
         // request the page already saw answered.
-        requestId = message?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
+        const tick = message?.tag === "miso.service.v1";
+        requestId = tick ? 0 : this.lastRequestId;
+        // Issue #2370: a failure `process()` recorded (it posts nothing) reaches the page at the
+        // next tick, as request 0, as the control Worker's render check posts it in `worker` mode.
+        if (tick) this.reportRenderFailure();
         this.rebindMemoryViews();
         this.serviceControl(requestId);
         this.rebindMemoryViews();
@@ -689,8 +693,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   /// #1332 S8: a render failure is sticky in `process()`, which posts no fatal. On the control
-  /// Worker's render check, a failure the page has not heard of yet is posted to it once, as the
-  /// typed `miso.error.v1` with request ID 0; the page fails sticky with it.
+  /// Worker's render check (`worker` mode) or the page's service tick (`single` mode, #2370), a
+  /// failure the page has not heard of yet is posted to it once, as the typed `miso.error.v1`
+  /// with request ID 0; the page fails sticky with it.
   reportRenderFailure() {
     if (this.phase !== PHASE_FAILED || this.failurePosted) return;
     this.failurePosted = true;
@@ -1110,7 +1115,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// Issue #2291: contain a throw that escaped a message handler. Each handler entry that reaches
   /// an export catches here: the page's port in both modes, the control Worker's port, and the SDK
   /// PCM feed prelude's attach port (its `prepare-seek`, which calls `trap(0)`). No export a
-  /// handler calls can throw past it. `process()` contains its render call itself, and
+  /// handler calls can throw past it. `process()` contains its render call and its meter frame
+  /// itself (#2370; it posts nothing, so it records the trap with `fail` alone), and
   /// `receiveDispose` and the releases contain theirs. A throw is a trap: the handler cannot tell one from its own fault (V8
   /// reports a Wasm stack overflow as a `RangeError`, and a JavaScript exception thrown through Wasm
   /// frames is not a `WebAssembly.RuntimeError`), and its own code throws only on a module fault,
@@ -1823,7 +1829,18 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     output[0].set(this.outputLeft);
     output[1].set(this.outputRight);
-    if (this.meterLease) this.postMeterFrame();
+    // Issue #2370: the meter frame calls exports after the render call (`meter_poll`, and in
+    // `worker` mode `meter_header_ptr`). A throw there is a trap like the render's, by #2291's
+    // rule that a throw past an export is one: the failure is recorded trapped and the block
+    // silenced, so no export runs on the instance again and its dispose or release is answered
+    // without one.
+    try {
+      if (this.meterLease) this.postMeterFrame();
+    } catch (_) {
+      this.fail(RESULT_INTERNAL, true);
+      this.silence(outputs);
+      return true;
+    }
     if (this.telemetryLease) this.recordRenderTime(this.clock.read() - started, actualFrames);
     return true;
   }
