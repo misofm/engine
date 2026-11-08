@@ -119,7 +119,7 @@ The coordinator files the unguarded `receiveControlPlane` export calls on a trap
 - `bash scripts/check-workspace-policy.sh`: ok.
 - `bash scripts/check-sdk-generated.sh <artifact>`: current, which includes the shipped `.d.ts` mirror pin.
 - `bash scripts/check-sdk-types.sh`: passed. `bash scripts/sdk-package.sh check <artifact>`: passed.
-- SDK evals with the artifact: 716/716.
+- SDK evals with the artifact: 716/716 with the eval files alone; the gate's own invocation (`scripts/check-sdk-headless.sh`, which adds `stem-store-hash-v1.mjs`) runs 717/717.
 - Chromium `single` and `worker` (`--check-matrix --self-test-mutations`): all qualification gates passed. The four render digests match base again.
 - The artifact for these runs is the attempt-1 build with this commit's `miso-engine-v1-audio-worklet.js` and `.d.ts` copied in. The builder only copies those files, and the Wasm module is unchanged.
 - WebKit is still left to CI, for the reason above.
@@ -156,7 +156,15 @@ Red on `9d844ed99`: `AssertionError [ERR_ASSERTION]: Expected values to be stric
 - `check-sdk-generated.sh <artifact>`: current.
 - `check-sdk-types.sh`: passed (shipped-host mirror pin included).
 - `sdk-package.sh check`: passed.
-- SDK evals with the artifact: 716/716.
+- SDK evals with the artifact: 716/716 with the eval files alone; the gate's own invocation (`scripts/check-sdk-headless.sh`, which adds `stem-store-hash-v1.mjs`) runs 717/717.
 - Chromium `single` and `worker`: all qualification gates passed, and the four render digests match base.
 - The artifact is the attempt-1 Wasm build with this commit's worklet JS, host JS and `.d.ts` copied in.
 - WebKit is still left to CI.
+
+### Fold review (Sol, head 39af91e05): PASS
+Only the fold commits were reviewed. No BLOCKER or MAJOR.
+- The request-0 branch can't be reached from the wrong peer, during factory boot or after dispose, and it can't double-fail.
+- The tick report posts once, and a request's own reply can't race it.
+- Mutations M1 (tick report removed), M2 (meter-poll `return` removed), M3 (worker-only guard restored) and H2 (worklet told back) are all red.
+- The eval count is corrected above.
+- The carried-forward non-trap meter-frame failure is filed as #2382, together with this issue's control-handler non-goal.
