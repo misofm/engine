@@ -40,3 +40,8 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
   lends it. Test `controller::tests::a_refused_materialization_leaves_the_token_its_in_place_session`
   is red on base: `panicked at crates/protocol/src/controller.rs:1528:14: live affine token owns
   prospective session`. The base is the mutation (the `take()` restored turns it red).
+- **C10, done.** On base `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p host-core` fails:
+  `error: unresolved link to crate::warm::production_config --> crates/host-core/src/prepare.rs:262:20`.
+  The `WarmConfig` doc now names the function in plain code and adds the link only under
+  `cfg_attr(feature = "control-provider")`; the build is green with and without the feature, and
+  the featured page still links `host_core::warm::production_config`. Doc only: no bit moves.

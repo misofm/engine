@@ -259,7 +259,13 @@ pub enum WarmDecision {
 }
 
 /// The bounds a warm successor is checked against (#1354 D1). It has no default: every caller
-/// passes both. [`crate::warm::production_config`] is the production value (#1360 D1).
+/// passes both. The production value is `warm::production_config` (#1360 D1), behind the
+/// `control-provider` feature.
+#[cfg_attr(
+    feature = "control-provider",
+    doc = "",
+    doc = "See [`crate::warm::production_config`]."
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WarmConfig {
     /// The largest `ΣP + P`, in samples.
