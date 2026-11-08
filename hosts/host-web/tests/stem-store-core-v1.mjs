@@ -1591,8 +1591,8 @@ async function theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks() {
 // settles typed while the step is wedged. A step that changes the store (a create, a move, a removal,
 // a writable's open, write, close or abort) may still land, so it keeps the stem lock until it
 // settles; a lookup lands nothing and does not. One leg per step; each wedges exactly that step.
-// A failed or stalled staging abort or cleanup fails the call only when an integrity retry would
-// follow, which it stops; the retry's promote would wait on it.
+// A staging abort or cleanup is best-effort; an integrity retry waits, with a deadline, for every
+// step still in flight, and runs once they have settled, a rejected step included.
 async function aStemLockStepNeverOutlastsItsDeadline() {
   const quota = () => Object.assign(new Error("fake quota exhausted"), { name: "QuotaExceededError" })
   const legs = [
@@ -1605,7 +1605,9 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     { leg: "staging close", code: "storage.write_stalled", fenced: true },
     { leg: "staging abort", code: "stem.resolve.failed", fenced: true },
     { leg: "staging abort (integrity)", code: "storage.write_stalled", fenced: true },
-    { leg: "staging cleanup (integrity)", code: "storage.remove_stalled", fenced: true },
+    { leg: "staging abort rejected (integrity)", code: undefined, fenced: false },
+    // Keep first of the cleanup legs: the ledger's staging-cleanup entries name it as their target.
+    { leg: "staging cleanup (integrity)", code: "storage.write_stalled", fenced: true },
     { leg: "staging cleanup (quota)", code: "storage.insufficient", fenced: true },
     { leg: "staging cleanup (success)", code: undefined, fenced: true },
     { leg: "staging cleanup (last integrity)", code: "stem.ingest.integrity", fenced: true },
@@ -1614,7 +1616,7 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     { leg: "fallback write", moveSupported: false, code: "storage.write_stalled", fenced: true },
     { leg: "fallback close", moveSupported: false, code: "storage.write_stalled", fenced: true },
     { leg: "quota removal", code: "storage.insufficient", fenced: true },
-    { leg: "integrity removal", moveSupported: false, code: "storage.remove_stalled", fenced: true },
+    { leg: "integrity removal", moveSupported: false, code: "storage.write_stalled", fenced: true },
   ]
   for (const { leg, call, code, fenced, moveSupported } of legs) {
     const stem = fixture(`stem-lock-step-${leg}`, 4096)
@@ -1684,7 +1686,7 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
         },
       }
       backend.abortBlocker = on(staged)
-    } else if (leg === "staging abort (integrity)") {
+    } else if (leg === "staging abort (integrity)" || leg === "staging abort rejected (integrity)") {
       // The first delivery overruns the declaration; a retry would get the right bytes.
       let resolves = 0
       resolver = {
@@ -1694,7 +1696,16 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
           return { stream: new ReadableStream({ start: (controller) => (controller.enqueue(bytes), controller.close()) }) }
         },
       }
-      backend.abortBlocker = on(staged)
+      if (leg === "staging abort (integrity)") {
+        backend.abortBlocker = on(staged)
+      } else {
+        // The abort rejects at once: nothing is left in flight, so the retry runs, as on base.
+        backend.abortBlocker = ({ fileName }) => {
+          if (fileName !== staged || reached) return
+          reached = true
+          throw Object.assign(new Error("abort refused"), { name: "InvalidStateError" })
+        }
+      }
     } else if (leg === "move") {
       backend.moveBlocker = () => wedge()
     } else {

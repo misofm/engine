@@ -154,9 +154,9 @@ async function runMutationLedger() {
   }
   const fallbackFinalArm = {
     search:
-      "    if (\n      observed.bytes !== stem.bytes ||\n      observed.hex !== stemDigest(stem.identity)\n    ) {\n      // The removal keeps the stem lock",
+      "    if (\n      observed.bytes !== stem.bytes ||\n      observed.hex !== stemDigest(stem.identity)\n    ) {\n      // Best-effort, like a demotion",
     replace:
-      "    if (observed.hex !== stemDigest(stem.identity)) {\n      // The removal keeps the stem lock",
+      "    if (observed.hex !== stemDigest(stem.identity)) {\n      // Best-effort, like a demotion",
   }
   // The cheap size pre-check is the first verify-on-open length arm; the
   // comparison after the hash is the second. Both go, or neither is tested.
@@ -1167,8 +1167,8 @@ async function runMutationLedger() {
     // Issue #2397: every OPFS step a stem-lock hold awaits is deadlined; a step that changes the
     // store is fenced into the hold, so the stem lock outlives it, and a lookup is not. One deadline
     // entry and one fence entry per new deadline, a fence entry per writable step that was already
-    // deadlined, and one entry per clause of the rule that a retried attempt fails on a failed or
-    // stalled staging abort or cleanup.
+    // deadlined, one entry each for the best-effort staging abort and cleanup, and one per guard of
+    // the retry's wait for every fenced step of the failed attempt.
     {
       name: "look up a final in a stem-lock hold with no deadline (verify() lookup)",
       file: "web/stem-store/opfs-store.js",
@@ -1349,68 +1349,68 @@ async function runMutationLedger() {
         },
       ],
       test: "stem-store-core-v1.mjs",
-      expectedFailure: "a timed-out staging cleanup (integrity) released the stem lock before it settled",
+      expectedFailure: "a wedged staging cleanup (integrity) failed with the wrong error",
     },
     {
-      name: "let a stalled staging cleanup replace every attempt outcome",
+      name: "let a staging cleanup failure replace the attempt's outcome",
       file: "web/stem-store/opfs-store.js",
       edits: [
         {
           search:
-            "          if (retried(failure)) throw cleanupError\n",
-          replace: "          throw cleanupError\n",
-        },
-      ],
-      test: "stem-store-core-v1.mjs",
-      expectedFailure: "a wedged staging cleanup (quota) failed with the wrong error",
-    },
-    {
-      name: "swallow a stalled staging cleanup after an integrity failure",
-      file: "web/stem-store/opfs-store.js",
-      edits: [
-        {
-          search:
-            "          if (retried(failure)) throw cleanupError\n",
-          replace: "",
+            "        ).catch(() => {\n          // The attempt's own outcome stands",
+          replace: "        ).catch((cleanupError) => {\n          throw cleanupError\n          // The attempt's own outcome stands",
         },
       ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a wedged staging cleanup (integrity) failed with the wrong error",
     },
     {
-      name: "forget the attempt's failure before its staging cleanup",
+      name: "let a staging abort failure replace the attempt's error",
       file: "web/stem-store/opfs-store.js",
       edits: [
         {
           search:
-            "    } catch (error) {\n      failure = error\n",
-          replace: "    } catch (error) {\n",
+            "        ).catch(() => {})\n        void reader?.cancel(error).catch(() => {})\n",
+          replace: "        ).catch((failed) => {\n          throw failed\n        })\n        void reader?.cancel(error).catch(() => {})\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
-      expectedFailure: "a wedged staging cleanup (integrity) failed with the wrong error",
+      expectedFailure: "a wedged staging abort failed with the wrong error",
     },
     {
-      name: "fail the last attempt on its stalled staging cleanup",
+      name: "retry an ingest without waiting for its fenced steps",
       file: "web/stem-store/opfs-store.js",
       edits: [
         {
           search:
-            "    const retried = (error) => !lastAttempt && error?.code === \"stem.ingest.integrity\"\n",
-          replace: "    const retried = (error) => error?.code === \"stem.ingest.integrity\"\n",
-        },
-      ],
-      test: "stem-store-core-v1.mjs",
-      expectedFailure: "a wedged staging cleanup (last integrity) failed with the wrong error",
-    },
-    {
-      name: "swallow a stalled staging abort before an integrity retry",
-      file: "web/stem-store/opfs-store.js",
-      edits: [
-        {
-          search:
-            "        if (abortFailure !== undefined && retried(error)) throw abortFailure\n",
+            "        if (attempt > 0) {\n          // A step of this hold still in flight could land on the staged file or the final the retry\n          // writes, and the retry's promote would wait on it with no deadline. So the retry runs only\n          // once every fenced step has settled; a step that rejected has settled (#2397).\n          await withDeadline(\n            settled(hold.fences),\n            this.#readDeadlineMs,\n            \"storage.write_stalled\",\n            `An earlier attempt at ${stem.identity} left a step unsettled`,\n            options.signal\n          )\n        }\n",
           replace: "",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged staging abort (integrity) past its deadline",
+    },
+    {
+      name: "wait for a retry's fenced steps with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        if (attempt > 0) {\n          // A step of this hold still in flight could land on the staged file or the final the retry\n          // writes, and the retry's promote would wait on it with no deadline. So the retry runs only\n          // once every fenced step has settled; a step that rejected has settled (#2397).\n          await withDeadline(\n            settled(hold.fences),\n            this.#readDeadlineMs,\n            \"storage.write_stalled\",\n            `An earlier attempt at ${stem.identity} left a step unsettled`,\n            options.signal\n          )\n        }\n",
+          replace: "        if (attempt > 0) {\n          await settled(hold.fences)\n        }\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged staging abort (integrity) past its deadline",
+    },
+    {
+      name: "retry an ingest after its wait for fenced steps expired",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        if (attempt > 0) {\n          // A step of this hold still in flight could land on the staged file or the final the retry\n          // writes, and the retry's promote would wait on it with no deadline. So the retry runs only\n          // once every fenced step has settled; a step that rejected has settled (#2397).\n          await withDeadline(\n            settled(hold.fences),\n            this.#readDeadlineMs,\n            \"storage.write_stalled\",\n            `An earlier attempt at ${stem.identity} left a step unsettled`,\n            options.signal\n          )\n        }\n",
+          replace: "        if (attempt > 0) {\n          // A step of this hold still in flight could land on the staged file or the final the retry\n          // writes, and the retry's promote would wait on it with no deadline. So the retry runs only\n          // once every fenced step has settled; a step that rejected has settled (#2397).\n          await withDeadline(\n            settled(hold.fences),\n            this.#readDeadlineMs,\n            \"storage.write_stalled\",\n            `An earlier attempt at ${stem.identity} left a step unsettled`,\n            options.signal\n          ).catch(() => {})\n        }\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
@@ -1539,8 +1539,8 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "      await this.#removeFinal(stem.identity, hold, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing fallback final for ${stem.identity} made no progress`,\n          options.signal\n        )\n      )\n",
-          replace: "      await removeEntry(this.#directory, finalName)\n",
+            "      await this.#removeDemoted(stem.identity, hold)\n      throw new StemStoreError(",
+          replace: "      await removeEntry(this.#directory, finalName)\n      throw new StemStoreError(",
         },
       ],
       test: "stem-store-core-v1.mjs",
@@ -1552,25 +1552,12 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "      await this.#removeFinal(stem.identity, hold, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing fallback final for ${stem.identity} made no progress`,\n          options.signal\n        )\n      )\n",
-          replace: "      await withDeadline(removeEntry(this.#directory, finalName), this.#readDeadlineMs, \"storage.remove_stalled\", \"x\", options.signal)\n",
+            "      await this.#removeDemoted(stem.identity, hold)\n      throw new StemStoreError(",
+          replace: "      await withDeadline(removeEntry(this.#directory, finalName), this.#readDeadlineMs, \"storage.remove_stalled\", \"x\").catch(() => {})\n      throw new StemStoreError(",
         },
       ],
       test: "stem-store-core-v1.mjs",
-      expectedFailure: "a timed-out integrity removal released the stem lock before it settled",
-    },
-    {
-      name: "retry a fallback whose removal of its final stalled",
-      file: "web/stem-store/opfs-store.js",
-      edits: [
-        {
-          search:
-            "      await this.#removeFinal(stem.identity, hold, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing fallback final for ${stem.identity} made no progress`,\n          options.signal\n        )\n      )\n",
-          replace: "      await this.#removeFinal(stem.identity, hold, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing fallback final for ${stem.identity} made no progress`,\n          options.signal\n        )\n      ).catch(() => {})\n",
-        },
-      ],
-      test: "stem-store-core-v1.mjs",
-      expectedFailure: "a stem-lock hold waited on a wedged integrity removal past its deadline",
+      expectedFailure: "a wedged integrity removal failed with the wrong error",
     },
     // Issue #278's opt-in Worker cadence. Two mutations, because "off by default" and "stop
     // interrupts" are two claims and one of them staying green would hide the other. The first is

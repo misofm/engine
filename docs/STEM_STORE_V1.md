@@ -184,10 +184,10 @@ another hold in this store. How long a caller waits for its own removal is
 separate from the lock: an eviction's open waits until the removal settles or
 the open is aborted, a demotion waits at most the local-store deadline (it is
 best-effort), and a rebuild or sweep under the index lock waits at most its
-deadline and then fails typed. An ingest's own removals of a final wait at most
-the local-store deadline too (#2397): after a quota error the wait is
-best-effort, like a demotion's, and after a fallback final fails verification a
-stall fails the open `storage.remove_stalled` instead of retrying the ingest.
+deadline and then fails typed. An ingest's own removals of a final, after a
+quota error or after a fallback final fails verification, wait at most the
+local-store deadline and are best-effort, like a demotion's (#2397); a retry
+waits for a removal still in flight, as described below.
 Eviction and demotion drop the row first, under the index lock, so no removal
 runs under it. A failed fallback copy's unawaited removals hold the stem lock
 the same way, and within one hold no final is written until every removal that
@@ -203,16 +203,18 @@ holder's call fails typed (`storage.read_stalled`, `storage.write_stalled` or
 the store and may still land after its deadline, so each is fenced into its
 hold like a removal: the stem lock stays held until the step settles, and a
 staging writable that opens after its wait ended is aborted before the lock is
-released. A stalled clearing of the staged file ends the ingest. An integrity
-failure is retried once in the same hold, and the retry's promote waits on
-every step that hold fenced. So when a retry would follow, a staging abort or
-cleanup that failed or stalled fails the attempt with its own error and stops
-the retry, which would otherwise stage the same file under it or wait on it
-with no deadline. Otherwise the attempt's own outcome stands: a last attempt
-keeps `stem.ingest.integrity`, any other failure keeps its error, and a
-successful ingest swallows a stalled cleanup (the next ingest of the stem
-clears the staged file first). A lookup lands nothing, so it is not fenced; a stalled or
-failed lookup is a stalled or failed read under the rule above.
+released. A stalled clearing of the staged file ends the ingest. The staging
+abort and cleanup are best-effort: their failure or stall never replaces the
+attempt's own outcome, and a later ingest of the stem clears the staged file
+first. An ingest that fails `stem.ingest.integrity` is attempted once more in
+the same hold, and the retry runs only once every step that hold fenced has
+settled. That wait has the local-store deadline; on expiry the open fails
+`storage.write_stalled` and no retry runs, because a step still in flight could
+land on the staged file or the final the retry writes. A step that rejected has
+already settled, so it does not stop the retry. This also bounds a recheck
+demotion's removal still in flight at retry time, which before waited until the
+open's abort. A lookup lands nothing, so it is not fenced; a stalled or failed
+lookup is a stalled or failed read under the rule above.
 
 A wait for a stem lock, in this store or another tab, simply waits for the
 holder; it ends when the lock is released or at the waiter's own abort. A

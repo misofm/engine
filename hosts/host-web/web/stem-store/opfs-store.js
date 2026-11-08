@@ -8,6 +8,8 @@ const STAGING_DIRECTORY = "staging"
 const INDEX_VERSION = 1
 const FINAL_NAME = /^blake3-([0-9a-f]{64})$/
 const LOCK_PREFIX = "miso:stem-store:v1"
+// An ingest that fails integrity is attempted once more, in the same hold.
+const INGEST_ATTEMPTS = 2
 
 /** A typed web-adapter storage refusal. */
 export class StemStoreError extends Error {
@@ -338,15 +340,25 @@ export class OpfsStemStore {
     const promise = this.#withStemLock(stem.identity, options.signal, async (hold) => {
       if (await this.#verifyIndexed(stem, options.onProgress, options.signal, hold)) return
       let lastError
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      for (let attempt = 0; attempt < INGEST_ATTEMPTS; attempt += 1) {
+        if (attempt > 0) {
+          // A step of this hold still in flight could land on the staged file or the final the retry
+          // writes, and the retry's promote would wait on it with no deadline. So the retry runs only
+          // once every fenced step has settled; a step that rejected has settled (#2397).
+          await withDeadline(
+            settled(hold.fences),
+            this.#readDeadlineMs,
+            "storage.write_stalled",
+            `An earlier attempt at ${stem.identity} left a step unsettled`,
+            options.signal
+          )
+        }
         try {
-          await this.#ingestAttempt(stem, resolver, options, hold, attempt === 1)
+          await this.#ingestAttempt(stem, resolver, options, hold)
           return
         } catch (error) {
           lastError = error
-          if (!(error instanceof StemStoreError) || error.code !== "stem.ingest.integrity") {
-            throw error
-          }
+          if (!isIntegrityFailure(error)) throw error
         }
       }
       throw lastError
@@ -361,13 +373,8 @@ export class OpfsStemStore {
     }
   }
 
-  // `lastAttempt`: no integrity retry follows this attempt.
-  async #ingestAttempt(stem, resolver, options, hold, lastAttempt) {
+  async #ingestAttempt(stem, resolver, options, hold) {
     throwIfAborted(options.signal)
-    // An integrity failure is retried in this hold, and the retry's promote waits on every fence of
-    // it. So a cleanup step of a retried attempt that failed or stalled fails the attempt instead:
-    // a retry would stage the same file under it, or wait on it with no deadline (#2397).
-    const retried = (error) => !lastAttempt && error?.code === "stem.ingest.integrity"
     const digest = stemDigest(stem.identity)
     const stagingName = `${this.#tabId}-${digest}`
     // A late removal could delete the staged file a later hold of this tab writes, and a late
@@ -387,7 +394,6 @@ export class OpfsStemStore {
       options.signal
     )
     let leaveDebris = false
-    let failure
     try {
       // Prove the device writable before any network: an unwritable store
       // must refuse with a typed storage error, not after a full download.
@@ -490,18 +496,15 @@ export class OpfsStemStore {
           options.signal
         )
       } catch (error) {
-        let abortFailure
+        // Best-effort and fenced: a retry waits for it in #ensureIngested.
         await this.#fencedStep(
           hold,
           writable.abort(error),
           "storage.write_stalled",
           `Aborting staging for ${stem.identity} made no progress`
-        ).catch((failed) => {
-          abortFailure = failed
-        })
+        ).catch(() => {})
         void reader?.cancel(error).catch(() => {})
         if (error?.leaveStaging === true) leaveDebris = true
-        if (abortFailure !== undefined && retried(error)) throw abortFailure
         throw error
       } finally {
         if (reader !== undefined) releaseReader(reader)
@@ -557,7 +560,6 @@ export class OpfsStemStore {
         totalBytes: stem.bytes,
       })
     } catch (error) {
-      failure = error
       if (error?.leaveStaging === true) leaveDebris = true
       if (isQuotaError(error)) {
         // The failing identity is not a survivor: a quota error may have
@@ -579,11 +581,9 @@ export class OpfsStemStore {
           removeEntry(this.#staging, stagingName),
           "storage.remove_stalled",
           `Removing staging for ${stem.identity} made no progress`
-        ).catch((cleanupError) => {
-          // Only a retried attempt fails on its cleanup; otherwise the attempt's own outcome stands,
-          // and a success swallows it (a later ingest clears the staged file first). The removal
-          // stays fenced either way.
-          if (retried(failure)) throw cleanupError
+        ).catch(() => {
+          // The attempt's own outcome stands, and a later ingest clears the staged file first. The
+          // removal stays fenced, so a retry waits for it in #ensureIngested.
         })
       }
     }
@@ -727,17 +727,9 @@ export class OpfsStemStore {
       observed.bytes !== stem.bytes ||
       observed.hex !== stemDigest(stem.identity)
     ) {
-      // The removal keeps the stem lock until it settles. A stall fails typed rather than with
-      // `stem.ingest.integrity`, so no retry writes this final while the removal is in flight.
-      await this.#removeFinal(stem.identity, hold, (removal) =>
-        withDeadline(
-          removal,
-          this.#readDeadlineMs,
-          "storage.remove_stalled",
-          `Removing fallback final for ${stem.identity} made no progress`,
-          options.signal
-        )
-      )
+      // Best-effort, like a demotion's: the removal keeps the stem lock until it settles, and the
+      // retry in #ensureIngested waits for it (#2397).
+      await this.#removeDemoted(stem.identity, hold)
       throw new StemStoreError(
         "stem.ingest.integrity",
         `Fallback promotion verification failed for ${stem.identity}`,
@@ -1696,6 +1688,10 @@ function classifyStorageError(error, action, overrides = {}) {
     overrides,
     error
   )
+}
+
+function isIntegrityFailure(error) {
+  return error instanceof StemStoreError && error.code === "stem.ingest.integrity"
 }
 
 function isQuotaError(error) {

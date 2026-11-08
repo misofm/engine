@@ -244,3 +244,88 @@ The row now runs after `lyingDeclarationIsRefused`. Its `staging abort (integrit
 **Successor.** `.github/ISSUE_SPECS/2405-web-stem-store-a-lease-read-s-lookup-of-its-final-has-no-deadline.md` is added, and the placeholder above now names #2405.
 
 **Docs.** `docs/STEM_STORE_V1.md` now states the retry rule: a staging abort or cleanup fails a retried attempt, and a last attempt keeps `stem.ingest.integrity`.
+
+**Verdict: FAIL** (Sol, one MAJOR). No hang path is left, and the BLOCKER is fixed.
+- MAJOR: a staging abort that rejects outright now stops a retry that opened on base, and the error the caller gets is an unclassified `DOMException`. The reviewer's probe is `abort-hard.mjs`. A rejected abort has already settled, so nothing is in flight, and the stated reason does not apply. Narrowing the catch to stalls only also keeps the suite green, so that half of the rule is untested.
+- The coordinator chose Sol's structural fix for attempt 4:
+  - one wait, before the retry, for the hold's fences, with a deadline;
+  - remove the per-step `retried()` / `lastAttempt` plumbing;
+  - one attempt constant and one integrity predicate;
+  - keep the two legs and add `staging abort rejected (integrity)`;
+  - three ledger entries for the wait;
+  - a comment at the leg whose order matters, and a docs rewrap.
+
+### Attempt 4 (Terra, 2026-11-08)
+Folded on the same branch, over `363b63a56`.
+
+**One rule.** A retry runs only once every step the hold has fenced has settled. The hazard is a step that is still in flight: it could land on the staged file or the final that the retry writes, and the retry's promote would wait on it with no deadline. A step that rejected has already settled, so it does not stop the retry.
+
+**Fix** (`opfs-store.js`).
+- `#ensureIngested` loops `INGEST_ATTEMPTS` (2) times. Before every attempt after the first, it awaits `withDeadline(settled(hold.fences), readDeadlineMs, "storage.write_stalled", …, options.signal)`. On expiry the open fails typed and no retry runs.
+- The loop's test is the shared predicate `isIntegrityFailure(error)`. Nothing else needs it now.
+- Removed: `lastAttempt`, `retried()`, `abortFailure`, `failure`.
+- The staging abort and the staging cleanup are both best-effort again (`.catch(() => {})`), and both stay fenced. Their failure never replaces the attempt's own outcome, which is attempt 2's "keep the original error" policy:
+  - on success, a stalled cleanup is swallowed;
+  - a last attempt keeps `stem.ingest.integrity`;
+  - a rejected abort lets the retry run, as on base (`abort-hard.mjs`).
+- The fallback final's verification-failure removal followed the same per-step rule: since attempt 1 it threw on a stall so that no retry ran. It is now best-effort through `#removeDemoted`, like the quota path's removal, and the retry waits for it. The ledger proved the throwing wait redundant: the attempt-1 entry "retry a fallback whose removal of its final stalled" went red outside its target under this rule, because the retry's wait now catches it. That entry is deleted.
+  - Change from base: a hard (non-stall) removal error here used to fail the open; now the retry runs, by the same rule as a rejected abort.
+- **Deliberate, bounded improvement.** A #2381 recheck demotion whose removal is still in flight at retry time now fails the open typed within the deadline. Before, it waited until the open's abort. The recheck path's first attempt is unchanged: its promote still waits for the demotion, until the open's abort, as #2381 accepted.
+
+**Tests** (`aStemLockStepNeverOutlastsItsDeadline`, now 20 legs).
+- `staging abort (integrity)`: as before. The open now fails `storage.write_stalled` from the retry's wait, and the lock is held until the abort settles.
+- New `staging abort rejected (integrity)`: the first delivery overruns, and the abort rejects at once. The retry must open, as on base.
+- `staging cleanup (integrity)`: the stalled cleanup is swallowed and the retry's wait expires, so the open fails `storage.write_stalled`. It was `storage.remove_stalled`.
+- `staging cleanup (last integrity)`: kept, `stem.ingest.integrity`.
+- `integrity removal`: the open now fails `storage.write_stalled` from the retry's wait.
+- Finding 4: a one-line comment marks `staging cleanup (integrity)` as the first cleanup leg, which the ledger's staging-cleanup entries name as their target. The `last integrity` leg's position no longer matters, because the entry that needed it is deleted.
+- Test value of the new leg: red if a step that has already failed, and so is no longer in flight, stops an integrity retry; base retried it.
+
+**Red.**
+- On the attempt-3 store `363b63a56`, each leg run alone:
+  - `staging abort rejected (integrity)`: `a wedged staging abort rejected (integrity) failed the open` (actual `InvalidStateError: abort refused`);
+  - `staging cleanup (integrity)` and `integrity removal`: wrong error (actual `storage.remove_stalled`).
+- On base `d060df5cd`:
+  - `staging abort rejected (integrity)` is green, by design: it holds base's behaviour.
+  - `staging abort (integrity)` is red: wrong error, because base retried while the abort was in flight.
+  - `staging cleanup (integrity)` and `integrity removal` are red: they waited past the deadline.
+- Probes on attempt 4:
+  - `abort-retry.mjs`: `failed storage.write_stalled`, in 74 ms, and 77 ms with a signal;
+  - `abort-hard.mjs`: `opened (resolves=2)`, in 41 ms with and without a signal;
+  - `close-repro.mjs`, both modes: the lock is held, and the second open waits.
+
+**Mutation ledger.** The #2397 block has 30 entries, each `RED` at its target.
+- Deleted, with the plumbing:
+  - "let a stalled staging cleanup replace every attempt outcome";
+  - "swallow a stalled staging cleanup after an integrity failure";
+  - "forget the attempt's failure before its staging cleanup";
+  - "fail the last attempt on its stalled staging cleanup";
+  - "swallow a stalled staging abort before an integrity retry";
+  - "retry a fallback whose removal of its final stalled".
+- New:
+  - "retry an ingest without waiting for its fenced steps";
+  - "wait for a retry's fenced steps with no deadline";
+  - "retry an ingest after its wait for fenced steps expired";
+  - the first three are red at `… waited on a wedged staging abort (integrity) past its deadline`;
+  - "let a staging cleanup failure replace the attempt's outcome", red at `staging cleanup (integrity)`;
+  - "let a staging abort failure replace the attempt's error", red at `staging abort`.
+- Retargeted:
+  - the integrity removal's two entries now search the `#removeDemoted` call;
+  - its outside-the-hold entry, and the cleanup's unfenced entry, are now red at `failed with the wrong error`, because with no fence the retry runs and fails integrity again;
+  - `fallbackFinalArm` anchors on the new comment.
+
+**Green:**
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS, 131 `RED` lines (101 plus 30).
+- `stem-store-core-v1.mjs --budgets`: 4 parallel runs, all PASS.
+- `stem-pump-v1.mjs`: PASS.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: ok.
+
+**Docs.** `docs/STEM_STORE_V1.md` states the one rule:
+- the staging abort and cleanup are best-effort;
+- an integrity retry waits, with the deadline, for every fenced step;
+- a rejected step does not stop the retry;
+- the recheck demotion is now bounded at retry time.
+
+The ingest's two removals of a final are now described as best-effort. The paragraph is rewrapped (finding 5).
