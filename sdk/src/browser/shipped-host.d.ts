@@ -663,6 +663,10 @@ export interface MisoAudioWorkletHost {
   /// @internal The count of engine events that arrived while no listener was subscribed (issue
   /// 1570b D5). Such an event is dropped here, which changes no engine state.
   readonly discardedControlEvents: number;
+  /// @internal The count of meter, telemetry, control-event and watermark frames that arrived after
+  /// the host failed (issue 2371). Such a frame is dropped and reaches no listener, so nothing a
+  /// listener hears comes after the failure. It is not counted in `discardedControlEvents`.
+  readonly discardedFramesAfterFailure: number;
   /// Dispose the host. Every later call returns the same promise once it ended in teardown. It
   /// rejects with the engine's error, or with a `MisoTeardown` when nobody answered (issue 1332
   /// S8); the node is disconnected (and in `"worker"` mode the Worker terminated) either way.

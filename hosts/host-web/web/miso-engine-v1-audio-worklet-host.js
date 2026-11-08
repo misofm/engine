@@ -12,6 +12,10 @@ const MEMORY_MAXIMUM_PAGES = 8192;
 // Issue #1332 S7 (D7): in `worker` mode the page's requests go to the control Worker, except these,
 // which the worklet answers for its render half.
 const RENDER_PORT_TAGS = new Set(["miso.meters.v1", "miso.telemetry.v1", "miso.renderallocations.v1"]);
+// The frames a peer posts unasked, which answer no request (`#receive`): a failed host drops them.
+const UNSOLICITED_TAGS = new Set([
+  "miso.meter.v1", "miso.telemetry.v1", "miso.control-event.v1", "miso.watermark.v1",
+]);
 const READY_FIELDS = [
   "tag", "requestId", "result", "backend", "resources", "memoryBytes", "sourceRingFrames",
   "controlFrameBytes",
@@ -527,6 +531,8 @@ class MisoAudioWorkletHost {
   /// count of frames that arrived with none.
   #controlEventListeners = new Set();
   #discardedControlEvents = 0;
+  /// Issue #2371: the count of unsolicited frames that arrived after the host failed, each dropped.
+  #discardedFramesAfterFailure = 0;
   /// Issue #1294a: the listeners of the applied-revision watermark, in subscription order.
   #watermarkListeners = new Set();
   #lastRequestId = 0;
@@ -674,6 +680,14 @@ class MisoAudioWorkletHost {
   /// `peer` sent the message (`PEER_WORKER` or `PEER_WORKLET`). A well-formed typed error it posts
   /// is a failure it recorded itself, so it needs no `miso.fail.v1` for it (issue #2317).
   #receive(message, peer) {
+    // Issue #2371: once the host has failed, an unsolicited frame still in flight is dropped and
+    // counted, before its schema check: a consumer told the engine failed sees no progress after
+    // it, and a malformed frame would only fail the host again, which keeps its first error. (A
+    // disposed host has no handler left to receive one.)
+    if (UNSOLICITED_TAGS.has(message?.tag) && this.#failure() !== null) {
+      this.#discardedFramesAfterFailure += 1;
+      return;
+    }
     // Issue #137 D2/D3: meter and telemetry frames are unsolicited -- they answer a lease, not a
     // request -- so they are dispatched before the correlation lookup and never reach it. A frame
     // whose shape is wrong is a hard failure exactly like a malformed acknowledgement: a console
@@ -811,7 +825,13 @@ class MisoAudioWorkletHost {
     // Issue #1332 S8: the worklet posts a sticky render failure, which belongs to no request, as
     // request ID 0: the host fails with it, typed. In `worker` mode it comes on the control
     // Worker's render check; in `single` mode on the next service tick (#2370).
-    if (message?.tag === "miso.error.v1" && message.requestId === 0
+    // Issue #2371: a sticky error the steps after a reply found (the service step, the watermark,
+    // the event drain) carries that reply's request ID, which no longer names a pending request.
+    // It is typed too, so the host fails with its code; it carries no planes, since the reply took
+    // them back. An ID this host never sent is a stray, below.
+    if (message?.tag === "miso.error.v1" && pending === null
+        && (message.requestId === 0
+          || (validRequestId(message.requestId) && message.requestId <= this.#lastRequestId))
         && hasExactFields(message, ["tag", "requestId", "result"])
         && validResult(message.result) && message.result !== RESULT_OK) {
       this.#fail(Object.freeze(message), null, peer);
@@ -1425,6 +1445,12 @@ class MisoAudioWorkletHost {
   /// @internal The count of engine events that arrived with no listener subscribed (issue #1570b D5).
   get discardedControlEvents() {
     return this.#discardedControlEvents;
+  }
+
+  /// @internal The count of meter, telemetry, control-event and watermark frames that arrived after
+  /// the host failed (issue #2371). Each is dropped and reaches no listener.
+  get discardedFramesAfterFailure() {
+    return this.#discardedFramesAfterFailure;
   }
 
   /// The worker-mode dispose contract (#1332 S7, root): the promise is created once and every
