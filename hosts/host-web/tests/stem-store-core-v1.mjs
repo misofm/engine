@@ -1583,6 +1583,103 @@ async function theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks() {
   assert.ok(!left.includes(dead), "the age check kept a dead staged file")
 }
 
+// Issue #2397: every OPFS step a stem-lock hold awaits is deadlined, so the call holding the lock
+// settles typed while the step is wedged. A step that changes the store (a create, a move, a removal)
+// may still land, so it keeps the stem lock until it settles; a lookup lands nothing and does not.
+// One leg per step; each wedges exactly that step.
+async function aStemLockStepNeverOutlastsItsDeadline() {
+  const quota = () => Object.assign(new Error("fake quota exhausted"), { name: "QuotaExceededError" })
+  const legs = [
+    { leg: "verify() lookup", call: "verify", code: "storage.read_stalled", fenced: false },
+    { leg: "verify-on-open lookup", call: "open", code: "storage.read_stalled", fenced: false },
+    { leg: "staging clear", code: "storage.remove_stalled", fenced: true },
+    { leg: "staging create", code: "storage.write_stalled", fenced: true },
+    { leg: "staging cleanup", code: "storage.remove_stalled", fenced: true },
+    { leg: "move", code: "storage.write_stalled", fenced: true },
+    { leg: "fallback final create", moveSupported: false, code: "storage.write_stalled", fenced: true },
+    { leg: "quota removal", code: "storage.insufficient", fenced: true },
+    { leg: "integrity removal", moveSupported: false, code: "storage.remove_stalled", fenced: true },
+  ]
+  for (const { leg, call, code, fenced, moveSupported } of legs) {
+    const stem = fixture(`stem-lock-step-${leg}`, 4096)
+    const final = finalName(stem)
+    const staged = `stem-lock-step-${stem.identity.slice("blake3:".length)}`
+    const backend = new FakeOpfsBackend({ moveSupported })
+    const locks = new FakeLockManager()
+    const resolver = new MemoryStemResolver(stemMap([stem]))
+    let corrupt = false
+    const opfs = store(backend, locks, {
+      tabId: "stem-lock-step",
+      readDeadlineMs: 20,
+      hooks: {
+        afterFallbackCopy() {
+          if (corrupt) backend.setBytes(`${STORE_FOLDER}/${final}`, encoder.encode("corrupt"))
+        },
+      },
+    })
+    // The lookup legs need an indexed final; another session pins it, so the stall fails typed.
+    let pinned
+    if (call !== undefined) {
+      pinned = await opfs.openSession({ sessionId: "T", stems: requirements([stem]), resolver })
+    }
+    let reached = false
+    let unwedge
+    const wedge = () => {
+      reached = true
+      return new Promise((resolve) => (unwedge = resolve))
+    }
+    let stagingRemovals = 0
+    if (call !== undefined) {
+      backend.getFileHandleBlocker = ({ name, create }) =>
+        name === final && !create && !reached ? wedge() : undefined
+    } else if (leg === "staging clear" || leg === "staging cleanup") {
+      backend.removeEntryBlocker = ({ name }) => {
+        if (name !== staged) return undefined
+        stagingRemovals += 1
+        return stagingRemovals === (leg === "staging clear" ? 1 : 2) ? wedge() : undefined
+      }
+    } else if (leg === "staging create" || leg === "fallback final create") {
+      const target = leg === "staging create" ? staged : final
+      backend.getFileHandleBlocker = ({ name, create }) =>
+        name === target && create && !reached ? wedge() : undefined
+    } else if (leg === "move") {
+      backend.moveBlocker = () => wedge()
+    } else {
+      if (leg === "quota removal") {
+        backend.writeBlocker = ({ fileName }) => {
+          if (fileName === staged) throw quota()
+        }
+      } else {
+        corrupt = true
+      }
+      backend.removeEntryBlocker = ({ name }) => (name === final && !reached ? wedge() : undefined)
+    }
+    const outcome = await settledWithin(
+      call === "verify"
+        ? opfs.verify(stem.identity)
+        : opfs.openSession({ sessionId: "A", stems: requirements([stem]), resolver }),
+      500
+    )
+    assert.ok(reached, `the ${leg} was never wedged`)
+    assert.notEqual(outcome, "timed-out", `a stem-lock hold waited on a wedged ${leg} past its deadline`)
+    assert.equal(outcome.error?.code, code, `a wedged ${leg} failed with the wrong error`)
+    const stemLock = `${STORE_LOCKS}:ingest:${stem.identity.slice("blake3:".length)}`
+    const isHeld = async () => (await locks.query()).held.some((lock) => lock.name === stemLock)
+    for (let step = 0; step < 5; step += 1) await tick()
+    if (fenced) {
+      assert.ok(await isHeld(), `a timed-out ${leg} released the stem lock before it settled`)
+      unwedge()
+    }
+    await until(async () => !(await isHeld()), `the stem lock's release after the ${leg}`)
+    if (pinned !== undefined) {
+      backend.getFileHandleBlocker = undefined
+      unwedge()
+      assert.equal((await pinned.read(stem.identity)).size, stem.bytes)
+      await pinned.close()
+    }
+  }
+}
+
 // Issue #2381: an aborted open evicts nothing once its abort is seen, wherever its eviction waits:
 // queued on the victim's stem lock, queued on the index lock, or in the index read under it. The
 // waits on the two locks end at the abort, so the open refuses without waiting for their holders.
@@ -2068,6 +2165,7 @@ await anAbortedOpenEvictsNothing()
 await aStalledLockQueryNeverHoldsTheIndex()
 await anUnknownLockStateSweepsNothingStaged()
 await theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks()
+await aStemLockStepNeverOutlastsItsDeadline()
 await tabCloseMidStaging()
 await abortCleansStaging()
 await wedgedDecoderObeysAbortAndDeadline()

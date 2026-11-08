@@ -95,7 +95,7 @@ async function staticChecks(repository) {
     /NoModificationAllowedError|InvalidStateError|error\?*\.name/,
     "access-handle contention detection must not match an engine-specific error name"
   )
-  assert.match(storeSource, /await stagingHandle\.move\(this\.#directory, finalName\)/)
+  assert.match(storeSource, /stagingHandle\.move\(this\.#directory, finalName\)/)
   assert.match(storeSource, /const observed = await this\.#hashOpenFile/)
   const workerClient = await readFile(join(runtime, "worker-client.js"), "utf8")
   assert.match(workerClient, /new WorkerConstructor/)
@@ -154,9 +154,9 @@ async function runMutationLedger() {
   }
   const fallbackFinalArm = {
     search:
-      "    if (\n      observed.bytes !== stem.bytes ||\n      observed.hex !== stemDigest(stem.identity)\n    ) {\n      await removeEntry(this.#directory, finalName)",
+      "    if (\n      observed.bytes !== stem.bytes ||\n      observed.hex !== stemDigest(stem.identity)\n    ) {\n      // The removal keeps the stem lock",
     replace:
-      "    if (observed.hex !== stemDigest(stem.identity)) {\n      await removeEntry(this.#directory, finalName)",
+      "    if (observed.hex !== stemDigest(stem.identity)) {\n      // The removal keeps the stem lock",
   }
   // The cheap size pre-check is the first verify-on-open length arm; the
   // comparison after the hash is the second. Both go, or neither is tested.
@@ -1163,6 +1163,256 @@ async function runMutationLedger() {
       ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "the age check kept a dead staged file",
+    },
+    // Issue #2397: every OPFS step a stem-lock hold awaits is deadlined; a step that changes the
+    // store is fenced into the hold, so the stem lock outlives it, and a lookup is not. One deadline
+    // entry and one fence entry per step.
+    {
+      name: "look up a final in a stem-lock hold with no deadline (verify() lookup)",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        const handle = await withDeadline(\n          this.#fileHandle(stemFileName(identity), false),\n          this.#readDeadlineMs,\n          \"storage.read_stalled\",\n          `Looking up ${identity} made no progress`,\n          options.signal\n        )\n",
+          replace: "        const handle = await this.#fileHandle(stemFileName(identity), false)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged verify() lookup past its deadline",
+    },
+    {
+      name: "fence a lookup into its stem-lock hold (verify() lookup)",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        const handle = await withDeadline(\n          this.#fileHandle(stemFileName(identity), false),\n          this.#readDeadlineMs,\n          \"storage.read_stalled\",\n          `Looking up ${identity} made no progress`,\n          options.signal\n        )\n",
+          replace: "        const handle = await this.#fencedStep(\n          hold,\n          this.#fileHandle(stemFileName(identity), false),\n          \"storage.read_stalled\",\n          `Looking up ${identity} made no progress`,\n          options.signal\n        )\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "the stem lock's release after the verify() lookup",
+    },
+    {
+      name: "look up a final in a stem-lock hold with no deadline (verify-on-open lookup)",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      handle = await withDeadline(\n        this.#fileHandle(stemFileName(stem.identity), false),\n        this.#readDeadlineMs,\n        \"storage.read_stalled\",\n        `Looking up ${stem.identity} made no progress`,\n        signal\n      )\n",
+          replace: "      handle = await this.#fileHandle(stemFileName(stem.identity), false)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged verify-on-open lookup past its deadline",
+    },
+    {
+      name: "fence a lookup into its stem-lock hold (verify-on-open lookup)",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      handle = await withDeadline(\n        this.#fileHandle(stemFileName(stem.identity), false),\n        this.#readDeadlineMs,\n        \"storage.read_stalled\",\n        `Looking up ${stem.identity} made no progress`,\n        signal\n      )\n",
+          replace: "      handle = await this.#fencedStep(\n        hold,\n        this.#fileHandle(stemFileName(stem.identity), false),\n        \"storage.read_stalled\",\n        `Looking up ${stem.identity} made no progress`,\n        signal\n      )\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "the stem lock's release after the verify-on-open lookup",
+    },
+    {
+      name: "await a stem-lock hold's staging clear with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    await this.#fencedStep(\n      hold,\n      removeEntry(this.#staging, stagingName),\n      \"storage.remove_stalled\",\n      `Clearing staging for ${stem.identity} made no progress`,\n      options.signal\n    )\n",
+          replace: "    await removeEntry(this.#staging, stagingName)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged staging clear past its deadline",
+    },
+    {
+      name: "leave a timed-out staging clear unfenced",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    await this.#fencedStep(\n      hold,\n      removeEntry(this.#staging, stagingName),\n      \"storage.remove_stalled\",\n      `Clearing staging for ${stem.identity} made no progress`,\n      options.signal\n    )\n",
+          replace: "    await this.#fencedStep(\n      { fences: new Set() },\n      removeEntry(this.#staging, stagingName),\n      \"storage.remove_stalled\",\n      `Clearing staging for ${stem.identity} made no progress`,\n      options.signal\n    )\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a timed-out staging clear released the stem lock before it settled",
+    },
+    {
+      name: "await a stem-lock hold's staging create with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    const handle = await this.#fencedStep(\n      hold,\n      this.#staging.getFileHandle(stagingName, { create: true }),\n      \"storage.write_stalled\",\n      `Creating staging for ${stem.identity} made no progress`,\n      options.signal\n    )\n",
+          replace: "    const handle = await this.#staging.getFileHandle(stagingName, { create: true })\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged staging create past its deadline",
+    },
+    {
+      name: "leave a timed-out staging create unfenced",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    const handle = await this.#fencedStep(\n      hold,\n      this.#staging.getFileHandle(stagingName, { create: true }),\n      \"storage.write_stalled\",\n      `Creating staging for ${stem.identity} made no progress`,\n      options.signal\n    )\n",
+          replace: "    const handle = await this.#fencedStep(\n      { fences: new Set() },\n      this.#staging.getFileHandle(stagingName, { create: true }),\n      \"storage.write_stalled\",\n      `Creating staging for ${stem.identity} made no progress`,\n      options.signal\n    )\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a timed-out staging create released the stem lock before it settled",
+    },
+    {
+      name: "await a stem-lock hold's staging cleanup with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        await this.#fencedStep(\n          hold,\n          removeEntry(this.#staging, stagingName),\n          \"storage.remove_stalled\",\n          `Removing staging for ${stem.identity} made no progress`\n        )\n",
+          replace: "        await removeEntry(this.#staging, stagingName)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged staging cleanup past its deadline",
+    },
+    {
+      name: "leave a timed-out staging cleanup unfenced",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        await this.#fencedStep(\n          hold,\n          removeEntry(this.#staging, stagingName),\n          \"storage.remove_stalled\",\n          `Removing staging for ${stem.identity} made no progress`\n        )\n",
+          replace: "        await this.#fencedStep(\n          { fences: new Set() },\n          removeEntry(this.#staging, stagingName),\n          \"storage.remove_stalled\",\n          `Removing staging for ${stem.identity} made no progress`\n        )\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a timed-out staging cleanup released the stem lock before it settled",
+    },
+    {
+      name: "await a stem-lock hold's move with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        await this.#fencedStep(\n          hold,\n          stagingHandle.move(this.#directory, finalName),\n          \"storage.write_stalled\",\n          `Moving ${stem.identity} into place made no progress`,\n          options.signal\n        )\n",
+          replace: "        await stagingHandle.move(this.#directory, finalName)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged move past its deadline",
+    },
+    {
+      name: "leave a timed-out move unfenced",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        await this.#fencedStep(\n          hold,\n          stagingHandle.move(this.#directory, finalName),\n          \"storage.write_stalled\",\n          `Moving ${stem.identity} into place made no progress`,\n          options.signal\n        )\n",
+          replace: "        await this.#fencedStep(\n          { fences: new Set() },\n          stagingHandle.move(this.#directory, finalName),\n          \"storage.write_stalled\",\n          `Moving ${stem.identity} into place made no progress`,\n          options.signal\n        )\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a timed-out move released the stem lock before it settled",
+    },
+    {
+      name: "await a stem-lock hold's fallback final create with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    const finalHandle = await this.#fencedStep(\n      hold,\n      this.#directory.getFileHandle(finalName, { create: true }),\n      \"storage.write_stalled\",\n      `Creating fallback final for ${stem.identity} made no progress`,\n      options.signal\n    )\n",
+          replace: "    const finalHandle = await this.#directory.getFileHandle(finalName, { create: true })\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged fallback final create past its deadline",
+    },
+    {
+      name: "leave a timed-out fallback final create unfenced",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    const finalHandle = await this.#fencedStep(\n      hold,\n      this.#directory.getFileHandle(finalName, { create: true }),\n      \"storage.write_stalled\",\n      `Creating fallback final for ${stem.identity} made no progress`,\n      options.signal\n    )\n",
+          replace: "    const finalHandle = await this.#fencedStep(\n      { fences: new Set() },\n      this.#directory.getFileHandle(finalName, { create: true }),\n      \"storage.write_stalled\",\n      `Creating fallback final for ${stem.identity} made no progress`,\n      options.signal\n    )\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a timed-out fallback final create released the stem lock before it settled",
+    },
+    {
+      name: "await the quota path's removal of a final with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        await this.#removeDemoted(stem.identity, hold)\n        throw await this.#quotaError(",
+          replace: "        await removeEntry(this.#directory, stemFileName(stem.identity)).catch(() => {})\n        throw await this.#quotaError(",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged quota removal past its deadline",
+    },
+    {
+      name: "remove the quota path's final outside the hold",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        await this.#removeDemoted(stem.identity, hold)\n        throw await this.#quotaError(",
+          replace: "        await withDeadline(removeEntry(this.#directory, stemFileName(stem.identity)), this.#readDeadlineMs, \"storage.remove_stalled\", \"x\").catch(() => {})\n        throw await this.#quotaError(",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a timed-out quota removal released the stem lock before it settled",
+    },
+    {
+      name: "await a failed fallback's removal of its final with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      await this.#removeFinal(stem.identity, hold, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing fallback final for ${stem.identity} made no progress`,\n          options.signal\n        )\n      )\n",
+          replace: "      await removeEntry(this.#directory, finalName)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged integrity removal past its deadline",
+    },
+    {
+      name: "remove a failed fallback's final outside the hold",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      await this.#removeFinal(stem.identity, hold, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing fallback final for ${stem.identity} made no progress`,\n          options.signal\n        )\n      )\n",
+          replace: "      await withDeadline(removeEntry(this.#directory, finalName), this.#readDeadlineMs, \"storage.remove_stalled\", \"x\", options.signal)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a timed-out integrity removal released the stem lock before it settled",
+    },
+    {
+      name: "retry a fallback whose removal of its final stalled",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      await this.#removeFinal(stem.identity, hold, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing fallback final for ${stem.identity} made no progress`,\n          options.signal\n        )\n      )\n",
+          replace: "      await this.#removeFinal(stem.identity, hold, (removal) =>\n        withDeadline(\n          removal,\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Removing fallback final for ${stem.identity} made no progress`,\n          options.signal\n        )\n      ).catch(() => {})\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged integrity removal past its deadline",
     },
     // Issue #278's opt-in Worker cadence. Two mutations, because "off by default" and "stop
     // interrupts" are two claims and one of them staying green would hide the other. The first is

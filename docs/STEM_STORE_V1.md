@@ -184,11 +184,26 @@ another hold in this store. How long a caller waits for its own removal is
 separate from the lock: an eviction's open waits until the removal settles or
 the open is aborted, a demotion waits at most the local-store deadline (it is
 best-effort), and a rebuild or sweep under the index lock waits at most its
-deadline and then fails typed. Eviction and demotion drop the row first, under
-the index lock, so no removal runs under it. A failed fallback copy's unawaited
-removals hold the stem lock the same way, and within one hold no final is
-written until every removal that hold started has settled; that wait ends at
-the open's abort.
+deadline and then fails typed. An ingest's own removals of a final wait at most
+the local-store deadline too (#2397): after a quota error the wait is
+best-effort, like a demotion's, and after a fallback final fails verification a
+stall fails the open `storage.remove_stalled` instead of retrying the ingest.
+Eviction and demotion drop the row first, under the index lock, so no removal
+runs under it. A failed fallback copy's unawaited removals hold the stem lock
+the same way, and within one hold no final is written until every removal that
+hold started has settled; that wait ends at the open's abort.
+
+The other OPFS steps a stem-lock hold awaits have the local-store deadline as
+well (#2397): the lookup of the final in verify-on-open and `verify()`, an
+ingest's clearing, creation and cleanup of its staged file, and the promote's
+`move()` and fallback-final creation. On expiry the holder's call fails typed
+(`storage.read_stalled`, `storage.write_stalled` or `storage.remove_stalled`).
+The staged-file and promote steps change the store and may still land after
+their deadline, so each is fenced into its hold like a removal: the stem lock
+stays held until the step settles. A stalled clearing or cleanup of the staged
+file ends the ingest rather than retrying it over the same file. A lookup lands
+nothing, so it is not fenced; a stalled lookup is a stalled read under the rule
+above.
 
 A wait for a stem lock, in this store or another tab, simply waits for the
 holder; it ends when the lock is released or at the waiter's own abort. A
