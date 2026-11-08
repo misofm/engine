@@ -14,7 +14,7 @@ If that lookup never settles, the lease read never settles either. The Worker pu
 
 ## Contract
 - `read()`'s lookup has the local-store deadline. On expiry it fails with `storage.read_stalled`, the code its `getFile()` uses.
-- A stalled lookup is a stalled read under #2381's one stall rule. It goes to `read()`'s existing failure path (`#demoteUnreadable` with the lease's own pin):
+- A stalled lookup is a stalled read under #2381's one stall rule. It goes to `read()`'s existing failure path (`#demoteUnreadable` with the reading session's own pin, which `StemSessionLease.read()` passes; the Worker facade passes none, see the attempt 1 fold):
   - the stem is demoted only when no other live session pins it;
   - the read fails typed `storage.read_stalled`, as a stalled `getFile()` does today.
 - A `NotFoundError` from the lookup is still damage, and still demotes unconditionally.
@@ -71,3 +71,12 @@ AssertionError [ERR_ASSERTION]: a lease read waited on a wedged lookup past its 
 **Docs.** `docs/STEM_STORE_V1.md` states that a session's `read()` holds no lock, that its lookup has the local-store deadline and fails `storage.read_stalled`, that the stall follows the stall rule, and that a missing final still demotes unconditionally.
 
 **Follow-ups.** None.
+
+**Verdict: PASS** (Sol, on `c9df307ca`). Two doc minors were folded, and nothing else changed.
+1. The docs said a session's `read()` "holds no lock". That overstates it: `read()` takes the index lock for its index read, and its failure demotion takes locks. The docs now say it takes no stem lock and looks up its final under no lock.
+2. The shipped Worker facade (`pcm-pump-worker.js:57`) calls `store.read(identity)` with no `ownPin`. From the Worker pump, the loading gate's own pin therefore always counts as another session's, so a read there that stalls or fails never demotes the stem. This is conservative and predates the branch.
+   - The docs now record it.
+   - The Contract's "with the lease's own pin" now applies only to `StemSessionLease.read()`.
+   - The pump protocol is unchanged.
+
+**Fold** (docs and spec only; no code or tests changed). `origin/main` (`f44d848fd`) is already merged, since it is the base; I reran `node scripts/check-stem-store-v1.mjs`: PASS.
