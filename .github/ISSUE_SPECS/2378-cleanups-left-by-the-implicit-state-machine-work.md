@@ -91,3 +91,16 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
   on base `cargo clippy -p control-plane --all-targets -- -D warnings` fails with "function
   `compile_children_warm` is never used" (`compile.rs:2729`); it is green now, and so is the
   `--all-features` run. No render code is touched.
+- **C8, done.** `EffectPlacement::Banked` loses `kept`: the `Vec` supply of
+  `GraphCompiler::compile_with_builtins` drops a banked member's processor at placement, as
+  `compile_projected` never prepares one, so both paths hand the plan the same effect table.
+  Nothing read the kept processor: `graph`'s bind (`crates/graph/src/runtime.rs:9072`) takes a
+  node's per-node effect only when the node has no bank membership, and a member's response
+  facts are the bank's (they overwrite the effect's, `runtime.rs:8929`), so a kept processor was
+  dropped unrun at bind. #2303's own mutation record already showed the `kept: None` mutant
+  surviving the whole `graph-compiler` suite. Evidence: `graph_fixture --check` exits 0 (no plan
+  fixture moves), `cargo test -p graph-compiler` (206 tests) and the `host-core` suites that
+  compile through `compile_with_builtins` (`live_lanes`, `live_routes`, `route_mute`,
+  `submix_strip`, `tail_composition`) are green, `audit` and `console-workload` build. Only the
+  test/tool compile path changes; the production `compile_projected` path is untouched, so no
+  rendered bit can move.
