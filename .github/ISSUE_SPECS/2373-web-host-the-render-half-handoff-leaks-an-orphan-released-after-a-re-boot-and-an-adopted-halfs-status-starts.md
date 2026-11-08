@@ -87,3 +87,22 @@ assertion `left == right` failed: the control fields are the shell's
 - The committed module pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`) is the release fingerprint, re-pinned only by a release (`scripts/build-web-audioworklet.sh` header, docs/RELEASE.md). It is not changed here.
 
 **Not run locally:** the Playwright browser matrix (Chromium and WebKit, `single` and `worker`). This machine has no PulseAudio, and the job's null sink needs it. CI's `browser` job runs the matrix on the merge. The JavaScript is unchanged. Its Worker paths (`finishDispose`, `reclaimOrphan`) call the same exports. `reclaimOrphan`'s adoption can now be refused, but only for a disposed session's half that a sweep already freed. The Worker then disposes nothing, and nothing is left to free.
+
+The red-on-base line cites above are at the attempt-1 commit `5a40b7995`.
+
+**Verdict on attempt 1 (Sol): PASS with MINORs**, folded after a merge of `origin/main` (#2370 and #2372, both JavaScript only):
+1. **A dispose frees its own released half.** That claim had no test: a mutant that sweeps before `live_slot.take()`/`host.dispose()` kept `worker_handoff` green. The new test now starts with a deterministic scenario: the worklet hands its half back before the Worker's dispose. After the dispose, `handoff_occupied() == 0`, and `host_adopt(back)` answers `RESULT_INVALID_ARGUMENT`. Under that mutant it is red: "the dispose freed its own released half" (`1` vs `0`).
+2. **Docs.** `miso_engine_web_v1_host_adopt`'s doc now names the transient `RESULT_INVALID_ARGUMENT` while another control instance's sweep holds the entry, and why the page never meets it: one control instance per memory. `HANDOFF_SLOTS`' doc no longer says "a page that boots again".
+3. **A failed session is not a disposed one.** The other control instance in the test's second half now fails its session (`session_fail`) before the Worker's boot. Its half must still survive the boot and be adopted back. A mutant whose `session_disposed` reads `state != STATE_READY` is red: "the boot freed the orphan and kept the failed session's half" (`0` vs `1`).
+4. **A vacuous comparison.** The adoption test compared `blocking_rebuilds` 0 with 0. The field is dropped from the tuple. The doc says why the count agrees by construction.
+5. **Wrapping.** The test's long doc line is re-wrapped to 100 columns.
+
+The fold changes no render code and no wasm-reachable code beyond doc comments. It was re-gated with:
+- `cargo test --locked -p host-web`, with and without `--all-features`;
+- clippy `-D warnings` on `host-web`, with and without `--all-features`;
+- `cargo fmt --check`;
+- `RUSTDOCFLAGS="-D warnings" cargo doc` on `host-web`;
+- `cargo run --locked --release -p realtime-policy`;
+- `bash scripts/check-workspace-policy.sh`.
+
+The wasm artifact was not rebuilt.

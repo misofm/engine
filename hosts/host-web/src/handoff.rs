@@ -44,8 +44,9 @@ use crate::RenderHost;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// How many released render halves the registry holds at once. One Worker instance holds one host
-/// and releases one half; the other entries are slack for a release whose adoption is pending
-/// while a second host (a test's, or a page that boots again) releases its own.
+/// and releases one half; the other entries are slack for halves whose adoption is pending: a
+/// disposed session's orphan until the control instance's next boot or dispose frees it (#2373),
+/// or a second host's half (a native test's, where each thread is an instance).
 pub const HANDOFF_SLOTS: usize = 4;
 
 /// The token word of an entry an adoption has claimed and not yet confirmed or cancelled.

@@ -1854,10 +1854,10 @@ fn the_released_status_shell_shows_a_render_side_failure_at_the_next_control_cal
 }
 
 /// Issue #2373: the adoption back publishes, in the half's status, the control fields the shell
-/// showed while the half was away: the lifecycle state and the last result (the blocking-rebuild
-/// count, which moves only while the half is here, agrees already). A control failure the half has not yet rendered is the half's at once: its state and
-/// its silence, as a failure with the half here makes them. The render clock and counters stay
-/// the half's own.
+/// showed while the half was away: the lifecycle state and the last result. (The blocking-rebuild
+/// count moves only while the half is here, so it agrees already.) A control failure the half
+/// has not yet rendered is the half's at once: its state and its silence, as a failure with the
+/// half here makes them. The render clock and counters stay the half's own.
 ///
 /// Test value: red if `adopt_render` installs the half's status as the worklet left it, so a
 /// status read through `status_ptr` after the adoption back (the Worker's `finishDispose`) shows
@@ -1889,12 +1889,8 @@ fn an_adopted_half_publishes_the_control_fields_the_shell_showed() {
     assert!(host.adopt_render(render).is_ok());
     let adopted = *host.status();
     assert_eq!(
-        (
-            adopted.state,
-            adopted.last_result,
-            adopted.blocking_rebuilds
-        ),
-        (shell.state, shell.last_result, shell.blocking_rebuilds),
+        (adopted.state, adopted.last_result),
+        (shell.state, shell.last_result),
         "the control fields are the shell's"
     );
     assert_eq!(

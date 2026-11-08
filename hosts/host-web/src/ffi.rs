@@ -1735,6 +1735,13 @@ fn release_render_half(handle: u32) -> u64 {
 /// [`RESULT_INVALID_ARGUMENT`] for a token no release issued or one already taken, and for a half
 /// another host released (unconsumed); [`RESULT_INTERNAL`] for a refused borrow.
 ///
+/// #2373: [`RESULT_INVALID_ARGUMENT`] is also the answer, transiently and with the token
+/// unconsumed, while another control instance's registry sweep holds the entry (the sweep at its
+/// boot or dispose claims each entry by its token, and puts back a live session's half). The page
+/// never meets it: a memory has one control instance (the Worker, or the single-mode worklet),
+/// which sweeps only at its own boot, while it holds no host, and at its own dispose. The worklet
+/// adopts only the token that boot released after its sweep.
+///
 /// Render-locked: it allocates and frees nothing, wherever it runs.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_host_adopt(token: u64) -> u32 {

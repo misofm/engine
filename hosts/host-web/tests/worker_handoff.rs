@@ -15,8 +15,8 @@ use std::alloc::System;
 use std::sync::{Barrier, Mutex};
 
 use host_web::{
-    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_LIFECYCLE, RESULT_WRONG_STATE,
-    RenderLockedAllocator, Reservation, STATE_READY, native_staging,
+    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_LIFECYCLE,
+    RESULT_WRONG_STATE, RenderLockedAllocator, Reservation, STATE_READY, native_staging,
 };
 use protocol::{
     CommandPayload, DecodeScratch, DecodedEventPayload, DecodedSuccessResponsePayload,
@@ -893,9 +893,10 @@ fn an_orphaned_render_half_is_freed_by_the_worker_that_adopts_it_back() {
 /// is unchanged.
 ///
 /// Test value: red if the dispose of a booted host leaves a disposed session's half in the
-/// registry, or if a boot does; red too if the sweep frees a half whose session is live (another
-/// control instance's half, released and pending adoption, must survive the boot). No existing
-/// test releases an orphan while the Worker holds a host.
+/// registry, or if a boot does; red if a dispose that sweeps before it disposes its session leaves
+/// that session's own released half; and red if the sweep frees a half whose session is not
+/// disposed (another control instance's failed session, whose host still takes the half back,
+/// must survive the boot). No existing test releases an orphan while the Worker holds a host.
 #[test]
 fn an_orphan_released_after_a_re_boot_is_freed_by_the_next_dispose_or_boot() {
     use std::sync::mpsc::{Sender, channel};
@@ -936,6 +937,27 @@ fn an_orphan_released_after_a_re_boot_is_freed_by_the_next_dispose_or_boot() {
             handle
         };
 
+        // Released before the dispose, and so never taken back: the dispose frees its own
+        // session's half, after the session is disposed.
+        let handle = boot();
+        let token = host_web::miso_engine_web_v1_host_release(handle);
+        assert_ne!(token, 0);
+        ask(&to_worklet, handle, Some(token));
+        let back = ask(&to_worklet, handle, None);
+        assert_ne!(back, 0, "the worklet hands the half back");
+        assert_eq!(native_staging::handoff_occupied(), 1);
+        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+        assert_eq!(
+            native_staging::handoff_occupied(),
+            0,
+            "the dispose freed its own released half"
+        );
+        assert_eq!(
+            host_web::miso_engine_web_v1_host_adopt(back),
+            RESULT_INVALID_ARGUMENT,
+            "a freed half's token adopts nothing"
+        );
+
         // Released after the re-boot: the dispose of the new host frees it.
         let first = orphan(&to_worklet);
         let rebooted = boot();
@@ -964,12 +986,17 @@ fn an_orphan_released_after_a_re_boot_is_freed_by_the_next_dispose_or_boot() {
             let handle = boot();
             let token = host_web::miso_engine_web_v1_host_release(handle);
             assert_ne!(token, 0);
+            // A failed session is not a disposed one: its host may still take its half back.
+            assert_eq!(
+                host_web::miso_engine_web_v1_session_fail(handle, RESULT_INTERNAL),
+                RESULT_OK
+            );
             other_released.send(token).expect("the Worker");
             other_go_inbox.recv().expect("the go-ahead");
             assert_eq!(
                 host_web::miso_engine_web_v1_host_adopt(token),
                 RESULT_OK,
-                "the live session's half survived the boot"
+                "the failed session's half survived the boot"
             );
             assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
         });
@@ -983,7 +1010,7 @@ fn an_orphan_released_after_a_re_boot_is_freed_by_the_next_dispose_or_boot() {
         assert_eq!(
             native_staging::handoff_occupied(),
             1,
-            "the boot freed the orphan and kept the live half"
+            "the boot freed the orphan and kept the failed session's half"
         );
         other_go.send(()).expect("the other host");
         other.join().expect("the other host");
