@@ -222,7 +222,7 @@ plan word is touched.
 - `./target/release/realtime_policy`: ok (298 marked regions in 48 files). No marked region
   changed.
 
-**Successor.** #SUCCESSOR. Its spec is at the coordinator's scratchpad `succ/t.md`, corrected in the
+**Successor.** #2401. Its spec is at the coordinator's scratchpad `succ/t.md`, corrected in the
 attempt 1 fold below.
 
 **Verdict (attempt 1): PASS** (Sol, `c57c52d90`), minors only, folded below.
