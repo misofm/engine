@@ -1031,11 +1031,11 @@ impl PreparedRenderPlan {
     ///
     /// The executor is owned by the plan, so it is destroyed only when the retired plan is
     /// reclaimed off the render thread.  No publication behavior is changed here.
-    #[doc(hidden)]
     ///
     /// # Errors
     ///
     /// [`Self::prepare`]'s.
+    #[doc(hidden)]
     pub fn prepare_with_executor(
         request: PrepareRenderPlan<'_>,
         executor: Box<dyn PreparedPlanExecutor>,

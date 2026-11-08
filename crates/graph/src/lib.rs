@@ -5338,9 +5338,9 @@ impl<S> GraphBoundPlan<S> {
     /// }
     /// ```
     ///
-    /// The holder publishes on the handle the seal returned. This twin differs from the doctest
-    /// above only in the receiver, so a renamed item or a typo in the shared code turns it red
-    /// (issue #1422 D2):
+    /// The holder stamps on the handle the seal returned. This twin shares the doctest above's
+    /// seal and binding, and calls a method the handle has where the doctest calls one the plan
+    /// lacks, so a renamed item or a typo in the shared code turns it red (issue #1422 D2):
     ///
     /// ```
     /// fn take_once(plan: graph::GraphBoundPlan) {

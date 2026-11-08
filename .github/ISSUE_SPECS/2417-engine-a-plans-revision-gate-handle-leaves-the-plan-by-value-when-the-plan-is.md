@@ -118,7 +118,7 @@ At base each of the first four compiled, and a second take returned `None` at ru
 | `PreparedRenderPlan::prepare` returns a handle of another gate | `engine --lib` | red: 9 tests (the exchange's own-gate assertion and every probe that publishes) |
 | `GraphBoundPlan::seal` returns a handle of another plan's gate | `graph --lib` | red: 5 live-control tests (`a_live_control_parameter_command_applies_at_the_next_block_boundary` and four more) |
 | `GraphCarryBuilder::seal` returns a handle of another plan's gate | host-core `successor_swap`, `warm_successor` | red: 20 and 3 tests |
-| `prepare_or_project` stamps the carry retargets on another fresh gate (the commit still stamps and publishes the seal's handle) | host-core `successor_swap`, `warm_successor`, `live_routes` | green: an equivalent mutant. A fresh gate's first stamp at `r` is the key `(1, r)` on every gate, and the commit's stamp on the seal's handle publishes that same key, so the cells' records are read exactly as before. The base had the same blind spot through `stamp_held_gate` on another plan; with the stamp now on the one handle the seal returns, no production path names another gate. |
+| `prepare_or_project` stamps the carry retargets on another fresh gate (the commit still stamps and publishes the seal's handle) | host-core `successor_swap`, `warm_successor`, `live_routes` | green at attempt 1, so the rendered output cannot see it: a fresh gate's first stamp at `r` is the key `(1, r)` on every gate, and the commit's stamp on the seal's handle publishes that same key. Red at the fold: `a_preparation_with_a_retarget_stamps_on_the_handle_it_returns` (below) |
 
 **No bit moved.** #2412's scratch instrumentation (`PreparedRenderPlan::render_block` folds every
 rendered output block into a thread-local FNV-1a accumulator whose destructor appends
@@ -133,7 +133,9 @@ rows of the concurrent-producer tests (`live_routes_render_without_allocating`,
 are excluded as before. The other 346 rows (62 889 blocks) are identical; the sorted listing has
 sha256 `42f79994865b97d9d2bc3f3adf8d4ebbec1fc8c0bc9794148cc762c9c46e8854` on both trees, the same
 as #2412's. `graph_fixture --check` passes at head. The render path is untouched: the plan lost a
-field render never read.
+field render never read. What does move, deliberately: `size_of::<PreparedRenderPlan>()` goes from 216 to
+136 bytes, so the plan-exchange rows move (retained 1880 to 1400, largest 928 to 608) and capi's
+`capi_retained_bytes` drops by about 560 B per session (see the fold).
 
 **Gates (head).** `F` = builtins-compiler, graph, effect-compiler, session and engine test-support
 plus `engine/realtime-audit`.
@@ -162,6 +164,26 @@ plus `engine/realtime-audit`.
   `scripts/check-rack-policy.sh` (rack is untouched), `graph_fixture --check` and
   `realtime_policy` (314 marked regions in 48 files): pass.
 
-**Follow-ups.** None filed. The equivalent mutant above is not a gap this issue opens: a test that
-stamps on a gate other than the plan's would need a gate whose publication count differs from the
-plan's, which no production path can build.
+### Sol verdict on attempt 1 (`b99610933`): PASS, with minors to fold
+
+### Fold (Terra)
+
+- **Retarget twin.** `a_preparation_with_a_retarget_stamps_on_the_handle_it_returns`
+  (`crates/host-core/tests/successor_swap.rs`, debug builds) is the twin of
+  `a_preparation_without_a_retarget_stamps_nothing`. A successor whose committed base moves the
+  first track's fader to -9 dB writes a retarget, so the handle `successor_handle` returns holds
+  the stamp open, and stamping `SUCCESSOR_REVISION + 5` on it panics with `is stamped and not yet
+  published`. Test value: red if the retargets are stamped on any gate but the handle the seal
+  returns, the mutant attempt 1 found green; it is red under that mutant. Attempt 1 said such a
+  test could not exist. That was wrong: the open stamp shows on the handle itself, not in the
+  rendered output.
+- **Plan size.** `size_of::<PreparedRenderPlan>()` goes from 216 to 136 bytes, because the inline
+  `Option<GatePin>` is gone. The plan-exchange rows that count plan values move with it (retained
+  1880 to 1400, largest 928 to 608), and capi's `capi_retained_bytes` drops by about 560 B per
+  session. These are deliberate, reported changes: no rendered bit or `graph_fixture` byte moves.
+- The doctest twin on `GraphBoundPlan::seal` now says how it differs from the doctest above: same
+  seal and binding, and a method the handle has instead of one the plan lacks.
+  `#[doc(hidden)]` on `prepare_with_executor` now sits below its doc comment.
+- Merged `origin/main`.
+
+**Follow-ups.** None filed.

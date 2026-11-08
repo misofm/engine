@@ -6435,6 +6435,21 @@ fn a_preparation_without_a_retarget_stamps_nothing() {
         .expect("a different revision stamps on a handle with no open stamp");
 }
 
+/// D5 and #2417, the twin: a preparation that writes a retarget stamps it on the handle the seal
+/// returned, which holds the stamp open until the commit publishes it, so a debug build refuses
+/// another revision stamped on that handle first. Red if the retargets are stamped on any other
+/// gate, which leaves the returned handle with no open stamp.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "is stamped and not yet published")]
+fn a_preparation_with_a_retarget_stamps_on_the_handle_it_returns() {
+    let a = strip_state_session();
+    let first = a.tracks[0].id.as_str().to_owned();
+    let committed = with_fader(a, &first, [-9.0, -9.0]);
+    let mut gate = successor_handle(&committed, with_muted_track(strip_state_session()));
+    let _ = gate.stamp(successor::SUCCESSOR_REVISION + 5);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Issue #1279: a console effect lane keeps its state through a plan swap.
 //
