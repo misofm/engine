@@ -398,15 +398,16 @@ fn bind_with(
     finish(plan.seal())
 }
 
-/// [`bind_with`]'s bound plan, before its seal, and what finishes it once sealed: its gate and
-/// its mono collapse, as `host-core`'s prepare takes and arms them on the sealed plan.
+/// [`bind_with`]'s bound plan, before its seal, with its mono collapse joined as `host-core`'s
+/// prepare joins it on the bound plan, and what finishes it once sealed: its gate, as the host
+/// takes it from the sealed plan.
 fn bind_unsealed(
     model: &SessionModel,
     schedules: &[Arc<[Block]>],
     observed: bool,
     setup: Setup,
 ) -> (
-    graph::GraphBoundPlan,
+    graph::GraphBoundPlan<graph::ProgramAttached>,
     impl FnOnce(PreparedRenderPlan) -> Bound,
 ) {
     let session = compile_session(
@@ -538,26 +539,28 @@ fn bind_unsealed(
             sinks.push(sink);
         }
     }
-    let bound = artifact
+    let mut bound = artifact
         .into_bound(GraphRuntimeBindings {
             envelope,
             nodes,
             observers,
         })
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
-    let controls = bound.track_controls;
     let mono_source: std::collections::BTreeSet<Box<str>> = session_structural_symmetry(&session)
         .into_iter()
         .filter(|(_, witness)| witness.eligible())
         .map(|(track, _)| track)
         .collect();
+    bound
+        .plan
+        .arm_mono_collapse(&|track: &str| mono_source.contains(track));
+    let controls = bound.track_controls;
     let finish = move |mut plan: PreparedRenderPlan| {
         let gate = if setup.live || setup.effects_live {
             plan.take_revision_gate()
         } else {
             None
         };
-        plan.arm_mono_collapse(&|track: &str| mono_source.contains(track));
         Bound {
             plan,
             frames,

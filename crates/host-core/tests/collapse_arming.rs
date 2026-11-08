@@ -4,7 +4,7 @@
 //! The collapse's structural term, `SOURCE`, says one thing: the track's **input** carries two
 //! identical planes (`left_source_channel == right_source_channel`). It is decided per track from
 //! the compiled session and joined onto bank chains at bind by
-//! `PreparedRenderPlan::arm_mono_collapse`. A chain whose every lane begins at its track's
+//! `graph::GraphBoundPlan::arm_mono_collapse`. A chain whose every lane begins at its track's
 //! `PostInputBuiltins` stage gathers that input, so the term speaks for its planes. A **later**
 //! chain of the same track does not: it reads planes that an earlier chain or a per-node op
 //! produced, and whatever made them differ is in neither that chain's own witness nor the join.

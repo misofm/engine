@@ -1211,8 +1211,8 @@ pub(crate) struct InputSectionInventoryRow {
 }
 
 impl PlanStateInventory {
-    /// The plan's process-unique graph identity (`graph::plan_identity`), which the successor's
-    /// carry program names.
+    /// The plan's process-unique graph identity (`graph::GraphBoundPlan::plan_identity`, read
+    /// before the seal), which the successor's carry program names.
     #[must_use]
     pub const fn plan_identity(&self) -> u64 {
         self.plan_identity
@@ -4899,13 +4899,12 @@ fn prepare_or_project(
         .retained_bytes()
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // #2388: the bound plan, which cannot render or be published before its seal below.
-    let mut plan = bound.plan;
     // #1639 D1: the plan's jump-length cell, seeded with the session's lengths, so the plan holds
     // them from its first block. A successor is seeded from the committed model, which holds any
-    // edit of them (D4): nothing carries.
-    let jump_lengths = plan
-        .attach_jump_lengths(session_jump_lengths(model), &live_superseded)
-        .map_err(|_| graph_failure("host.jump_lengths.attach"))?;
+    // edit of them (D4): nothing carries. The plan takes its one cell by value (#2401).
+    let (mut plan, jump_lengths) = bound
+        .plan
+        .attach_jump_lengths(session_jump_lengths(model), &live_superseded);
     // Issue #1276 D6: this plan's own input lanes, sorted by strip ID: the inventory its
     // successor joins with, and the table the join below looks this plan's lanes up in.
     let mut input_sections: Vec<InputSectionInventoryRow> = plan
@@ -5596,7 +5595,7 @@ fn prepare_or_project(
     let route_arm_count = route_arms.len();
     arms.extend(route_arms);
     arms.extend(copy_arms);
-    let (plan, entries, fade_watch) = plan
+    let (mut plan, entries, fade_watch) = plan
         .install_fade_arms(arms)
         .map_err(|_| graph_failure("host.fade.install"))?;
     let strip_count = strips.len();
@@ -5693,6 +5692,27 @@ fn prepare_or_project(
         .map(|lead| u32::try_from(lead.lead_samples / u64::from(compiled.quantum().0)))
         .transpose()
         .map_err(|_| resource("host.resource.arithmetic"))?;
+    // The mono collapse's structural join (mono-collapse M2). This is the one place a host has
+    // both halves of the channel-symmetry witness in hand: `session_structural_symmetry`
+    // answers per **track id** from the compiled session, and the built plan's bank chains are
+    // keyed by anonymous **lanes**. The plan's own rows carry the relation, so the join is a call
+    // and not a re-derivation.
+    //
+    // It is the *arming*, not a tuning knob. `BankChain::collapse_source` defaults to declining,
+    // so a plan nobody joins never collapses at all -- which is what makes forgetting this call a
+    // missed optimisation rather than wrong audio, and it is why the default is that way round.
+    // On a session whose tracks read two source channels, which is every stereo session there is,
+    // this arms nothing. It runs on the bound plan, which cannot have rendered (#2401): no
+    // hand-over section reads the arming, and the seal below keeps it.
+    // Source semantics: tracks only.
+    let mono_source: BTreeSet<Box<str>> = session_structural_symmetry(compiled)
+        .into_iter()
+        .filter(|(_, witness)| witness.eligible())
+        .map(|(track, _)| track)
+        .collect();
+    plan.arm_mono_collapse(&|track: &str| mono_source.contains(track));
+    // #2401: the plan's identity, read on the bound plan, which is always a graph plan's.
+    let plan_identity = plan.plan_identity();
     let mut plan = if let Some(program) = carry_program {
         let install = |_| graph_failure("host.carry.install");
         let mut carry =
@@ -5768,8 +5788,7 @@ fn prepare_or_project(
     });
     plan.set_source_read_offset(source_read_offset);
     let inventory = PlanStateInventory {
-        plan_identity: graph::plan_identity(&mut plan)
-            .ok_or_else(|| graph_failure("host.inventory.identity"))?,
+        plan_identity,
         sources: inventory_sources.into_boxed_slice(),
         input_sections: input_sections.into_boxed_slice(),
         strip_stages: strip_stages.into_boxed_slice(),
@@ -5862,25 +5881,6 @@ fn prepare_or_project(
         largest_engine_allocation_bytes: largest_engine_allocation_bytes
             .max(effect_carry_scratch_bytes),
     };
-
-    // The mono collapse's structural join (mono-collapse M2). This is the one place a host has
-    // both halves of the channel-symmetry witness in hand: `session_structural_symmetry`
-    // answers per **track id** from the compiled session, and the built plan's bank chains are
-    // keyed by anonymous **lanes**. The plan's own rows carry the relation, so the join is a call
-    // and not a re-derivation.
-    //
-    // It is the *arming*, not a tuning knob. `BankChain::collapse_source` defaults to declining,
-    // so a plan nobody joins never collapses at all -- which is what makes forgetting this call a
-    // missed optimisation rather than wrong audio, and it is why the default is that way round.
-    // On a session whose tracks read two source channels, which is every stereo session there is,
-    // this arms nothing.
-    // Source semantics: tracks only.
-    let mono_source: BTreeSet<Box<str>> = session_structural_symmetry(compiled)
-        .into_iter()
-        .filter(|(_, witness)| witness.eligible())
-        .map(|(track, _)| track)
-        .collect();
-    plan.arm_mono_collapse(&|track: &str| mono_source.contains(track));
 
     // Issue #1277 D5: the carried strips' live differences, written to this plan's own cells,
     // stamped with the revision it commits as. This is preparation's last fallible step, so a

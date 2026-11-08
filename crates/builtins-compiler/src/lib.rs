@@ -6602,11 +6602,13 @@ pub struct PreparedBuiltinsGraphArtifact<R> {
 ///
 /// `plan` is the [`graph::GraphBoundPlan`] bind returned, which cannot render or be published
 /// until it is sealed (#2388): [`Self::seal`] seals it in place, as
-/// [`PreparedBuiltinsGraphSealed`], for a caller with no hand-over to assemble.
+/// [`PreparedBuiltinsGraphSealed`], for a caller with no hand-over to assemble. Its
+/// stored-automation program is attached ([`graph::ProgramAttached`], #2401), so no caller
+/// attaches another.
 ///
 /// Field order is drop order: `track_controls` producers are released before the `plan` that owns
 /// their consumer endpoints, and `meter_consumers` outlive the plan that owns their producers.
-pub struct PreparedBuiltinsGraphBound<P = graph::GraphBoundPlan> {
+pub struct PreparedBuiltinsGraphBound<P = graph::GraphBoundPlan<graph::ProgramAttached>> {
     pub track_controls: Vec<TrackControlProducer>,
     pub plan: P,
     pub meter_consumers: Vec<MeterConsumer>,
@@ -8151,20 +8153,16 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
     }
 
     fn bound_from_plan(
-        mut plan: graph::GraphBoundPlan,
+        plan: graph::GraphBoundPlan,
         track_controls: Vec<TrackControlProducer>,
         meter_consumers: Vec<MeterConsumer>,
         automation_program: Option<Arc<automation::Program>>,
     ) -> PreparedBuiltinsGraphBound {
-        // No error path is left here: `bind` has consumed the artifact. The refusal cannot occur:
-        // nothing has attached a program to the plan `bind` just built (not `AlreadyAttached`).
-        if let Some(program) = automation_program {
-            plan.attach_automation_program(program)
-                .expect("a freshly bound graph plan has no program attached");
-        }
+        // No error path is left here: `bind` has consumed the artifact, and the plan `bind` just
+        // built takes its one program by value (#2401).
         PreparedBuiltinsGraphBound {
             track_controls,
-            plan,
+            plan: plan.attach_automation_program(automation_program),
             meter_consumers,
             #[cfg(any(test, feature = "test-support"))]
             test_gate: None,
@@ -11417,6 +11415,7 @@ mod tests {
             TEST_ONLY_PAIR_GRAPH_TRACKS,
             (7, 12.0),
         )
+        .seal()
     }
 
     /// A queued graph of `n` live-control tracks at the vector `backend`, prepared, lowered and
@@ -11430,6 +11429,26 @@ mod tests {
         backend: Backend,
         n: usize,
     ) -> PreparedBuiltinsGraphSealed {
+        prepared_live_graph_fixture_bound(
+            post_fader_observed,
+            symmetric_input,
+            nonfinite_input,
+            post_matrix_capture,
+            backend,
+            n,
+        )
+        .seal()
+    }
+
+    /// [`prepared_live_graph_fixture`] before its seal.
+    fn prepared_live_graph_fixture_bound(
+        post_fader_observed: bool,
+        symmetric_input: bool,
+        nonfinite_input: bool,
+        post_matrix_capture: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
+        backend: Backend,
+        n: usize,
+    ) -> PreparedBuiltinsGraphBound {
         prepared_live_graph_fixture_with_ballistics(
             post_fader_observed.then_some(0),
             symmetric_input,
@@ -11441,6 +11460,15 @@ mod tests {
         )
     }
 
+    /// `bound`, its mono collapse joined on every track, sealed: the join takes only a bound plan
+    /// (#2401).
+    fn mono_armed(mut bound: PreparedBuiltinsGraphBound) -> PreparedBuiltinsGraphSealed {
+        bound.plan.arm_mono_collapse(&|_| true);
+        bound.seal()
+    }
+
+    /// [`prepared_live_graph_fixture_bound`], with a post-fader meter on `post_fader_track` of
+    /// the given `(hold, decay)` ballistics: the bound plan, before its seal.
     fn prepared_live_graph_fixture_with_ballistics(
         post_fader_track: Option<usize>,
         symmetric_input: bool,
@@ -11449,7 +11477,7 @@ mod tests {
         backend: Backend,
         n: usize,
         ballistics: (u32, f32),
-    ) -> PreparedBuiltinsGraphSealed {
+    ) -> PreparedBuiltinsGraphBound {
         let compiled = n_track_session_with_symmetry(n, symmetric_input);
         let controls = (0..n)
             .map(|index| TrackControlRequest {
@@ -11542,7 +11570,6 @@ mod tests {
                 observers: Vec::new(),
             })
             .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code))
-            .seal()
     }
 
     fn render_bound(bound: &mut PreparedBuiltinsGraphSealed, sample: u64) -> Vec<u32> {
@@ -11710,14 +11737,14 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let collapsed_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
         let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut collapsed = prepared_live_graph_fixture(
+        let mut collapsed = mono_armed(prepared_live_graph_fixture_bound(
             false,
             true,
             false,
             Some(Arc::clone(&collapsed_capture)),
             PAIR_GRAPH_BACKEND,
             TEST_ONLY_PAIR_GRAPH_TRACKS,
-        );
+        ));
         let mut separate = prepared_live_graph_fixture(
             false,
             true,
@@ -11726,7 +11753,6 @@ mod tests {
             PAIR_GRAPH_BACKEND,
             TEST_ONLY_PAIR_GRAPH_TRACKS,
         );
-        collapsed.plan.arm_mono_collapse(&|_| true);
         separate.plan.force_mono_collapse_off(true);
 
         let collapsed_host = render_bound(&mut collapsed, 0);
@@ -11782,14 +11808,14 @@ mod tests {
 
         let recovered_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reference_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut recovered = prepared_live_graph_fixture(
+        let mut recovered = mono_armed(prepared_live_graph_fixture_bound(
             false,
             true,
             true,
             Some(Arc::clone(&recovered_capture)),
             PAIR_GRAPH_BACKEND,
             TEST_ONLY_PAIR_GRAPH_TRACKS,
-        );
+        ));
         let mut recovery_reference = prepared_live_graph_fixture(
             false,
             true,
@@ -11798,7 +11824,6 @@ mod tests {
             PAIR_GRAPH_BACKEND,
             TEST_ONLY_PAIR_GRAPH_TRACKS,
         );
-        recovered.plan.arm_mono_collapse(&|_| true);
         recovery_reference.plan.force_mono_collapse_off(true);
         let _ = render_bound(&mut recovered, 0);
         let _ = render_bound(&mut recovery_reference, 0);
@@ -12698,7 +12723,7 @@ mod tests {
                 ((0, 12.0), true),
                 ((7, 12.0), false),
             ] {
-                let mut candidate = prepared_live_graph_fixture_with_ballistics(
+                let mut candidate = mono_armed(prepared_live_graph_fixture_with_ballistics(
                     Some(8),
                     symmetric,
                     false,
@@ -12706,8 +12731,8 @@ mod tests {
                     backend,
                     9,
                     ballistics,
-                );
-                let mut reference = prepared_live_graph_fixture_with_ballistics(
+                ));
+                let mut reference = mono_armed(prepared_live_graph_fixture_with_ballistics(
                     Some(8),
                     symmetric,
                     false,
@@ -12715,9 +12740,7 @@ mod tests {
                     backend,
                     9,
                     ballistics,
-                );
-                candidate.plan.arm_mono_collapse(&|_| true);
-                reference.plan.arm_mono_collapse(&|_| true);
+                ));
                 let mut a = vec![0.0; HARNESS_QUANTUM as usize * 2];
                 let mut b = a.clone();
                 // Warm both plans before checking steady-state dispatch and parity.
