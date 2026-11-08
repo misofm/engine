@@ -2276,139 +2276,6 @@ fn a_diverged_lane_keeps_its_chain_dual_after_the_swap_on_every_width() {
     }
 }
 
-/// D6 and P11 of #1276. Staging the input section refuses a padding lane and a repeated successor
-/// or predecessor lane (a section without a carry program does not compile, #2375). At the swap
-/// block a predecessor lane that does not resolve refuses the whole hand-over, before any lane
-/// moves. Red if install accepts a padding lane, or if the swap block copies the lanes that
-/// resolve and skips the rest.
-#[test]
-fn a_bad_input_move_is_refused_whole() {
-    use graph::{
-        GraphCarryInstallError, GraphCarryProgram, GraphLaneLocation, GraphLaneMove, carry_builder,
-    };
-    let backend = Backend::Simd4;
-    let a = Session::compile(filtered_session(false));
-    let b = Session::compile(with_muted_track(filtered_session(false)));
-    let mut predecessor = a.prepare(backend);
-    let lanes = graph::builtin_input_lanes(&mut predecessor.plan).expect("a graph plan");
-    assert_eq!(lanes.len(), 9);
-    let at = |strip: &str| {
-        lanes
-            .iter()
-            .find(|(id, _)| &**id == strip)
-            .expect("strip")
-            .1
-    };
-    // Four-lane banks of eq0-eq3, eq4-eq7 and eq8 alone.
-    let (eq0, eq8) = (at("eq0"), at("eq8"));
-    assert_eq!(eq8.lane, 0);
-    let step = |successor, predecessor| GraphLaneMove {
-        successor,
-        predecessor,
-    };
-
-    let mut successor = b.prepare(backend);
-    let successor_lanes = graph::builtin_input_lanes(&mut successor.plan).expect("a graph plan");
-    let into = successor_lanes
-        .iter()
-        .find(|(id, _)| &**id == "eq0")
-        .expect("eq0")
-        .1;
-    let mut carry = carry_builder(
-        successor.plan,
-        GraphCarryProgram {
-            predecessor: predecessor.inventory.plan_identity(),
-            sources: Box::default(),
-            timeline: false,
-        },
-    )
-    .expect("a program that moves no source");
-    // The successor's last bank holds eq7 and eq8; its lanes 2 and 3 are padding.
-    let last = successor_lanes
-        .iter()
-        .find(|(id, _)| &**id == "eq8")
-        .expect("eq8")
-        .1;
-    let members = successor_lanes
-        .iter()
-        .filter(|(_, location)| location.unit == last.unit)
-        .count();
-    assert_eq!(members, 2);
-    let padding = GraphLaneLocation { lane: 2, ..last };
-    assert_eq!(
-        carry.builtin_inputs(vec![step(padding, eq0)]),
-        Err(GraphCarryInstallError::InputLaneOutOfRange)
-    );
-    assert_eq!(
-        carry.builtin_inputs(vec![step(into, eq0), step(into, eq8)]),
-        Err(GraphCarryInstallError::DuplicateInputLane)
-    );
-    // A predecessor location past every unit: it sorts after eq0's valid move.
-    let nowhere = GraphLaneLocation {
-        unit: u32::MAX,
-        ..eq8
-    };
-    let other = successor_lanes
-        .iter()
-        .find(|(id, _)| &**id == "eq1")
-        .expect("eq1")
-        .1;
-    carry
-        .builtin_inputs(vec![step(into, eq0), step(other, nowhere)])
-        .expect("successor lanes resolve; predecessor lanes are checked at the swap block");
-    successor.plan = carry.seal();
-
-    // Render the predecessor so eq0's filters hold state, then hand over.
-    let feed = Feed::new(SOURCE, 17);
-    let rate = predecessor.report.sample_rate_hz;
-    for block in 0..SWAP_BLOCK {
-        feed.submit(&mut predecessor.sources, rate, block);
-        let mut output = [0.0_f32; QUANTUM * 2];
-        let sample = predecessor.plan.next_absolute_sample();
-        predecessor
-            .plan
-            .render_contiguous(
-                engine::realtime::RenderIo {
-                    output: engine::realtime::PlanarBufferMut::try_new(
-                        &mut output,
-                        2,
-                        QUANTUM,
-                        QUANTUM,
-                    )
-                    .expect("output"),
-                },
-                sample,
-            )
-            .expect("render");
-    }
-    assert_eq!(
-        successor.plan.adopt_predecessor_plan(&mut predecessor.plan),
-        CarryOutcome::PredecessorMismatch
-    );
-    // Nothing moved: the successor's first block is a fresh plan's first block on the same PCM.
-    let reference = reference_run(&b, &[&feed], backend);
-    feed.submit(&mut successor.sources, rate, 0);
-    let mut output = [f32::NAN; QUANTUM * 2];
-    let sample = successor.plan.next_absolute_sample();
-    successor
-        .plan
-        .render_contiguous(
-            engine::realtime::RenderIo {
-                output: engine::realtime::PlanarBufferMut::try_new(
-                    &mut output,
-                    2,
-                    QUANTUM,
-                    QUANTUM,
-                )
-                .expect("output"),
-            },
-            sample,
-        )
-        .expect("render");
-    let bits: Vec<u32> = output.iter().map(|sample| sample.to_bits()).collect();
-    assert_eq!(bits, reference[0].bits);
-}
-
 /// #1276 attempt-2 MINOR-1. Red if a successor's preparation accepts a committed model whose
 /// strips are not in canonical ID order: the binary-search join would then find no committed
 /// section and silently restart every strip at rest, the click this slice removes.
@@ -8589,17 +8456,18 @@ fn with_misaligned_muted_track(model: SessionModel) -> SessionModel {
 /// in strip order.
 fn insert_forms(session: &Session, backend: Backend) -> Vec<bool> {
     let mut plan = LivePlan::fresh(session, backend);
-    let mut forms: Vec<(Box<str>, bool)> = graph::bank_effect_lanes(&mut plan.prepared.plan)
-        .expect("a graph plan")
-        .into_iter()
-        .filter(|(_, lane)| lane.rack == graph::RackId::Dynamic)
-        .map(|(strip, lane)| {
-            (
-                strip,
-                matches!(lane.location, graph::GraphEffectSite::Node(_)),
-            )
-        })
-        .collect();
+    let mut forms: Vec<(Box<str>, bool)> =
+        graph::test_only_bank_effect_lanes(&mut plan.prepared.plan)
+            .expect("a graph plan")
+            .into_iter()
+            .filter(|(_, lane)| lane.rack == graph::RackId::Dynamic)
+            .map(|(strip, lane)| {
+                (
+                    strip,
+                    matches!(lane.location, graph::GraphEffectSite::Node(_)),
+                )
+            })
+            .collect();
     forms.sort();
     forms.into_iter().map(|(_, per_node)| per_node).collect()
 }

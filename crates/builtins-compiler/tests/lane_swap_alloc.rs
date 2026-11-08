@@ -43,7 +43,7 @@ fn a_banked_held_meter_render_allocates_nothing() {
     let mut bound = builtins_compiler::test_only_prepared_unpaired_graph_with_held_meter();
     let mut output = [0.0; 128];
     let render =
-        |bound: &mut builtins_compiler::PreparedBuiltinsGraphBound, output: &mut [f32], at| {
+        |bound: &mut builtins_compiler::PreparedBuiltinsGraphSealed, output: &mut [f32], at| {
             bound.plan.render(
                 RenderIo {
                     output: PlanarBufferMut::try_new(output, 2, 64, 64).unwrap(),

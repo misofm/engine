@@ -308,6 +308,7 @@ fn bind(
             observers: Vec::new(),
         })
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+        .seal()
         .plan;
     drop(producers);
     let window = current_thread_delta_since(mark);

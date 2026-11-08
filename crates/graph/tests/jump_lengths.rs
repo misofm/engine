@@ -67,7 +67,7 @@ fn estimate() -> GraphResourceEstimate {
 }
 
 /// One track's input feeding the output: the smallest bound graph plan.
-fn bound() -> PreparedRenderPlan {
+fn bound() -> GraphBoundPlan {
     let envelope = RenderEnvelope {
         sample_rate: SampleRateHz(48_000),
         quantum: QuantumFrames(FRAMES as u32),
@@ -213,12 +213,16 @@ fn the_block_entry_holds_the_newest_published_lengths() {
     // Warm any process static the attach touches on a throwaway plan, so the counted attach
     // below sees the cell's own allocations alone.
     let mut warm = bound();
-    drop(attach_jump_lengths(&mut warm, PREPARED, &superseded).expect("a graph plan's cell"));
+    drop(
+        warm.attach_jump_lengths(PREPARED, &superseded)
+            .expect("a graph plan's cell"),
+    );
     drop(warm);
     let mut plan = bound();
     let mark = bench_support::alloc::current_thread_counters();
-    let mut producer =
-        attach_jump_lengths(&mut plan, PREPARED, &superseded).expect("a graph plan's cell");
+    let mut producer = plan
+        .attach_jump_lengths(PREPARED, &superseded)
+        .expect("a graph plan's cell");
     let cell = bench_support::alloc::current_thread_delta_since(mark);
     assert_eq!(
         cell.requested_bytes - cell.released_bytes,
@@ -231,10 +235,10 @@ fn the_block_entry_holds_the_newest_published_lengths() {
         "the cell is two allocations: the shared lane and the plan's reader"
     );
     assert_eq!(
-        attach_jump_lengths(&mut plan, PREPARED, &superseded).err(),
+        plan.attach_jump_lengths(PREPARED, &superseded).err(),
         Some(GraphJumpLengthError::AlreadyAttached)
     );
-    let (mut gate, mut owner, _exchange) = exchange(plan);
+    let (mut gate, mut owner, _exchange) = exchange(plan.seal());
     // Warm the process statics and the thread-local reader before any count.
     let _ = render(&mut owner, 0);
     assert_eq!(test_only_block_jump_lengths(), Some(PREPARED));

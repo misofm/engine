@@ -2584,8 +2584,8 @@ fn delay_restarted(
 /// The sidechain compensation lines of a compiled or projected, unbound graph, from its inserted
 /// delays (the lines its program lowers, one per delayed edge) and its edges, each with its edge's
 /// endpoints. `line` is the row's index in the result: a bound plan's lines are read after bind
-/// ([`graph::take_compensation_lines`]), so these rows serve [`warm_lead`]'s closure and its L3
-/// count only.
+/// ([`graph::GraphBoundPlan::take_bind_tables`]), so these rows serve [`warm_lead`]'s closure and
+/// its L3 count only.
 fn compiled_sidechain_lines(
     inserted_delays: &[graph::InsertedDelay],
     edges: &[graph::GraphEdge],
@@ -4898,17 +4898,18 @@ fn prepare_or_project(
     let control_retained_bytes = sources
         .retained_bytes()
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    // #2388: the bound plan, which cannot render or be published before its seal below.
     let mut plan = bound.plan;
     // #1639 D1: the plan's jump-length cell, seeded with the session's lengths, so the plan holds
     // them from its first block. A successor is seeded from the committed model, which holds any
     // edit of them (D4): nothing carries.
-    let jump_lengths =
-        graph::attach_jump_lengths(&mut plan, session_jump_lengths(model), &live_superseded)
-            .map_err(|_| graph_failure("host.jump_lengths.attach"))?;
+    let jump_lengths = plan
+        .attach_jump_lengths(session_jump_lengths(model), &live_superseded)
+        .map_err(|_| graph_failure("host.jump_lengths.attach"))?;
     // Issue #1276 D6: this plan's own input lanes, sorted by strip ID: the inventory its
     // successor joins with, and the table the join below looks this plan's lanes up in.
-    let mut input_sections: Vec<InputSectionInventoryRow> = graph::builtin_input_lanes(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?
+    let mut input_sections: Vec<InputSectionInventoryRow> = plan
+        .builtin_input_lanes()
         .into_iter()
         .map(|(id, location)| InputSectionInventoryRow {
             id,
@@ -4919,8 +4920,7 @@ fn prepare_or_project(
     input_sections.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     // Issue #1327 D1: this plan's own meters, in reader order: the inventory its successor joins
     // with, and the rows the join below looks this plan's observers up in.
-    let observer_rows =
-        graph::observer_rows(&mut plan).ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    let observer_rows = plan.observer_rows();
     let meter_rows: Vec<MeterInventoryRow> = {
         let locations: BTreeMap<u64, graph::GraphObserverLocation> = observer_rows
             .iter()
@@ -5013,8 +5013,8 @@ fn prepare_or_project(
     // Issue #1277 D1: this plan's own fader and matrix lanes, sorted by strip ID and owner: the
     // inventory its successor joins with, and the table the join below looks this plan's lanes up
     // in.
-    let mut strip_stages: Vec<StripStageInventoryRow> = graph::builtin_strip_lanes(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?
+    let mut strip_stages: Vec<StripStageInventoryRow> = plan
+        .builtin_strip_lanes()
         .into_iter()
         .map(|(id, lane)| StripStageInventoryRow {
             id,
@@ -5038,8 +5038,8 @@ fn prepare_or_project(
     };
     // Issue #1279 D1: this plan's own effect bank lanes, sorted by owner key: the inventory its
     // successor joins with, and the table the join below looks this plan's lanes up in.
-    let mut effect_lanes: Vec<EffectLaneInventoryRow> = graph::bank_effect_lanes(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?
+    let mut effect_lanes: Vec<EffectLaneInventoryRow> = plan
+        .bank_effect_lanes()
         .into_iter()
         .map(|(id, lane)| EffectLaneInventoryRow {
             id,
@@ -5093,10 +5093,15 @@ fn prepare_or_project(
             })
         })
         .collect();
+    // #2388: the plan hands its bind identity tables out once, here; it retains none of them.
+    let (mut plan, bind_tables) = plan.take_bind_tables();
+    let graph::GraphBindTables {
+        compensation_lines: mut delay_lines,
+        mut strip_delays,
+        mut live_routes,
+    } = bind_tables;
     // Issue #1283 D1: this plan's own compensation lines, sorted by edge ID: the inventory its
     // successor joins with, and the lines its own moves are resolved from.
-    let mut delay_lines = graph::take_compensation_lines(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
     delay_lines.sort_unstable_by(|left, right| left.edge.cmp(&right.edge));
     let mut delay_carry = match successor {
         Some(base) => resolve_delay_carry(&base.inventory.delay_lines, &delay_lines, |id| {
@@ -5115,11 +5120,7 @@ fn prepare_or_project(
     }
     // Issue #1284 D1, D2: this plan's own strip input alignment lines and live sends, sorted by ID:
     // the inventory its successor joins with, and the rows its own moves are resolved from.
-    let mut strip_delays = graph::take_strip_delay_lines(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
     strip_delays.sort_unstable_by(|left, right| left.strip.cmp(&right.strip));
-    let mut live_routes = graph::take_live_routes(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
     live_routes.sort_unstable_by(|left, right| left.route_id.cmp(&right.route_id));
     let mut strip_delay_carry = match successor {
         Some(base) => resolve_strip_delay_carry(
@@ -5541,7 +5542,8 @@ fn prepare_or_project(
     // same cap as the rest of the plan, and the scratch is one allocation (#1279 D3).
     // The carried slots of the successor lanes the moves name are allocated with the table, and
     // only for those lanes (#1633 D1).
-    let effect_carry_slot_bytes = graph::effect_carry_slot_bytes(&mut plan, &effect_carry.moves)
+    let effect_carry_slot_bytes = plan
+        .effect_carry_slot_bytes(&effect_carry.moves)
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let effect_carry_bytes = graph::effect_carry_retained_bytes(
         effect_carry.moves.len(),
@@ -5586,78 +5588,75 @@ fn prepare_or_project(
     .ok_or_else(|| graph_failure("host.fade.install"))?;
     let mut fade_arm_rows = Vec::new();
     let mut route_copy_rows = Vec::new();
-    let mut fade_watch = graph::GraphFadeArmWatch::default();
-    // The fade table goes in before the hand-over takes the plan: its pairs index it (#1392 D3).
+    // The fade table goes in once, before the hand-over takes the plan: its pairs index it (#1392
+    // D3), and only a plan whose table is in stages them (#2388). With nothing to arm the install
+    // changes nothing: no table, and the empty watch.
     let mut fade_pairs = Vec::new();
-    if !fade_arms.is_empty() || !route_arms.is_empty() || !copy_arms.is_empty() {
-        let (strips, mut arms): (Vec<_>, Vec<_>) = fade_arms.into_iter().unzip();
-        let route_count = route_arms.len();
-        arms.extend(route_arms);
-        arms.extend(copy_arms);
-        let (entries, watch) = graph::install_fade_arms(&mut plan, arms)
-            .map_err(|_| graph_failure("host.fade.install"))?;
-        fade_watch = watch;
-        let strip_count = strips.len();
-        for (id, entry) in strips.into_iter().zip(&entries) {
-            let Some(entry) = *entry else {
-                continue;
-            };
-            if let Some(&(_, Some(predecessor))) =
-                fade_strips.iter().find(|(strip, _)| *strip == id)
-            {
-                fade_pairs.push(graph::GraphFadeArmPair {
-                    successor: entry,
-                    predecessor,
-                });
-            }
-            fade_arm_rows.push(FadeArmInventoryRow {
-                id: id.into(),
-                entry,
-                owner: FadeArmOwner::Strip,
+    let (strips, mut arms): (Vec<_>, Vec<_>) = fade_arms.into_iter().unzip();
+    let route_arm_count = route_arms.len();
+    arms.extend(route_arms);
+    arms.extend(copy_arms);
+    let (plan, entries, fade_watch) = plan
+        .install_fade_arms(arms)
+        .map_err(|_| graph_failure("host.fade.install"))?;
+    let strip_count = strips.len();
+    for (id, entry) in strips.into_iter().zip(&entries) {
+        let Some(entry) = *entry else {
+            continue;
+        };
+        if let Some(&(_, Some(predecessor))) = fade_strips.iter().find(|(strip, _)| *strip == id) {
+            fade_pairs.push(graph::GraphFadeArmPair {
+                successor: entry,
+                predecessor,
             });
         }
-        // #1877 D1, D2: the route arms follow the strips' in `route_fades` order.
-        for (fade, entry) in route_fades.iter().zip(entries.iter().skip(strip_count)) {
-            let Some(entry) = *entry else {
-                continue;
-            };
-            if let Some(predecessor) = fade.carried {
-                fade_pairs.push(graph::GraphFadeArmPair {
-                    successor: entry,
-                    predecessor,
-                });
-            }
-            fade_arm_rows.push(FadeArmInventoryRow {
-                id: fade.route.id.as_str().into(),
-                entry,
-                owner: FadeArmOwner::Route,
-            });
-        }
-        // #1953b: the copies' arms follow the routes'.
-        for (copy, entry) in route_copies
-            .iter()
-            .zip(entries.iter().skip(strip_count + route_count))
-        {
-            let Some(entry) = *entry else {
-                continue;
-            };
-            if let Some(predecessor) = copy.carried {
-                fade_pairs.push(graph::GraphFadeArmPair {
-                    successor: entry,
-                    predecessor,
-                });
-            }
-            route_copy_rows.push(RouteCopyRow {
-                route: copy.route.clone(),
-                entry,
-            });
-        }
-        route_copy_rows.sort_unstable_by(|left: &RouteCopyRow, right: &RouteCopyRow| {
-            left.route.id.as_str().cmp(right.route.id.as_str())
+        fade_arm_rows.push(FadeArmInventoryRow {
+            id: id.into(),
+            entry,
+            owner: FadeArmOwner::Strip,
         });
-        fade_arm_rows
-            .sort_unstable_by(|left, right| (&left.id, left.owner).cmp(&(&right.id, right.owner)));
     }
+    // #1877 D1, D2: the route arms follow the strips' in `route_fades` order.
+    for (fade, entry) in route_fades.iter().zip(entries.iter().skip(strip_count)) {
+        let Some(entry) = *entry else {
+            continue;
+        };
+        if let Some(predecessor) = fade.carried {
+            fade_pairs.push(graph::GraphFadeArmPair {
+                successor: entry,
+                predecessor,
+            });
+        }
+        fade_arm_rows.push(FadeArmInventoryRow {
+            id: fade.route.id.as_str().into(),
+            entry,
+            owner: FadeArmOwner::Route,
+        });
+    }
+    // #1953b: the copies' arms follow the routes'.
+    for (copy, entry) in route_copies
+        .iter()
+        .zip(entries.iter().skip(strip_count + route_arm_count))
+    {
+        let Some(entry) = *entry else {
+            continue;
+        };
+        if let Some(predecessor) = copy.carried {
+            fade_pairs.push(graph::GraphFadeArmPair {
+                successor: entry,
+                predecessor,
+            });
+        }
+        route_copy_rows.push(RouteCopyRow {
+            route: copy.route.clone(),
+            entry,
+        });
+    }
+    route_copy_rows.sort_unstable_by(|left: &RouteCopyRow, right: &RouteCopyRow| {
+        left.route.id.as_str().cmp(right.route.id.as_str())
+    });
+    fade_arm_rows
+        .sort_unstable_by(|left, right| (&left.id, left.owner).cmp(&(&right.id, right.owner)));
     // #1674 R1: the meter readers the control side pairs at promotion, in the swap block's record
     // order, read before the moves go to the plan.
     let meter_pairing: Box<[engine::realtime::ObserverCarry]> = meter_carry
@@ -5694,7 +5693,7 @@ fn prepare_or_project(
         .map(|lead| u32::try_from(lead.lead_samples / u64::from(compiled.quantum().0)))
         .transpose()
         .map_err(|_| resource("host.resource.arithmetic"))?;
-    if let Some(program) = carry_program {
+    let mut plan = if let Some(program) = carry_program {
         let install = |_| graph_failure("host.carry.install");
         let mut carry =
             graph::carry_builder(plan, program).map_err(|_| graph_failure("host.carry.install"))?;
@@ -5737,8 +5736,10 @@ fn prepare_or_project(
                 .prime(blocks, strip_delay_carry.fills, sidechain_fills)
                 .map_err(install)?;
         }
-        plan = carry.seal();
-    }
+        carry.seal()
+    } else {
+        plan.seal()
+    };
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
     // The admission charged the input moves of every strip the input join carries; the
     // restart filter (#1324 D2) may have dropped some since, and the program retains exactly

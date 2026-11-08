@@ -1985,9 +1985,9 @@ struct JumpLengthLane {
     dirty: engine::realtime::DirtyWord,
 }
 
-/// The render half of the plan's jump-length cell (#1639 D2): the one reader. It is not `Clone`
-/// and only [`attach_jump_lengths`] builds it, straight into the executor, so a second reader of
-/// the cell cannot be written.
+/// The render half of the plan's jump-length cell (#1639 D2): the one reader. It is not `Clone` and
+/// only [`GraphBoundPlan::attach_jump_lengths`] builds it, straight into the executor, so a second
+/// reader of the cell cannot be written.
 struct JumpLengthReader {
     lane: std::sync::Arc<JumpLengthLane>,
     reader: engine::realtime::CellReader,
@@ -2055,44 +2055,38 @@ impl GraphJumpLengthProducer {
     }
 }
 
-/// Why [`attach_automation_program`] refused.
+/// Why [`GraphBoundPlan::attach_automation_program`] refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphAutomationProgramError {
-    /// The plan is not a graph plan.
-    NotAGraphPlan,
     /// The plan holds its program already.
     AlreadyAttached,
 }
 
-/// Give a bound graph plan a handle on the stored-automation program its stages and routes
-/// read (#1074), so [`PreparedRenderPlan::retained_bytes`] charges that one shared allocation
-/// once, at the plan: no per-stage or per-route clone charges it. Off the render thread, before
-/// publication; render never reads the handle.
-///
-/// # Errors
-///
-/// [`GraphAutomationProgramError::NotAGraphPlan`] for a plan another executor renders, and
-/// [`GraphAutomationProgramError::AlreadyAttached`] for a second call on one plan.
-pub fn attach_automation_program(
-    plan: &mut PreparedRenderPlan,
-    program: std::sync::Arc<automation::Program>,
-) -> Result<(), GraphAutomationProgramError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphAutomationProgramError::NotAGraphPlan)?;
-    if executor.automation_program.is_some() {
-        return Err(GraphAutomationProgramError::AlreadyAttached);
+impl<S> GraphBoundPlan<S> {
+    /// Give a bound graph plan a handle on the stored-automation program its stages and routes
+    /// read (#1074), so [`PreparedRenderPlan::retained_bytes`] charges that one shared allocation
+    /// once, at the plan: no per-stage or per-route clone charges it. Off the render thread, before
+    /// publication; render never reads the handle.
+    ///
+    /// # Errors
+    ///
+    /// [`GraphAutomationProgramError::AlreadyAttached`] for a second call on one plan.
+    pub fn attach_automation_program(
+        &mut self,
+        program: std::sync::Arc<automation::Program>,
+    ) -> Result<(), GraphAutomationProgramError> {
+        let executor = self.executor();
+        if executor.automation_program.is_some() {
+            return Err(GraphAutomationProgramError::AlreadyAttached);
+        }
+        executor.automation_program = Some(program);
+        Ok(())
     }
-    executor.automation_program = Some(program);
-    Ok(())
 }
 
-/// Why [`attach_jump_lengths`] refused.
+/// Why [`GraphBoundPlan::attach_jump_lengths`] refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphJumpLengthError {
-    /// The plan is not a graph plan.
-    NotAGraphPlan,
     /// The plan has its jump-length cell already.
     AlreadyAttached,
 }
@@ -2115,44 +2109,44 @@ pub fn jump_length_largest_allocation_bytes() -> u64 {
     u64::try_from(shared.max(reader)).unwrap_or(u64::MAX)
 }
 
-/// Give a bound graph plan its jump-length cell (#1639 D1), holding `lengths` from its first
-/// block, and return the cell's one writer. Every write a later one replaces before render reads
-/// it is added to `superseded`, the session's count. Off the render thread, before publication.
-///
-/// The graph reads the cell once per block at block entry, beside the source set's
-/// `begin_block`, and holds the three values for that block (D2). No stage reads the cell itself.
-///
-/// # Errors
-///
-/// [`GraphJumpLengthError::NotAGraphPlan`] for a plan another executor renders, and
-/// [`GraphJumpLengthError::AlreadyAttached`] for a second call on one plan.
-pub fn attach_jump_lengths(
-    plan: &mut PreparedRenderPlan,
-    lengths: GraphJumpLengths,
-    superseded: &engine::realtime::LiveValuesSuperseded,
-) -> Result<GraphJumpLengthProducer, GraphJumpLengthError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphJumpLengthError::NotAGraphPlan)?;
-    if executor.jump_lengths.is_some() {
-        return Err(GraphJumpLengthError::AlreadyAttached);
+impl<S> GraphBoundPlan<S> {
+    /// Give a bound graph plan its jump-length cell (#1639 D1), holding `lengths` from its first
+    /// block, and return the cell's one writer. Every write a later one replaces before render
+    /// reads it is added to `superseded`, the session's count. Off the render thread, before
+    /// publication.
+    ///
+    /// The graph reads the cell once per block at block entry, beside the source set's
+    /// `begin_block`, and holds the three values for that block (D2). No stage reads the cell
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// [`GraphJumpLengthError::AlreadyAttached`] for a second call on one plan.
+    pub fn attach_jump_lengths(
+        &mut self,
+        lengths: GraphJumpLengths,
+        superseded: &engine::realtime::LiveValuesSuperseded,
+    ) -> Result<GraphJumpLengthProducer, GraphJumpLengthError> {
+        let executor = self.executor();
+        if executor.jump_lengths.is_some() {
+            return Err(GraphJumpLengthError::AlreadyAttached);
+        }
+        let lane = std::sync::Arc::new(JumpLengthLane {
+            cell: engine::realtime::LatestCell::new(),
+            dirty: engine::realtime::DirtyWord::new(),
+        });
+        executor.jump_lengths = Some(Box::new(JumpLengthReader {
+            lane: std::sync::Arc::clone(&lane),
+            reader: engine::realtime::CellReader::new(),
+            dirty: engine::realtime::DirtyReader::new(),
+            superseded: superseded.clone(),
+            held: lengths,
+        }));
+        Ok(GraphJumpLengthProducer {
+            lane,
+            writer: engine::realtime::CellWriter::new(),
+        })
     }
-    let lane = std::sync::Arc::new(JumpLengthLane {
-        cell: engine::realtime::LatestCell::new(),
-        dirty: engine::realtime::DirtyWord::new(),
-    });
-    executor.jump_lengths = Some(Box::new(JumpLengthReader {
-        lane: std::sync::Arc::clone(&lane),
-        reader: engine::realtime::CellReader::new(),
-        dirty: engine::realtime::DirtyReader::new(),
-        superseded: superseded.clone(),
-        held: lengths,
-    }));
-    Ok(GraphJumpLengthProducer {
-        lane,
-        writer: engine::realtime::CellWriter::new(),
-    })
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2530,10 +2524,10 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     }
     /// Arm the fade-in of fader lane `lane`, a strip a plan swap adds during playback (issue #1288
     /// D2): each channel the session does not mute becomes a settled mute that
-    /// [`Self::fire_fade_in`] unmutes, and a channel the session mutes arms too, its fire going
-    /// to its prepared mute unless a record before the fire unmutes it (#2080 R1). Called by
-    /// [`install_fade_arms`], off the render thread, before the plan is published. Returns whether
-    /// the lane was armed; the default arms nothing.
+    /// [`Self::fire_fade_in`] unmutes, and a channel the session mutes arms too, its fire going to
+    /// its prepared mute unless a record before the fire unmutes it (#2080 R1). Called by
+    /// [`GraphBoundPlan::install_fade_arms`], off the render thread, before the plan is published.
+    /// Returns whether the lane was armed; the default arms nothing.
     fn arm_fade_in(&mut self, lane: usize) -> bool {
         let _ = lane;
         false
@@ -3261,12 +3255,9 @@ impl PreparedGraphPlan {
     /// The failure carries every input back, which is the point; boxing it would only move the
     /// allocation onto the caller's error path.
     #[allow(clippy::result_large_err)]
-    pub fn bind(
-        self,
-        bindings: GraphRuntimeBindings,
-    ) -> Result<PreparedRenderPlan, GraphBindFailure> {
+    pub fn bind(self, bindings: GraphRuntimeBindings) -> Result<GraphBoundPlan, GraphBindFailure> {
         match self.bind_optional_source_set(bindings, None) {
-            Ok(plan) => Ok(plan),
+            Ok(plan) => Ok(GraphBoundPlan::bound(plan)),
             Err((plan, bindings, _, code)) => Err(GraphBindFailure {
                 plan: Box::new(plan),
                 bindings,
@@ -3281,8 +3272,9 @@ impl PreparedGraphPlan {
         self,
         bindings: GraphRuntimeBindings,
         source_set: GraphPreparedSourceSet,
-    ) -> Result<PreparedRenderPlan, GraphSourceBindFailure> {
+    ) -> Result<GraphBoundPlan, GraphSourceBindFailure> {
         self.bind_optional_source_set(bindings, Some(source_set))
+            .map(GraphBoundPlan::bound)
             .map_err(
                 |(plan, bindings, source_set, code)| GraphSourceBindFailure {
                     plan: Box::new(plan),
@@ -4365,8 +4357,8 @@ struct GraphExecutor {
     /// The compensation-line section of the hand-over (#1283 D1), sorted by predecessor line;
     /// empty (and never allocated) when no line carries.
     carry_delays: Box<[GraphDelayMove]>,
-    /// The identity of every compensation line, read once by [`take_compensation_lines`] right
-    /// after bind and empty afterwards: a plan retains none of it.
+    /// The identity of every compensation line, read once by [`GraphBoundPlan::take_bind_tables`]
+    /// right after bind and empty afterwards: a plan retains none of it.
     compensation_lines: Vec<GraphDelayLine>,
     /// The strip-delay section of the hand-over (#1284 D1), sorted by predecessor line; empty
     /// (and never allocated) when no strip delay line carries.
@@ -4389,7 +4381,7 @@ struct GraphExecutor {
     /// stored mute automation keeps its bytes.
     route_checks: Option<Box<RouteCarryChecks>>,
     /// The identity of every strip delay line and live route, read once by
-    /// [`take_strip_delay_lines`] and [`take_live_routes`] right after bind and empty afterwards:
+    /// [`GraphBoundPlan::take_bind_tables`] right after bind and empty afterwards:
     /// a plan retains none of it.
     bind_identities: runtime::BindIdentities,
     /// The live snapshot `S` of the block about to render (#1504 D1): stored by
@@ -4397,10 +4389,11 @@ struct GraphExecutor {
     /// without its own snapshot is refused and never reads the previous block's.
     live_snapshot: Option<LiveSnapshot>,
     /// The plan's jump-length cell reader (#1639 D2), attached after bind by
-    /// [`attach_jump_lengths`]; `None` for a plan with no cell.
+    /// [`GraphBoundPlan::attach_jump_lengths`]; `None` for a plan with no cell.
     jump_lengths: Option<Box<JumpLengthReader>>,
     /// The fade-in arms of the strips this plan adds during playback (issue #1288 D3), installed
-    /// before publication by [`install_fade_arms`]; empty (and never allocated) when none.
+    /// before publication by [`GraphBoundPlan::install_fade_arms`]; empty (and never allocated)
+    /// when none.
     fade_arms: Box<[FadeArm]>,
     /// How many of [`Self::fade_arms`] have not fired: render tests this one integer per block.
     fade_arms_pending: u32,
@@ -4415,9 +4408,9 @@ struct GraphExecutor {
     /// fired arm's row instead of carrying it.
     fade_fired: GraphFadeArmWatch,
     /// The session's stored-automation program (#1074), attached at bind by
-    /// [`attach_automation_program`] so the plan's retained-bytes walk charges its one shared
-    /// allocation once, whatever number of stages and routes clone it. Control-only: render never
-    /// reads it. `None` for a plan without stored automation.
+    /// [`GraphBoundPlan::attach_automation_program`] so the plan's retained-bytes walk charges its
+    /// one shared allocation once, whatever number of stages and routes clone it. Control-only:
+    /// render never reads it. `None` for a plan without stored automation.
     automation_program: Option<std::sync::Arc<automation::Program>>,
     /// The strip meter level of the next block (#882), stored by
     /// [`PreparedPlanExecutor::set_strip_meter_level`]; `true` until a host sets it. Render skips
@@ -4460,15 +4453,14 @@ impl GraphCarryProgram {
 }
 
 /// Refusal to start a hand-over ([`carry_builder`]), stage one of its sections
-/// ([`GraphCarryBuilder`]) or install a fade table ([`install_fade_arms`]), off the render thread.
+/// ([`GraphCarryBuilder`]) or install a fade table
+/// ([`GraphBoundPlan::install_fade_arms`]), off the render thread.
 ///
 /// No section can be installed before the [`GraphCarryProgram`] that names its predecessor: a
 /// section is only staged on the builder that program started (#2375), so that order needs no
 /// refusal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphCarryInstallError {
-    /// The plan was not bound by this crate.
-    NotAGraphPlan,
     /// The plan has no source set to carry sources, the timeline or a prime's fills into.
     NoSourceSet,
     /// A successor source index is beyond the plan's source set.
@@ -4513,12 +4505,6 @@ pub enum GraphCarryInstallError {
     PrimeFillOutOfRange,
     /// A fill's line appears twice (#1355 D5).
     DuplicatePrimeFill,
-    /// The plan already holds a [`GraphCarryProgram`] (#2302): every section installed after it
-    /// was validated for its predecessor, so a plan names one predecessor for its life.
-    CarryProgramInstalled,
-    /// The plan already holds a fade table (#2302): its lanes are armed, and its fade-arm carry
-    /// indexes it, so a plan installs one table for its life.
-    FadeArmsInstalled,
 }
 
 /// Where one builtin bank lane sits in a bound graph plan: its runtime unit, its bank chain slot
@@ -4543,15 +4529,14 @@ pub struct GraphLaneMove {
     pub predecessor: GraphLaneLocation,
 }
 
-/// Every banked strip input section of a bound graph plan, as `(strip ID, location)` pairs in
-/// program order (issue #1276 D6); `None` for any other plan. Read off the render thread, before
-/// publication: a successor's preparation joins its own lanes with its predecessor's (recorded
-/// when that plan was prepared) by strip ID, never by location.
-pub fn builtin_input_lanes(
-    plan: &mut PreparedRenderPlan,
-) -> Option<Vec<(Box<str>, GraphLaneLocation)>> {
-    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
-    Some(executor.runtime.builtin_input_lanes())
+impl<S> GraphBoundPlan<S> {
+    /// Every banked strip input section of a bound graph plan, as `(strip ID, location)` pairs in
+    /// program order (issue #1276 D6). Read off the render thread, before publication: a
+    /// successor's preparation joins its own lanes with its predecessor's (recorded when that plan
+    /// was prepared) by strip ID, never by location.
+    pub fn builtin_input_lanes(&mut self) -> Vec<(Box<str>, GraphLaneLocation)> {
+        self.executor().runtime.builtin_input_lanes()
+    }
 }
 
 /// One strip stage a successor takes from its predecessor at the swap block: `owner`'s lane
@@ -4583,16 +4568,14 @@ pub struct GraphStripLane {
     pub location: GraphLaneLocation,
 }
 
-/// Every strip stage lane of a bound graph plan, as `(strip ID, lane)` pairs in program order
-/// (issue #1277 D1); `None` for any other plan. A strip's fader and matrix lanes are listed
-/// separately. Read off the render thread, before publication: a successor's preparation joins
-/// its own lanes with its predecessor's (recorded when that plan was prepared) by strip ID, never
-/// by location.
-pub fn builtin_strip_lanes(
-    plan: &mut PreparedRenderPlan,
-) -> Option<Vec<(Box<str>, GraphStripLane)>> {
-    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
-    Some(executor.runtime.builtin_strip_lanes())
+impl<S> GraphBoundPlan<S> {
+    /// Every strip stage lane of a bound graph plan, as `(strip ID, lane)` pairs in program order
+    /// (issue #1277 D1). A strip's fader and matrix lanes are listed separately. Read off the
+    /// render thread, before publication: a successor's preparation joins its own lanes with its
+    /// predecessor's (recorded when that plan was prepared) by strip ID, never by location.
+    pub fn builtin_strip_lanes(&mut self) -> Vec<(Box<str>, GraphStripLane)> {
+        self.executor().runtime.builtin_strip_lanes()
+    }
 }
 
 /// One strip a plan swap adds during playback, whose fader lane fades in from its first played
@@ -4675,10 +4658,10 @@ struct FadeArm {
 enum FadeFire {
     /// The fire reached the target's fader lane or live route op.
     Fired,
-    /// The target resolved to no fader lane ([`runtime::Runtime::fader_lane_mut`]) or live
-    /// route, so nothing fired. Unreachable for an arm [`install_fade_arms`] accepted: it
-    /// resolved the target through the same lookup, a plan's units never change after bind, and
-    /// a lane move only trades two populated lanes of one fader slot of peer chains.
+    /// The target resolved to no fader lane ([`runtime::Runtime::fader_lane_mut`]) or live route,
+    /// so nothing fired. Unreachable for an arm [`GraphBoundPlan::install_fade_arms`] accepted: it
+    /// resolved the target through the same lookup, a plan's units never change after bind, and a
+    /// lane move only trades two populated lanes of one fader slot of peer chains.
     Unresolved,
 }
 
@@ -4711,9 +4694,9 @@ impl FadeFire {
     // REALTIME_POLICY_END
 }
 
-/// The bytes [`install_fade_arms`] and [`GraphCarryBuilder::fade_arms`] retain for a table of `arms`
-/// arms and `pairs` carried ones, for the plan's resource charge (issues #1288 D7, #1392 D8);
-/// `None` on overflow.
+/// The bytes [`GraphBoundPlan::install_fade_arms`] and [`GraphCarryBuilder::fade_arms`] retain for
+/// a table of `arms` arms and `pairs` carried ones, for the plan's resource charge (issues #1288
+/// D7, #1392 D8); `None` on overflow.
 #[must_use]
 pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
     arms.checked_mul(
@@ -4729,51 +4712,14 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
     .and_then(|bytes| u64::try_from(bytes).ok())
 }
 
-/// Arm the fade-in of each strip in `arms` and install the table this plan fires them from
-/// (issue #1288 D2, D3), off the render thread, before publication, once per plan (#2302). Each
-/// lane is armed now, so the plan's first block already renders it muted. A strip
-/// the session mutes, on one channel or both, arms too and gets an entry (#2080): its fire goes
-/// to its prepared mute and ramps nowhere unless a record before the fire unmutes it, as a
-/// muted route's (#2069). Returns, for each arm in order, the index of its entry in the table, or
-/// `None` when it armed nothing: the index a successor's [`GraphFadeArmPair::predecessor`] names
-/// (#1392), and this plan's own [`GraphCarryBuilder::fade_arms`] pairs, staged after this install
-/// (the builder holds the plan), as [`GraphFadeArmPair::successor`]; and the watch render sets
-/// each entry's flag in when it fires.
-///
-/// A source node that is not one of the source set's claims, and every source of a driver that
-/// does not lend its played planes, waits for nothing: that fade fires at the first block.
-///
-/// A route target (#1363 D3) arms its live route op, of either kind: it waits settled at
-/// `[+0.0; 4]`, muted, and fires over `ramp_samples`, a six-word route to its prepared target and
-/// a following route (#2011) to each column's target composed with the curve it hears at the
-/// fire; a record (or a curve event) it reads before the fire retargets the fire only. A route
-/// the session mutes arms too and gets an entry (#2069): its fire goes to its prepared mute and
-/// ramps nowhere unless a record before the fire unmutes it.
-///
-/// Refused, arming nothing, when the plan is not a graph plan, already holds a table (#2302: its
-/// lanes are armed and its fade-arm carry indexes it, so a replacement would leave a lane muted
-/// for a fire no table holds), a fader location does not resolve to a populated lane of a fader
-/// bank (through the lookup render fires through, #2257), a route unit is not a live route's, or a
-/// target repeats. An install that armed nothing holds no table.
-pub fn install_fade_arms(
-    plan: &mut PreparedRenderPlan,
-    arms: Vec<GraphFadeArm>,
-) -> Result<(Vec<Option<u32>>, GraphFadeArmWatch), GraphCarryInstallError> {
-    plan.executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?
-        .install_fade_arms(arms)
-}
-
 impl GraphExecutor {
-    /// [`install_fade_arms`] on a bound executor.
+    /// [`GraphBoundPlan::install_fade_arms`] on a bound executor, which holds no
+    /// table yet: the bound plan's state installs one table for the plan's life (#2302, #2388).
     fn install_fade_arms(
         &mut self,
         arms: Vec<GraphFadeArm>,
     ) -> Result<(Vec<Option<u32>>, GraphFadeArmWatch), GraphCarryInstallError> {
-        if !self.fade_arms.is_empty() {
-            return Err(GraphCarryInstallError::FadeArmsInstalled);
-        }
+        debug_assert!(self.fade_arms.is_empty(), "one fade table a plan");
         for (index, arm) in arms.iter().enumerate() {
             let exists = match arm.target {
                 // #2257: the resolution render fires through ([`FadeFire`]).
@@ -4927,9 +4873,10 @@ impl Eq for GraphFadeArmWatch {}
 /// `predecessor` of that plan's table hands its render state to entry `successor` of this one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphFadeArmPair {
-    /// The entry in this plan's table, as [`install_fade_arms`] returned it.
+    /// The entry in this plan's table, as [`GraphBoundPlan::install_fade_arms`] returned it.
     pub successor: u32,
-    /// The entry in the displaced plan's table, as its own [`install_fade_arms`] returned it.
+    /// The entry in the displaced plan's table, as its own [`GraphBoundPlan::install_fade_arms`]
+    /// returned it.
     pub predecessor: u32,
 }
 
@@ -5098,42 +5045,50 @@ pub struct GraphEffectLane {
     pub kind: EffectLaneKind,
 }
 
-/// Every effect instance of a bound graph plan that a swap can move, as `(strip ID, instance)`
-/// pairs in program order (issues #1279 D1, #1280, #1281); `None` for any other plan. A bank lane
-/// with a live control lane or a lowered bypass is listed with its own kind, and so is a per-node
-/// live-controlled effect. Read off the render thread, before publication: a successor's
-/// preparation joins its own instances with its predecessor's (recorded when that plan was
-/// prepared) by owner key, never by location.
-pub fn bank_effect_lanes(
+impl<S> GraphBoundPlan<S> {
+    /// Every effect instance of a bound graph plan that a swap can move, as `(strip ID, instance)`
+    /// pairs in program order (issues #1279 D1, #1280, #1281). A bank lane with a live control lane
+    /// or a lowered bypass is listed with its own kind, and so is a per-node live-controlled
+    /// effect. Read off the render thread, before publication: a successor's preparation joins its
+    /// own instances with its predecessor's (recorded when that plan was prepared) by owner key,
+    /// never by location.
+    pub fn bank_effect_lanes(&mut self) -> Vec<(Box<str>, GraphEffectLane)> {
+        self.executor().runtime.bank_effect_lanes()
+    }
+}
+
+/// Test-only (#2388): [`GraphBoundPlan::bank_effect_lanes`] of a sealed plan, for evidence that
+/// reads a plan's banks after it rendered; `None` for any other plan. Each row's location, owner
+/// and effect ID are bind's home location for that instance. Its `kind` is the lane's current
+/// occupant's, which a pack can change: `lane_swap_fits` lets a `BypassOnly` and an
+/// `Uncontrolled` lane trade (#2135).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_bank_effect_lanes(
     plan: &mut PreparedRenderPlan,
 ) -> Option<Vec<(Box<str>, GraphEffectLane)>> {
     let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
     Some(executor.runtime.bank_effect_lanes())
 }
 
-/// The bytes [`GraphCarryBuilder::seal`] allocates for the carried slots of the successor lanes
-/// `moves` names (#1633 D1): the part of a carry's charge that depends on the lanes' cell tables.
-/// Read before the install, so preparation admits the carry before it allocates. `None` when the
-/// plan is not a graph plan, a successor site does not resolve, or the sum overflows.
-pub fn effect_carry_slot_bytes(
-    plan: &mut PreparedRenderPlan,
-    moves: &[GraphEffectMove],
-) -> Option<u64> {
-    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
-    moves.iter().try_fold(0_u64, |total, step| {
-        total.checked_add(
-            executor
-                .runtime
-                .effect_site_carry_slot_bytes(step.successor)?,
-        )
-    })
+impl<S> GraphBoundPlan<S> {
+    /// The bytes [`GraphCarryBuilder::seal`] allocates for the carried slots of the successor lanes
+    /// `moves` names (#1633 D1): the part of a carry's charge that depends on the lanes' cell
+    /// tables. Read before the install, so preparation admits the carry before it allocates. `None`
+    /// when a successor site does not resolve or the sum overflows.
+    pub fn effect_carry_slot_bytes(&mut self, moves: &[GraphEffectMove]) -> Option<u64> {
+        let runtime = &mut self.executor().runtime;
+        moves.iter().try_fold(0_u64, |total, step| {
+            total.checked_add(runtime.effect_site_carry_slot_bytes(step.successor)?)
+        })
+    }
 }
 
-/// The effect-section bytes a carry of `moves` lanes with a largest payload of `scratch_bytes`
-/// and `slot_bytes` of carried slots ([`effect_carry_slot_bytes`]) retains in its plan: the move
-/// table, the payload scratch and the slots ([`GraphCarryBuilder::effects`]). Checked arithmetic: `None`
-/// on overflow. The one place the charge is spelled, so preparation's admission and
-/// [`carry_program_retained_bytes`] cannot disagree.
+/// The effect-section bytes a carry of `moves` lanes with a largest payload of `scratch_bytes` and
+/// `slot_bytes` of carried slots ([`GraphBoundPlan::effect_carry_slot_bytes`]) retains in its plan:
+/// the move table, the payload scratch and the slots ([`GraphCarryBuilder::effects`]). Checked
+/// arithmetic: `None` on overflow. The one place the charge is spelled, so preparation's admission
+/// and [`carry_program_retained_bytes`] cannot disagree.
 #[must_use]
 pub fn effect_carry_retained_bytes(
     moves: usize,
@@ -5165,8 +5120,8 @@ pub fn carry_refusal_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
 /// The due fade-arm fires whose target resolved to no fader lane or live route (issue #2257),
 /// each of which left its arm unfired and unreported; saturating. `None` for any other plan.
 ///
-/// Read after render, by whoever holds the plan: [`install_fade_arms`] resolved every target
-/// through the lookup render fires through, so a nonzero count is a defect.
+/// Read after render, by whoever holds the plan: [`GraphBoundPlan::install_fade_arms`] resolved
+/// every target through the lookup render fires through, so a nonzero count is a defect.
 pub fn fade_arm_unresolved_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
     plan.executor_any_mut()?
         .downcast_mut::<GraphExecutor>()
@@ -5180,29 +5135,254 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
         .map(|executor| executor.identity)
 }
 
-/// Start the hand-over this graph plan runs when it displaces its predecessor (#2375): `program`
-/// names that predecessor, and the returned builder takes every other section of the hand-over,
-/// each validated for it, until [`GraphCarryBuilder::seal`] installs them all at once and hands
-/// the plan back.
+/// A graph plan from its bind to its seal (#2388): what [`PreparedGraphPlan::bind`] and
+/// [`PreparedGraphPlan::bind_with_source_set`] return, off the render thread, before publication.
 ///
-/// The builder owns the plan from here to its seal, so the plan cannot render, be published or
-/// take another builder while its hand-over is half assembled, and no section can be installed on
-/// a plan without the program it was validated for: the install order is a type, not a refusal. A
-/// builder dropped unsealed drops its plan with it, so a forgotten seal leaves no plan to use.
-/// Call it before publication, once per plan (#2302).
+/// It is not a [`PreparedRenderPlan`], so it can neither render nor be published. [`Self::seal`],
+/// or the seal of the [`GraphCarryBuilder`] it starts ([`carry_builder`]), is the only way to one,
+/// and outside test-support a sealed plan offers no bind read, attach or install. Its state `S`
+/// names the one-shot steps it has left:
 ///
-/// Refused, handing the plan back as it was ([`GraphCarryRefusal`]), when the plan is not a graph
-/// plan, already holds a program
-/// (#2302: every section was validated for that program's predecessor, so a plan names one
-/// predecessor for its life), has no source set for a program that moves a source or the
-/// timeline, or a successor index is out of range, not vacant or repeated, or a predecessor index
-/// is repeated. Predecessor indices are checked against the predecessor at the swap block, where
-/// an out-of-range index refuses the whole move.
-pub fn carry_builder(
-    mut plan: PreparedRenderPlan,
+/// - [`BindTables`], from bind: it still holds its bind identity tables, which
+///   [`Self::take_bind_tables`] hands out once, by value.
+/// - [`TablesTaken`]: the tables are handed out.
+/// - [`FadeTable`]: [`GraphBoundPlan::install_fade_arms`] installed its fade table,
+///   once; only a builder started in this state stages fade-arm pairs
+///   ([`GraphCarryBuilder::fade_arms`]).
+///
+/// Each step consumes the plan and returns it in the next state, so a second take, a second fade
+/// table or a pair staged before its table is a missing method, never a run-time refusal.
+///
+/// A bound plan renders only once it is sealed (E0599, no `render` on a bound plan):
+///
+/// ```compile_fail,E0599
+/// use engine::realtime::{RenderIo, RenderTime};
+///
+/// fn render_unsealed(mut plan: graph::GraphBoundPlan, io: RenderIo<'_>) {
+///     let _ = plan.render(io, RenderTime { absolute_sample: 0 });
+/// }
+/// ```
+///
+/// The sealed plan renders. This twin differs from the doctest above only by the seal, so a
+/// renamed item or a typo in the shared code turns it red (issue #1422 D2):
+///
+/// ```
+/// use engine::realtime::{RenderIo, RenderTime};
+///
+/// fn render_sealed(plan: graph::GraphBoundPlan, io: RenderIo<'_>) {
+///     let _ = plan.seal().render(io, RenderTime { absolute_sample: 0 });
+/// }
+/// ```
+#[must_use = "a bound plan renders only once it is sealed"]
+pub struct GraphBoundPlan<S = BindTables> {
+    plan: PreparedRenderPlan,
+    state: S,
+}
+
+/// [`GraphBoundPlan`] state from bind: the plan still holds its bind identity tables, and has no
+/// fade table.
+#[derive(Debug)]
+pub struct BindTables;
+
+/// [`GraphBoundPlan`] state once [`GraphBoundPlan::take_bind_tables`] handed its tables out: no
+/// fade table yet.
+#[derive(Debug)]
+pub struct TablesTaken;
+
+/// [`GraphBoundPlan`] state once its fade table is installed: how many entries the table holds,
+/// the range of a [`GraphFadeArmPair::successor`].
+#[derive(Debug)]
+pub struct FadeTable {
+    entries: usize,
+}
+
+/// The [`GraphBoundPlan`] states with no fade table yet, [`BindTables`] and [`TablesTaken`]: the
+/// states [`GraphBoundPlan::install_fade_arms`] takes. Sealed: no other type implements it.
+pub trait NoFadeTable: bound_state::Sealed {}
+
+impl NoFadeTable for BindTables {}
+impl NoFadeTable for TablesTaken {}
+
+/// Seals [`NoFadeTable`].
+mod bound_state {
+    pub trait Sealed {}
+    impl Sealed for super::BindTables {}
+    impl Sealed for super::TablesTaken {}
+}
+
+/// The bind identity tables of one bound graph plan (#1283 D1, #1284 D1, D2), handed out once by
+/// [`GraphBoundPlan::take_bind_tables`]: what a successor's preparation joins with its own tables,
+/// by ID and never by index. The plan retains none of them afterwards.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphBindTables {
+    /// The compensation lines, in line order.
+    pub compensation_lines: Vec<GraphDelayLine>,
+    /// The strip delay lines, in line order.
+    pub strip_delays: Vec<GraphStripDelayLine>,
+    /// The live sends, in unit order.
+    pub live_routes: Vec<GraphLiveRoute>,
+}
+
+/// Shows the state; the plan has no `Debug` form.
+impl<S: core::fmt::Debug> core::fmt::Debug for GraphBoundPlan<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphBoundPlan")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GraphBoundPlan {
+    /// The plan bind just built, which is a graph plan.
+    fn bound(plan: PreparedRenderPlan) -> Self {
+        debug_assert!(
+            plan.executor_any()
+                .is_some_and(|any| any.downcast_ref::<GraphExecutor>().is_some())
+        );
+        Self {
+            plan,
+            state: BindTables,
+        }
+    }
+
+    /// Hand out the plan's bind identity tables, once (#1283 D1, #1284 D1, D2): a successor's
+    /// preparation joins its own tables with its predecessor's (recorded when that plan was
+    /// prepared), and the plan retains none of the identities it handed out.
+    pub fn take_bind_tables(mut self) -> (GraphBoundPlan<TablesTaken>, GraphBindTables) {
+        let executor = self.executor();
+        let tables = GraphBindTables {
+            compensation_lines: core::mem::take(&mut executor.compensation_lines),
+            strip_delays: core::mem::take(&mut executor.bind_identities.strip_delays),
+            live_routes: core::mem::take(&mut executor.bind_identities.live_routes),
+        };
+        (self.with_state(TablesTaken), tables)
+    }
+}
+
+impl<S> GraphBoundPlan<S> {
+    /// Seal the plan without a hand-over: from here it renders and may be published, and offers
+    /// no bind read, attach or install. A successor's hand-over seals with
+    /// [`GraphCarryBuilder::seal`] instead.
+    #[must_use = "the sealed plan is the one that renders"]
+    pub fn seal(self) -> PreparedRenderPlan {
+        self.plan
+    }
+
+    /// The bound graph executor, which bind built.
+    fn executor(&mut self) -> &mut GraphExecutor {
+        carry_executor(&mut self.plan)
+    }
+
+    /// The same plan in its next state.
+    fn with_state<T>(self, state: T) -> GraphBoundPlan<T> {
+        GraphBoundPlan {
+            plan: self.plan,
+            state,
+        }
+    }
+
+    /// The bytes the plan's observation readers retain
+    /// ([`PreparedRenderPlan::observation_retained_bytes`]).
+    #[must_use]
+    pub fn observation_retained_bytes(&self) -> u64 {
+        self.plan.observation_retained_bytes()
+    }
+
+    /// Every heap byte the plan retains ([`PreparedRenderPlan::retained_bytes`]).
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.plan.retained_bytes()
+    }
+}
+
+impl<S: NoFadeTable> GraphBoundPlan<S> {
+    /// Arm the fade-in of each strip in `arms` and install the table this plan fires them from
+    /// (issue #1288 D2, D3), once: the plan comes back as a [`FadeTable`] plan, which has no
+    /// install. A plan that still holds its bind tables keeps them (and can no longer hand them
+    /// out). Each lane is armed now, so the plan's first block already renders it muted. A
+    /// strip the session mutes, on one channel or both, arms too and gets an entry (#2080): its
+    /// fire goes to its prepared mute and ramps nowhere unless a record before the fire unmutes
+    /// it, as a muted route's (#2069). Returns, for each arm in order, the index of its entry in
+    /// the table, or `None` when it armed nothing: the index a successor's
+    /// [`GraphFadeArmPair::predecessor`] names (#1392), and this plan's own
+    /// [`GraphCarryBuilder::fade_arms`] pairs as [`GraphFadeArmPair::successor`]; and the watch
+    /// render sets each entry's flag in when it fires.
+    ///
+    /// A source node that is not one of the source set's claims, and every source of a driver
+    /// that does not lend its played planes, waits for nothing: that fade fires at the first
+    /// block.
+    ///
+    /// A route target (#1363 D3) arms its live route op, of either kind: it waits settled at
+    /// `[+0.0; 4]`, muted, and fires over `ramp_samples`, a six-word route to its prepared target
+    /// and a following route (#2011) to each column's target composed with the curve it hears at
+    /// the fire; a record (or a curve event) it reads before the fire retargets the fire only. A
+    /// route the session mutes arms too and gets an entry (#2069): its fire goes to its prepared
+    /// mute and ramps nowhere unless a record before the fire unmutes it.
+    ///
+    /// An empty `arms` installs nothing: the plan holds no table, and the watch is the empty
+    /// default. An install that armed nothing holds no table either.
+    ///
+    /// # Errors
+    ///
+    /// Refused, arming nothing and handing the plan back as it was, when a fader location does
+    /// not resolve to a populated lane of a fader bank (through the lookup render fires through,
+    /// #2257), a route unit is not a live route's, or a target repeats.
+    #[allow(clippy::type_complexity)]
+    pub fn install_fade_arms(
+        mut self,
+        arms: Vec<GraphFadeArm>,
+    ) -> Result<
+        (
+            GraphBoundPlan<FadeTable>,
+            Vec<Option<u32>>,
+            GraphFadeArmWatch,
+        ),
+        GraphCarryRefusal<S>,
+    > {
+        if arms.is_empty() {
+            return Ok((
+                self.with_state(FadeTable { entries: 0 }),
+                Vec::new(),
+                GraphFadeArmWatch::default(),
+            ));
+        }
+        match self.executor().install_fade_arms(arms) {
+            Ok((entries, watch)) => {
+                let table = self.executor().fade_arms.len();
+                Ok((
+                    self.with_state(FadeTable { entries: table }),
+                    entries,
+                    watch,
+                ))
+            }
+            Err(error) => Err(GraphCarryRefusal {
+                plan: Box::new(self),
+                error,
+            }),
+        }
+    }
+}
+
+/// Start the hand-over this bound graph plan runs when it displaces its predecessor (#2375):
+/// `program` names that predecessor, and the returned builder takes every other section of the
+/// hand-over, each validated for it, until [`GraphCarryBuilder::seal`] installs them all at once
+/// and hands the plan back, sealed.
+///
+/// The builder owns the plan from here to its seal, so the plan cannot take another builder while
+/// its hand-over is half assembled, and no section can be installed on a plan without the program
+/// it was validated for: the install order is a type, not a refusal. A builder dropped unsealed
+/// drops its plan with it, so a forgotten seal leaves no plan to use. A sealed plan is not a
+/// [`GraphBoundPlan`], so a plan names one predecessor for its life (#2302, #2388).
+///
+/// Refused, handing the plan back as it was ([`GraphCarryRefusal`]), when the plan has no source
+/// set for a program that moves a source or the timeline, or a successor index is out of range,
+/// not vacant or repeated, or a predecessor index is repeated. Predecessor indices are checked
+/// against the predecessor at the swap block, where an out-of-range index refuses the whole move.
+pub fn carry_builder<S>(
+    mut plan: GraphBoundPlan<S>,
     program: GraphCarryProgram,
-) -> Result<GraphCarryBuilder, GraphCarryRefusal> {
-    match carry_program_refusal(&mut plan, &program) {
+) -> Result<GraphCarryBuilder<S>, GraphCarryRefusal<S>> {
+    match carry_program_refusal(plan.executor(), &program) {
         None => Ok(GraphCarryBuilder {
             plan,
             program,
@@ -5215,20 +5395,11 @@ pub fn carry_builder(
     }
 }
 
-/// Why [`carry_builder`] refuses `program` on `plan`, or `None` when it starts.
+/// Why [`carry_builder`] refuses `program` on `executor`, or `None` when it starts.
 fn carry_program_refusal(
-    plan: &mut PreparedRenderPlan,
+    executor: &GraphExecutor,
     program: &GraphCarryProgram,
 ) -> Option<GraphCarryInstallError> {
-    let Some(executor) = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-    else {
-        return Some(GraphCarryInstallError::NotAGraphPlan);
-    };
-    if executor.carry.is_some() {
-        return Some(GraphCarryInstallError::CarryProgramInstalled);
-    }
     // A program that moves no source and no timeline needs no source set (issue #1276: a plan
     // may carry only strip state). The timeline lives in the source set (#1641 D1).
     let set = match executor.source_set.as_ref() {
@@ -5258,47 +5429,20 @@ fn carry_program_refusal(
 /// The hand-over of one successor graph plan while it is assembled (#2375), off the render
 /// thread, before publication: its [`GraphCarryProgram`], taken by [`carry_builder`], and the
 /// sections its methods validate for that program, staged here and installed in the plan only by
-/// [`Self::seal`].
+/// [`Self::seal`]. `S` is the state of the [`GraphBoundPlan`] it took: only a builder of a
+/// [`FadeTable`] plan stages fade-arm pairs.
 ///
 /// A section method that refuses leaves every section staged earlier in place. Calling one again
 /// replaces the section it staged before, under the same program.
-///
-/// A plan renders only once its hand-over is whole: the builder owns it, so a render before the
-/// seal, or after a forgotten one, uses a plan the builder took (E0382):
-///
-/// ```compile_fail,E0382
-/// use engine::realtime::{PreparedRenderPlan, RenderIo, RenderTime};
-/// use graph::GraphCarryProgram;
-///
-/// fn hand_over(mut plan: PreparedRenderPlan, program: GraphCarryProgram, io: RenderIo<'_>) {
-///     let carry = graph::carry_builder(plan, program).expect("a graph plan");
-///     let _ = plan.render(io, RenderTime { absolute_sample: 0 });
-///     plan = carry.seal();
-/// }
-/// ```
-///
-/// The sealed plan renders. This twin differs from the doctest above in the order of the last two
-/// calls only, so a renamed item or a typo in the shared code turns it red (issue #1422 D2):
-///
-/// ```
-/// use engine::realtime::{PreparedRenderPlan, RenderIo, RenderTime};
-/// use graph::GraphCarryProgram;
-///
-/// fn hand_over(mut plan: PreparedRenderPlan, program: GraphCarryProgram, io: RenderIo<'_>) {
-///     let carry = graph::carry_builder(plan, program).expect("a graph plan");
-///     plan = carry.seal();
-///     let _ = plan.render(io, RenderTime { absolute_sample: 0 });
-/// }
-/// ```
 #[must_use = "a carry builder installs nothing until it is sealed, and drops its plan unsealed"]
-pub struct GraphCarryBuilder {
-    plan: PreparedRenderPlan,
+pub struct GraphCarryBuilder<S = BindTables> {
+    plan: GraphBoundPlan<S>,
     program: GraphCarryProgram,
     sections: CarrySections,
 }
 
 /// Shows the program; the plan and the staged sections have no `Debug` form.
-impl core::fmt::Debug for GraphCarryBuilder {
+impl<S> core::fmt::Debug for GraphCarryBuilder<S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GraphCarryBuilder")
             .field("program", &self.program)
@@ -5306,28 +5450,27 @@ impl core::fmt::Debug for GraphCarryBuilder {
     }
 }
 
-/// A [`carry_builder`] refusal: why, and the plan, handed back as it was.
-pub struct GraphCarryRefusal {
-    plan: Box<PreparedRenderPlan>,
+/// A [`carry_builder`] or fade table refusal: why, and the bound plan, handed back as it was.
+pub struct GraphCarryRefusal<S = BindTables> {
+    plan: Box<GraphBoundPlan<S>>,
     error: GraphCarryInstallError,
 }
 
-impl GraphCarryRefusal {
-    /// Why the hand-over was refused.
+impl<S> GraphCarryRefusal<S> {
+    /// Why the hand-over or the fade table was refused.
     #[must_use]
     pub const fn error(&self) -> GraphCarryInstallError {
         self.error
     }
 
-    /// The plan, as it was before the refused [`carry_builder`].
-    #[must_use]
-    pub fn into_plan(self) -> PreparedRenderPlan {
+    /// The bound plan, as it was before the refused call.
+    pub fn into_plan(self) -> GraphBoundPlan<S> {
         *self.plan
     }
 }
 
 /// Shows the refusal's error; the plan has no `Debug` form.
-impl core::fmt::Debug for GraphCarryRefusal {
+impl<S> core::fmt::Debug for GraphCarryRefusal<S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GraphCarryRefusal")
             .field("error", &self.error)
@@ -5335,11 +5478,11 @@ impl core::fmt::Debug for GraphCarryRefusal {
     }
 }
 
-/// The graph executor of a plan [`carry_builder`] took, which checked that it is one.
+/// The graph executor of a bound plan, which bind built.
 fn carry_executor(plan: &mut PreparedRenderPlan) -> &mut GraphExecutor {
     plan.executor_any_mut()
         .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .expect("carry_builder takes only a graph plan")
+        .expect("a bound plan is a graph plan")
 }
 
 /// The sections of one hand-over a [`GraphCarryBuilder`] stages until its seal; each is empty
@@ -5363,7 +5506,36 @@ struct CarrySections {
     prime_sidechains: Box<[SidechainFillRow]>,
 }
 
-impl GraphCarryBuilder {
+impl GraphCarryBuilder<FadeTable> {
+    /// Stage the fade-arm section (issue #1392 D3), whose pairs index the fade table the plan
+    /// installed before this builder took it ([`GraphBoundPlan::install_fade_arms`]):
+    /// at the swap block each pair's successor entry takes its predecessor entry's state, so a
+    /// waiting fade keeps waiting with its predecessor's progress, a scheduled one keeps its
+    /// sample, and a fired one stays fired. Only a builder of a [`FadeTable`] plan has this
+    /// section, so no pair can be staged before its table (#2388).
+    ///
+    /// Refused when a successor entry is past the table or an entry repeats. A predecessor entry
+    /// past that plan's table is skipped at the swap block (its successor entry waits afresh).
+    pub fn fade_arms(
+        &mut self,
+        pairs: Vec<GraphFadeArmPair>,
+    ) -> Result<(), GraphCarryInstallError> {
+        for (index, pair) in pairs.iter().enumerate() {
+            if pair.successor as usize >= self.plan.state.entries {
+                return Err(GraphCarryInstallError::StripLaneOutOfRange);
+            }
+            if pairs[..index].iter().any(|earlier| {
+                earlier.successor == pair.successor || earlier.predecessor == pair.predecessor
+            }) {
+                return Err(GraphCarryInstallError::DuplicateStripLane);
+            }
+        }
+        self.sections.fade_arms = pairs.into_boxed_slice();
+        Ok(())
+    }
+}
+
+impl<S> GraphCarryBuilder<S> {
     /// Stage the builtin-input section (issue #1276 D6).
     ///
     /// Refused when a successor location is not a populated lane of a builtin bank whose input
@@ -5376,10 +5548,7 @@ impl GraphCarryBuilder {
         mut moves: Vec<GraphLaneMove>,
     ) -> Result<(), GraphCarryInstallError> {
         for (index, step) in moves.iter().enumerate() {
-            if !carry_executor(&mut self.plan)
-                .runtime
-                .has_input_lane(step.successor)
-            {
+            if !self.plan.executor().runtime.has_input_lane(step.successor) {
                 return Err(GraphCarryInstallError::InputLaneOutOfRange);
             }
             if moves[..index].iter().any(|earlier| {
@@ -5405,7 +5574,9 @@ impl GraphCarryBuilder {
         mut moves: Vec<GraphStripMove>,
     ) -> Result<(), GraphCarryInstallError> {
         for (index, step) in moves.iter().enumerate() {
-            if !carry_executor(&mut self.plan)
+            if !self
+                .plan
+                .executor()
                 .runtime
                 .has_strip_lane(step.owner, step.successor)
             {
@@ -5421,32 +5592,6 @@ impl GraphCarryBuilder {
         }
         moves.sort_unstable_by_key(|step| (step.predecessor, step.owner));
         self.sections.strips = moves.into_boxed_slice();
-        Ok(())
-    }
-
-    /// Stage the fade-arm section (issue #1392 D3), whose pairs index the fade table the plan's
-    /// [`install_fade_arms`] installed before this builder took the plan: at the swap block each
-    /// pair's successor entry takes its predecessor entry's state, so a waiting fade keeps waiting
-    /// with its predecessor's progress, a scheduled one keeps its sample, and a fired one stays
-    /// fired.
-    ///
-    /// Refused when a successor entry is past the table or an entry repeats. A predecessor entry
-    /// past that plan's table is skipped at the swap block (its successor entry waits afresh).
-    pub fn fade_arms(
-        &mut self,
-        pairs: Vec<GraphFadeArmPair>,
-    ) -> Result<(), GraphCarryInstallError> {
-        for (index, pair) in pairs.iter().enumerate() {
-            if pair.successor as usize >= carry_executor(&mut self.plan).fade_arms.len() {
-                return Err(GraphCarryInstallError::StripLaneOutOfRange);
-            }
-            if pairs[..index].iter().any(|earlier| {
-                earlier.successor == pair.successor || earlier.predecessor == pair.predecessor
-            }) {
-                return Err(GraphCarryInstallError::DuplicateStripLane);
-            }
-        }
-        self.sections.fade_arms = pairs.into_boxed_slice();
         Ok(())
     }
 
@@ -5468,7 +5613,7 @@ impl GraphCarryBuilder {
         mut moves: Vec<GraphEffectMove>,
         scratch_bytes: u64,
     ) -> Result<(), GraphCarryInstallError> {
-        let runtime = &mut carry_executor(&mut self.plan).runtime;
+        let runtime = &mut self.plan.executor().runtime;
         let mut scratch = scratch_bytes;
         for (index, step) in moves.iter().enumerate() {
             if !runtime.has_effect_site(step.successor) {
@@ -5506,7 +5651,9 @@ impl GraphCarryBuilder {
         moves: Vec<GraphObserverMove>,
         joins: Vec<GraphObserverJoin>,
     ) -> Result<(), GraphCarryInstallError> {
-        let kinds: BTreeMap<GraphObserverLocation, ObserverKind> = carry_executor(&mut self.plan)
+        let kinds: BTreeMap<GraphObserverLocation, ObserverKind> = self
+            .plan
+            .executor()
             .runtime
             .observer_rows()
             .into_iter()
@@ -5570,7 +5717,9 @@ impl GraphCarryBuilder {
                 return Err(GraphCarryInstallError::ObserverOutOfRange);
             };
             if effects[effect_move].successor != step.successor
-                || !carry_executor(&mut self.plan)
+                || !self
+                    .plan
+                    .executor()
                     .runtime
                     .has_observation_lane(step.successor)
             {
@@ -5603,7 +5752,7 @@ impl GraphCarryBuilder {
         let mut successors = BTreeSet::new();
         let mut predecessors = BTreeSet::new();
         for step in &moves {
-            if step.successor as usize >= carry_executor(&mut self.plan).runtime.delays.len() {
+            if step.successor as usize >= self.plan.executor().runtime.delays.len() {
                 return Err(GraphCarryInstallError::DelayLineOutOfRange);
             }
             if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
@@ -5628,7 +5777,7 @@ impl GraphCarryBuilder {
         let mut successors = BTreeSet::new();
         let mut predecessors = BTreeSet::new();
         for step in &moves {
-            if step.successor as usize >= carry_executor(&mut self.plan).runtime.track_delays.len()
+            if step.successor as usize >= self.plan.executor().runtime.track_delays.len()
                 || step.lanes == 0
                 || step.lanes & !(STRIP_DELAY_LEFT | STRIP_DELAY_RIGHT) != 0
             {
@@ -5652,10 +5801,7 @@ impl GraphCarryBuilder {
         let mut successors = BTreeSet::new();
         let mut predecessors = BTreeSet::new();
         for step in &moves {
-            if !carry_executor(&mut self.plan)
-                .runtime
-                .is_live_route(step.successor)
-            {
+            if !self.plan.executor().runtime.is_live_route(step.successor) {
                 return Err(GraphCarryInstallError::RouteOutOfRange);
             }
             if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
@@ -5704,7 +5850,7 @@ impl GraphCarryBuilder {
         claims: Vec<GraphClaimFill>,
         sidechains: Vec<GraphSidechainFill>,
     ) -> Result<(), GraphCarryInstallError> {
-        let executor = carry_executor(&mut self.plan);
+        let executor = self.plan.executor();
         let runtime = &executor.runtime;
         let Some(set) = executor.source_set.as_ref() else {
             return Err(GraphCarryInstallError::NoSourceSet);
@@ -5774,10 +5920,11 @@ impl GraphCarryBuilder {
     #[must_use = "the sealed plan is the one that renders"]
     pub fn seal(self) -> PreparedRenderPlan {
         let Self {
-            mut plan,
+            plan,
             program,
             sections,
         } = self;
+        let mut plan = plan.plan;
         let executor = carry_executor(&mut plan);
         let CarrySections {
             inputs,
@@ -5969,13 +6116,14 @@ pub fn observer_carry_retained_bytes(moves: usize, joins: usize, taps: usize) ->
     u64::try_from(bytes).ok()
 }
 
-/// Every observer of a bound graph plan a swap can carry (those that answer
-/// [`GraphRuntimeObserver::carry_kind`]), in program order (#1327 D2); `None` for any other plan.
-/// Read off the render thread, before publication: a successor's preparation joins its own rows
-/// with its predecessor's (recorded when that plan was prepared) by owner key, never by location.
-pub fn observer_rows(plan: &mut PreparedRenderPlan) -> Option<Vec<GraphObserverRow>> {
-    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
-    Some(executor.runtime.observer_rows())
+impl<S> GraphBoundPlan<S> {
+    /// Every observer of a bound graph plan a swap can carry (those that answer
+    /// [`GraphRuntimeObserver::carry_kind`]), in program order (#1327 D2). Read off the render
+    /// thread, before publication: a successor's preparation joins its own rows with its
+    /// predecessor's (recorded when that plan was prepared) by owner key, never by location.
+    pub fn observer_rows(&mut self) -> Vec<GraphObserverRow> {
+        self.executor().runtime.observer_rows()
+    }
 }
 
 /// One compensation line of a bound graph plan, named by the edge it delays (#1283 D1): what a
@@ -6082,15 +6230,6 @@ fn compensation_lines_of(
         .collect()
 }
 
-/// The compensation lines of a bound graph plan, in line order (#1283 D1); `None` for any other
-/// plan, and empty on a second call. Read once, off the render thread, right after bind: a
-/// successor's preparation joins its own lines with its predecessor's (recorded when that plan
-/// was prepared), and a plan retains none of the identities it handed out.
-pub fn take_compensation_lines(plan: &mut PreparedRenderPlan) -> Option<Vec<GraphDelayLine>> {
-    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
-    Some(core::mem::take(&mut executor.compensation_lines))
-}
-
 /// The bytes a compensation-line section of `moves` lines retains in its plan (#1283): its move
 /// table. `None` on overflow. The one place the charge is spelled, so preparation's admission and
 /// [`carry_program_retained_bytes`] cannot disagree.
@@ -6177,23 +6316,6 @@ pub struct GraphRouteMove {
     /// Whether the predecessor's row is a following route ([`GraphLiveRoute::following`]): the
     /// move then gets a slot in the section's side table (#1652 D3, MINOR-3).
     pub predecessor_follows: bool,
-}
-
-/// The strip delay lines of a bound graph plan, in line order (#1284 D1); `None` for any other
-/// plan, and empty on a second call. Read once, off the render thread, right after bind: a
-/// successor's preparation joins its own lines with its predecessor's (recorded when that plan was
-/// prepared), and a plan retains none of the identities it handed out.
-pub fn take_strip_delay_lines(plan: &mut PreparedRenderPlan) -> Option<Vec<GraphStripDelayLine>> {
-    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
-    Some(core::mem::take(&mut executor.bind_identities.strip_delays))
-}
-
-/// The live sends of a bound graph plan, in unit order (#1284 D2); `None` for any other plan, and
-/// empty on a second call. Read once, off the render thread, right after bind, as
-/// [`take_strip_delay_lines`].
-pub fn take_live_routes(plan: &mut PreparedRenderPlan) -> Option<Vec<GraphLiveRoute>> {
-    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
-    Some(core::mem::take(&mut executor.bind_identities.live_routes))
 }
 
 /// One source-claim line a warm successor fills at its adoption block (#1355 D5, lemma L2): the
@@ -7030,12 +7152,12 @@ impl GraphExecutor {
 impl PreparedPlanExecutor for GraphExecutor {
     /// The bound graph's heap (#1074): the runtime ([`runtime::Runtime::retained_bytes`]), the
     /// source set (claims and the driver's box and heap), the dispatch and carry tables, the
-    /// observer section, the bind-identity vectors (at capacity), the jump-length reader's box
-    /// and cell `Arc`, the fade arms, and the stored-automation program's shared `Arc` in full,
-    /// once ([`attach_automation_program`]). Not charged: the fired flags' `Arc`, which the
-    /// host's plan inventory holds and charges (`GraphFadeArmWatch::heap_bytes`) and frees after
-    /// the plan, and each control lane's `superseded` counter, the host's, shared by every lane
-    /// and outliving the plan.
+    /// observer section, the bind-identity vectors (at capacity), the jump-length reader's box and
+    /// cell `Arc`, the fade arms, and the stored-automation program's shared `Arc` in full, once
+    /// ([`GraphBoundPlan::attach_automation_program`]). Not charged: the fired flags' `Arc`, which
+    /// the host's plan inventory holds and charges (`GraphFadeArmWatch::heap_bytes`) and frees
+    /// after the plan, and each control lane's `superseded` counter, the host's, shared by every
+    /// lane and outliving the plan.
     fn retained_bytes(&self) -> u64 {
         use engine::realtime::retained::{arc, boxed, slice, str, vec};
         let program = self.automation_program.as_ref().map_or(0, |program| {
@@ -8777,10 +8899,12 @@ mod tests {
                 let retry = match source {
                     Some(source) => returned
                         .bind_with_source_set(bindings, source)
-                        .unwrap_or_else(|failure| panic!("retry: {}", failure.code)),
+                        .unwrap_or_else(|failure| panic!("retry: {}", failure.code))
+                        .seal(),
                     None => returned
                         .bind(bindings)
-                        .unwrap_or_else(|failure| panic!("retry: {}", failure.code)),
+                        .unwrap_or_else(|failure| panic!("retry: {}", failure.code))
+                        .seal(),
                 };
                 assert_eq!(retry.bank_route_folds(), 4);
                 assert_eq!(
@@ -8905,7 +9029,8 @@ mod tests {
             .extend([excluded.clone(), excluded]);
         let bound = bank_plan
             .bind(bank_bindings)
-            .unwrap_or_else(|failure| panic!("bank-excluded duplicate rejected: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("bank-excluded duplicate rejected: {}", failure.code))
+            .seal();
         assert_eq!(
             render_three_blocks(bound).0.map(f32::to_bits),
             [10.0, -15.0, 20.0, -30.0, 30.0, -45.0].map(f32::to_bits)
@@ -8948,20 +9073,20 @@ mod tests {
 
     #[test]
     fn binding_coverage_preserves_validation_and_ownership() {
-        let assert_ok = |result: Result<PreparedRenderPlan, GraphBindFailure>| match result {
+        let assert_ok = |result: Result<GraphBoundPlan, GraphBindFailure>| match result {
             Ok(_) => {}
             Err(failure) => panic!("unexpected bind failure: {}", failure.code),
         };
-        let assert_source_ok =
-            |result: Result<PreparedRenderPlan, GraphSourceBindFailure>| match result {
-                Ok(_) => {}
-                Err(failure) => panic!("unexpected source bind failure: {}", failure.code),
-            };
-        let source_err = |result: Result<PreparedRenderPlan, GraphSourceBindFailure>| match result {
+        let assert_source_ok = |result: Result<GraphBoundPlan, GraphSourceBindFailure>| match result
+        {
+            Ok(_) => {}
+            Err(failure) => panic!("unexpected source bind failure: {}", failure.code),
+        };
+        let source_err = |result: Result<GraphBoundPlan, GraphSourceBindFailure>| match result {
             Ok(_) => panic!("unexpected successful source bind"),
             Err(failure) => failure,
         };
-        let bind_err = |result: Result<PreparedRenderPlan, GraphBindFailure>| match result {
+        let bind_err = |result: Result<GraphBoundPlan, GraphBindFailure>| match result {
             Ok(_) => panic!("unexpected successful bind"),
             Err(failure) => failure,
         };
@@ -9150,7 +9275,8 @@ mod tests {
         let scalar = render_three_blocks(
             scalar_graph
                 .bind(scalar_bindings)
-                .unwrap_or_else(|failure| panic!("scalar reference bind: {}", failure.code)),
+                .unwrap_or_else(|failure| panic!("scalar reference bind: {}", failure.code))
+                .seal(),
         );
 
         let (bank_graph, bank_bindings, bank_observers) =
@@ -9166,7 +9292,8 @@ mod tests {
         let banked = render_three_blocks(
             bank_graph
                 .bind(bank_bindings)
-                .unwrap_or_else(|failure| panic!("banked bind: {}", failure.code)),
+                .unwrap_or_else(|failure| panic!("banked bind: {}", failure.code))
+                .seal(),
         );
 
         let analytic = [10.0, -15.0, 20.0, -30.0, 30.0, -45.0];
@@ -9192,7 +9319,7 @@ mod tests {
         bindings.observers.clear();
         let failure = match invalid.bind(bindings) {
             Ok(plan) => {
-                let (pcm, _) = render_three_blocks(plan);
+                let (pcm, _) = render_three_blocks(plan.seal());
                 assert_eq!(
                     [pcm[0], pcm[2], pcm[4]],
                     [10.0, 20.0, 30.0],
@@ -9208,7 +9335,8 @@ mod tests {
         restore_level_major(&mut recovered);
         let recovered = recovered
             .bind(failure.bindings)
-            .unwrap_or_else(|retry| panic!("scalar ownership retry: {}", retry.code));
+            .unwrap_or_else(|retry| panic!("scalar ownership retry: {}", retry.code))
+            .seal();
         assert_eq!(
             render_three_blocks(recovered).0.map(f32::to_bits),
             [10.0, -15.0, 20.0, -30.0, 30.0, -45.0].map(f32::to_bits)
@@ -9226,7 +9354,7 @@ mod tests {
         assert_eq!(scalar_failure.code, "graph.scheduler.layout");
         let mut scalar = *scalar_failure.plan;
         scalar.sequential_schedule.swap(0, 1);
-        scalar
+        let _ = scalar
             .bind(scalar_failure.bindings)
             .unwrap_or_else(|failure| panic!("scalar retry: {}", failure.code));
 
@@ -9242,7 +9370,7 @@ mod tests {
         assert_eq!(source_failure.source_set.claims().len(), 1);
         let mut source_graph = *source_failure.plan;
         source_graph.sequential_schedule.swap(0, 1);
-        source_graph
+        let _ = source_graph
             .bind_with_source_set(source_failure.bindings, source_failure.source_set)
             .unwrap_or_else(|failure| panic!("scalar source retry: {}", failure.code));
 
@@ -9353,7 +9481,8 @@ mod tests {
 
         let mut plan = *failure.plan;
         set_levels(&mut plan, &[&[&live, &dead], &[&output]]);
-        plan.bind_with_source_set(failure.bindings, failure.source_set)
+        let _ = plan
+            .bind_with_source_set(failure.bindings, failure.source_set)
             .unwrap_or_else(|failure| panic!("disjoint source slots: {}", failure.code));
     }
 
@@ -9468,7 +9597,7 @@ mod tests {
                 observers: bindings.observers,
             };
             let mut plan = match plan.bind(bindings) {
-                Ok(plan) => plan,
+                Ok(plan) => plan.seal(),
                 Err(failure) => panic!("identity bindings rejected: {}", failure.code),
             };
             let mut samples = [f32::NAN; 2];
@@ -9510,7 +9639,7 @@ mod tests {
     fn compile_request_plan_id_survives_binding() {
         let (plan, bindings, _) = binding_plan();
         let mut plan = match plan.bind(bindings) {
-            Ok(plan) => plan,
+            Ok(plan) => plan.seal(),
             Err(_) => panic!("exact bindings rejected"),
         };
         let mut samples = [1.0_f32; 2];
@@ -10277,10 +10406,12 @@ mod tests {
 
         let mut aliased_plan = aliased
             .bind(aliased_bindings)
-            .unwrap_or_else(|failure| panic!("aliased bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("aliased bind: {}", failure.code))
+            .seal();
         let mut materialised_plan = materialised
             .bind(materialised_bindings)
-            .unwrap_or_else(|failure| panic!("materialised bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("materialised bind: {}", failure.code))
+            .seal();
         assert_eq!(
             render_blocks(&mut aliased_plan, FRAMES, 4),
             render_blocks(&mut materialised_plan, FRAMES, 4),
@@ -10309,7 +10440,8 @@ mod tests {
             build(true, Some((Arc::clone(&calls), Arc::clone(&sink))));
         let mut observed_plan = observed
             .bind(observed_bindings)
-            .unwrap_or_else(|failure| panic!("observed bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("observed bind: {}", failure.code))
+            .seal();
         let observed_bits = render_blocks(&mut observed_plan, FRAMES, 4);
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -10378,7 +10510,8 @@ mod tests {
             }
             let mut sequential = sequential_plan
                 .bind(sequential_bindings)
-                .unwrap_or_else(|failure| panic!("seed {seed} sequential bind: {}", failure.code));
+                .unwrap_or_else(|failure| panic!("seed {seed} sequential bind: {}", failure.code))
+                .seal();
             let bits = render_blocks(&mut sequential, FRAMES, BLOCKS);
             assert!(
                 bits.iter().any(|value| *value != 0),
@@ -10573,7 +10706,8 @@ mod tests {
                 nodes: bindings,
                 observers: Vec::new(),
             })
-            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .seal();
         let bits = render_blocks(&mut render, FRAMES, BLOCKS);
 
         // The scalar oracle: the D9 sum in route-ID order (r0, r1, r2), then the delay.
@@ -10699,7 +10833,8 @@ mod tests {
             .collect();
         let mut bound = plan
             .bind(bindings)
-            .unwrap_or_else(|failure| panic!("permanent bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("permanent bind: {}", failure.code))
+            .seal();
         runtime::test_only_observe_calls_reset(skip_disabled);
         test_only_observation_dispatch_reset();
         test_only_meter_input_reset(false);
@@ -11192,7 +11327,7 @@ mod tests {
             observers: Vec::new(),
         };
         match graph.bind(bindings) {
-            Ok(plan) => plan,
+            Ok(plan) => plan.seal(),
             Err(failure) => panic!("bindings: {}", failure.code),
         }
     }
@@ -11573,7 +11708,7 @@ mod tests {
         assert_eq!(&block[4..], &[0.0, -2.0, -4.0, -6.0]);
     }
 
-    fn sidechain_pdc_plan(delay_main: bool) -> PreparedRenderPlan {
+    fn sidechain_pdc_plan(delay_main: bool) -> GraphBoundPlan {
         let main_input = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse("main-path").expect("ID"),
             stage: TrackStage::Input,
@@ -11840,38 +11975,10 @@ mod tests {
         assert!(carry_builder(refused.into_plan(), program(false)).is_ok());
     }
 
-    /// Issue #2302: a plan's carry program is installed once. A second program, naming another
-    /// predecessor, is refused and the first stays.
-    ///
-    /// Red if a second program replaces the first: every section installed after the first was
-    /// validated for its predecessor, and the swap block would run them against the other one.
-    #[test]
-    fn install_refuses_a_second_carry_program() {
-        let plan = sidechain_pdc_plan(false);
-        let program = |predecessor| GraphCarryProgram {
-            predecessor,
-            sources: Box::new([]),
-            timeline: false,
-        };
-        let plan = carry_builder(plan, program(1))
-            .expect("the first program")
-            .seal();
-        let second = carry_builder(plan, program(2)).expect_err("a second program");
-        let error = second.error();
-        let mut plan = second.into_plan();
-        let installed = plan
-            .executor_any_mut()
-            .and_then(|any| any.downcast_mut::<GraphExecutor>())
-            .and_then(|executor| executor.carry.as_ref())
-            .map(|program| program.predecessor);
-        assert_eq!(installed, Some(1), "the first program stays");
-        assert_eq!(error, GraphCarryInstallError::CarryProgramInstalled);
-    }
-
     #[test]
     fn faster_main_and_faster_sidechain_align_on_their_typed_ports() {
         for delay_main in [true, false] {
-            let mut plan = sidechain_pdc_plan(delay_main);
+            let mut plan = sidechain_pdc_plan(delay_main).seal();
             let mut samples = [0.0_f32; 8];
             let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
             plan.render(
@@ -12136,7 +12243,7 @@ mod tests {
             observers: Vec::new(),
         };
         match graph.bind(bindings) {
-            Ok(plan) => plan,
+            Ok(plan) => plan.seal(),
             Err(_) => panic!("bindings"),
         }
     }

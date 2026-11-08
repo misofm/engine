@@ -11,8 +11,8 @@ use effect_contract::LatencySamples;
 use engine::{
     QuantumFrames, SampleRateHz,
     realtime::{
-        CarryOutcome, PlanExchangeConfig, PlanarBufferMut, PreparedRenderPlan, RealtimePlanOwner,
-        RenderEnvelope, RenderError, RenderIo, SwapOutcome, plan_exchange,
+        CarryOutcome, PlanExchangeConfig, PlanarBufferMut, RealtimePlanOwner, RenderEnvelope,
+        RenderError, RenderIo, SwapOutcome, plan_exchange,
     },
 };
 use graph::*;
@@ -102,7 +102,7 @@ fn envelope() -> RenderEnvelope {
 }
 
 /// One track input routed to the output; the input is claimed by a `CarriedSlot` source set.
-fn bound(slot: Option<Box<[f32]>>) -> PreparedRenderPlan {
+fn bound(slot: Option<Box<[f32]>>) -> GraphBoundPlan {
     let input = GraphNodeId::TrackStage {
         track_id: StableGraphId::parse("track").expect("ID"),
         stage: TrackStage::Input,
@@ -237,7 +237,7 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
     let _restore = RestoreMode(mode());
     set_mode(Mode::Count);
 
-    let mut predecessor = bound(Some(vec![0.75; 64].into_boxed_slice()));
+    let mut predecessor = bound(Some(vec![0.75; 64].into_boxed_slice())).seal();
     let identity = plan_identity(&mut predecessor).expect("graph plan");
     let successor = carry_builder(
         bound(None),

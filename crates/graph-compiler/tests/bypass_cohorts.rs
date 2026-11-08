@@ -400,6 +400,7 @@ fn render_prepared(
             observers,
         })
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+        .seal()
         .plan;
     let mut output = Vec::new();
     let mut pcm = vec![0.0_f32; frames * 2];

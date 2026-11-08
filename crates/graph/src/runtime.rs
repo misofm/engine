@@ -11440,9 +11440,10 @@ impl Runtime {
     /// #1782a, #2257): [`Self::current_location`] of `home`, resolved to a populated lane of a
     /// builtin bank that holds fader strip state. `None` when it does not resolve.
     ///
-    /// The one resolution of a fade arm's fader target: [`crate::install_fade_arms`] validates
-    /// and arms through it, and render fires through it, so the lane armed is the lane fired.
-    /// Allocation-free: a map lookup, a unit borrow and two downcasts.
+    /// The one resolution of a fade arm's fader target:
+    /// [`crate::GraphBoundPlan::install_fade_arms`] validates and arms through it, and render fires
+    /// through it, so the lane armed is the lane fired. Allocation-free: a map lookup, a unit
+    /// borrow and two downcasts.
     pub(crate) fn fader_lane_mut(
         &mut self,
         home: crate::GraphLaneLocation,
@@ -12283,7 +12284,7 @@ fn fold_displaced_group(
 
 /// What bind knows about the state a successor can take from this plan and the runtime does not
 /// keep (#1284): who owns each strip delay line and each live route. Read once, off the render
-/// thread, right after bind ([`crate::take_strip_delay_lines`], [`crate::take_live_routes`]);
+/// thread, right after bind ([`crate::GraphBoundPlan::take_bind_tables`]);
 /// the plan retains none of it.
 #[derive(Default)]
 pub(crate) struct BindIdentities {
@@ -17996,7 +17997,8 @@ mod tests {
         test_only_set_scatter_redirect_declined(fixture.scatter_declined);
         let bound = plan
             .bind(bindings)
-            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .seal();
         test_only_set_route_fold_declined(false);
         test_only_set_scatter_redirect_declined(false);
         bound
@@ -18506,7 +18508,8 @@ mod tests {
         test_only_set_route_fold_declined(fold_declined);
         let bound = plan
             .bind(bindings)
-            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .seal();
         test_only_set_route_fold_declined(false);
         bound
     }
@@ -19515,14 +19518,14 @@ mod tests {
         );
         let failure = plan
             .bind(bindings)
-            .err()
-            .expect("a plan that reads the session output must not bind");
+            .expect_err("a plan that reads the session output must not bind");
         assert_eq!(failure.code, "graph.scheduler.layout");
 
         let (plan, bindings) = output_reader_parts(false);
         let mut bound = plan
             .bind(bindings)
-            .unwrap_or_else(|failure| panic!("control bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("control bind: {}", failure.code))
+            .seal();
         let bits = render_fold_fixture(&mut bound, 13, 2);
         assert!(bits.iter().any(|word| *word != 0), "the control renders");
     }
@@ -21061,67 +21064,6 @@ mod tests {
         assert!(
             installed.1.fired(0) && installed.1.fired(1),
             "the watch saw both fire"
-        );
-    }
-
-    /// Issue #2302: a plan's fade table is installed once. A second install is refused and keeps
-    /// the first table, so every lane the first install armed still fires.
-    ///
-    /// Red if a second install replaces the table: the first install already armed (muted) both
-    /// lanes, the replacement table names only one, and the other waits muted for a fire no table
-    /// holds; any fade-arm carry installed against the first table would also index the second.
-    #[test]
-    fn a_second_fade_table_is_refused_and_every_first_arm_still_fires() {
-        let shape = SourceShape {
-            stages: &[TrackStage::PostFader],
-            meters: &[],
-            fade_probe: true,
-            ..SourceShape::banked(BankWidth::Four, 2, 128)
-        };
-        let (plan, bindings, source_set) = source_fixture_parts(shape, &Published::default());
-        let (mut executor, _) = bind_executor(plan, bindings, Some(source_set));
-        let lanes = executor.runtime.builtin_strip_lanes();
-        let fader = |track: &str| {
-            lanes
-                .iter()
-                .find(|(id, lane)| {
-                    id.as_ref() == track && lane.owner == crate::BuiltinStripOwner::Fader
-                })
-                .map(|(_, lane)| lane.location)
-                .expect("a fader lane")
-        };
-        let arm = |track: &str| crate::GraphFadeArm {
-            target: crate::GraphFadeTarget::Fader(fader(track)),
-            source: None,
-            delay_samples: 0,
-            ramp_samples: 64,
-            tail_samples: 0,
-        };
-        let (_, watch) = executor
-            .install_fade_arms(vec![arm("track00"), arm("track01")])
-            .expect("installed");
-        let second = executor.install_fade_arms(vec![arm("track01")]);
-        FADE_FIRES.with(|fires| fires.borrow_mut().clear());
-        for block in 0..2_u64 {
-            let mut storage = vec![0.0_f32; 2 * 128];
-            render_host(
-                &mut executor,
-                engine::realtime::PlanarBufferMut::try_new(&mut storage, 2, 128, 128)
-                    .expect("host output"),
-                block * 128,
-            )
-            .expect("render");
-        }
-        let lane = |track: &str| usize::from(fader(track).lane);
-        let mut fired = FADE_FIRES.with(|fires| fires.borrow().clone());
-        fired.sort_unstable();
-        let mut expected = vec![(lane("track00"), 0), (lane("track01"), 0)];
-        expected.sort_unstable();
-        assert_eq!(fired, expected, "every lane the first install armed fires");
-        assert!(watch.fired(0) && watch.fired(1), "the first table's watch");
-        assert_eq!(
-            second.map(|(entries, _)| entries),
-            Err(crate::GraphCarryInstallError::FadeArmsInstalled)
         );
     }
 

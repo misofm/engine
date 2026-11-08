@@ -324,7 +324,8 @@ fn render_arm(
 ) -> Rendered {
     let frames = artifact.envelope().quantum.0 as usize;
     let blocks = blocks.max(artifact.report().output_latency.0.div_ceil(frames as u64) + 4);
-    let (mut plan, sinks) = bind_arm(artifact, tracks, forced_off);
+    let (plan, sinks) = bind_arm(artifact, tracks);
+    let mut plan = arm(plan.seal(), tracks, forced_off);
     let mut output = Vec::new();
     let mut pcm = vec![0.0_f32; frames * 2];
     for block in 0..blocks {
@@ -361,20 +362,21 @@ fn render_arm(
     }
 }
 
-/// Bind `artifact` as [`render_arm`] does, armed (or forced off) and not yet rendered: the plan and
-/// each track's post-matrix recorder.
+/// The index of track `chNN`.
+fn index_of(track_id: &str) -> usize {
+    track_id
+        .strip_prefix("ch")
+        .and_then(|index| index.parse().ok())
+        .expect("chNN")
+}
+
+/// Bind `artifact` as [`render_arm`] does, not yet sealed ([`arm`]) or rendered: the bound plan
+/// and each track's post-matrix recorder.
 fn bind_arm(
     artifact: PreparedGraphBuiltinsArtifact,
     tracks: &[TrackShape],
-    forced_off: bool,
-) -> (PreparedRenderPlan, Vec<BitSink>) {
+) -> (graph::GraphBoundPlan, Vec<BitSink>) {
     let envelope = artifact.envelope();
-    let index_of = |track_id: &str| -> usize {
-        track_id
-            .strip_prefix("ch")
-            .and_then(|index| index.parse().ok())
-            .expect("chNN")
-    };
     let nodes = artifact
         .external_binding_nodes()
         .map(|node| {
@@ -406,7 +408,7 @@ fn bind_arm(
             )
         })
         .collect();
-    let mut plan = artifact
+    let plan = artifact
         .into_bound(GraphRuntimeBindings {
             envelope,
             nodes,
@@ -414,9 +416,18 @@ fn bind_arm(
         })
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
         .plan;
+    (plan, sinks)
+}
+
+/// Arm the sealed `plan`'s mono collapse for `tracks`, or force it off.
+fn arm(
+    mut plan: PreparedRenderPlan,
+    tracks: &[TrackShape],
+    forced_off: bool,
+) -> PreparedRenderPlan {
     plan.arm_mono_collapse(&|track: &str| !tracks[index_of(track)].feed.stereo);
     plan.force_mono_collapse_off(forced_off);
-    (plan, sinks)
+    plan
 }
 
 /// Every track's bits, and the output's, are the oracle's; `what` names the case.
@@ -1992,24 +2003,18 @@ fn a_swap_carries_a_per_node_effects_agreement_with_its_state() {
     let registry = double_registry(Role::Episode);
     // Each track's post-matrix bits over the predecessor's blocks, then the successor's.
     let run = |forced_off: bool| -> Vec<Vec<u32>> {
-        let (mut before, before_sinks) = bind_arm(
-            compile_with_live_delays(&model, &registry),
-            &tracks,
-            forced_off,
-        );
-        let (mut after, after_sinks) = bind_arm(
-            compile_with_live_delays(&model, &registry),
-            &tracks,
-            forced_off,
-        );
-        let lanes = |plan: &mut PreparedRenderPlan| {
-            graph::bank_effect_lanes(plan)
-                .expect("a graph plan")
+        let (mut before, before_sinks) =
+            bind_arm(compile_with_live_delays(&model, &registry), &tracks);
+        let (mut after, after_sinks) =
+            bind_arm(compile_with_live_delays(&model, &registry), &tracks);
+        let lanes = |plan: &mut graph::GraphBoundPlan| {
+            plan.bank_effect_lanes()
                 .into_iter()
                 .filter(|(_, lane)| matches!(lane.location, graph::GraphEffectSite::Node(_)))
                 .collect::<BTreeMap<_, _>>()
         };
         let predecessor = lanes(&mut before);
+        let mut before = arm(before.seal(), &tracks, forced_off);
         let moves: Vec<_> = lanes(&mut after)
             .into_iter()
             .map(|(key, lane)| graph::GraphEffectMove {
@@ -2028,7 +2033,7 @@ fn a_swap_carries_a_per_node_effects_agreement_with_its_state() {
         )
         .expect("carry program");
         carry.effects(moves, 0).expect("effect carry");
-        let mut after = carry.seal();
+        let mut after = arm(carry.seal(), &tracks, forced_off);
         let frames = after.envelope().quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         let mut block = |plan: &mut PreparedRenderPlan, index: u64| {
