@@ -23,4 +23,11 @@ Each row names the plausible defect its test must turn red.
 - One test per claim: a row whose claim an existing test already covers is deleted.
 
 ## Evidence / attempt record
-(empty)
+Attempt 1 (Terra), branch `codex/issue-2377-coverage-gaps` from `origin/main` `90932ff03`. One commit per row.
+
+### T1 (#2355): the scalar fader's `target_gain` and `is_muted` refuse a lane above 1
+- Claim held at base: `crates/builtins/src/lib.rs` `FaderMuteRampBuiltins::target_gain` and `is_muted` read `self.stage.*(0, lane % 2)` while `is_armed`, `gain_held` and `ramp_remaining` return `None` above lane 1.
+- Fix: both return `Option` and `None` for a lane above `1`. Callers: builtins-compiler's `FaderJumpStage` impl (`== Some(true)`) and its automation closure (`?`, which already returns `Option`), plus `tests/fader_ramp.rs`. No rendered sample changes: the methods are readbacks.
+- Test: `the_scalar_fader_refuses_a_lane_out_of_range` (`crates/builtins/tests/fader_ramp.rs`) gains `is_muted(2) == None` and `target_gain(3) == None`, with the in-range answers beside them.
+- Red under the defect: restoring the wrap (`Some(self.stage.is_muted(0, lane % 2))`, no `None` arm) fails at `fader_ramp.rs:1214` `left: Some(true) right: None`; the same for `target_gain` alone fails at `:1216` `left: Some(1.0) right: None`.
+- Test value: a lane query that wraps a lane above 1 onto another channel turns it red, and no other test asks the scalar fader about such a lane.

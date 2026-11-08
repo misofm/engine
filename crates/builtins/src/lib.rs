@@ -5904,16 +5904,23 @@ impl FaderMuteRampBuiltins {
         Some(self.stage.is_armed(0, lane))
     }
 
-    /// The settled gain of one lane, for tests and control-plane readback.
+    /// The settled gain of one lane (`0` left, `1` right), for tests and control-plane readback.
+    /// `None` for a lane above `1`.
     #[must_use]
-    pub fn target_gain(&self, lane: usize) -> f32 {
-        self.stage.target_gain(0, lane % 2)
+    pub fn target_gain(&self, lane: usize) -> Option<f32> {
+        if lane > 1 {
+            return None;
+        }
+        Some(self.stage.target_gain(0, lane))
     }
 
-    /// Whether one lane is muted.
+    /// Whether one lane (`0` left, `1` right) is muted. `None` for a lane above `1`.
     #[must_use]
-    pub const fn is_muted(&self, lane: usize) -> bool {
-        self.stage.is_muted(0, lane % 2)
+    pub const fn is_muted(&self, lane: usize) -> Option<bool> {
+        if lane > 1 {
+            return None;
+        }
+        Some(self.stage.is_muted(0, lane))
     }
 
     /// Renders one already-validated block.
