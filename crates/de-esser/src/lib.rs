@@ -1911,3 +1911,5 @@ fn bind_bank<const NATIVE_ONLY: bool>(
 mod glide_tests;
 #[cfg(test)]
 mod ramp_tests;
+#[cfg(test)]
+mod swap_tests;
