@@ -1213,10 +1213,18 @@ export class OpfsStemStore {
     })
   }
 
+  // Every held and queued Web Lock name, or null when the lock state is unknown: there are no Web
+  // Locks to ask, or the query threw or made no progress. Both callers hold the index lock, so the
+  // query has the local-store deadline, and a late answer is dropped (#2396).
   async #liveLockNames() {
     if (typeof this.#locks?.query === "function") {
       try {
-        const snapshot = await this.#locks.query()
+        const snapshot = await withDeadline(
+          this.#locks.query(),
+          this.#readDeadlineMs,
+          "storage.maintenance_stalled",
+          "Querying Web Locks made no progress"
+        )
         const liveLocks = new Set()
         for (const lock of [...(snapshot.held ?? []), ...(snapshot.pending ?? [])]) {
           liveLocks.add(lock.name)
@@ -1230,6 +1238,15 @@ export class OpfsStemStore {
   }
 
   async #sweepStaging(liveLocks, budgetEnd) {
+    // Under Web Locks (`request` decides, as in #acquireStemLock) a staged file is dead only when its
+    // stem lock is free. A query that is missing, threw or stalled leaves that unproven, so nothing
+    // staged is removed. The age check below is only for a store with no Web Locks at all (#2396).
+    if (liveLocks === null && typeof this.#locks?.request === "function") {
+      throw new StemStoreError(
+        "storage.maintenance_stalled",
+        "Web Locks did not report which staged files are live"
+      )
+    }
     await this.#sweepEntries("staging", this.#staging, budgetEnd, async (name, handle) => {
       if (handle.kind !== "file") return
       const digest = name.slice(-64)
