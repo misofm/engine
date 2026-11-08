@@ -310,3 +310,15 @@ Two branches have no reachable mutant:
 - `check-workspace-policy.sh`: ok.
 - `realtime_policy`: ok (312 marked regions in 48 files).
 - Production code changed only in the `Stranded` doc comment, so no rendered bit can move and the web gate was not re-run.
+
+### Verdict on attempt 4 (Sol, `de6a65ff2`): PASS
+No BLOCKER or MAJOR. Attempt 3's MAJOR is covered: R1-widen and every R3-widen arm are red in debug and release. Sol reproduced 9 rows of the sweep table and ran 13 new mutants (N1-N13); all are red except two.
+
+Record corrections:
+- **R5, live stage:** the "×4 arms" row drops only the `unrestored` bits, not the `designed` refresh.
+- **Equivalent mutants added to the "no reachable mutant" list**, both green in debug and release:
+  - N7: the live stage's `self.designed[lane]` refresh dropped (rack lib.rs:2591).
+  - N8: the effect stage's witness computed as `lane_witness(true, false)` (lib.rs:1516).
+
+  They are equivalent under today's consumers. Every reader of the witness also requires `RESTORED` (`SYMMETRIC`, `AGREEING`, `all_lanes_symmetric`, `all_lanes_preserve_agreement`). A stranded lane withholds `RESTORED` until its next restore, which recomputes `designed` (lib.rs:2110, 2222).
+- **Tripwire tests:** they arm slot 2 (an effect stage). The tripwire belongs to the chain arm, not the stage type, so the slot choice does not matter.
