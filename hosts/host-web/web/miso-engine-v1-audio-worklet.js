@@ -279,7 +279,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.memoryWords = null;
     this.meterFramesSkipped = 0;
     // Issue #2382, `worker` mode: this instance's control allocation count as last read, at boot
-    // and at each status read before a trap; a trapped instance's status reports it.
+    // and at each status read before a trap; a trapped instance's status reports it. The value is
+    // exact, not stale: after the boot read this instance runs only render-locked exports, so the
+    // count cannot move (the reads at a status are the measurement that it does not).
     this.controlAllocations = 0;
     // Issue #1294a: the watermark `(revision, first_sample)` pair last posted (or read at boot).
     this.watermarkRevision = -1n;
