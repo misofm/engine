@@ -216,7 +216,7 @@ The W4 bank does not bind on this AVX2 host, so the 4-lane walk is covered by th
 - `graph_fixture --check` exits 0. No struct changed.
 
 **Follow-ups.**
-1. Successor #SUCCESSOR covers one rule for the builtins stages' `f32` countdown residue plus one
+1. Successor #2410 covers one rule for the builtins stages' `f32` countdown residue plus one
    exact-countdown constant. Today the residue is handled three ways: the fader neither carries
    nor imports it (#2377 T2); the matrix's import writes it although its export does not carry it
    (S2, a dead write); and the input's export carries it (`InputChannelState::ramp[3]`) and its
@@ -234,7 +234,7 @@ The W4 bank does not bind on this AVX2 host, so the 4-lane walk is covered by th
 ### Attempt 1 verdict: PASS (minor findings folded)
 
 Sol passed `541919384`. The three minor findings were folded in after merging `origin/main`:
-1. Follow-ups 1 and 2 are one stateless successor spec, #SUCCESSOR. Follow-up 3 is recorded as
+1. Follow-ups 1 and 2 are one stateless successor spec, #2410. Follow-up 3 is recorded as
    deliberately not filed.
 2. The M5 paragraph and the new test's "test value" are corrected: three de-esser lib tests
    already caught M5, and the new test's unique value is the glue (W1-W4).
