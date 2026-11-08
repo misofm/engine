@@ -11578,11 +11578,13 @@ mod tests {
         /// block `S`. A structural edit that removes track 2's source supersedes W: the source's
         /// producer is back in the running epoch, its submits are accepted and A plays them with
         /// no underrun, and the adoption reports `EXACT | SUPERSEDED`. A declared stop supersedes
-        /// W, which folded in nothing: its revision completes `EXACT` alone.
+        /// W, which folded in nothing: its revision completes `EXACT` alone. A declared stop over
+        /// that B, whose overlay ducks track 2, is adopted at the next block.
         ///
         /// Test value: a supersession that drops W's producers with W leaves the removed source
         /// with no producer, so its submits are refused and A underruns; a stop reported
-        /// `SUPERSEDED` for a candidate that folded in nothing miscounts it.
+        /// `SUPERSEDED` for a candidate that folded in nothing miscounts it; a stop that plans a
+        /// transition (the `if true` replan mutant of #2348) joins B's overlay and waits for `S`.
         #[test]
         fn edits_while_the_warm_candidate_waits() {
             // A live edit.
@@ -11686,6 +11688,30 @@ mod tests {
                 ),
                 (revision, OUTCOME_EXACT, 0)
             );
+
+            // A declared stop over B, whose overlay ducks track 2 until `S` (issue #2377 T4): the
+            // stop plans no transition and joins no overlay (#1323 D2), so it is adopted at the
+            // next block, not at B's `S`.
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            rig.rebuild(&growth());
+            rig.render(1);
+            let s = duck_sample(rig.children.session.test_render_clock());
+            assert!(
+                s > (BEFORE as u64 + 2) * QUANTUM,
+                "S is past the next block"
+            );
+            assert!(matches!(
+                rig.rebuild(&edits),
+                PlanAdoption::Primed { not_before, .. } if not_before == s
+            ));
+            rig.children
+                .session
+                .declare_discontinuity()
+                .expect("declaration");
+            rig.render(1);
+            assert_eq!(rig.swaps(), [BEFORE + 1], "the stop is adopted at once");
         }
 
         /// #2044: a warm B that does not carry W's [`UNUSED`] ring panics after its primed
