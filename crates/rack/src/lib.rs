@@ -3865,8 +3865,9 @@ pub struct BankChain {
     /// eligible.
     ///
     /// So a chain that nobody has performed the join for must decline, and does. The caller that
-    /// holds both halves -- `graph::GraphBoundPlan::arm_mono_collapse`, which has the session's
-    /// structural witnesses and the plan's per-lane track names -- is the only one that can arm it.
+    /// holds both halves -- the graph crate's `GraphBoundPlan::arm_mono_collapse`, which has the
+    /// session's structural witnesses and the plan's per-lane track names -- is the only one that
+    /// can arm it.
     collapse_source: bool,
     /// The **per-block** input term (issue #987): this block's input planes carry the same samples
     /// on every active lane, as far as the caller can prove it without reading them.
@@ -4892,8 +4893,8 @@ impl BankChain {
     /// # The obligation, which M3's invariant rests on
     ///
     /// Bind-time: off the render thread, once, before this chain renders its first block.
-    /// `graph::GraphBoundPlan::arm_mono_collapse` enforces the render-scope half with an
-    /// assertion, and the block-order half by its type: a bound plan cannot render (#2401). A
+    /// The graph crate's `GraphBoundPlan::arm_mono_collapse` enforces the render-scope half with
+    /// an assertion, and the block-order half by its type: a bound plan cannot render (#2401). A
     /// caller that arms a chain directly owns the block-order half, because the chain cannot check
     /// it. That half is what lets [`run`](Self::run) leave `SOURCE` out of the agreement
     /// invariant: a chain armed before it renders has one answer to "do the two planes carry the

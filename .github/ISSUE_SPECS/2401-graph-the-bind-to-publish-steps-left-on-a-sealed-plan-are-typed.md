@@ -253,3 +253,27 @@ coordinator's scratchpad `succ/x.md`, written in the attempt 1 fold below.
 - `cargo fmt --check`: ok.
 - The fold changes doc comments, one doctest pair and this record, so no render path or test
   body moved.
+
+### Attempt 1 second fold (Terra): qualification on PR #2413
+
+**The failure.** In "fmt, clippy, doc, and hermetic policy gates", the step "Workspace policy
+mutation tests" (`bash scripts/test-workspace-policy.sh`) failed. That script ends by running the
+gate self-tests, and the rack policy refused the head:
+`rack policy failure: control-plane, I/O, threading, synchronization, or logging leaked into rack
+render code`, at `crates/rack/src/lib.rs:3868` and `:4895`. The doc comments this issue
+retargeted there named the join `graph::GraphBoundPlan::arm_mono_collapse`.
+`scripts/check-rack-policy.sh` forbids `\bgraph::` anywhere under `crates/rack/src`, comments
+included, so that rack never names a graph path. The log's "directed fault unexpectedly passed"
+and "rg exit 9" lines are that script's own counter-mutant controls, expected on every run; the
+job fails only on the rack line.
+
+**The fix.** The two rack comments now say "the graph crate's `GraphBoundPlan::arm_mono_collapse`".
+They still make the same claim, and they no longer spell a graph path. The gate is unchanged.
+
+**Gates (second fold head).**
+- `bash scripts/test-workspace-policy.sh`: ok.
+- `bash scripts/check-rack-policy.sh`: PASS. `bash scripts/test-rack-policy.sh`: ok.
+- The job's other policy gates, rerun: workspace, graph, host-core, session, builtins, protocol
+  control, bench, env vocabulary and conformance boundaries: ok.
+- `cargo fmt --check`: ok.
+- The fold changes two rack doc comments and this record.
