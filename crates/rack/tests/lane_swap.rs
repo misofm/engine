@@ -1571,7 +1571,7 @@ fn a_cleanly_refused_stage_swap_runs_no_recovery() {
 /// each beside the stranded slot's count ([`BankChain::lane_swap_defects`]), and returns `Split`
 /// naming the highest such slot. A slot that refused its swap-back cleanly keeps the two strips'
 /// defaults traded: that is the split. An effect slot (0) and the live slot (1) refuse, each in an
-/// in-chain and a cross-chain swap, and both at once.
+/// in-chain and a cross-chain swap, and both at once in each.
 ///
 /// Test value: a chain that takes a refused swap-back for a done one (`Defect`, no reset, no
 /// count), stops swapping back at the first refusal, resets a slot or lane that did not refuse or
@@ -1593,6 +1593,7 @@ fn a_slot_that_refuses_its_swap_back_splits_the_strip_and_is_reset() {
         (&[0][..], 1, (0, 3)),
         (&[0][..], 1, (1, 2)),
         (&[1, 0][..], 2, (0, 3)),
+        (&[1, 0][..], 2, (1, 2)),
     ] {
         let what = format!("split {split:?}, stranded {strand}, {at:?} with {other:?}");
         let mut world = World::new(width, 5, shape);
