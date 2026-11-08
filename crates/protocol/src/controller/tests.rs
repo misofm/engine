@@ -1171,7 +1171,7 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
     assert!(
         prepared
             .prospective_session()
-            .compiled()
+            .compiled(endpoint.session())
             .expect("a compiled transaction")
             .canonical_json()
             .contains("prepared-session")
@@ -1962,7 +1962,7 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
         assert_eq!(
             prepared
                 .prospective_session()
-                .compiled()
+                .compiled(endpoint.session())
                 .expect("a compiled transaction")
                 .canonical_json(),
             snapshot,
@@ -2080,6 +2080,39 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
         crate::DecodedTypedResponseFrame::Success { .. } => panic!("acknowledged a lost write"),
     }
     assert_eq!(endpoint.session().revision(), SessionRevision(7));
+}
+
+/// #2394: a token of monitor writes refuses an `OBSERVATION_ENDED` attachment, typed, and holds
+/// no event room for it; an empty list attaches nothing. Its commit then emits no event.
+///
+/// Red if a monitor token accepts the attachment (its commit, which emits no `SESSION_COMMITTED`,
+/// would drop an event the host was told is queued), or if the refusal holds a queue slot.
+#[test]
+fn a_monitor_token_refuses_an_observation_ended_attachment() {
+    let track = parse_session_json(EXAMPLE).expect("fixture").tracks[0]
+        .id
+        .clone();
+    let mut endpoint = controller(8);
+    let events = endpoint.queues.report(crate::QueueKind::ReliableEvent);
+    let mut token = prepare_at(&mut endpoint, 7, &[solo_edit(&track, true, None)]);
+    assert!(token.is_monitor_only());
+    assert_eq!(
+        endpoint.attach_observation_ended(&mut token, vec![ended_key("a", 1)]),
+        Err(crate::AttachObservationEndedError::MonitorOnly)
+    );
+    assert_eq!(
+        endpoint.attach_observation_ended(&mut token, Vec::new()),
+        Ok(0)
+    );
+    assert_eq!(
+        endpoint.queues().report(crate::QueueKind::ReliableEvent),
+        events,
+        "the refusal holds no slot"
+    );
+    endpoint
+        .commit_prepared_structural(token, EditPath::ModelOnly)
+        .expect("commits");
+    assert!(drain_events(&mut endpoint).is_empty(), "no event");
 }
 
 #[test]

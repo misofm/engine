@@ -134,7 +134,7 @@ impl Pair {
 
         let current_full = self.full.compiled().normalized_model();
         let next_full = full
-            .compiled()
+            .compiled(&self.full)
             .expect("a compiled transaction")
             .normalized_model();
         let change = self.overlay.after(full.monitor_edits(), next_full);

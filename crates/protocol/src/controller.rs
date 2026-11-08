@@ -1487,22 +1487,37 @@ pub struct PreparedStructuralCommand {
     replay_plan: ReplayAdmission,
     request: Box<[u8]>,
     response: ControllerResponse,
-    /// The queue slot the commit's `SESSION_COMMITTED` takes: held exactly when the prospective
-    /// session's form is a session mutation, decided from that form when the token is made
-    /// (#2330), so the commit never meets a mutation without its slot.
-    session_committed: Option<crate::ReliableEventReservation>,
+    /// What the commit does to the session and the event queue, decided once from the prospective
+    /// session's form when the token is made (#2330, #2394): the commit and
+    /// [`ProtocolController::attach_observation_ended`] read this and nothing else.
+    commit: TokenCommit,
     event_sequence: u64,
     applied_operations: u32,
     /// The reply's fields as prepared (#1585 D5): the commit sets the edit path, and the arm tags
     /// fixed the frame's length.
     applied: TransactionApplied,
-    /// The one `OBSERVATION_ENDED` event this commit emits after its `SESSION_COMMITTED` (#1584
-    /// D6a fold), with the room and the cell it takes. `None` unless the host attached keys.
-    observation_ended: Option<EndedAttachment>,
     /// The controller's token lock. Declared last on purpose: fields drop in declaration order,
     /// so every reservation the token holds is returned before the lock reads idle, even when the
     /// token is dropped on another thread (#2359).
     lease: TokenLease,
+}
+
+/// The commit a token makes (#2394), from the prospective session's form (#2286): a transaction of
+/// monitor writes only commits no model and no revision and emits no event (#1559 D4); every other
+/// commits its session and the `SESSION_COMMITTED` whose queue slot it holds, so the commit never
+/// meets a mutation without its slot, nor a monitor token with one.
+enum TokenCommit {
+    /// The response has [`EditPath::Monitor`]; the session and the queue stay as they are.
+    Monitor,
+    /// A session mutation.
+    Mutation {
+        /// The queue slot the commit's `SESSION_COMMITTED` takes.
+        committed: crate::ReliableEventReservation,
+        /// The one `OBSERVATION_ENDED` event this commit emits after its `SESSION_COMMITTED`
+        /// (#1584 D6a fold), with the room and the cell it takes. `None` unless the host attached
+        /// keys.
+        ended: Option<EndedAttachment>,
+    },
 }
 
 /// An `OBSERVATION_ENDED` event attached to a token, with everything its commit needs, proven
@@ -1538,8 +1553,8 @@ impl PreparedStructuralCommand {
     /// Whether every edit of the transaction writes a monitor row: the commit then changes no
     /// model and no revision, and its response has [`EditPath::Monitor`].
     #[must_use]
-    pub fn is_monitor_only(&self) -> bool {
-        self.prospective_session().is_monitor_only()
+    pub const fn is_monitor_only(&self) -> bool {
+        matches!(self.commit, TokenCommit::Monitor)
     }
 
     /// Exact canonical response byte count retained for post-publication caller output.
@@ -2852,7 +2867,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         // The plan checked this room with the queue's own check under this `&mut self`, and only
         // a release can change it since, so this cannot fail; it stays a defect report, never a
         // refusal.
-        let session_committed = self
+        let commit = self
             .reserve_session_committed(&plan.prospective_session)
             .map_err(|_| CommandFrameProcessError::Internal)?;
 
@@ -2866,11 +2881,10 @@ impl<P: ControlProvider> ProtocolController<P> {
             replay_plan: plan.replay_plan,
             request: request.into_boxed_slice(),
             response,
-            session_committed,
+            commit,
             event_sequence: plan.event_sequence,
             applied_operations: plan.applied_operations,
             applied,
-            observation_ended: None,
         })
     }
 
@@ -3126,7 +3140,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             plan.prospective_session.applied_operations(),
             plan.applied_operations as usize
         );
-        let session_committed = self
+        let commit = self
             .reserve_session_committed(&plan.prospective_session)
             .expect("the plan's room check admits exactly this reservation");
         self.replay
@@ -3134,12 +3148,14 @@ impl<P: ControlProvider> ProtocolController<P> {
             .expect("planned replay reservation accepts the measured direct response");
 
         // From here on nothing fails.
-        let commit = self.session.commit_prepared(plan.prospective_session);
-        if let Some(reservation) = session_committed {
+        let session_commit = self.session.commit_prepared(plan.prospective_session);
+        // The one-call path attaches no `OBSERVATION_ENDED`.
+        if let TokenCommit::Mutation { committed, ended } = commit {
+            debug_assert!(ended.is_none());
             self.queues.commit_reliable_event(
-                reservation,
+                committed,
                 ReliableSlot::session_committed(
-                    commit.revision,
+                    session_commit.revision,
                     plan.event_sequence,
                     plan.request_id,
                     plan.previous_revision,
@@ -3151,18 +3167,23 @@ impl<P: ControlProvider> ProtocolController<P> {
         Ok(written)
     }
 
-    /// The queue slot a commit of `session` takes for its `SESSION_COMMITTED`: one for a session
-    /// mutation, none for a transaction of monitor writes only, which emits no event (#1559 D4).
-    /// The form decides (#2286), so the commit that reads the same form always finds the slot
-    /// its mutation needs (#2330).
+    /// The commit of `session` (#2394), with the queue slot it takes for its `SESSION_COMMITTED`:
+    /// one for a session mutation, none for a transaction of monitor writes only, which emits no
+    /// event (#1559 D4). The form decides (#2286), once: the commit reads the value this returns,
+    /// so it always finds the slot its mutation needs (#2330).
     fn reserve_session_committed(
         &mut self,
         session: &PreparedSessionTransaction,
-    ) -> Result<Option<crate::ReliableEventReservation>, QueueReport> {
+    ) -> Result<TokenCommit, QueueReport> {
         if session.is_monitor_only() {
-            return Ok(None);
+            return Ok(TokenCommit::Monitor);
         }
-        self.queues.reserve_reliable_event().map(Some)
+        self.queues
+            .reserve_reliable_event()
+            .map(|committed| TokenCommit::Mutation {
+                committed,
+                ended: None,
+            })
     }
 
     fn process_planned_immediate_into(
@@ -3274,21 +3295,30 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<usize, AttachObservationEndedError> {
         self.check_prepared_structural(prepared)
             .map_err(AttachObservationEndedError::Token)?;
+        let revision = prepared.prospective_session().revision();
+        // `event_sequence` is the `SESSION_COMMITTED` sequence; this event follows it.
+        let event_sequence = prepared.event_sequence.saturating_add(1);
+        // The token's commit decides (#2394): a monitor token emits no event, so it holds none.
+        let TokenCommit::Mutation {
+            ended: attached, ..
+        } = &mut prepared.commit
+        else {
+            return if ended.is_empty() {
+                Ok(0)
+            } else {
+                Err(AttachObservationEndedError::MonitorOnly)
+            };
+        };
         // Drop an earlier attachment first, so its room counts as free for this one.
-        prepared.observation_ended = None;
+        *attached = None;
         if ended.is_empty() {
             return Ok(0);
         }
-        if prepared.prospective_session().is_monitor_only() {
-            return Err(AttachObservationEndedError::MonitorOnly);
-        }
         let event = ObservationEnded {
-            // `event_sequence` is the `SESSION_COMMITTED` sequence; this event follows it.
-            event_sequence: prepared.event_sequence.saturating_add(1),
+            event_sequence,
             keys: ended,
         };
         // The size of the frame, which an empty output reports without writing one.
-        let revision = prepared.prospective_session().revision();
         let required = match self.codec.encode_event_frame_into(
             &TypedEventFrame {
                 revision,
@@ -3310,7 +3340,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             .queues
             .reserve_reliable_event()
             .map_err(AttachObservationEndedError::NoRoom)?;
-        prepared.observation_ended = Some(EndedAttachment { event, room, cell });
+        *attached = Some(EndedAttachment { event, room, cell });
         Ok(required)
     }
 
@@ -3350,30 +3380,28 @@ impl<P: ControlProvider> ProtocolController<P> {
         // revision stay and no `SESSION_COMMITTED` follows.
         // Its token reserved no event. The response and the replay entry are recorded as for any
         // other transaction, so an exact replay returns these bytes and applies nothing.
-        let monitor_only = session.is_monitor_only();
-        let path = if monitor_only {
-            EditPath::Monitor
-        } else {
-            path
+        // The token's commit was decided from the session's form when the token was made (#2394).
+        let commit = prepared.commit;
+        debug_assert_eq!(
+            matches!(commit, TokenCommit::Monitor),
+            session.is_monitor_only()
+        );
+        let path = match commit {
+            TokenCommit::Monitor => EditPath::Monitor,
+            TokenCommit::Mutation { .. } => path,
         };
         debug_assert!(
-            monitor_only || path != EditPath::Monitor,
+            matches!(commit, TokenCommit::Monitor) || path != EditPath::Monitor,
             "only a transaction of monitor writes has the monitor path"
         );
         debug_assert_eq!(
             session.applied_operations(),
             prepared.applied_operations as usize
         );
-        // The token's slot was reserved from this same form (`reserve_session_committed`), and a
-        // monitor token holds no attachment (`attach_observation_ended` refuses one).
-        let events = match (monitor_only, prepared.session_committed.take()) {
-            (true, None) => None,
-            (false, Some(committed)) => Some((committed, prepared.observation_ended.take())),
-            (true, Some(_)) | (false, None) => {
-                unreachable!("a token holds a SESSION_COMMITTED slot exactly for a mutation")
-            }
-        };
-        if let Some((_, Some(ended))) = &events {
+        if let TokenCommit::Mutation {
+            ended: Some(ended), ..
+        } = &commit
+        {
             debug_assert!(
                 self.observation_ended_cells[ended.cell as usize].is_none(),
                 "the cell attached to the token is free: only a commit fills one"
@@ -3416,7 +3444,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             );
         // From here on nothing fails.
         let mut displaced = None;
-        if let Some((committed, ended)) = events {
+        if let TokenCommit::Mutation { committed, ended } = commit {
             let (commit, previous) = self.session.commit_prepared_displacing(session);
             displaced = previous;
             self.queues.commit_reliable_event(
@@ -5356,7 +5384,7 @@ fn removed_arm_tags(
     prepared: &crate::PreparedSessionTransaction,
     committed: &controls::ObservationBindings,
 ) -> Vec<u64> {
-    let Some(compiled) = prepared.compiled().filter(|_| !prepared.is_monitor_only()) else {
+    let Some(compiled) = prepared.own_compiled() else {
         return Vec::new();
     };
     let next = compiled.normalized_model();

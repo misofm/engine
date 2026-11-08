@@ -1763,6 +1763,7 @@ dependencies = [
 name = "protocol"
 version = "0.1.0"
 dependencies = [
+ "bench-support",
  "conformance",
  "controls",
  "engine",

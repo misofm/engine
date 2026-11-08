@@ -4757,7 +4757,7 @@ where
                     let prospective = prepared
                         .get()
                         .prospective_session()
-                        .compiled()
+                        .own_compiled()
                         .ok_or(CommandError::Internal)?;
                     let committed = self.controller.session().compiled();
                     if prospective.sample_rate() != committed.sample_rate()
@@ -4792,7 +4792,7 @@ where
                     prepared
                         .get()
                         .prospective_session()
-                        .compiled()
+                        .own_compiled()
                         .ok_or(CommandError::Internal)?
                         .normalized_model(),
                 );
@@ -4815,7 +4815,7 @@ where
                         prepared
                             .get()
                             .prospective_session()
-                            .compiled()
+                            .own_compiled()
                             .ok_or(CommandError::Internal)?
                             .normalized_model(),
                     )
@@ -5994,7 +5994,7 @@ where
             Rebuild::Transaction(prepared) => prepared
                 .get()
                 .prospective_session()
-                .compiled()
+                .own_compiled()
                 .ok_or(CommandError::Internal)?,
             Rebuild::Discontinuity(model)
             | Rebuild::Monitor { model, .. }
@@ -7122,13 +7122,15 @@ where
         let in_place = transaction.is_in_place();
         let committed = self.controller.session().compiled().normalized_model();
         // The model after the transaction, read as the committed model and the owners the
-        // transaction edited (#1613), or the prospective compilation's model, whole.
+        // transaction edited (#1613), or the prospective compilation's model, whole: for a
+        // transaction of monitor writes prepared whole, the committed one, lent by the store
+        // (#2394).
         let view = match (transaction.edited_owners(), in_place) {
             (Some(owners), _) => controls::ModelView::edited(committed, owners),
             (None, true) => controls::ModelView::whole(committed),
             (None, false) => controls::ModelView::whole(
                 transaction
-                    .compiled()
+                    .compiled(self.controller.session())
                     .expect("a compiled transaction")
                     .normalized_model(),
             ),
@@ -7725,7 +7727,7 @@ where
             compiled_model_admission_over(
                 self.held_models()?.as_slice(),
                 transaction
-                    .compiled()
+                    .compiled(self.controller.session())
                     .ok_or(CommandError::Internal)?
                     .resource_estimate(),
             )
