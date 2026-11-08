@@ -156,6 +156,30 @@ resume that does not settle, nor waits on another holder of that pin. `close()`
 reports `idle` at once, and an open started while the old lease closes owns the
 state from then on (#2266).
 
+A resolved close means a released pin (#2372). Every `StemSessionLease.close()`
+call shares the first call's release, so a release that fails rejects that
+call and every later one: a lease never reports a release that did not happen,
+and `StemSessionGate.close()` rejects with the same error when the current
+lease's release fails.
+
+`StemSessionGate.close()` waits only for what holds a pin or can still take
+one:
+- the current lease's close;
+- a same-session predecessor that an open took out of the gate and is closing;
+- every open that has reached the store's pin phase, including one a newer open
+  had already superseded.
+
+An open reaches the pin phase when `openSession` passes its last signal check
+before the session pin lock. From then on it may hold that lock or write its
+pin, and it settles only after closing every lease it was granted or displaced.
+Every wait it has from then on either ends at its abort or is the store's
+index work, which a lease close waits for too. An open aborted before the pin
+phase holds no pin and never takes one, because that signal check refuses it.
+`close()` therefore does not wait for it, whatever store work it is still in:
+the store's first open, the quota estimate, an ingest it joined, its own
+staging cleanup, or an eviction. Those can be long or have no deadline. The
+aborted open rejects whenever that work ends.
+
 The PCM pump is a dedicated module Worker. MSB1 ring descriptors cross the
 Worker port after construction; they are never processor options. The Worker
 reads bounded Blob slices, de-interleaves interleaved int16/int24 little-endian

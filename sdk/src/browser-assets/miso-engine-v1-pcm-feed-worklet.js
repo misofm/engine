@@ -68,6 +68,10 @@
  *   - maintain the engine ring's depth and count a block that found it empty
  *     as an underrun.
  *
+ * A throw from the drain's own code is counted in the ring's ERRORS word and
+ * the block renders. A throw from an export it calls is a trap (issue #2370):
+ * the engine fails trapped, renders silence and calls no export again.
+ *
  * ## `worker` mode (issue #1387)
  *
  * On a cross-origin-isolated page the engine runs its control plane in a
@@ -160,6 +164,12 @@ const RESULT_INTERNAL = 255
 // #1644 D2), as the bytes a refusal writes at the start of the session
 // diagnostic. Built once at load: the worklet scope has no TextEncoder.
 const STALE_GENERATION_CODE = Uint8Array.from("source.generation.stale", (character) => character.charCodeAt(0))
+// Issue #2370: what a drain's export call throws in place of whatever the export threw, so the
+// drain's catch in `process()` tells an export's trap from a fault of the drain's own code. The
+// type of the throw cannot tell them apart (V8 reports a Wasm stack overflow as a `RangeError`, as
+// it does an out-of-range copy); where it came from can. One frozen object made at load: throwing
+// it captures no stack and allocates nothing in `process()`.
+const EXPORT_TRAP = Object.freeze({ trap: "an engine export threw" })
 
 /** The one engine processor in this scope, and any rings that arrived before
  *  it existed. Both nodes are constructed by the same main thread in a fixed
@@ -429,7 +439,14 @@ function wrapEngineProcessor(Base) {
           const ring = rings[index]
           try {
             this.drainSharedRing(ring)
-          } catch (_) {
+          } catch (error) {
+            if (error === EXPORT_TRAP) {
+              // Issue #2370: an export the drain called threw, which is a trap (#2291). The
+              // engine records it in its one failure record, trapped, so its `process()` below
+              // renders silence with no export call, and its dispose runs none.
+              this.fail(RESULT_INTERNAL, true)
+              break
+            }
             // A feed that throws must not take the render with it: the block
             // still renders from whatever the engine already holds, and the
             // counter says the feed is the reason it may run dry.
@@ -503,15 +520,20 @@ function wrapEngineProcessor(Base) {
         }
         ring.idTarget.set(ring.idBytes)
         const word64 = slot * (SLOT_HEADER_BYTES / 8)
-        const result = this.exports.miso_engine_web_v1_source_submit(
-          this.handle,
-          ring.idLength,
-          ring.headersI64[word64 + SLOT_I64_GENERATION],
-          ring.headersI64[word64 + SLOT_I64_START_FRAME],
-          ring.channels,
-          frames,
-          (flags & FLAG_END_OF_REGION) !== 0 ? 1 : 0
-        )
+        let result
+        try {
+          result = this.exports.miso_engine_web_v1_source_submit(
+            this.handle,
+            ring.idLength,
+            ring.headersI64[word64 + SLOT_I64_GENERATION],
+            ring.headersI64[word64 + SLOT_I64_START_FRAME],
+            ring.channels,
+            frames,
+            (flags & FLAG_END_OF_REGION) !== 0 ? 1 : 0
+          )
+        } catch (_) {
+          throw EXPORT_TRAP
+        }
         if (result === RESULT_BACKPRESSURE) {
           // The engine's ring is full. Leave the chunk where it is — this is
           // the backpressure that keeps the feeder from running ahead.
@@ -650,12 +672,19 @@ function wrapEngineProcessor(Base) {
         const seek = prepare
           ? this.exports.miso_engine_web_v1_source_prepare_seek
           : this.exports.miso_engine_web_v1_source_seek
-        let result = seek(
-          this.handle,
-          ring.idLength,
-          requested,
-          requestedFrame
-        )
+        let result
+        try {
+          result = seek(
+            this.handle,
+            ring.idLength,
+            requested,
+            requestedFrame
+          )
+        } catch (_) {
+          // Issue #2370: a trap, as at `drainSharedRing`'s submit. The attach port's
+          // `prepare-seek`, the other caller, takes any throw for one (#2291).
+          throw EXPORT_TRAP
+        }
         // Issue #1644 D2 (R4 amended): a session seek the engine accepted at this generation
         // already moved this source, so its own seek at the same generation is refused as stale,
         // and the ring would stall for good. That one refusal is the seek applied. The source is

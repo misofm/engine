@@ -933,6 +933,302 @@ async function closeReachesTheNewestOpen() {
   await holder.close()
 }
 
+// Holds the store's index lock, which every pin release rewrites under, until `unstall()`.
+async function holdTheIndex(locks) {
+  const held = {}
+  held.done = locks.request(`${LOCKS}:index`, {}, () => new Promise((resolve) => (held.unstall = resolve)))
+  await until(() => held.unstall !== undefined, "the held index")
+  return held
+}
+
+// Issue #2372: a resolved lease close() means its pin is released. A second close() made while the
+// first is still releasing must not resolve before it.
+async function everyLeaseCloseWaitsForThePinRelease() {
+  const env = abortFixture()
+  const lease = await env.store.openSession({ sessionId: "same", stems: env.stems, resolver: env.resolver })
+  const index = await holdTheIndex(env.locks)
+  const first = lease.close()
+  let pinsAtSecond
+  const second = lease.close().then(() => (pinsAtSecond = env.pins()))
+  await untilPending(env.locks, `${LOCKS}:index`)
+  await tick()
+  index.unstall()
+  await index.done
+  await Promise.all([first, second])
+  assert.deepEqual(pinsAtSecond, [], "a second close() resolved while the first still held the pin")
+}
+
+// Issue #2372: a resolved gate.close() means every lease the gate's opens were granted is released,
+// including the lease of an open that close() aborted and of one a newer open superseded earlier.
+async function gateCloseWaitsForEveryAbortedOpensLease() {
+  for (const leg of ["aborted by close()", "superseded, then close()"]) {
+    const env = abortFixture()
+    let ready = false
+    const first = settledWithin(
+      env.gate.open({
+        sessionId: "same",
+        stems: env.stems,
+        resume: () => new Promise(() => {}),
+        onProgress(event) {
+          if (event.stage === "ready") ready = true
+        },
+      }),
+      500
+    )
+    await until(() => ready, `the first lease (${leg})`)
+    const index = await holdTheIndex(env.locks)
+    const newer =
+      leg === "aborted by close()"
+        ? undefined
+        : settledWithin(
+            env.gate.open({ sessionId: "other", stems: env.stems, resume: () => new Promise(() => {}) }),
+            500
+          )
+    let pinsAtClose
+    const closing = env.gate.close().then(() => (pinsAtClose = env.pins()))
+    await untilPending(env.locks, `${LOCKS}:index`)
+    await tick()
+    index.unstall()
+    await index.done
+    await closing
+    assert.equal((await first).error?.name, "AbortError", leg)
+    if (newer !== undefined) assert.equal((await newer).error?.name, "AbortError", leg)
+    assert.deepEqual(
+      pinsAtClose,
+      [],
+      `gate.close() resolved while an aborted open's lease still held its pin (${leg})`
+    )
+  }
+}
+
+// Issue #2372: an open aborted while it writes its pin has no lease yet but holds the session pin lock
+// and is about to write the pin. gate.close() must wait for it to close the lease it is then granted.
+async function gateCloseWaitsForAnOpenInItsPinWrite() {
+  const env = abortFixture()
+  const pinLock = `${LOCKS}:pin:session:matrix:same`
+  const holder = await env.store.openSession({ sessionId: "same", stems: env.stems, resolver: env.resolver })
+  const first = settledWithin(
+    env.gate.open({ sessionId: "same", stems: env.stems, resume: () => new Promise(() => {}) }),
+    1_000
+  )
+  await untilPending(env.locks, pinLock)
+  // The index queue becomes: the holder's release, then `blocker`, then the open's pin write.
+  const index = await holdTheIndex(env.locks)
+  const released = holder.close()
+  await untilPending(env.locks, `${LOCKS}:index`)
+  const blocker = {}
+  blocker.done = env.locks.request(`${LOCKS}:index`, {}, () => new Promise((resolve) => (blocker.unstall = resolve)))
+  index.unstall()
+  await index.done
+  await released
+  await until(() => blocker.unstall !== undefined, "the blocker")
+  await until(
+    async () => (await env.locks.query()).held.some((lock) => lock.name === pinLock),
+    "the open's pin lock"
+  )
+  let atClose
+  const closing = env.gate.close().then(async () => {
+    atClose = { pins: env.pins(), held: (await env.locks.query()).held.map((lock) => lock.name) }
+  })
+  await tick()
+  blocker.unstall()
+  await blocker.done
+  await closing
+  assert.equal((await first).error?.name, "AbortError")
+  assert.deepEqual(atClose.pins, [], "gate.close() resolved while an open in its pin write held the pin")
+  assert.equal(
+    atClose.held.includes(pinLock),
+    false,
+    "gate.close() resolved while an open in its pin write held the pin lock"
+  )
+}
+
+// Issue #2372: a same-session open takes the current lease out of the gate and closes it before its
+// own pin phase. gate.close() must wait for that close too.
+async function gateCloseWaitsForAReplacedPredecessor() {
+  const env = abortFixture()
+  await env.gate.open({ sessionId: "same", stems: env.stems, resume() {} })
+  const index = await holdTheIndex(env.locks)
+  const second = settledWithin(env.gate.open({ sessionId: "same", stems: env.stems, resume() {} }), 1_000)
+  await untilPending(env.locks, `${LOCKS}:index`)
+  let pinsAtClose
+  const closing = env.gate.close().then(() => (pinsAtClose = env.pins()))
+  await tick()
+  index.unstall()
+  await index.done
+  await closing
+  assert.equal((await second).error?.name, "AbortError")
+  assert.deepEqual(pinsAtClose, [], "gate.close() resolved while a replaced predecessor still held its pin")
+}
+
+// Issue #2372: gate.close() waits only for pins, never for an aborted open's work that holds none. Each
+// leg leaves the open aborted before the store's pin phase, stuck on one wait that holds no lease and
+// has no deadline: the store's first open (a getDirectory that never settles), the quota estimate,
+// another caller's ingest that the open joined, its own staging cleanup (a removeEntry that never
+// settles), or an eviction under quota pressure queued on a stem lock another holder keeps. close()
+// must resolve at once; once the wait is released, the open must refuse and take no pin.
+async function gateCloseNeverWaitsOnWorkThatHoldsNoLease() {
+  const bytes = pcm16([9, -9, 3, -3], 1)
+  const stemIdentity = identity(bytes)
+  const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
+  const victim = pcm16([1, -1, 1, -1], 1)
+  const victimIdentity = identity(victim)
+  const victimLock = `${LOCKS}:ingest:${victimIdentity.slice("blake3:".length)}`
+  const legs = [
+    "wedged getDirectory",
+    "wedged estimate",
+    "joined ingest",
+    "wedged staging cleanup",
+    "eviction behind a held stem lock",
+  ]
+  for (const leg of legs) {
+    let reached = false
+    let unwedge
+    // Settles with `value()` once `unwedge()` runs.
+    const wedge = (value) => {
+      reached = true
+      return new Promise((resolve) => (unwedge = () => resolve(value())))
+    }
+    let stagingRemovals = 0
+    const backend = new FakeOpfsBackend({
+      removeEntryBlocker({ name }) {
+        if (leg !== "wedged staging cleanup" || !name.startsWith("no-lease-")) return
+        // The first removal clears stale staging before the ingest; the second is the cleanup.
+        stagingRemovals += 1
+        if (stagingRemovals === 2) return wedge(() => undefined)
+      },
+    })
+    const locks = new FakeLockManager()
+    const storage = backend.storage()
+    const { getDirectory, estimate } = storage
+    if (leg === "wedged getDirectory") storage.getDirectory = () => wedge(getDirectory)
+    if (leg === "wedged estimate") storage.estimate = () => wedge(estimate)
+    const store = new OpfsStemStore({ storage, locks, tabId: "no-lease" })
+    let resolves = 0
+    // Streams nothing until its caller aborts.
+    let resolver = {
+      resolve(_identity, { signal }) {
+        resolves += 1
+        return new Promise((_resolve, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+        )
+      },
+    }
+    const direct = new AbortController()
+    let directOpen
+    if (leg === "joined ingest") {
+      directOpen = settledWithin(
+        store.openSession({ sessionId: "direct", stems, resolver, signal: direct.signal }),
+        1_000
+      )
+      unwedge = () => direct.abort(new DOMException("Done", "AbortError"))
+    } else if (leg === "eviction behind a held stem lock") {
+      // An unpinned stem fills the store, so the open's preflight must evict it.
+      resolver = new MemoryStemResolver({ [stemIdentity]: bytes, [victimIdentity]: victim })
+      const warm = await store.openSession({
+        sessionId: "warm",
+        stems: [{ identity: victimIdentity, bytes: victim.byteLength }],
+        resolver,
+      })
+      await warm.close()
+      backend.reportedQuota = backend.usage
+      const held = {}
+      held.done = locks.request(victimLock, {}, () => new Promise((resolve) => (held.unstall = resolve)))
+      await until(() => held.unstall !== undefined, "the held stem lock")
+      unwedge = () => held.unstall()
+    }
+    const gate = new StemSessionGate(store, resolver)
+    const opening = settledWithin(gate.open({ sessionId: "gate", stems, resume() {} }), 1_000)
+    if (leg === "joined ingest") {
+      await until(() => resolves === 1, "the direct open's ingest")
+      for (let step = 0; step < 5; step += 1) await tick()
+      // The gate's open is not queued behind the ingest's stem lock, so it joined the ingest.
+      assert.equal((await locks.query()).pending.length, 0, "the gate's open never joined the ingest")
+      assert.equal(resolves, 1)
+    } else if (leg === "wedged staging cleanup") {
+      await until(() => resolves === 1, "the open's ingest")
+    } else if (leg === "eviction behind a held stem lock") {
+      await untilPending(locks, victimLock)
+    } else {
+      await until(() => reached, `the ${leg}`)
+    }
+    const closed = await settledWithin(gate.close(), 500)
+    assert.notEqual(closed, "timed-out", `gate.close() waited on an aborted open's ${leg}`)
+    if (leg === "wedged staging cleanup") await until(() => reached, "the staging cleanup")
+    unwedge()
+    // A joiner refuses with the joined ingest's own error; every other leg with the abort.
+    const outcome = await opening
+    assert.ok(outcome !== "timed-out" && outcome.error !== undefined, `the aborted open went on (${leg})`)
+    if (directOpen !== undefined) assert.notEqual(await directOpen, "timed-out", leg)
+    let rows = {}
+    try {
+      rows = JSON.parse(new TextDecoder().decode(backend.bytes("miso-stems-blake3-v1/index.json"))).stems
+    } catch (error) {
+      // No store folder or index yet, so no pin either.
+      if (error?.name !== "NotFoundError") throw error
+    }
+    for (const row of Object.values(rows)) {
+      assert.equal(row.pins.includes("session:no-lease:gate"), false, `the aborted open took a pin (${leg})`)
+    }
+  }
+}
+
+// Issue #2372: a lease close that fails rejects gate.close(), and every later close() of that lease
+// shares the same rejection rather than reporting a release that never happened.
+async function aFailedPinReleaseRejectsEveryClose() {
+  const bytes = pcm16([6, -6, 2, -2], 1)
+  const stemIdentity = identity(bytes)
+  let failIndexWrites = false
+  const backend = new FakeOpfsBackend({
+    writeBlocker({ fileName }) {
+      if (failIndexWrites && fileName === "index.json") throw new Error("index write failed")
+    },
+  })
+  const gate = new StemSessionGate(
+    new OpfsStemStore({ storage: backend.storage(), locks: new FakeLockManager(), tabId: "release-fails" }),
+    new MemoryStemResolver({ [stemIdentity]: bytes })
+  )
+  const lease = await gate.open({
+    sessionId: "x",
+    stems: [{ identity: stemIdentity, bytes: bytes.byteLength }],
+    resume() {},
+  })
+  failIndexWrites = true
+  await assert.rejects(gate.close(), /index write failed/, "gate.close() hid a failed pin release")
+  await assert.rejects(lease.close(), /index write failed/, "a repeat close() reported a release that failed")
+}
+
+// Issue #2372: the gate tracks its opens on a private promise, so an open whose caller drops the
+// promise still surfaces its rejection as unhandled: one that fails before the store's pin phase (an
+// unavailable store) and one that fails after it (a rejected resume), once the gate is tracking it.
+async function aDroppedFailedOpenStaysUnhandled() {
+  const legs = [
+    { leg: "before the pin phase", storage: {}, resume() {} },
+    {
+      leg: "after the pin phase",
+      storage: new FakeOpfsBackend().storage(),
+      resume: () => Promise.reject(new Error("route changed")),
+    },
+  ]
+  for (const { leg, storage, resume } of legs) {
+    const gate = new StemSessionGate(
+      new OpfsStemStore({ storage, locks: new FakeLockManager(), tabId: "dropped" }),
+      new MemoryStemResolver({})
+    )
+    const unhandled = []
+    const record = (_reason, promise) => unhandled.push(promise)
+    process.on("unhandledRejection", record)
+    let dropped
+    try {
+      dropped = gate.open({ sessionId: "dropped", stems: [], resume })
+      await until(() => unhandled.includes(dropped), `the dropped open's unhandled rejection (${leg})`)
+    } finally {
+      // Handling it now would only add a late-handling warning; the event is the claim.
+      process.off("unhandledRejection", record)
+    }
+  }
+}
+
 async function refusedGateNeverBecomesInteractive() {
   const events = []
   let resumed = false
@@ -1485,6 +1781,13 @@ await abortAsResumeSettlesNeverCommits()
 await throwingResumeLeavesATerminalState()
 await closeNeverOverwritesALaterOpen()
 await closeReachesTheNewestOpen()
+await everyLeaseCloseWaitsForThePinRelease()
+await gateCloseWaitsForEveryAbortedOpensLease()
+await gateCloseWaitsForAnOpenInItsPinWrite()
+await gateCloseWaitsForAReplacedPredecessor()
+await gateCloseNeverWaitsOnWorkThatHoldsNoLease()
+await aFailedPinReleaseRejectsEveryClose()
+await aDroppedFailedOpenStaysUnhandled()
 await refusedGateNeverBecomesInteractive()
 await rejectedResumeDoesNotLeakPins()
 await selfDrivingFillsWithoutPumpMessages()

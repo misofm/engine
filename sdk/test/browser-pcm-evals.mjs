@@ -1107,6 +1107,82 @@ test("issue 2291: a trap in prepare-seek's export fails the real engine trapped,
   assert.deepEqual(disposes, [], "no dispose export runs on the trapped engine");
 });
 
+test("issue 2370: the drain in process() records an export's trap on the real engine, and counts its own fault", async () => {
+  // The drain runs in `process()` and calls `source_submit` and `source_seek`. A throw from the
+  // drain's own code is a feed fault: counted in the ring's ERRORS, and the block renders. A throw
+  // from either export is a trap: the engine fails trapped, the block is silent, no other ring is
+  // drained, and no export runs again; the dispose is final. The fault here is a RangeError, which
+  // V8 also throws for a Wasm stack overflow, so the two are told apart by where the throw came
+  // from, not by its type. Red if a trap is only counted (the next block and the dispose call
+  // exports on the trapped instance, whose refusal the host retries for ever), if the drain goes
+  // on to the next ring, or if every throw is taken for a trap.
+  const feedSource = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const engineSource = await readFile(new URL("../../hosts/host-web/web/miso-engine-v1-audio-worklet.js", import.meta.url), "utf8");
+  const rig = (throwing) => {
+    const { sandbox, registrations } = preludeHarness(feedSource);
+    vm.runInContext(`(() => {\n${engineSource}\n})();`, sandbox);
+    // Constructed with no options, as in the #2291 row, then put back to `live` by the engine's writer.
+    const engine = new (registrations.get("miso-engine-v1-audio-worklet"))({});
+    const memory = { buffer: new ArrayBuffer(65_536) };
+    const posts = []; const calls = [];
+    const recorded = { memory };
+    for (const name of ["source_submit", "source_seek", "render", "dispose"]) {
+      recorded[`miso_engine_web_v1_${name}`] = () => {
+        calls.push(name);
+        if (name === throwing) throw new Error(`synthetic wasm trap from the ${name} export`);
+        return name === "dispose" ? 1 : 0;
+      };
+    }
+    Object.assign(engine, {
+      exports: recorded,
+      memoryBuffer: memory.buffer, handle: 7, sourceIdPointer: 0, sourceIdCapacity: 128,
+      sourcePcm: new sandbox.Float32Array(memory.buffer, 1024, 4), quantumFrames: 4, maximumSourceChannels: 2,
+      outputLeft: new sandbox.Float32Array(4).fill(0.25), outputRight: new sandbox.Float32Array(4).fill(-0.25),
+      meterLease: false, telemetryLease: false, failureCode: 0,
+      port: { onmessage: engine.port.onmessage, postMessage: (message) => posts.push(structuredClone(message)) },
+    });
+    engine.enter("live");
+    const attach = new (registrations.get("miso-sab-feed-attach"))();
+    attach.port.postMessage = () => {};
+    const rings = ["first", "second"].map((sourceId) => createMsb1Ring({ sourceId, channels: 1, frameCapacity: 4, capacity: 2 }));
+    const writers = rings.map((ring) => { const writer = new Msb1RingWriter(ring); writer.engage(1n); return writer; });
+    attach.port.onmessage({ data: { op: "attach", rings } });
+    for (const writer of writers) { writer.reserve(4); writer.commit({ generation: 1n, startFrame: 0n, frames: 4, endOfRegion: false }); }
+    const block = () => {
+      const out = [new sandbox.Float32Array(4).fill(9), new sandbox.Float32Array(4).fill(9)];
+      return { kept: engine.process([], [out]), out };
+    };
+    const errors = () => rings.map((ring) => controls(ring)[MSB1_CONTROL.ERRORS]);
+    return { sandbox, engine, memory, writers, calls, posts, block, errors };
+  };
+
+  {
+    const { sandbox, engine, memory, calls, block, errors } = rig(null);
+    // A staging too small for one quantum: the drain's own copy throws a RangeError on each ring.
+    engine.sourcePcm = new sandbox.Float32Array(memory.buffer, 1024, 2);
+    const faulted = block();
+    assert.deepEqual(errors(), [1, 1], "the drain's own fault is counted on each ring");
+    assert.deepEqual(calls, ["render"], "and the block renders");
+    assert.equal(engine.stickyResult, 0, "a feed fault fails nothing");
+    assert.deepEqual([...faulted.out[0]], [0.25, 0.25, 0.25, 0.25], "with the engine's output");
+  }
+  for (const throwing of ["source_submit", "source_seek"]) {
+    const { engine, writers, calls, posts, block, errors } = rig(throwing);
+    if (throwing === "source_seek") writers[0].seek(2n, 0n);
+    let trapped;
+    assert.doesNotThrow(() => { trapped = block(); }, `a ${throwing} trap stays inside process()`);
+    assert.deepEqual(calls, [throwing], `a ${throwing} trap: no export after it, on any ring`);
+    assert.equal(trapped.kept, true, `a ${throwing} trap: the node is kept`);
+    assert(trapped.out.every((plane) => plane.every((sample) => Object.is(sample, 0))), `a ${throwing} trap: the block is silent`);
+    assert.deepEqual(errors(), [0, 0], `a ${throwing} trap is no feed fault`);
+    assert.equal(engine.stickyResult, 255, `a ${throwing} trap fails the engine sticky 255`);
+    block();
+    engine.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 1 } });
+    assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 1, result: 255 }, `a ${throwing} trap: the dispose is final`);
+    assert.deepEqual(calls, [throwing], `a ${throwing} trap: no export runs on the trapped engine`);
+  }
+});
+
 test("detachSource withdraws one ring: the drain never reads it after it resolves, and the others keep draining", async () => {
   // #1297b gate 4 (the feed half; the engine's timing is browser-evals'). Red if detachSource
   // resolves before the worklet withdrew the ring, names the ring by an identity a cloned message
