@@ -7435,25 +7435,6 @@ pub mod test_support {
         matrix.stage.read_current()[0]
     }
 
-    /// Exact retained words for the live scalar fader owner.
-    #[must_use]
-    pub fn scalar_fader_words(fader: &FaderMuteRampBuiltins) -> [u32; 14] {
-        let stage = &fader.stage;
-        let mut out = [0; 14];
-        for channel in 0..2 {
-            let base = channel * 6;
-            out[base] = stage.ramp[channel].current.to_bits();
-            out[base + 1] = stage.ramp[channel].target.to_bits();
-            out[base + 2] = stage.ramp[channel].step.to_bits();
-            out[base + 3] = stage.ramp[channel].remaining.to_bits();
-            out[base + 4] = stage.remaining[channel][0];
-            out[base + 5] = stage.fader_gain[channel][0].to_bits();
-        }
-        out[12] = u32::from(stage.phase[0][0].muted());
-        out[13] = u32::from(stage.phase[1][0].muted());
-        out
-    }
-
     /// Exact retained words for the live scalar matrix owner.
     #[must_use]
     pub fn scalar_matrix_words(matrix: &MatrixBuiltins) -> [u32; 15] {
@@ -7480,24 +7461,24 @@ pub mod test_support {
         out
     }
 
-    /// Exact retained words for one fader-bank lane: per channel current/target/step/ramp word,
-    /// authoritative countdown and remembered gain, followed by both mute flags.
+    /// Exact retained words for one fader-bank lane: per channel current/target/step, the
+    /// authoritative countdown and the remembered gain, followed by both mute flags. The kernel's
+    /// `f32` countdown word is scratch, rebuilt from the countdown before every ramp kernel reads
+    /// it (issue #2377 T2), so it is left out.
     #[must_use]
-    pub fn fader_bank_lane_words(bank: &BuiltinFaderBank, lane: usize) -> [u32; 14] {
-        fn words<L: crate::Lane>(stage: &crate::FaderRampStage<L>, lane: usize) -> [u32; 14] {
-            let mut out = [0; 14];
+    pub fn fader_bank_lane_words(bank: &BuiltinFaderBank, lane: usize) -> [u32; 12] {
+        fn words<L: crate::Lane>(stage: &crate::FaderRampStage<L>, lane: usize) -> [u32; 12] {
+            let mut out = [0; 12];
             for channel in 0..2 {
-                let base = channel * 6;
+                let base = channel * 5;
                 out[base] = crate::lane_read::<L>(stage.ramp[channel].current)[lane].to_bits();
                 out[base + 1] = crate::lane_read::<L>(stage.ramp[channel].target)[lane].to_bits();
                 out[base + 2] = crate::lane_read::<L>(stage.ramp[channel].step)[lane].to_bits();
-                out[base + 3] =
-                    crate::lane_read::<L>(stage.ramp[channel].remaining)[lane].to_bits();
-                out[base + 4] = stage.remaining[channel][lane];
-                out[base + 5] = stage.fader_gain[channel][lane].to_bits();
+                out[base + 3] = stage.remaining[channel][lane];
+                out[base + 4] = stage.fader_gain[channel][lane].to_bits();
             }
-            out[12] = u32::from(stage.phase[0][lane].muted());
-            out[13] = u32::from(stage.phase[1][lane].muted());
+            out[10] = u32::from(stage.phase[0][lane].muted());
+            out[11] = u32::from(stage.phase[1][lane].muted());
             out
         }
         per_width!(FaderStageKernel(stage) in &bank.stage => words(stage, lane))

@@ -19,7 +19,7 @@ Each row names the plausible defect its test must turn red.
 
 ## Gates
 - Each new test is red under its named mutant or defect. The PR records the red run, and the test-value sentence is answered per row.
-- No product behaviour change except T1's `None` and T2's dead write. T1 is API-visible only within builtins.
+- No product behaviour change except T1's `None` and T2's dead write. T1's signature change (`Option` returns) reaches the two builtins-compiler callers (`crates/builtins-compiler/src/lib.rs` 1695 and 9465), which keep their behaviour.
 - One test per claim: a row whose claim an existing test already covers is deleted.
 
 ## Evidence / attempt record
@@ -29,7 +29,7 @@ Attempt 1 (Terra), branch `codex/issue-2377-coverage-gaps` from `origin/main` `9
 - Claim held at base: `crates/builtins/src/lib.rs` `FaderMuteRampBuiltins::target_gain` and `is_muted` read `self.stage.*(0, lane % 2)` while `is_armed`, `gain_held` and `ramp_remaining` return `None` above lane 1.
 - Fix: both return `Option` and `None` for a lane above `1`. Callers: builtins-compiler's `FaderJumpStage` impl (`== Some(true)`) and its automation closure (`?`, which already returns `Option`), plus `tests/fader_ramp.rs`. No rendered sample changes: the methods are readbacks.
 - Test: `the_scalar_fader_refuses_a_lane_out_of_range` (`crates/builtins/tests/fader_ramp.rs`) gains `is_muted(2) == None` and `target_gain(3) == None`, with the in-range answers beside them.
-- Red under the defect: restoring the wrap (`Some(self.stage.is_muted(0, lane % 2))`, no `None` arm) fails at `fader_ramp.rs:1214` `left: Some(true) right: None`; the same for `target_gain` alone fails at `:1216` `left: Some(1.0) right: None`.
+- Red under the defect: restoring the wrap (`Some(self.stage.is_muted(0, lane % 2))`, no `None` arm) fails at `fader_ramp.rs:1217` `left: Some(true) right: None`; the same for `target_gain` alone fails at `:1223` `left: Some(1.0) right: None` (re-run in attempt 2 at the formatted line numbers).
 - Test value: a lane query that wraps a lane above 1 onto another channel turns it red, and no other test asks the scalar fader about such a lane.
 
 ### T2 (#2354): the fader carry is exported from lane 1; the dead countdown-word write is removed
@@ -39,6 +39,7 @@ Attempt 1 (Terra), branch `codex/issue-2377-coverage-gaps` from `origin/main` `9
 - H7 confirmed equivalent and removed: `import_lane` wrote `ramp[channel].remaining` (the kernel's `f32` countdown word), but the only reader is `gain_mute_ramp_block`, called once, from `process_plane`, which rebuilds the word from the `u32` countdown right before it (`lib.rs` `process_plane`). `rest_tests::lane_state` already left the word out as residue. `reset`'s zeroing of the same word is equally dead and is left alone (outside the row).
 - No bit moved (one-time, not committed): a scratch test drove two 3-lane fader banks per width through 400 seeded blocks of mutes, fader moves with windows 0-1000, cross-bank imports and same- and cross-bank `swap_lanes`, hashing every output word. Base and change both print `9fa1fa1f8be8817c`; a control mutant (`import_lane` halving the `u32` countdown) prints `4d4eabd9a34d5804`, so the digest sees an import.
 - Gates: `cargo test -p builtins --features test-support` green; `realtime_policy` ok (298 regions).
+- Attempt 2 (verdict MINOR 9): the test-support readback `fader_bank_lane_words` no longer reports the scratch `f32` countdown word; it is now 12 words per lane: per channel current, target, step, countdown and gain, then both mute flags. `scalar_fader_words` had no caller and is deleted. `reset`'s zeroing of the word is handed to #2378 (C15).
 
 ### T3 (#2364): a one-channel filter retarget and an asymmetric import refresh `lane_symmetry`
 - Claim held at base: with S1 (`InputStage::apply_prepared_filter` drops its `refresh_channel_symmetry()`) or S2 (`InputStage::import_lane` drops `refresh_channel_symmetry_lane(lane)`), the whole `cargo test -p builtins --features test-support` stays green.
@@ -122,3 +123,16 @@ Test value, per new row: a factory record with a foreign prototype, a hidden acc
 Gates: `bash scripts/test-web-audioworklet.sh` passes (the hermetic suite, its MAX_SAFE runs and the policy self-tests). The shipped JavaScript is unchanged, so no browser run applies.
 
 Handed to #2378 (cleanups), as Sol's rows C14 and C15: the three unreachable guards (189, 257's `planes` parameter, 1706's `settled`), and `FaderRampStage::reset`'s write of the dead `f32` countdown word (T2).
+
+### Attempt 1 verdict (Sol, `a12307cce`): FAIL
+- MAJOR 1: T5 f2 is not equivalent. `release_at_entry` sets the cell's hold through `CellState::hold_until`, which overwrites an offsets jump's hold set at the same entry.
+- MAJOR 2: T9 guards 175, 223 and 230 are reachable beside an enumerable optional field whose value is `undefined`.
+- MINORs: (3) n8 is equivalent, not "probably"; (4) probe n3 with the same lens; (5) T7's "would add nothing" was false, so continue scalar against twin and pin the reach; (6) T9 181's reason was wrong; (7) hand the unreachable web guards and `reset`'s dead word to #2378 as C14 and C15; (8) T1's gate text and stale red-run cites; (9) T2's test-support readbacks still reported the scratch word.
+
+### Attempt 2 (Terra), same branch
+Every finding is folded; each is recorded at its row above:
+- T5: f2 is killed by the new twin row; n3 is equivalent, backed by a 162-run probe that reaches the due arm; n8 is equivalent.
+- T9: two rows kill 175, 223 and 230 (16 of 23 guards red now); 181's reason is corrected; the unreachable guards are handed to #2378.
+- T7: restored against continued past the hostile block, and `assert_reached` requires both counters.
+- T1: gate text and cites corrected.
+- T2: readback fixed.
