@@ -6248,7 +6248,7 @@ mod tests {
                 if block == SWAP_BLOCK {
                     let mut plan = successor.take().expect("successor");
                     if let Some(program) = (program.take().expect("program"))(identity) {
-                        graph::install_carry_program(&mut plan, program).expect("install");
+                        plan = graph::carry_builder(plan, program).expect("install").seal();
                     }
                     assert!(publisher.publish(plan, 0).is_ok());
                 }
@@ -6383,9 +6383,12 @@ mod tests {
             assert!(predecessor.prepare_source_seek(0, 2, SEEK));
 
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
-            let mut successor = bind(SourceGraphSource::vacant(2), &validity);
-            graph::install_carry_program(&mut successor, carry_source_zero(identity))
-                .expect("install");
+            let mut successor = graph::carry_builder(
+                bind(SourceGraphSource::vacant(2), &validity),
+                carry_source_zero(identity),
+            )
+            .expect("install")
+            .seal();
             assert_eq!(
                 successor.adopt_predecessor_plan(&mut predecessor),
                 CarryOutcome::Carried
@@ -6410,40 +6413,39 @@ mod tests {
         #[test]
         fn install_refuses_out_of_range_occupied_and_repeated_sources() {
             let validity = Arc::new(AtomicU8::new(0));
-            let mut vacant = bind(SourceGraphSource::vacant(2), &validity);
+            let vacant = bind(SourceGraphSource::vacant(2), &validity);
             let (_host, source) = filled_source();
-            let mut occupied = bind(source, &validity);
+            let occupied = bind(source, &validity);
             let program = |sources: &[(u32, u32)]| GraphCarryProgram {
                 predecessor: 1,
                 sources: sources.into(),
                 timeline: false,
             };
-            assert_eq!(
-                graph::install_carry_program(&mut vacant, program(&[(1, 0)])),
-                Err(GraphCarryInstallError::SourceIndexOutOfRange)
-            );
-            assert_eq!(
-                graph::install_carry_program(&mut occupied, program(&[(0, 0)])),
-                Err(GraphCarryInstallError::SourceNotVacant)
-            );
-            assert_eq!(
-                graph::install_carry_program(&mut vacant, program(&[(0, 0), (0, 1)])),
-                Err(GraphCarryInstallError::DuplicateSourceIndex)
-            );
-            let mut plain = PreparedRenderPlan::prepare(engine::realtime::PrepareRenderPlan {
+            // A refusal hands the plan back as it was.
+            let refuse = |plan, sources: &[(u32, u32)]| {
+                let refused = graph::carry_builder(plan, program(sources)).expect_err("refused");
+                (refused.error(), refused.into_plan())
+            };
+            let (error, vacant) = refuse(vacant, &[(1, 0)]);
+            assert_eq!(error, GraphCarryInstallError::SourceIndexOutOfRange);
+            let (error, mut occupied) = refuse(occupied, &[(0, 0)]);
+            assert_eq!(error, GraphCarryInstallError::SourceNotVacant);
+            let (error, mut vacant) = refuse(vacant, &[(0, 0), (0, 1)]);
+            assert_eq!(error, GraphCarryInstallError::DuplicateSourceIndex);
+            let plain = PreparedRenderPlan::prepare(engine::realtime::PrepareRenderPlan {
                 plan_id: 1,
                 envelope: envelope(),
                 scratch: &[],
             })
             .expect("plain plan");
-            assert_eq!(
-                graph::install_carry_program(&mut plain, program(&[(0, 0)])),
-                Err(GraphCarryInstallError::NotAGraphPlan)
-            );
+            let (error, mut plain) = refuse(plain, &[(0, 0)]);
+            assert_eq!(error, GraphCarryInstallError::NotAGraphPlan);
             assert_eq!(graph::plan_identity(&mut plain), None);
             // A refused install charges nothing; an accepted one charges its move table.
             assert_eq!(graph::carry_program_retained_bytes(&mut vacant), 0);
-            graph::install_carry_program(&mut vacant, program(&[(0, 0)])).expect("install");
+            let mut vacant = graph::carry_builder(vacant, program(&[(0, 0)]))
+                .expect("install")
+                .seal();
             assert_eq!(
                 graph::carry_program_retained_bytes(&mut vacant),
                 core::mem::size_of::<(u32, u32)>() as u64
@@ -6533,20 +6535,21 @@ mod tests {
             let (_second, second) = filled_source();
             let mut predecessor = bind_with(vec![first, second], two_source_mappings(), &validity);
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
-            let mut successor = bind_with(
+            let successor = bind_with(
                 vec![SourceGraphSource::vacant(2), SourceGraphSource::vacant(2)],
                 two_source_mappings(),
                 &validity,
             );
-            graph::install_carry_program(
-                &mut successor,
+            let mut successor = graph::carry_builder(
+                successor,
                 GraphCarryProgram {
                     predecessor: identity,
                     sources: vec![(0, 0), (1, 5)].into_boxed_slice(),
                     timeline: false,
                 },
             )
-            .expect("install");
+            .expect("install")
+            .seal();
             assert_eq!(
                 successor.adopt_predecessor_plan(&mut predecessor),
                 CarryOutcome::PredecessorMismatch
@@ -6561,21 +6564,23 @@ mod tests {
         #[test]
         fn install_refuses_a_repeated_predecessor_index() {
             let validity = Arc::new(AtomicU8::new(0));
-            let mut successor = bind_with(
+            let successor = bind_with(
                 vec![SourceGraphSource::vacant(2), SourceGraphSource::vacant(2)],
                 two_source_mappings(),
                 &validity,
             );
+            let refused = graph::carry_builder(
+                successor,
+                GraphCarryProgram {
+                    predecessor: 1,
+                    sources: vec![(0, 0), (1, 0)].into_boxed_slice(),
+                    timeline: false,
+                },
+            )
+            .expect_err("a repeated predecessor index");
             assert_eq!(
-                graph::install_carry_program(
-                    &mut successor,
-                    GraphCarryProgram {
-                        predecessor: 1,
-                        sources: vec![(0, 0), (1, 0)].into_boxed_slice(),
-                        timeline: false,
-                    },
-                ),
-                Err(GraphCarryInstallError::DuplicateSourceIndex)
+                refused.error(),
+                GraphCarryInstallError::DuplicateSourceIndex
             );
         }
 
@@ -6653,13 +6658,14 @@ mod tests {
                 &validity,
             );
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
-            let mut successor = bind_with(
+            let successor = bind_with(
                 vec![SourceGraphSource::vacant(2)],
                 vec![mono(a, 1), mono(b, 1)],
                 &validity,
             );
-            graph::install_carry_program(&mut successor, carry_source_zero(identity))
-                .expect("install");
+            let mut successor = graph::carry_builder(successor, carry_source_zero(identity))
+                .expect("install")
+                .seal();
             assert_eq!(
                 successor.adopt_predecessor_plan(&mut predecessor),
                 CarryOutcome::PredecessorMismatch

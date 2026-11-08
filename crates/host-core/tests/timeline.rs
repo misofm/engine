@@ -616,6 +616,81 @@ fn a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline() {
     }
 }
 
+/// [`with_added_track`] behind a true-peak limiter of `lookahead_ms` on `eq0`, every track sent
+/// into the submix `bus`, which declares its own input delay and forwards to the output.
+fn bus_session(lookahead_ms: f32) -> SessionModel {
+    let mut model = with_limiter(with_added_track(one_track()), "eq0", lookahead_ms);
+    let mut onward = model.routes[0].clone();
+    let RouteSource::Track { tap, .. } = onward.source else {
+        panic!("a track route");
+    };
+    onward.id = id("bus-main");
+    onward.source = RouteSource::Submix {
+        submix_id: id("bus"),
+        tap,
+    };
+    onward.follows_mute = false;
+    for route in &mut model.routes {
+        route.destination = session::RouteDestination::SubmixInput {
+            submix_id: id("bus"),
+        };
+    }
+    model.routes.push(onward);
+    let mut bus = session::Submix::unity(id("bus"), &model.console);
+    bus.builtins.left.delay_samples = 41;
+    bus.builtins.right.delay_samples = 29;
+    model.submixes.push(bus);
+    model
+}
+
+/// #2375: a successor at another rate has no join program, so it carries nothing and is charged
+/// for nothing, though the line joins, which run without the program's condition, would take
+/// `eq0`'s limiter compensation line and `bus`'s alignment line. The edit moves to 44.1 kHz,
+/// changes every strip's fader and pan or matrix and the limiter's lookahead in a prepared value,
+/// and changes the source's length, so no owner the program counts carries. (A send or a route
+/// fade carries only between plans with live route lanes, where every shared strip's join may
+/// carry and so builds a program: this entry binds none.)
+///
+/// Test value: red if preparation installs a program for either line (the carry counts or
+/// retained bytes move), or charges a line it does not install (preparation's retained-bytes
+/// `debug_assert_eq` trips: that half holds in a debug build only, as the test jobs run). Neither
+/// carry could ever run: the plan's envelope differs, so the hand-over is refused before it
+/// starts.
+#[test]
+fn a_successor_at_another_rate_carries_and_charges_nothing() {
+    let a = Session::compile(bus_session(4.0));
+    let mut predecessor = a.prepare(Backend::current());
+    let mut model = bus_session(6.0);
+    model.sample_rate_hz = 44_100;
+    for source in &mut model.sources {
+        source.frames += 1;
+    }
+    let pan = |matrix: &mut session::MatrixOrPan| match matrix {
+        session::MatrixOrPan::Pan { left, .. } | session::MatrixOrPan::Matrix { ll: left, .. } => {
+            *left = 0.5;
+        }
+    };
+    for track in &mut model.tracks {
+        track.fader.left_db += 1.0;
+        track.fader.right_db += 1.0;
+        pan(&mut track.matrix_or_pan);
+    }
+    for submix in &mut model.submixes {
+        submix.fader.left_db += 1.0;
+        submix.fader.right_db += 1.0;
+        pan(&mut submix.matrix_or_pan);
+    }
+    let b = Session::compile(model);
+    let mut successor = successor_of(&b, &a, &predecessor.inventory, false);
+    assert_eq!(graph::test_only_carry_counts(&mut successor.plan), [0; 5]);
+    assert_eq!(graph::carry_program_retained_bytes(&mut successor.plan), 0);
+    render(&mut predecessor.plan);
+    assert_eq!(
+        hand_over(&mut successor, &mut predecessor),
+        CarryOutcome::PredecessorMismatch
+    );
+}
+
 /// Gate 2, a successor with a larger `A_max`: its history is its own, of its own `K`.
 ///
 /// Test value: red if the successor sizes its history from the predecessor's `K` (a seek its

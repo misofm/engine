@@ -7409,7 +7409,7 @@ impl RouteCarryStep {
 /// One entry of a carry section's side table (#1652 D3, MINOR-3): a move whose predecessor row
 /// is a following route, by its index in the move table, and the comparison the swap block may
 /// leave there for a six-word successor's first block. One per such move, allocated by
-/// `install_route_carry` on the control thread, in move order.
+/// `GraphCarryBuilder::routes` on the control thread, in move order.
 #[derive(Clone, Copy)]
 pub(crate) struct RouteCarryCheck {
     step: u32,
