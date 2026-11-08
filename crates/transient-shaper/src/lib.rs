@@ -2171,7 +2171,7 @@ const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4 + 4;
 
 // REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
 impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
-    /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s left
+    /// [`LaneSwap::exchange_lane_defaults`]: lane `lane`'s left
     /// `Ramps::defaults` row then its right one, each parameter in descriptor order as
     /// little-endian `f32` bits, then the lane's link mode as one word (issue #1368,
     /// `effect_contract::exchange_lane_link_word`). They are the shaper's only prepared per-lane

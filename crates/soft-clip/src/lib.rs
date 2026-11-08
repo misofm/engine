@@ -2019,7 +2019,7 @@ const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
 
 // REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
 impl<L: Lane> PreparedSoftClipBank<L> {
-    /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s `left_defaults` row
+    /// [`LaneSwap::exchange_lane_defaults`]: lane `lane`'s `left_defaults` row
     /// then its `right_defaults` row, each parameter in descriptor order as little-endian `f32`
     /// bits. They are the soft clip's only prepared per-lane values: a full reset re-seeds the
     /// lane's ramps and state words from them. The D7 recovery snaps ramps and reads no default.

@@ -2489,6 +2489,7 @@ pub trait PreparedNativeEffect: Send {
         false
     }
 }
+
 /// A bank's render-time lane swap capability ([`swap_bank_lanes`], issues #1747, #2324, #2392):
 /// its prepared per-lane defaults, their exchange and its restore's verdict, as one type.
 ///

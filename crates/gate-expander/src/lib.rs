@@ -1926,7 +1926,7 @@ const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4 + 4;
 
 // REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
 impl<L: Lane> PreparedGate<L, false> {
-    /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s `defaults` row, left
+    /// [`LaneSwap::exchange_lane_defaults`]: lane `lane`'s `defaults` row, left
     /// then right, each parameter in descriptor order as little-endian `f32` bits, then the lane's
     /// link mode as one word (issue #1368, `effect_contract::exchange_lane_link_word`). The row
     /// and the mode are the gate's prepared per-lane values: `reset_lane_full` (a full reset and
