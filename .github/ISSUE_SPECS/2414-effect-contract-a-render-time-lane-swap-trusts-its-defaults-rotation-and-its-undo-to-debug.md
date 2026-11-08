@@ -169,7 +169,7 @@ Every row is the spec's prediction. The same probe on the branch: rows 1-3 `Err(
 - **Item 4.** `BankStage` gains `lane_swap_stranded()`, with default `0`. It replaces the two inherent accessors, so there is one source. `BankChain::swap_lanes` reads it before each slot's swap and, on a refusal, asserts `debug_assert!(stranded count moved, "a checked slot swaps its lanes, or strands and counts it")` in both arms.
   - A counted strand passes in debug.
   - Dropping the effect stage's count, or the live stage's, trips the assertion (`lib.rs` 5356 and 5321 under the mutation).
-- **Item 5.** The successor spec is written, ready to file. This spec names it as #SUCCESSOR. It covers:
+- **Item 5.** The successor spec is written, ready to file. This spec names it as #2419. It covers:
   - the checked chain and graph swap-backs, reported as a split strip;
   - the graph's `debug_assert!(false)`;
   - a host-facing `lane_swap_stranded` total, and a #2135 pin on `Chain(Defect)`;
