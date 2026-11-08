@@ -2074,6 +2074,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
     }
     // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN: #2392, the lane swap hook runs at a render block boundary.
     fn lane_swap(&self) -> Option<&dyn LaneSwap> {
         Some(self)
     }
@@ -2081,6 +2082,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
     fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
         Some(self)
     }
+    // REALTIME_POLICY_END
 
     /// Issue #1370: [`Shaper::retarget_link`]; a padded lane takes no glide.
     fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {

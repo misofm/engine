@@ -40,8 +40,8 @@ All three are separate trait methods with independent defaults: `None`, `false`,
 - The limiter's history/main-ring tie (#2393).
 - Third-party effects (R6a).
 
-## Also carried (#2378 C15, independent, a one-line cleanup) -- superseded by #2410
-Superseded: #2410 owns one residue rule for every builtins stage's `f32` countdown word, the fader's included, so this row is left to it and not done here (see the evidence record).
+## Also carried (#2378 C15, independent, a one-line cleanup) -- moved to #2410
+Moved: #2410's spec now carries this row explicitly as its fader contract item (it is amended on this issue's branch). As filed, #2410 changed only the matrix and the input trim, and its row 1 says the fader already follows the rule. So it did not own the stored word until the amendment. Not done here.
 
 `builtins`' `FaderRampStage` keeps the kernel's `f32` countdown word in `ramp[c].remaining`. That word is rebuilt from the `u32` countdown at the top of every ramping block (`process_plane`, `crates/builtins/src/lib.rs` ~3704-3710) and has no other reader. It should become a local of `process_plane`. Because `gain_mute_ramp_block` (`crates/lane/src/kernels/builtins.rs` ~305) takes the whole `&mut GainMuteRamp<L>`, of which `remaining` is a field, this needs either a change to that kernel's signature in the `lane` crate or a scoped `GainMuteRamp` copy; the `lane` crate is then touched. The same applies to any other stage whose `f32` countdown is pure per-block scratch. The change must move no bit and must leave `fader_bank_lane_words` as it is. It may land as its own commit here or as its own issue.
 
@@ -84,7 +84,12 @@ Superseded: #2410 owns one residue rule for every builtins stage's `f32` countdo
 - M4, `swap_bank_lanes_scratch_bytes` adds `0` for the defaults: red, `lane_swap_tests` (`scratch_bytes == 24 + DEFAULTS`).
 - M5, `rack::lane_swap_scratch_fits` stops comparing the peer's size (`defaults(processor).is_some()`): **survives**, and the same mutation of the base line (`processor.lane_default_bytes().is_some()`) survives on base too. No `rack` test pairs banks of different defaults sizes; `swap_bank_lanes` still refuses `Defaults` itself. Pre-existing, recorded as a follow-up, not widened here.
 
-**C15 (#2378, the `FaderRampStage` `f32` countdown word).** Not done here: superseded by #2410, which owns the builtins stages' residue rule (its row 1 is the fader). Left to #2410.
+**C15 (#2378, the `FaderRampStage` `f32` countdown word).** Not done here. Attempt 1 recorded it as "superseded by #2410", and that was wrong: #2410 as filed changed only the matrix and the input trim (its row 1 says the fader already follows the rule). Attempt 2 amends `.github/ISSUE_SPECS/2410-*.md` on this branch to carry C15 explicitly:
+- the problem row 1 now names the stored `ramp[c].remaining`;
+- a fader contract item drops the word and builds it as a `process_plane` local, through either a `lane` kernel signature change or a scoped `GainMuteRamp` copy;
+- a size-change item;
+- a mutation item.
+The coordinator syncs #2410's GitHub body to that file.
 
 **Gates (all green).**
 - `cargo test --locked`, one crate at a time: `effect-contract` 84, `compressor` 104, `de-esser` 21, `dynamic-eq` 18, `gate-expander` 71, `parametric-eq` 133, `soft-clip` 42, `transient-shaper` 46, `true-peak-limiter` 81, `multiband-compressor` 81, `rack` 75, `effect-compiler` 59 (with `restore_verdict`) passed, none failed. `graph-compiler --test silent_bank_skip` 14 passed (the lane-swapping consumer, with its allocation-free move test).

@@ -1919,6 +1919,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         self.advance_skipped_clocks(lanes_mask, frames);
     }
 
+    // REALTIME_POLICY_BEGIN: #2392, the lane swap hook runs at a render block boundary.
     fn lane_swap(&self) -> Option<&dyn LaneSwap> {
         Some(self)
     }
@@ -1926,6 +1927,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
     fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
         Some(self)
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane> LaneSwap for PreparedSoftClipBank<L> {
