@@ -5103,11 +5103,30 @@ fn snapshot_lane(
 /// instead made a live lane's own snapshot unrestorable for those `B` frames, which the
 /// plan-swap carry and `effect_contract::swap_bank_lanes` cannot honour.
 ///
-/// The kernel writes a non-finite history word only beside the same sample in the main ring
-/// (`12 < B`). A payload holding one without the other is not the kernel's, and admitting it is
-/// bounded: the detector then answers `r = 1` for at most 12 frames, no gain word leaves its
-/// range, and every output stays the ring word times a gain in `[0, 1]`, so nothing leaves the
-/// §4.4 bound that the check would not catch.
+/// What the two hold is tied, though (issue #2393). Every history tap is a copy of one main-ring
+/// word: tap `k` is `x[n - k]`, the sample the main ring holds at slot `(main_cursor + B - 1 - k)
+/// mod B`, age `B - 1 - k` from the cursor (`12 < B`). So each tap must be that ring word bit for
+/// bit, a non-finite pair included, or the section is refused with `effect.state.signal`. Every
+/// writer keeps the tie:
+///
+/// * the frame loop of every body (dual, uniform, linked, glide, collapsed) shifts the loaded
+///   input word into the history in its detector pass and stores the same word at the cursor's
+///   slot, then advances the bank's one cursor;
+/// * both resets, `reset_lane` and the D7 recovery, whole or per lane, write `+0.0` over the
+///   lane's whole history and main ring on both channels; the cursors move to zero or stay;
+/// * the collapse's disengage copy moves the left channel's history and main ring together, under
+///   the bank's one cursor;
+/// * a restore, and so the plan-swap carry and both halves of a lane swap, copies the history
+///   verbatim and re-ages the ring to the receiver's cursor ([`commit_lane`]): age `B - 1 - k`
+///   lands at age `B - 1 - k`;
+/// * a skipped block ([`LimiterCore::advance_clocks`]) moves the cursor past a lane only while the
+///   lane's history and ring are all `+0.0`;
+/// * the lookahead moves no ring word: it is not automatable, and a lane takes a new one only from
+///   a reset to its defaults or a restore.
+///
+/// A payload holding a history the kernel never wrote beside its line is therefore not the
+/// kernel's, and it does not restore: its detector would answer, for up to twelve frames, from
+/// samples the line never emits.
 fn read_lane(
     bytes: &[u8],
     shape: &Shape,
@@ -5173,8 +5192,17 @@ fn read_lane(
         *ramp = read;
     }
 
-    // Issue #2324: the history taps and the main ring (below) admit every word. See the note
-    // on [`read_lane`].
+    // Issue #2324: the history taps and the main ring admit every word; issue #2393: each tap is
+    // its main-ring word, bit for bit. See the note on [`read_lane`]. Twelve words, with the
+    // cursor already in range.
+    for tap in 0..HISTORY_WORDS {
+        let slot = (main_cursor as usize + shape.main - 1 - tap) % shape.main;
+        if read_f32(bytes, words::HISTORY + tap).to_bits()
+            != read_f32(bytes, LANE_HEADER_WORDS + slot).to_bits()
+        {
+            return Err(state_error("effect.state.signal"));
+        }
+    }
 
     // Issue #1370 D6: the weight lies in `[0, 1]` on its whole path, the engine never holds
     // `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`, `c` a
@@ -9123,6 +9151,64 @@ mod tests {
         // A one-byte-short section is rejected.
         let short = vec![0_u8; sizes.left_bytes as usize - 4];
         assert!(StatePayloadInput::new(&reference.0, &short, &reference.2, sizes).is_err());
+    }
+
+    /// **A detector history that disagrees with its main ring is refused** (issue #2393).
+    ///
+    /// Every history tap is a copy of one main-ring word: tap `k` is `x[n - k]`, which the main
+    /// ring holds at slot `(main_cursor + B - 1 - k) mod B`. From the effect's own snapshot, with
+    /// the cursor off zero and the ring wrapped, each tap of each channel is moved one bit away
+    /// from its ring word, and then the ring word away from its tap. Each forgery must be refused
+    /// with `effect.state.signal` and leave the peer as it was.
+    ///
+    /// Test value: a restore that admits a history the kernel never wrote beside its delay line
+    /// (base: every one restores), so the restored detector answers for up to twelve frames from
+    /// samples the line will never emit; or a tie checked for some taps or one channel only.
+    #[test]
+    fn a_history_tap_that_disagrees_with_its_main_ring_word_is_refused() {
+        let values = values_with(-6.0, 100.0, 5.0);
+        let mut source = TruePeakLimiterFactory
+            .prepare(request(&values))
+            .expect("prepare");
+        let mut peer = TruePeakLimiterFactory
+            .prepare(request(&values))
+            .expect("prepare");
+        let mut noise = Noise(0x2393);
+        let mut left: Vec<f32> = (0..700).map(|_| noise.next() * 4.0).collect();
+        let mut right: Vec<f32> = (0..700).map(|_| noise.next() * 4.0).collect();
+        render(&mut source, &mut left, &mut right, 128);
+        let reference = snapshot(&source);
+        let before = snapshot(&peer);
+        let sizes = peer.metadata.state_sizes;
+        let main = Shape::new(48_000).expect("a launch rate").main;
+        for channel in 0..2 {
+            let section = [&reference.1, &reference.2][channel];
+            let cursor = read_u32(section, words::MAIN_CURSOR) as usize;
+            assert_ne!(cursor, 0, "the cursor is off zero");
+            for tap in 0..HISTORY_WORDS {
+                let tied = LANE_HEADER_WORDS + (cursor + main - 1 - tap) % main;
+                assert_eq!(
+                    read_f32(section, words::HISTORY + tap).to_bits(),
+                    read_f32(section, tied).to_bits(),
+                    "channel {channel} tap {tap}: the engine's own payload is tied"
+                );
+                for (what, word) in [("history tap", words::HISTORY + tap), ("ring word", tied)] {
+                    let mut forged = [reference.1.clone(), reference.2.clone()];
+                    let moved = f32::from_bits(read_f32(&forged[channel], word).to_bits() ^ 1);
+                    write_f32(&mut forged[channel], word, moved);
+                    assert_eq!(
+                        peer.processor.restore_state_payload(
+                            STATE_LAYOUT_VERSION,
+                            StatePayloadInput::new(&reference.0, &forged[0], &forged[1], sizes)
+                                .expect("sizes"),
+                        ),
+                        Err(state_error("effect.state.signal")),
+                        "channel {channel} tap {tap}: a moved {what} was not refused"
+                    );
+                    assert_eq!(snapshot(&peer), before, "a refused restore wrote the peer");
+                }
+            }
+        }
     }
 
     /// Issue #1411 D1: a ramp word one ulp outside its range is refused even while the ramp

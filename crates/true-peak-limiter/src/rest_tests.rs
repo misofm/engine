@@ -209,7 +209,9 @@ pub(super) fn limiter_bank<L: Lane>(
 /// independently). It is the only way to reach a lane whose detector history is stale behind a
 /// drained delay line, or whose gain words are off rest while the line and the recursive word are
 /// at it, so it is what gives the predicate's history, gain-ring, `prefix` and `box_sum` legs a
-/// lane to refuse.
+/// lane to refuse. A restore no longer installs the stale history (issue #2393 ties each tap to
+/// its main-ring word), so no engine path reaches that leg's refusal; it is planted to keep the
+/// leg itself tested.
 fn plant(channel: &mut ChannelState, lane: usize, shape: &Shape, draw: &mut Draw) {
     let width = channel.width;
     match draw.below(5) {
