@@ -93,7 +93,7 @@ Moved: #2410's spec now carries this row explicitly as its fader contract item (
 - a fader contract item drops the word and builds it as a `process_plane` local, through either a `lane` kernel signature change or a scoped `GainMuteRamp` copy;
 - a size-change item;
 - a mutation item.
-The coordinator syncs #2410's GitHub body to that file.
+#2410's GitHub body is synced to that file.
 
 **Gates (all green).**
 - `cargo test --locked`, one crate at a time: `effect-contract` 84, `compressor` 104, `de-esser` 21, `dynamic-eq` 18, `gate-expander` 71, `parametric-eq` 133, `soft-clip` 42, `transient-shaper` 46, `true-peak-limiter` 81, `multiband-compressor` 81, `rack` 75, `effect-compiler` 59 (with `restore_verdict`) passed, none failed. `graph-compiler --test silent_bank_skip` 14 passed (the lane-swapping consumer, with its allocation-free move test).
@@ -130,3 +130,12 @@ The coordinator syncs #2410's GitHub body to that file.
   - `realtime_policy`: `ok (312 marked regions in 48 files)`.
   - `scripts/check-workspace-policy.sh`: `ok`.
   - No render code changed after attempt 1's call-graph run, apart from comment markers.
+
+**Sol's verdict on attempt 2 (`05b58129c`): PASS**, with three minors, folded on the same branch:
+- **The swap tests' lattices are cached.** The de-esser and dynamic EQ `swap_tests.rs` rebuilt `parameter_lattice_points` on every draw. They now build each parameter's lattice once, as `f32`s by descriptor index, in a `OnceLock<Vec<Vec<f32>>>`. Each draw still takes one `below` from the same stream, so the draw order is unchanged. Debug run times: the de-esser 5.2 s to 0.96 s, the dynamic EQ 29.4 s to 3.9 s. Each test was rerun under its exchange mutation (the exchange returns `true` and moves nothing), and each is still red with the same failure as before, at the same seed and block: the de-esser `W4 seed 0x23926000 after swap (0, 1) <-> (0, 2): strip 1's payload differs`, the dynamic EQ `W4 seed 0x23927000 block 23 (101 frames): strip 1 at (0, 3): left frame 0 differs`. That the failures did not move confirms the draw order is the same.
+- **#2414's spec is corrected.** Its step-1 example was wrong. `taken &= ..` does not short-circuit, so when the second exchange refuses, exchange 3 hands the first lane its own bytes back: both lanes keep their own defaults while the payloads cross. It is the first or the third exchange refusing that leaves `spare`'s prior bytes in a lane. The spec now works out all three cases, and the undo's three, and words the red-on-base expectation per case and per build. Its line cites are at `05b58129c`.
+- **#2410 synced.** The C15 paragraph above now says #2410's body is synced.
+- **Fold gates.** All green:
+  - `cargo test --locked -j 4 -p de-esser` (22 passed) and `-p dynamic-eq` (19);
+  - clippy `--all-targets -D warnings` on both crates;
+  - `cargo fmt --check`.
