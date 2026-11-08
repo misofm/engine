@@ -69,8 +69,8 @@ pub use model::{
 pub use queue::{
     ControlCommandSlot, CounterTelemetryRecord, ProtocolQueueConfig, ProtocolQueueError,
     ProtocolQueueResourceReport, ProtocolQueues, QueueKind, QueueReport, ReliableEnqueueError,
-    ReliableEventReservation, ReliableEventReservations, ReliableHeader, ReliablePayload,
-    ReliableSlot, TelemetryCounters, TelemetryKey, TelemetryRecord,
+    ReliableEventReservation, ReliableHeader, ReliablePayload, ReliableSlot, TelemetryCounters,
+    TelemetryKey, TelemetryRecord,
 };
 pub use session_wire::{DecodedSessionTransaction, SessionTransactionFrame};
 pub use typed_frame::{
@@ -101,10 +101,11 @@ pub use controller::{
     ControlProvider, ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
     ControllerRetainedCapacity, DocumentDiff, DocumentReplace, DocumentReplaceFn,
     DocumentReplaceRefusal, DocumentReplaceRequest, EventEgressError, IdleController,
-    MeterWindowSpan, ParameterProviderError, PreparedCommandCommitError, PreparedCommandFrame,
-    PreparedImmediateCommandFrame, PreparedObservationRead, PreparedSessionCommand,
-    PreparedStructuralCommand, ProtocolController, ProtocolControllerConfig, ProviderFeatures,
-    ReplayAdmission, ReplayCache, ReplayCacheConfig, ReplayCacheError, ReplayCacheResourceReport,
-    ReplayDecision, ReplayHit, ResponseProviderError, ResponseReadyEnqueueError, SessionCommand,
-    SessionCommandReply, TelemetryRefusal, TelemetryRefusalPath,
+    MaterializePreparedError, MeterWindowSpan, ParameterProviderError, PreparedCommandCommitError,
+    PreparedCommandFrame, PreparedImmediateCommandFrame, PreparedObservationRead,
+    PreparedSessionCommand, PreparedStructuralCommand, ProtocolController,
+    ProtocolControllerConfig, ProviderFeatures, ReplayAdmission, ReplayCache, ReplayCacheConfig,
+    ReplayCacheError, ReplayCacheResourceReport, ReplayDecision, ReplayHit, ResponseProviderError,
+    ResponseReadyEnqueueError, SessionCommand, SessionCommandReply, TelemetryRefusal,
+    TelemetryRefusalPath,
 };

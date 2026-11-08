@@ -53,14 +53,6 @@ const HOST_TYPED_ARRAY_BUFFER_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
   HOST_TYPED_ARRAY_PROTOTYPE,
   "buffer",
 ).get;
-const HOST_TYPED_ARRAY_BYTE_OFFSET_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
-  HOST_TYPED_ARRAY_PROTOTYPE,
-  "byteOffset",
-).get;
-const HOST_TYPED_ARRAY_BYTE_LENGTH_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
-  HOST_TYPED_ARRAY_PROTOTYPE,
-  "byteLength",
-).get;
 const HOST_TYPED_ARRAY_LENGTH_GETTER = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
   HOST_TYPED_ARRAY_PROTOTYPE,
   "length",
@@ -185,13 +177,11 @@ function snapshotDocument(value) {
   if (value === null || typeof value !== "object") return undefined;
   try {
     if (HOST_TYPED_ARRAY_TAG_GETTER.call(value) !== "Uint8Array") return undefined;
-    const backing = HOST_TYPED_ARRAY_BUFFER_GETTER.call(value);
-    const backingByteLength = HOST_ARRAY_BUFFER_BYTE_LENGTH_GETTER.call(backing);
-    const byteOffset = HOST_TYPED_ARRAY_BYTE_OFFSET_GETTER.call(value);
-    const byteLength = HOST_TYPED_ARRAY_BYTE_LENGTH_GETTER.call(value);
+    // The intrinsic `ArrayBuffer` getter throws on a `SharedArrayBuffer` backing, which refuses it;
+    // a detached or out-of-bounds view reads length 0 and the `set` below throws on it. The
+    // intrinsic getters keep a `Uint8Array` view inside its buffer, so there is no bounds to check.
+    HOST_ARRAY_BUFFER_BYTE_LENGTH_GETTER.call(HOST_TYPED_ARRAY_BUFFER_GETTER.call(value));
     const length = HOST_TYPED_ARRAY_LENGTH_GETTER.call(value);
-    if (byteOffset > backingByteLength || byteLength > backingByteLength - byteOffset
-        || byteLength !== length) return undefined;
     const copy = new HOST_UINT8_ARRAY(length);
     HOST_UINT8_ARRAY_SET.call(copy, value);
     return copy;
@@ -256,10 +246,8 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function webError(result, requestId = 0, planes) {
-  const record = { tag: "miso.error.v1", requestId, result };
-  if (planes !== undefined) record.planes = planes;
-  return Object.freeze(record);
+function webError(result, requestId = 0) {
+  return Object.freeze({ tag: "miso.error.v1", requestId, result });
 }
 
 function validRequestId(value) {
@@ -1600,14 +1588,13 @@ function bootControlWorker(workerUrl, boot) {
     return Promise.reject(workerFailed());
   }
   return new Promise((resolve, reject) => {
-    let settled = false;
     // Between the boot reply and the host's construction (the worklet's adoption), the Worker
     // may already post (its tick's watermark or events) or fail: the messages are kept in order
     // and a failure is remembered, and the host replays both when it takes the Worker over.
     const early = { messages: [], failed: null };
+    // Called at most once: its first call replaces or clears every Worker handler that calls it, and
+    // the `postMessage` failure below runs before any handler can.
     const finish = (operation, value) => {
-      if (settled) return;
-      settled = true;
       if (operation === reject) {
         worker.onmessage = null;
         worker.onerror = null;

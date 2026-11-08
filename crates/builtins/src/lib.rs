@@ -3822,12 +3822,13 @@ impl<L: Lane> FaderRampStage<L> {
     // REALTIME_POLICY_END
 
     /// Snaps every lane to its target and cancels any ramp in flight. An unmute ramp ends with
-    /// its countdown; an arm stays, as only its fire ends it.
+    /// its countdown; an arm stays, as only its fire ends it. The kernel's `f32` countdown word is
+    /// not written: `process_plane` rebuilds it from the `u32` countdown before every ramp kernel
+    /// reads it, as [`Self::import_lane`] relies on (issue #2377 T2, #2378 C15).
     fn reset(&mut self) {
         for channel in 0..2 {
             self.ramp[channel].current = self.ramp[channel].target;
             self.ramp[channel].step = L::zero();
-            self.ramp[channel].remaining = L::zero();
         }
         self.remaining = [[0; MAX_BANK_LANES]; 2];
         for phase in self.phase.iter_mut().flatten() {

@@ -85,7 +85,7 @@ pub struct ObservationSelection<'a> {
     pub channels: ObservationReadChannels,
 }
 
-/// The stable key of one tap, as the `issued` lookup of [`read_into`] receives it: the index
+/// The stable key of one tap, as the `issued` lookup of [`read_with`] receives it: the index
 /// entry's own IDs, so it borrows nothing from the caller's selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationKey<'a> {
@@ -100,13 +100,12 @@ pub struct ObservationKey<'a> {
 }
 
 /// One row of a read, for the selection at the same position.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObservationRow {
     /// What the read found: a window exists only in [`ObservationReading::Ready`] (#2307).
     pub reading: ObservationReading,
-    /// The tap's declaration, which names its native unit: always present in a row a read wrote,
-    /// `None` only in a default row.
-    pub tap: Option<&'static ObservationDescriptor>,
+    /// The tap's declaration, which names its native unit.
+    pub tap: &'static ObservationDescriptor,
 }
 
 /// What one read of a tap found (the rule is the module's). Only a ready reading holds a window,
@@ -140,12 +139,6 @@ pub enum ObservationReading {
         /// The lanes asked for.
         channels: ObservationReadChannels,
     },
-}
-
-impl Default for ObservationReading {
-    fn default() -> Self {
-        Self::Pending { state: None }
-    }
 }
 
 impl ObservationRow {
@@ -209,8 +202,6 @@ pub struct ObservationReadError {
 pub enum ObservationRefusal {
     /// More than [`MAXIMUM_OBSERVATION_SELECTIONS`] selections.
     TooManySelections,
-    /// Fewer rows than selections.
-    RowsTooShort,
     /// The plan has no such strip, console slot or insert (`observation.address.unknown`).
     UnknownAddress,
     /// The effect declares no such tap (`observation.tap.unknown`).
@@ -416,47 +407,15 @@ fn key_of(entry: &ObservationIndexEntry) -> (&str, LiveEffectRack, &str) {
     (&entry.strip_id, entry.section, &entry.effect_id)
 }
 
-/// Read one batch into `rows`, one row per selection in order (#1586 D3).
+/// Read one batch of a host's own selection records, one row per record in order (#1586 D3).
 ///
 /// The read goes through the index's own views ([`ObservationIndex::pair_carried`] keeps them on
-/// the slots that render). `issued` returns the tag of the last record the control plane
-/// issued for a tap and whether that record arms it (`(0, false)` for none). The whole batch is
-/// checked before any row is written (D4). Allocates nothing and never acknowledges.
-///
-/// # Errors
-///
-/// The first refusal, in selection order; `rows` is untouched.
-pub fn read_into(
-    index: &ObservationIndex,
-    selections: &[ObservationSelection<'_>],
-    issued: impl FnMut(&ObservationKey<'_>) -> (u64, bool),
-    rows: &mut [ObservationRow],
-) -> Result<(), ObservationReadError> {
-    if selections.len() > MAXIMUM_OBSERVATION_SELECTIONS {
-        return Err(batch_refusal(
-            selections.len(),
-            ObservationRefusal::TooManySelections,
-        ));
-    }
-    if rows.len() < selections.len() {
-        return Err(batch_refusal(
-            selections.len(),
-            ObservationRefusal::RowsTooShort,
-        ));
-    }
-    read_with(
-        index,
-        selections,
-        |selection| Ok(*selection),
-        issued,
-        |position, _, row| rows[position] = row,
-    )
-}
-
-/// [`read_into`] over a host's own selection records: `select` maps each record to its stable
-/// selection, or refuses it with the host's own error, in the same pass as the check, so the first
-/// refusal in record order is the one returned; `write` receives each row, with the index entry
-/// its selection resolved to, once the whole batch passed. Allocates nothing and never acknowledges.
+/// the slots that render). `select` maps each record to its stable selection, or refuses it with
+/// the host's own error, in the same pass as the check, so the first refusal in record order is the
+/// one returned. `issued` returns the tag of the last record the control plane issued for a tap
+/// and whether that record arms it (`(0, false)` for none). The whole batch is checked before any
+/// row is written (D4): `write` receives each row, with the index entry its selection resolved to,
+/// once the whole batch passed. Allocates nothing and never acknowledges.
 ///
 /// # Errors
 ///
@@ -597,8 +556,5 @@ fn read_row(
             None => ObservationReading::Pending { state },
         }
     };
-    ObservationRow {
-        reading,
-        tap: Some(tap),
-    }
+    ObservationRow { reading, tap }
 }

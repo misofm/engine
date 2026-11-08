@@ -1833,6 +1833,76 @@ fn solo_edit(track: &session::StableId, on: bool, ramp: Option<u32>) -> SessionE
     }
 }
 
+/// #2378 C9. Only the controller that issued a token materializes it: another controller's
+/// `materialize_prepared`, even at the same revision, is refused before it touches the token, and
+/// the owner's later commit installs the owner's own model with the token's edit.
+///
+/// Red if the materialization skips the token check: the foreign store then compiles the edits
+/// over its own model, the token carries that model, and the owner's commit installs another
+/// session (its `session_id` becomes the foreign one).
+#[test]
+fn another_controllers_materialization_is_refused_and_the_owner_keeps_its_model() {
+    let mut owner = controller(8);
+    let mut model = parse_session_json(EXAMPLE).expect("fixture");
+    let own_id = model.session_id.clone();
+    model.session_id = session::StableId::parse("foreign").expect("ID");
+    let foreign = controller_over(model, 8, SampleTime(0));
+    assert_eq!(foreign.session().revision(), owner.session().revision());
+    let gain = [SessionEdit::set_control(
+        crate::control_core::row_address(
+            crate::control_core::Owner::Route(session::StableId::parse("to-main").expect("ID")),
+            crate::control_core::Section::Own,
+            "gain_db",
+            crate::control_core::Lane::Both,
+        )
+        .expect("a route row"),
+        -3.0,
+        None,
+    )];
+    let input = full_command(
+        8,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&gain),
+    );
+    let mut prepared = match owner
+        .prepare_command_frame_in_place(
+            &input,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
+        .expect("prepares")
+    {
+        PreparedCommandFrame::Structural(prepared) => *prepared,
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => panic!("a value edit is structural"),
+    };
+    assert!(prepared.prospective_session().is_in_place());
+    assert_eq!(
+        foreign.materialize_prepared(&mut prepared),
+        Err(MaterializePreparedError::Token(
+            PreparedCommandCommitError::WrongController
+        ))
+    );
+    assert!(
+        prepared.prospective_session().is_in_place(),
+        "a refused token is untouched"
+    );
+    owner
+        .materialize_prepared(&mut prepared)
+        .expect("the owner materializes its token");
+    owner
+        .commit_prepared_structural(prepared, EditPath::ModelOnly)
+        .expect("commits");
+    let committed = owner.session().compiled().normalized_model();
+    assert_eq!(
+        committed.session_id, own_id,
+        "the owner kept its own session"
+    );
+    assert_eq!(owner.session().revision(), SessionRevision(8));
+}
+
 /// A transaction of monitor writes (#1559 D3, D4): its token exposes the writes, commits no model
 /// and no revision, emits no `SESSION_COMMITTED` and cancels no automation, answers `monitor` at
 /// the committed revision, and an exact replay returns the same bytes. A solo spends no revision
