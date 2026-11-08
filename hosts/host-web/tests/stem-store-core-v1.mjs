@@ -800,28 +800,56 @@ async function aStallingUnpinnedFinalHeals() {
 }
 
 // Issue #2381: a stalled read() of a stem another session pins fails typed and keeps the row and
-// the file, so the other session still reads.
+// the file, so the other session still reads. Issue #2405: so does a read whose lookup of the final
+// stalls, which holds no lock; once the wedge is lifted the other session reads. With no other
+// session pinning the stem, the stalled lookup demotes it, by the same stall rule.
 async function aStalledReadKeepsAStemAnotherSessionPins() {
-  const stem = fixture("stalled-read", 4096)
-  const backend = new FakeOpfsBackend()
-  const resolver = new MemoryStemResolver(stemMap([stem]))
-  const opfs = store(backend, new FakeLockManager(), { tabId: "stalled-read", readDeadlineMs: 20 })
-  const a = await opfs.openSession({ sessionId: "a", stems: requirements([stem]), resolver })
-  const b = await opfs.openSession({ sessionId: "b", stems: requirements([stem]), resolver })
-  let stalls = 1
-  backend.getFileBlocker = ({ name }) =>
-    name === finalName(stem) && stalls-- > 0 ? never() : undefined
-  const read = await settledWithin(a.read(stem.identity), 500)
-  assert.notEqual(read, "timed-out")
-  assert.equal(read.error?.code, "storage.read_stalled")
-  assert.ok(
-    backend.has(`${STORE_FOLDER}/${finalName(stem)}`) &&
-      indexStems(backend)[stem.identity]?.pins.includes("session:stalled-read:b"),
-    "a stalled read demoted a stem another session pins"
-  )
-  assert.equal((await b.read(stem.identity)).size, stem.bytes)
-  await a.close()
-  await b.close()
+  for (const leg of ["getFile", "lookup", "lookup, unpinned"]) {
+    const stem = fixture(`stalled-read-${leg}`, 4096)
+    const backend = new FakeOpfsBackend()
+    const resolver = new MemoryStemResolver(stemMap([stem]))
+    const opfs = store(backend, new FakeLockManager(), { tabId: "stalled-read", readDeadlineMs: 20 })
+    const a = await opfs.openSession({ sessionId: "a", stems: requirements([stem]), resolver })
+    const b =
+      leg === "lookup, unpinned"
+        ? undefined
+        : await opfs.openSession({ sessionId: "b", stems: requirements([stem]), resolver })
+    let reached = false
+    let unwedge
+    const wedge = () => {
+      reached = true
+      return new Promise((resolve) => (unwedge = resolve))
+    }
+    if (leg === "getFile") {
+      backend.getFileBlocker = ({ name }) => (name === finalName(stem) && !reached ? wedge() : undefined)
+    } else {
+      backend.getFileHandleBlocker = ({ name, create }) =>
+        name === finalName(stem) && !create && !reached ? wedge() : undefined
+    }
+    const read = await settledWithin(a.read(stem.identity), 500)
+    assert.ok(reached, `the read's ${leg} was never wedged`)
+    assert.notEqual(read, "timed-out", `a lease read waited on a wedged ${leg} past its deadline`)
+    assert.equal(read.error?.code, "storage.read_stalled", leg)
+    if (b === undefined) {
+      assert.equal(
+        indexStems(backend)[stem.identity],
+        undefined,
+        `a stalled read kept a stem no other session pins (${leg})`
+      )
+    } else {
+      assert.ok(
+        backend.has(`${STORE_FOLDER}/${finalName(stem)}`) &&
+          indexStems(backend)[stem.identity]?.pins.includes("session:stalled-read:b"),
+        `a stalled read demoted a stem another session pins (${leg})`
+      )
+    }
+    backend.getFileBlocker = undefined
+    backend.getFileHandleBlocker = undefined
+    unwedge()
+    if (b !== undefined) assert.equal((await b.read(stem.identity)).size, stem.bytes)
+    await a.close()
+    await b?.close()
+  }
 }
 
 // Issue #2381: a holdless removal (a read failure's demotion) keeps the stem lock until the removal

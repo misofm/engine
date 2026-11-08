@@ -23,8 +23,9 @@
 //! `dsp_reference::dynamic_band`, which shares no code with this module.
 
 use crate::dynamics::{GainComputerCoef, gain_delta_db};
+use crate::ramp::RampLanes;
 use lane::Lane;
-use lane::kernels::{SvfState, ramp_toward, svf_step_when};
+use lane::kernels::{SvfState, svf_step_when};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 /// Detector level floor, below which the logarithm is not taken.
@@ -177,17 +178,19 @@ impl<L: Lane> WordRamp<L> {
 
 /// Advances every ramp one sample: `ramp_toward` (never past the target, #1409), the target on
 /// the final sample. A settled ramp selects every field back, an exact no-op.
+///
+/// This is [`RampLanes::advance_where`] with every lane gated in: the one lane-vector walk of
+/// `LinearRamp`'s law (issue #2390), not a copy of it. The words stay lane words between
+/// samples and blocks, so they pass through the walk as they are rather than being gathered from
+/// and scattered to scalar ramps; a restore admits them through `LinearRamp::from_words`.
 #[inline(always)]
 pub fn advance_word_ramps<L: Lane>(ramps: &mut [WordRamp<L>]) {
-    let zero = L::zero();
-    let one = L::splat(1.0);
+    let every = L::zero().eq(L::zero());
     for ramp in ramps {
-        let moving = ramp.remaining.gt(zero);
-        let last = ramp.remaining.eq(one);
-        let stepped = ramp_toward(ramp.current, ramp.step, ramp.target);
-        ramp.current = L::select(moving, L::select(last, ramp.target, stepped), ramp.current);
-        ramp.step = L::select(last, zero, ramp.step);
-        ramp.remaining = L::select(moving, ramp.remaining.sub(one), ramp.remaining);
+        let mut lanes =
+            RampLanes::from_lane_words(ramp.current, ramp.target, ramp.step, ramp.remaining);
+        let _ = lanes.advance_where(every);
+        [ramp.current, ramp.target, ramp.step, ramp.remaining] = lanes.into_lane_words();
     }
 }
 

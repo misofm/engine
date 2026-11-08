@@ -216,6 +216,17 @@ demotion's removal still in flight at retry time, which before waited until the
 open's abort. A lookup lands nothing, so it is not fenced; a stalled or failed
 lookup is a stalled or failed read under the rule above.
 
+A session's `read()` takes no stem lock and looks up its final under no lock;
+that lookup has the same local-store deadline (#2405). On expiry the read fails
+typed `storage.read_stalled`, like its `getFile()`, and the stall is a stalled
+read under the rule above: the stem is demoted only if no other session pins it.
+A lookup that finds no final is a missing file and still demotes
+unconditionally. The shipped Worker pump reads through a facade that passes no
+reading session's pin, so there the loading gate's own pin counts as another
+session's: a read that stalls or fails in the Worker fails typed and never
+demotes the stem, which stays indexed. This is conservative, and it predates
+#2405.
+
 A wait for a stem lock, in this store or another tab, simply waits for the
 holder; it ends when the lock is released or at the waiter's own abort. A
 caller without a signal, such as `verify()` without one, can therefore wait as

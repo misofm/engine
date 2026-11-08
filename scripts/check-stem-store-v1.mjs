@@ -1585,6 +1585,35 @@ async function runMutationLedger() {
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a wedged staging abort (integrity, aborted) failed with the wrong error",
     },
+    // Issue #2405: a lease read's lookup of its final is deadlined, and its stall goes through the
+    // one stall rule. One entry for the deadline and one for the rule.
+    {
+      name: "look up a lease read's final with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      const handle = await withDeadline(\n        this.#directory.getFileHandle(stemFileName(identity)),\n        this.#readDeadlineMs,\n        \"storage.read_stalled\",\n        `Looking up ${identity} made no progress`\n      )\n",
+          replace: "      const handle = await this.#directory.getFileHandle(stemFileName(identity))\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lease read waited on a wedged lookup past its deadline",
+    },
+    {
+      name: "keep a lease read's lookup stall out of the stall rule",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    try {\n      // A lookup lands nothing and this read holds no lock, so a stalled one is only a stalled read\n      // (#2405).\n      const handle = await withDeadline(\n        this.#directory.getFileHandle(stemFileName(identity)),\n        this.#readDeadlineMs,\n        \"storage.read_stalled\",\n        `Looking up ${identity} made no progress`\n      )\n",
+          replace:
+            "    const handle = await withDeadline(\n      this.#directory.getFileHandle(stemFileName(identity)),\n      this.#readDeadlineMs,\n      \"storage.read_stalled\",\n      `Looking up ${identity} made no progress`\n    )\n    try {\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stalled read kept a stem no other session pins (lookup, unpinned)",
+    },
     // Issue #278's opt-in Worker cadence. Two mutations, because "off by default" and "stop
     // interrupts" are two claims and one of them staying green would hide the other. The first is
     // the compatibility claim in particular: nothing about the shipped worker changed for a host
