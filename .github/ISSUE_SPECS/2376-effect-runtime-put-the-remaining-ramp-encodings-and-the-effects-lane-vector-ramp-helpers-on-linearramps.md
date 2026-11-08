@@ -12,11 +12,11 @@ There are still several encodings of one ramp law, each with its own settle and 
 Each copy is a place where a restore can admit a settled ramp off its target, which is the defect class #2368 fixed in three effects.
 
 ## Contract
-Amended after attempt 1 to the helper slice. The other three encodings move to the successor, #SUCCESSOR.
+Amended after attempt 1 to the helper slice. The other three encodings move to the successor, #2390.
 - One lane-vector helper in `effect-runtime`, next to `LinearRamp`. It gathers, advances by the law and scatters through `record_advance`. The compressor, transient shaper and limiter use it, and their own copies are deleted.
 - The helper is a SIMD lane-word encoding: branch-free, with no enums in lane words.
 - No rendered bit, state word or payload word moves.
-- Out of this issue, and moved to #SUCCESSOR: `WordRamp`, the builtins' countdown stages and `IndexedRamp`, which either share `LinearRamp`'s validation (`from_words`) or document why their encoding cannot.
+- Out of this issue, and moved to #2390: `WordRamp`, the builtins' countdown stages and `IndexedRamp`, which either share `LinearRamp`'s validation (`from_words`) or document why their encoding cannot.
 
 ## Non-goals
 - A stationary hoist for builtin gain retargets. It is cost-only; if it is wanted, it gets its own issue, and it must exclude mute moves, which would move signed-zero bits.
@@ -156,7 +156,7 @@ committed `ramp_lanes.rs` and by each effect's lane-identity tests, not by the d
 - `graph_fixture --check`, which exits 0: no plan struct changed, because `RampLanes` lives only
   in block-loop registers and `LinearRamp` is unchanged.
 
-**Successor: the remaining encodings, #SUCCESSOR.**
+**Successor: the remaining encodings, #2390.**
 - `WordRamp`. Its restores already validate through `from_words` (de-esser and dynamic EQ
   `parse_lane`). What remains is its walk, `advance_word_ramps`, an ungated copy of
   `RampLanes::advance_where`.
@@ -169,7 +169,7 @@ committed `ramp_lanes.rs` and by each effect's lane-identity tests, not by the d
 
 Sol passed `8c60fa71f`. The four minor findings were folded in after merging `origin/main` (#2375):
 1. The Contract and Gates above are amended to the helper slice. The successor is written as a
-   stateless spec, to be filed as #SUCCESSOR.
+   stateless spec, to be filed as #2390.
 2. M15 (`.max(zero)` dropped from `advance`) is added to the mutation table as an equivalent
    mutant, with its reason.
 3. `a_lane_at_rest_advances_to_itself` now rotates the resting values by every offset, so every
