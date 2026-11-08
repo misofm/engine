@@ -303,7 +303,14 @@ export class OpfsStemStore {
       )
     }
     try {
-      const handle = await this.#directory.getFileHandle(stemFileName(identity))
+      // A lookup lands nothing and this read holds no lock, so a stalled one is only a stalled read
+      // (#2405).
+      const handle = await withDeadline(
+        this.#directory.getFileHandle(stemFileName(identity)),
+        this.#readDeadlineMs,
+        "storage.read_stalled",
+        `Looking up ${identity} made no progress`
+      )
       return await withDeadline(
         handle.getFile(),
         this.#readDeadlineMs,
