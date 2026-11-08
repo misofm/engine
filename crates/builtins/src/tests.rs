@@ -844,6 +844,69 @@ fn prepared_filters_design_only_before_runtime_application() {
     assert_eq!(FILTER_DESIGN_CALLS.with(Cell::get), 0);
 }
 
+/// Issue #2377 T3 (mutants S1 and S2 of #2364): the two lane writers that can make one lane's
+/// channels differ, a one-channel filter retarget and an asymmetric lane import, refresh that
+/// lane's held channel-symmetry bit, and an import of a symmetric lane over an asymmetric one
+/// clears it again. Red if `apply_prepared_filter` or `import_lane` drops its symmetry refresh:
+/// `lane_symmetry` then answers from a stale bit (its debug assertion fires, and a release build
+/// collapses a lane whose channels differ).
+#[test]
+fn a_one_channel_filter_retarget_and_an_asymmetric_import_refresh_lane_symmetry() {
+    use super::{BuiltinInputBank, PreparedInputFilterTarget, prepare_input_filter_pair};
+    use effect_contract::BankWidth;
+    use lane::Backend;
+
+    let bank = || {
+        BuiltinInputBank::new(
+            Backend::Simd4,
+            BankWidth::Four,
+            (0..3)
+                .map(|_| {
+                    BuiltinChain::new(48_000, BuiltinParameters::default())
+                        .unwrap()
+                        .into_input_builtins()
+                })
+                .collect(),
+        )
+        .unwrap()
+    };
+    let symmetric = |bank: &BuiltinInputBank| -> [bool; 3] {
+        core::array::from_fn(|lane| bank.lane_symmetry(lane).eligible())
+    };
+    let mut source = bank();
+    let mut destination = bank();
+    assert_eq!(symmetric(&source), [true; 3], "prepared symmetric");
+
+    // S1: a high-pass on the left channel of lane 1 alone.
+    let active = prepare_input_filter_pair(48_000, 120.0, 0.0).unwrap();
+    let left_only = PreparedInputFilterTarget {
+        lanes: BuiltinLaneSelector::Left,
+        ..active.targets[0]
+    };
+    source.apply_prepared_filter(1, left_only).unwrap();
+    assert_eq!(
+        symmetric(&source),
+        [true, false, true],
+        "a one-channel filter retarget makes only its lane asymmetric"
+    );
+
+    // S2: that lane imported over a symmetric one, then a symmetric lane imported back over it.
+    let asymmetric = source.export_lane(1).unwrap();
+    destination.import_lane(2, &asymmetric).unwrap();
+    assert_eq!(
+        symmetric(&destination),
+        [true, true, false],
+        "an asymmetric import makes its lane asymmetric"
+    );
+    let plain = destination.export_lane(0).unwrap();
+    destination.import_lane(2, &plain).unwrap();
+    assert_eq!(
+        symmetric(&destination),
+        [true; 3],
+        "a symmetric import makes its lane symmetric again"
+    );
+}
+
 /// Issue #1638 D3: the sink refuses a padding lane, a bad gain and a second operation of one
 /// kind on one lane and channel, and a refusal queues nothing on either channel.
 #[test]

@@ -3013,11 +3013,11 @@ impl<L: Lane> InputStage<L> {
             }
         }
         self.refresh_ramp_flags(0..2);
-        // Both refreshes are defence rather than load-bearing today: a settled carried lane
-        // holds the coefficients its successor prepared, a ramping lane's body ignores the
-        // elision plan, and `lane_channel_symmetry`'s debug assertion backs the symmetry bit, so
-        // no test turns red without them. They are kept so the caches always describe the words
-        // just written, whatever a later carry imports.
+        // The plan refresh is defence rather than load-bearing today: a settled carried lane
+        // holds the coefficients its successor prepared and a ramping lane's body ignores the
+        // elision plan. The symmetry refresh is load-bearing: an asymmetric lane imported over a
+        // symmetric one must stop reading as symmetric (issue #2377 T3 pins it). Both are kept so
+        // the caches always describe the words just written, whatever a later carry imports.
         self.refresh_filter_plan();
         self.refresh_channel_symmetry_lane(lane);
     }
