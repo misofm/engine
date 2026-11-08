@@ -808,9 +808,10 @@ class MisoAudioWorkletHost {
     const errorFields = message?.planes === undefined
       ? ["tag", "requestId", "result"]
       : ["tag", "requestId", "result", "planes"];
-    // Issue #1332 S8: in `worker` mode the worklet posts a sticky render failure, which belongs to
-    // no request, as request ID 0: the host fails with it, typed.
-    if (message?.tag === "miso.error.v1" && this.#worker !== undefined && message.requestId === 0
+    // Issue #1332 S8: the worklet posts a sticky render failure, which belongs to no request, as
+    // request ID 0: the host fails with it, typed. In `worker` mode it comes on the control
+    // Worker's render check; in `single` mode on the next service tick (#2370).
+    if (message?.tag === "miso.error.v1" && message.requestId === 0
         && hasExactFields(message, ["tag", "requestId", "result"])
         && validResult(message.result) && message.result !== RESULT_OK) {
       this.#fail(Object.freeze(message), null, peer);
