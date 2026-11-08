@@ -10196,7 +10196,10 @@ pub(crate) struct LaneMap {
     pack_attempts: u64,
 }
 
-/// Why [`Runtime::swap_bank_lanes`] moved nothing. Every refusal leaves the plan as it was.
+/// Why [`Runtime::swap_bank_lanes`] moved nothing. Every refusal leaves the plan as it was, but
+/// `Chain(Defect)` may have reset the two strips' lanes of one slot (issue #2414; see
+/// [`rack::ChainLaneSwapRefusal::Defect`]): both strips still sit where they were, and the map
+/// is unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BankLaneMoveRefusal {
     /// The two units are not banks of one pack group.
@@ -11483,8 +11486,9 @@ impl Runtime {
     /// and meters), the lane's route fold entry (`fold`, constants and store bit), and its
     /// [`UnitIdentity::source_lanes`] bit, and the two units' observation rows are derived again
     /// from their new members. A row whose chains refuse after their check passed is a defect: the
-    /// rows already traded are traded back. Last, the lane map, which every other reader
-    /// translates through.
+    /// rows already traded are traded back, and that row's chains have recovered their own slot
+    /// (a slot whose lane swap stranded reset the two lanes, issue #2414), so no strip moved and
+    /// the map is not touched. Last, the lane map, which every other reader translates through.
     ///
     /// Allocation-free: element swaps, the chains' bounded swaps over the preallocated scratch, and
     /// a walk of each row's two units' members.
