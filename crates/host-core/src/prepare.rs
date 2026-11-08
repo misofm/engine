@@ -934,9 +934,10 @@ std::thread_local! {
 /// its preparation computes (#1396 deliverable 2): the plan's
 /// ([`PreparedRenderPlan::source_read_offset`]) and its inventory row's together, so a successor
 /// prepared from the inventory inherits it. The preparation sets it on the bound plan, before the
-/// seal, as it sets its own (#2412): a sealed plan's offset never changes. Taken once, by the
-/// next preparation on this thread that reaches its seal; a projection does not take it. The one
-/// production writer of a nonzero offset is a warm successor's preparation (#1355).
+/// seal, as it sets its own (#2412): a sealed plan's offset never changes. Taken once, at the
+/// start of the next preparation on this thread, whether that preparation then succeeds or is
+/// refused, so a refused preparation never leaves it for a later one; a projection does not take
+/// it. The one production writer of a nonzero offset is a warm successor's preparation (#1355).
 #[cfg(feature = "test-support")]
 pub fn test_only_set_next_source_read_offset(offset: u64) {
     TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(Some(offset)));
@@ -3333,6 +3334,14 @@ fn prepare_or_project(
     mode: PrepareMode,
 ) -> Result<PrepareOutcome, PrepareDiagnostics> {
     let projecting = mode == PrepareMode::Project;
+    // #1396 deliverable 2: a test's scheduled offset, taken by this preparation alone, before
+    // anything can refuse it (#2412).
+    #[cfg(feature = "test-support")]
+    let test_source_read_offset = if projecting {
+        None
+    } else {
+        take_test_next_source_read_offset()
+    };
     // #1709 D1: the whole preparation runs in the canonical floating-point environment, so a
     // route or send gain (`compile_graph`'s `db_to_gain_f32`), a native effect's coefficients and
     // every value composed below are what a canonical thread prepares, whatever the caller has
@@ -5736,7 +5745,7 @@ fn prepare_or_project(
         base.inventory.source_read_offset + warm.map_or(0, |lead| lead.lead_samples)
     });
     #[cfg(feature = "test-support")]
-    let source_read_offset = take_test_next_source_read_offset().unwrap_or(source_read_offset);
+    let source_read_offset = test_source_read_offset.unwrap_or(source_read_offset);
     // #2412: set on the bound plan, which cannot have rendered; the seal below fixes it. No
     // hand-over section reads it: the carry builder only moves staged sections into the executor.
     plan.set_source_read_offset(source_read_offset);

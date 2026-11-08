@@ -7384,11 +7384,14 @@ impl PreparedPlanExecutor for GraphExecutor {
         Some(self)
     }
 
+    // REALTIME_POLICY_BEGIN
+    /// The source-read offset the bound plan was given
+    /// ([`GraphBoundPlan::set_source_read_offset`]), read by the publisher's source-read clock
+    /// after each rendered block (#2412).
     fn source_read_offset(&self) -> u64 {
         self.source_read_offset
     }
 
-    // REALTIME_POLICY_BEGIN
     /// Whether this plan, running, can be displaced by a warm successor whose prime replays
     /// `lead_blocks` blocks at the block from `block_start` (#1355 D4): its source set's check at
     /// the block's source-read sample `block_start + O`, where the successor's prime begins. A
