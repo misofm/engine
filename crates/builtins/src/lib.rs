@@ -3013,11 +3013,11 @@ impl<L: Lane> InputStage<L> {
             }
         }
         self.refresh_ramp_flags(0..2);
-        // Both refreshes are defence rather than load-bearing today: a settled carried lane
-        // holds the coefficients its successor prepared, a ramping lane's body ignores the
-        // elision plan, and `lane_channel_symmetry`'s debug assertion backs the symmetry bit, so
-        // no test turns red without them. They are kept so the caches always describe the words
-        // just written, whatever a later carry imports.
+        // The plan refresh is defence rather than load-bearing today: a settled carried lane
+        // holds the coefficients its successor prepared and a ramping lane's body ignores the
+        // elision plan. The symmetry refresh is load-bearing: an asymmetric lane imported over a
+        // symmetric one must stop reading as symmetric (issue #2377 T3 pins it). Both are kept so
+        // the caches always describe the words just written, whatever a later carry imports.
         self.refresh_filter_plan();
         self.refresh_channel_symmetry_lane(lane);
     }
@@ -3796,9 +3796,10 @@ impl<L: Lane> FaderRampStage<L> {
         }
     }
 
-    /// Overwrite one populated lane with `state`, word for word, and re-derive the two words the
-    /// kernel loads from them: the lane's bit of the mute mask and the countdown the ramp kernel
-    /// reads. The lane then renders exactly what the lane it was exported from would have.
+    /// Overwrite one populated lane with `state`, word for word, and re-derive the lane's bit of
+    /// the mute mask the kernel loads. The kernel's `f32` countdown word needs no import: the
+    /// ramp path rebuilds it from the `u32` countdown before every read. The lane then renders
+    /// exactly what the lane it was exported from would have.
     ///
     /// The phase is re-derived with the countdown ([`FaderPhase::at_countdown`], issue #2280), not
     /// copied: an unmute ramp with no frames left imports as the open lane the countdown's end
@@ -3810,11 +3811,8 @@ impl<L: Lane> FaderRampStage<L> {
             put_lane::<L>(&mut self.ramp[channel].current, lane, carried.current);
             put_lane::<L>(&mut self.ramp[channel].target, lane, carried.target);
             put_lane::<L>(&mut self.ramp[channel].step, lane, carried.step);
-            put_lane::<L>(
-                &mut self.ramp[channel].remaining,
-                lane,
-                carried.remaining.min(FADER_RAMP_COUNTDOWN_MAXIMUM) as f32,
-            );
+            // No write of the kernel's `f32` countdown word: `process_plane` rebuilds it from the
+            // `u32` countdown below before every ramp kernel reads it (issue #2377 T2).
             self.remaining[channel][lane] = carried.remaining;
             self.fader_gain[channel][lane] = carried.fader_gain;
             self.phase[channel][lane] = carried.phase.at_countdown(carried.remaining);
@@ -5904,16 +5902,23 @@ impl FaderMuteRampBuiltins {
         Some(self.stage.is_armed(0, lane))
     }
 
-    /// The settled gain of one lane, for tests and control-plane readback.
+    /// The settled gain of one lane (`0` left, `1` right), for tests and control-plane readback.
+    /// `None` for a lane above `1`.
     #[must_use]
-    pub fn target_gain(&self, lane: usize) -> f32 {
-        self.stage.target_gain(0, lane % 2)
+    pub fn target_gain(&self, lane: usize) -> Option<f32> {
+        if lane > 1 {
+            return None;
+        }
+        Some(self.stage.target_gain(0, lane))
     }
 
-    /// Whether one lane is muted.
+    /// Whether one lane (`0` left, `1` right) is muted. `None` for a lane above `1`.
     #[must_use]
-    pub const fn is_muted(&self, lane: usize) -> bool {
-        self.stage.is_muted(0, lane % 2)
+    pub const fn is_muted(&self, lane: usize) -> Option<bool> {
+        if lane > 1 {
+            return None;
+        }
+        Some(self.stage.is_muted(0, lane))
     }
 
     /// Renders one already-validated block.
@@ -7251,8 +7256,8 @@ fn zero(value: f32) -> f32 {
 pub mod test_support {
     use super::{
         BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinMatrixBank, BuiltinParameterError,
-        FaderMuteRampBuiltins, FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2,
-        MatrixBuiltins, MatrixStageKernel, SvfSection, lane_read,
+        FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2, MatrixBuiltins,
+        MatrixStageKernel, SvfSection, lane_read,
     };
 
     /// How many design bounds (#1329 D4) preparation has computed on the calling thread: one
@@ -7430,25 +7435,6 @@ pub mod test_support {
         matrix.stage.read_current()[0]
     }
 
-    /// Exact retained words for the live scalar fader owner.
-    #[must_use]
-    pub fn scalar_fader_words(fader: &FaderMuteRampBuiltins) -> [u32; 14] {
-        let stage = &fader.stage;
-        let mut out = [0; 14];
-        for channel in 0..2 {
-            let base = channel * 6;
-            out[base] = stage.ramp[channel].current.to_bits();
-            out[base + 1] = stage.ramp[channel].target.to_bits();
-            out[base + 2] = stage.ramp[channel].step.to_bits();
-            out[base + 3] = stage.ramp[channel].remaining.to_bits();
-            out[base + 4] = stage.remaining[channel][0];
-            out[base + 5] = stage.fader_gain[channel][0].to_bits();
-        }
-        out[12] = u32::from(stage.phase[0][0].muted());
-        out[13] = u32::from(stage.phase[1][0].muted());
-        out
-    }
-
     /// Exact retained words for the live scalar matrix owner.
     #[must_use]
     pub fn scalar_matrix_words(matrix: &MatrixBuiltins) -> [u32; 15] {
@@ -7475,24 +7461,24 @@ pub mod test_support {
         out
     }
 
-    /// Exact retained words for one fader-bank lane: per channel current/target/step/ramp word,
-    /// authoritative countdown and remembered gain, followed by both mute flags.
+    /// Exact retained words for one fader-bank lane: per channel current/target/step, the
+    /// authoritative countdown and the remembered gain, followed by both mute flags. The kernel's
+    /// `f32` countdown word is scratch, rebuilt from the countdown before every ramp kernel reads
+    /// it (issue #2377 T2), so it is left out.
     #[must_use]
-    pub fn fader_bank_lane_words(bank: &BuiltinFaderBank, lane: usize) -> [u32; 14] {
-        fn words<L: crate::Lane>(stage: &crate::FaderRampStage<L>, lane: usize) -> [u32; 14] {
-            let mut out = [0; 14];
+    pub fn fader_bank_lane_words(bank: &BuiltinFaderBank, lane: usize) -> [u32; 12] {
+        fn words<L: crate::Lane>(stage: &crate::FaderRampStage<L>, lane: usize) -> [u32; 12] {
+            let mut out = [0; 12];
             for channel in 0..2 {
-                let base = channel * 6;
+                let base = channel * 5;
                 out[base] = crate::lane_read::<L>(stage.ramp[channel].current)[lane].to_bits();
                 out[base + 1] = crate::lane_read::<L>(stage.ramp[channel].target)[lane].to_bits();
                 out[base + 2] = crate::lane_read::<L>(stage.ramp[channel].step)[lane].to_bits();
-                out[base + 3] =
-                    crate::lane_read::<L>(stage.ramp[channel].remaining)[lane].to_bits();
-                out[base + 4] = stage.remaining[channel][lane];
-                out[base + 5] = stage.fader_gain[channel][lane].to_bits();
+                out[base + 3] = stage.remaining[channel][lane];
+                out[base + 4] = stage.fader_gain[channel][lane].to_bits();
             }
-            out[12] = u32::from(stage.phase[0][lane].muted());
-            out[13] = u32::from(stage.phase[1][lane].muted());
+            out[10] = u32::from(stage.phase[0][lane].muted());
+            out[11] = u32::from(stage.phase[1][lane].muted());
             out
         }
         per_width!(FaderStageKernel(stage) in &bank.stage => words(stage, lane))
@@ -7640,31 +7626,33 @@ mod lane_state {
                     .collect(),
             )
             .expect("destination bank");
+            // The exported lane is 1, not 0 (issue #2377 T2): lane 0 holds another remembered
+            // gain, so an export that reads any per-lane word from lane 0 is caught.
             source
-                .set_mute(0, BuiltinLaneSelector::Both, true, 150)
+                .set_mute(1, BuiltinLaneSelector::Both, true, 150)
                 .expect("lane");
             // A fader move on the right channel while it fades: the lane remembers -9 dB for the
             // unmute, and the right channel's fade restarts over 40 frames; the left one's goes on.
             source
-                .set_fader_db(0, BuiltinLaneSelector::Right, -9.0, 40)
+                .set_fader_db(1, BuiltinLaneSelector::Right, -9.0, 40)
                 .expect("lane");
-            run_fader(&mut source, 0, 1, -0.5);
-            let state = source.export_lane(0).expect("a member lane");
+            run_fader(&mut source, 1, 1, -0.5);
+            let state = source.export_lane(1).expect("a member lane");
             destination.import_lane(2, &state).expect("a member lane");
             for step in 0..2 {
-                let before = run_fader(&mut source, 0, 2, -0.5);
+                let before = run_fader(&mut source, 1, 2, -0.5);
                 let after = run_fader(&mut destination, 2, 2, -0.5);
                 assert_eq!(before, after, "{backend:?}: fade block pair {step}");
             }
             // The mute has settled on both. The unmute retargets to the gain the lane remembers.
             source
-                .set_mute(0, BuiltinLaneSelector::Both, false, 20)
+                .set_mute(1, BuiltinLaneSelector::Both, false, 20)
                 .expect("lane");
             destination
                 .set_mute(2, BuiltinLaneSelector::Both, false, 20)
                 .expect("lane");
             assert_eq!(
-                run_fader(&mut source, 0, 2, -0.5),
+                run_fader(&mut source, 1, 2, -0.5),
                 run_fader(&mut destination, 2, 2, -0.5),
                 "{backend:?}: the unmute returns to the remembered gain"
             );
