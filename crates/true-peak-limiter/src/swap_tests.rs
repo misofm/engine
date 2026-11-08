@@ -344,7 +344,7 @@ fn a_lane_holding_a_non_finite_delay_word_restores_and_swaps_exactly() {
 }
 
 /// The writers [`every_writer_leaves_each_lane_a_payload_that_restores`] drives, by step.
-const WRITERS: [&str; 12] = [
+const WRITERS: [&str; 13] = [
     "dual block",
     "collapsed run",
     "rest, then skipped blocks",
@@ -356,6 +356,7 @@ const WRITERS: [&str; 12] = [
     "swap within a bank",
     "swap across banks",
     "D7 recovery",
+    "link retarget",
     "explicit desymmetrize",
 ];
 
@@ -368,16 +369,37 @@ struct WriterReach {
     lane_recoveries: u32,
     nonfinite_payloads: u32,
     payloads: u32,
+    /// Rendered blocks by the body that ran them: either per-lane body, the dual and the
+    /// collapsed uniform bodies, either uniform one under the stationary two-pass dispatch, a
+    /// uniform block that linked its pair, and a block with a link glide in flight.
+    per_lane: u32,
+    dual_uniform: u32,
+    mono_uniform: u32,
+    stationary: u32,
+    linked: u32,
+    glide: u32,
 }
 
-/// A bank of `L` whose strips draw their own ceiling, release, lookahead and link mode. Releases
-/// are short so a walk can bring the bank to rest.
-fn drawn_bank<L: Lane>(draw: &mut Draw) -> PreparedTruePeakLimiterBank<L> {
+/// A bank of `L` whose strips draw their own ceiling, release and link mode. Releases are short
+/// so a walk can bring the bank to rest. `cohort` 0 draws a lookahead per strip and channel, so
+/// the bank renders the per-lane bodies; 1 shares one lookahead, so it renders the uniform ones;
+/// and 2 also gives each strip one parameter set for both channels and links every strip at
+/// `Maximum`, so its uniform blocks link the pair. A shared lookahead is `shared`, so two banks
+/// given one keep a uniform shape across a swap between them.
+fn drawn_bank<L: Lane>(
+    draw: &mut Draw,
+    cohort: u64,
+    shared: f32,
+) -> PreparedTruePeakLimiterBank<L> {
     let strip = |draw: &mut Draw| {
         [
             draw.within(-18.0, -1.0),
             draw.within(10.0, 12.0),
-            draw.within(0.0, 10.0),
+            if cohort == 0 {
+                draw.within(0.0, 10.0)
+            } else {
+                shared
+            },
         ]
     };
     let mut left = Vec::with_capacity(L::WIDTH);
@@ -386,8 +408,12 @@ fn drawn_bank<L: Lane>(draw: &mut Draw) -> PreparedTruePeakLimiterBank<L> {
     for _ in 0..L::WIDTH {
         let one = strip(draw);
         left.push(one);
-        right.push(if draw.below(2) == 0 { one } else { strip(draw) });
-        links.push(if draw.below(2) == 0 {
+        right.push(if cohort == 2 || draw.below(2) == 0 {
+            one
+        } else {
+            strip(draw)
+        });
+        links.push(if cohort == 2 || draw.below(2) == 0 {
             LinkMode::Maximum
         } else {
             LinkMode::DualMono
@@ -403,7 +429,7 @@ fn drawn_bank<L: Lane>(draw: &mut Draw) -> PreparedTruePeakLimiterBank<L> {
 
 /// One block of `frames` frames on `bank`, dual or collapsed, carrying `spans`. A block whose
 /// output failed the §4.4 check counts as a whole recovery when every lane failed, and as a lane
-/// recovery otherwise.
+/// recovery otherwise; the body that rendered it is counted too.
 fn walk_render<L: Lane>(
     bank: &mut PreparedTruePeakLimiterBank<L>,
     (left, right): (&mut [f32], &mut [f32]),
@@ -413,6 +439,16 @@ fn walk_render<L: Lane>(
     mono: bool,
     reach: &mut WriterReach,
 ) {
+    DISPATCH_OBSERVATION.with(|observation| {
+        observation.set(DispatchObservation {
+            route: DispatchRoute::Unset,
+            mode: StationaryDispatch::Runtime,
+        });
+    });
+    let linked = LINKED_ENGAGEMENTS.with(Cell::get);
+    if bank.core.glide_frames(frames, mono) > 0 {
+        reach.glide += 1;
+    }
     let block = EffectBankProcessBlock::new(
         left,
         right,
@@ -431,6 +467,23 @@ fn walk_render<L: Lane>(
         bank.process_bank(block)
     };
     *first += frames as u64;
+    let observed = dispatch_observation();
+    match observed.route {
+        DispatchRoute::DualUniform => reach.dual_uniform += 1,
+        DispatchRoute::MonoUniform => reach.mono_uniform += 1,
+        DispatchRoute::DualPerLane | DispatchRoute::MonoPerLane => reach.per_lane += 1,
+        _ => {}
+    }
+    if matches!(
+        observed.route,
+        DispatchRoute::DualUniform | DispatchRoute::MonoUniform
+    ) && observed.mode == StationaryDispatch::Stationary
+    {
+        reach.stationary += 1;
+    }
+    if LINKED_ENGAGEMENTS.with(Cell::get) != linked {
+        reach.linked += 1;
+    }
     let mut failed = 0;
     for (lane, track) in report.reports.iter().enumerate().take(L::WIDTH) {
         assert_eq!(track.invalid_spans, 0, "a drawn span was refused");
@@ -510,21 +563,26 @@ fn walk_block<L: Lane>(
     let mut offsets = vec![0_u32];
     for _ in 0..lanes {
         if walk == Walk::Dual && draw.below(8) == 0 {
+            // One channel, or both to one value, which keeps a linked pair's channels alike.
             let parameter_index = draw.below(2) as u32;
-            spans.push(PreparedAutomationSpan {
-                channel: if draw.below(2) == 0 {
-                    ParameterChannel::Left
-                } else {
-                    ParameterChannel::Right
-                },
-                parameter_index,
-                sample: *first,
-                value: if parameter_index == 0 {
-                    draw.within(-24.0, 0.0)
-                } else {
-                    draw.within(10.0, 12.0)
-                },
-            });
+            let value = if parameter_index == 0 {
+                draw.within(-24.0, 0.0)
+            } else {
+                draw.within(10.0, 12.0)
+            };
+            let channels: &[ParameterChannel] = match draw.below(4) {
+                0 => &[ParameterChannel::Left],
+                1 => &[ParameterChannel::Right],
+                _ => &[ParameterChannel::Left, ParameterChannel::Right],
+            };
+            for &channel in channels {
+                spans.push(PreparedAutomationSpan {
+                    channel,
+                    parameter_index,
+                    sample: *first,
+                    value,
+                });
+            }
         }
         offsets.push(spans.len() as u32);
     }
@@ -635,12 +693,15 @@ fn rest_then_skip<L: Lane>(
 ///
 /// A restore ties each detector history tap to its main-ring word, so a writer that moved one
 /// without the other would make a live lane's own snapshot unrestorable, #2324's failure. Two
-/// banks of one width, every strip with its own parameters and link mode, take a random walk of
-/// every writer of the history or the main ring ([`WRITERS`]):
+/// banks of one width, drawn so that their blocks run every render body (per-lane, uniform,
+/// linked, the stationary two-pass dispatch and the glide; see [`drawn_bank`]), take a random
+/// walk of every writer of the history or the main ring ([`WRITERS`]):
 ///
 /// * dual blocks of drawn length on either bank: loud, `+0.0`, or carrying a non-finite input
 ///   word on one lane or on all, so that a lane holds a non-finite delay word while the other
 ///   writers act on it; with ceiling and release retargets;
+/// * link retargets with a glide of drawn length, which the next blocks render through the glide
+///   body;
 /// * the D7 recovery, whole and per lane: a poisoned block, then the two that bring the word to
 ///   the output;
 /// * collapsed runs on the first bank, ended by whatever writer comes next (a dual block, a
@@ -668,9 +729,18 @@ fn every_writer_leaves_each_lane_a_payload_that_restores() {
         let lanes = L::WIDTH;
         let sizes = quality(RATE).maximum_state;
         let mut draw = Draw(0x2393_0000 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ lanes as u64);
-        let mut banks = [drawn_bank::<L>(&mut draw), drawn_bank::<L>(&mut draw)];
+        // On even seeds both banks are linked cohorts of one lookahead, so they stay uniform and
+        // linkable across swaps between them; on odd seeds the first bank, the one that
+        // collapses, is a uniform cohort and the second runs the per-lane bodies.
+        let shared = draw.within(0.0, 10.0);
+        let cohorts = if seed.is_multiple_of(2) {
+            [2, 2]
+        } else {
+            [1, 0]
+        };
+        let mut banks = cohorts.map(|cohort| drawn_bank::<L>(&mut draw, cohort, shared));
         let mut firsts = [0_u64; 2];
-        let mut twin = drawn_bank::<L>(&mut draw);
+        let mut twin = drawn_bank::<L>(&mut draw, 0, shared);
         let mut twin_first = 0_u64;
         for _ in 0..1 + draw.below(5) {
             walk_block(
@@ -770,7 +840,16 @@ fn every_writer_leaves_each_lane_a_payload_that_restores() {
                         );
                     }
                 }
-                _ => {
+                11 => {
+                    let mode = if draw.below(2) == 0 {
+                        LinkMode::Maximum
+                    } else {
+                        LinkMode::DualMono
+                    };
+                    let samples = draw.below(2048) as u32;
+                    assert!(banks[which].retarget_link(lane, mode, samples), "{context}");
+                }
+                9 => {
                     let [first, second] = &mut banks;
                     assert_eq!(
                         effect_contract::swap_bank_lanes(
@@ -786,6 +865,7 @@ fn every_writer_leaves_each_lane_a_payload_that_restores() {
                         "{context}"
                     );
                 }
+                _ => unreachable!("a drawn writer"),
             }
             reach.steps[writer] += 1;
             for (index, bank) in banks.iter_mut().enumerate() {
@@ -802,7 +882,7 @@ fn every_writer_leaves_each_lane_a_payload_that_restores() {
     }
     lane::each_vector_lane!(|L| {
         let mut reach = WriterReach::default();
-        for seed in 0..4 {
+        for seed in 0..2 {
             at::<L>(seed, &mut reach);
         }
         println!("W{}: {reach:?}", L::WIDTH);
@@ -813,7 +893,13 @@ fn every_writer_leaves_each_lane_a_payload_that_restores() {
             reach.skipped_blocks > 0
                 && reach.whole_recoveries > 0
                 && reach.lane_recoveries > 0
-                && reach.nonfinite_payloads > 0,
+                && reach.nonfinite_payloads > 0
+                && reach.per_lane > 0
+                && reach.dual_uniform > 0
+                && reach.mono_uniform > 0
+                && reach.stationary > 0
+                && reach.linked > 0
+                && reach.glide > 0,
             "W{}: {reach:?}",
             L::WIDTH
         );

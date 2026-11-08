@@ -135,3 +135,48 @@ head, and no other limiter test moved.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p true-peak-limiter`: clean.
 - `bash scripts/check-workspace-policy.sh`: ok.
 - `./target/release/realtime_policy`: ok (298 marked regions in 48 files).
+
+### Sol verdict on attempt 1 (`567f3f5be`): PASS, minors only
+
+The three minors were folded on the same branch, after merging `origin/main` (`3375b619b`).
+
+1. **The walk now reaches every render body.** `drawn_bank` now takes a cohort:
+   - 0: a lookahead per strip and channel;
+   - 1: one shared lookahead;
+   - 2: a shared lookahead, one parameter set per strip for both channels, and every strip at
+     `Maximum`.
+
+   Even seeds give both banks cohort 2, with one lookahead, so they stay uniform and linkable
+   across swaps. Odd seeds give the collapsing bank cohort 1 and the other bank cohort 0. The
+   walk's retargets now sometimes write both channels to one value. A new writer, `link retarget`,
+   calls `retarget_link` with a glide of up to 2047 samples.
+
+   `walk_render` records the dispatch route and mode and the `LINKED_ENGAGEMENTS` delta for every
+   rendered block, and whether a glide was in flight. `WriterReach` asserts all of these:
+   per-lane, `DualUniform`, `MonoUniform`, uniform under `Stationary`, linked, and glide.
+
+   Reach (head):
+
+   | width | each writer | skipped | whole / per-lane recoveries | non-finite payloads | payloads |
+   |---|---|---|---|---|---|
+   | W4 | 13-27 | 34 | 12 / 16 | 54 | 1772 |
+   | W8 | 9-25 | 42 | 6 / 14 | 80 | 3656 |
+
+   | width | per-lane | dual uniform | mono uniform | stationary | linked | glide |
+   |---|---|---|---|---|---|---|
+   | W4 | 691 | 196 | 15 | 209 | 119 | 3 |
+   | W8 | 601 | 74 | 5 | 76 | 8 | 13 |
+
+   Mutations 4, 5 and 6 above were re-run against the folded walk, and all three are still red.
+2. **Seeds cut from 4 to 2.** The walk takes 9.9 s in debug for both widths, and it is still a
+   debug test.
+3. **Stale doc rewritten.** The doc on `a_stale_detector_history_refuses_the_claim` now matches
+   the `plant` note. Under the #2393 tie, the history leg follows from the main-ring leg at every
+   quantum. The test plants a state no engine path reaches, to keep that leg tested. The old claim
+   was that a block shorter than 12 frames breaks the implication. It is withdrawn: the taps are
+   a suffix of the ring at any block length.
+
+Gates after the fold:
+- `cargo test --locked -p true-peak-limiter`: green.
+- `cargo clippy --locked -p true-peak-limiter --all-targets -- -D warnings`: clean.
+- `cargo fmt --check`: clean.

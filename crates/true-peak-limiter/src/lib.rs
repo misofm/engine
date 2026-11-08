@@ -8645,28 +8645,24 @@ mod tests {
 
     /// **A stale detector history refuses the claim, even when every ring is already at rest.**
     ///
-    /// Issue #182 S2, the `history` leg of `lanes_at_silent_rest` — the one entry on that list that is
-    /// not obviously needed, and the one that is not reachable at a 128-frame quantum.
+    /// Issue #182 S2, the `history` leg of `lanes_at_silent_rest`: the one entry on that list that
+    /// no engine path needs.
     ///
-    /// At an ordinary quantum the leg is *implied*: `main_ring` holds the last `B = 486` input
-    /// samples, so `block_is_positive_zero(&main_ring)` already says the last 486 inputs were
-    /// `+0.0`, and the twelve detector taps are a suffix of those. Deleting the history test
-    /// therefore turns nothing red at 128 frames, and recording that would be the end of it if the
-    /// implication held generally. It does not: the render quantum is caller-supplied, and a block
-    /// of fewer than `HISTORY_WORDS = 12` frames cannot flush the taps that a longer block would.
+    /// Under the #2393 tie the leg follows from the main-ring leg at every quantum. Each detector
+    /// tap is, bit for bit, the main-ring word at age `B - 1 - k`. Every writer keeps that tie,
+    /// and `read_lane` refuses a payload that breaks it. So a `main_ring` all `+0.0` is a
+    /// history all `+0.0`, whatever the block length. Deleting the history test therefore turns
+    /// nothing red on any state the engine reaches.
     ///
-    /// So this test runs eight-frame blocks. The instance starts at the rest state with one word
-    /// changed — a small stale value in every detector tap, small enough (`0.01` against a guarded
-    /// limit of `0.447`) that the estimate it produces never crosses the ceiling and every ring
-    /// therefore stays at exactly `1.0`. Every leg of the claim but `history` holds after the first
-    /// eight-frame block. Correct code refuses until the taps have drained; code without the leg
-    /// earns the claim there and freezes four stale taps for the rest of the silence, which the
-    /// loud tone at the end reads as part of its own Annex-2 estimate.
-    ///
-    /// The same shape is what a crafted payload reaches at any quantum: `commit_lane` writes
-    /// `history` and `main_ring` from independent regions of a section, so a restore can install a
-    /// zeroed delay line behind a non-zero history. That path is closed by the restore withdrawal;
-    /// this one is closed by the leg.
+    /// This test keeps the leg itself tested. It plants a state no engine path reaches: the rest
+    /// state with a small stale value in every detector tap and a zeroed line behind them. The
+    /// value is small enough (`0.01` against a guarded limit of `0.447`) that the estimate never
+    /// crosses the ceiling, so every ring stays at exactly `1.0`. The test runs eight-frame blocks,
+    /// fewer than `HISTORY_WORDS = 12`, so the taps outlive a block. Every leg of the claim but
+    /// `history` holds after the first block. Correct code refuses the claim until the taps have
+    /// drained. Code without the leg earns the claim there and freezes four stale taps for the rest
+    /// of the silence, and the loud tone at the end reads them as part of its own Annex-2
+    /// estimate.
     ///
     /// Red mutation: drop `positive_zero_lanes_of::<L>(&self.history)` from `lanes_at_silent_rest`.
     #[test]
