@@ -771,9 +771,11 @@ fn codec_error(error: payload::StatePayloadError) -> StatePayloadError {
     StatePayloadError { code: error.code }
 }
 
-/// `true` for a finite whole number in `[0, limit]`.
+/// `true` for a finite whole number in `[+0.0, limit]`. A countdown or run clock is written as
+/// `u32 as f32`, never `-0.0`, so `-0.0` is refused (#2378 C3): the kernel would never step it,
+/// but the rest scan's exact `+0.0` test would never report the lane at rest.
 fn integral_within(value: f32, limit: f32) -> bool {
-    value.is_finite() && (0.0..=limit).contains(&value) && value == value.floor()
+    value.is_finite() && value.is_sign_positive() && value <= limit && value == value.floor()
 }
 
 const fn all_lanes(width: usize) -> u32 {

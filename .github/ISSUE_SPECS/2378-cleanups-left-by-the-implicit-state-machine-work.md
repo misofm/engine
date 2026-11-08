@@ -161,3 +161,26 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
   - Mutation: deleting `self.silent.withdraw()` from `restore_track` turns three limiter tests
     red, `a_restore_withdraws_the_silence_claim` through the new `trusted` check on the dual fast
     path (`lib.rs:4411`). `cargo test -p true-peak-limiter -p effect-runtime` (165) is green.
+- **C3, half done, half already done.**
+  - *Compressor and transient shaper, the at-target clause: already done by #2368* (merged
+    before this issue). Their restores now read every parameter ramp through
+    `state_payload::read_ramp` / `LinearRamp::from_words`, which refuses a settled ramp off its
+    target or with a nonzero step: compressor `crates/compressor/src/state.rs:144-146` (parameter),
+    `:167` (rate) and `:183` (link); transient shaper `crates/transient-shaper/src/lib.rs:1588`
+    (parameter) and `:1606` (link). #2368 has the red-on-base reproducers. Nothing to do.
+  - *De-esser and dynamic EQ, `-0.0` countdowns: fixed.* Both crates' `integral_within` admitted
+    `-0.0` (`(0.0..=limit).contains(&-0.0)` is true), so `parse_lane` accepted a `-0.0` in every
+    parameter ramp's and link weight's `remaining` word and in both silence clocks. The engine
+    writes a countdown as `u32 as f32` and a silence clock from `+0.0` upward
+    (`lane::kernels::silence_advance`), never `-0.0`; such a lane would restore with a word the
+    rest scan's exact `+0.0` test never reports at rest. `integral_within` now requires
+    `is_sign_positive()`, so it admits exactly the reachable words. New test
+    `glide_tests::a_negative_zero_countdown_is_refused` in each crate forges each countdown word
+    of a rest payload (every ramp, both links, both clocks; each channel) to `-0.0`, expects the
+    word's own refusal code and an unchanged snapshot. Red on base in both crates: `panicked at
+    crates/de-esser/src/glide_tests.rs:956:22: a -0.0 countdown: ()` and `panicked at
+    crates/dynamic-eq/src/glide_tests.rs:962:22: a -0.0 countdown: ()` (the restore succeeded).
+    The base is the mutation (dropping `is_sign_positive()` restores it). The predicate changes
+    only at `-0.0`, which no engine payload holds, so no carry or lane swap of an engine payload
+    decides differently and no rendered bit moves; both crates' suites (39 tests, the bank and
+    rest suites' restores and swaps among them) are green.
