@@ -424,6 +424,88 @@ async function runMutationLedger() {
       test: "stem-pump-v1.mjs",
       expectedFailure: "the dropped open's unhandled rejection (after the pin phase)",
     },
+    // Issue #2381: every OPFS step under the index lock is deadlined, so no wedged step stalls every
+    // later lease close; a stalled index read fails typed instead of rebuilding away every pin; and
+    // an aborted open evicts nothing once its abort is seen. One entry per guard.
+    {
+      name: "remove an eviction's file under the index lock with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        "        await withDeadline(\n          removeEntry(this.#directory, stemFileName(identity)),\n          this.#readDeadlineMs,\n          \"storage.remove_stalled\",\n          `Evicting ${identity} made no progress`\n        )\n",
+      replace: "        await removeEntry(this.#directory, stemFileName(identity))\n",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lease close waited on an eviction's wedged removal",
+    },
+    {
+      name: "open the index file with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        "      const handle = await withDeadline(\n        this.#directory.getFileHandle(INDEX_FILE),\n        this.#readDeadlineMs,\n        \"storage.read_stalled\",\n        \"Opening the stem index made no progress\"\n      )\n",
+      replace: "      const handle = await this.#directory.getFileHandle(INDEX_FILE)\n",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lease close waited on a wedged index open",
+    },
+    {
+      name: "rebuild the index after a stalled index read",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        "      if (error instanceof StemStoreError && error.code === \"storage.read_stalled\") throw error\n",
+      replace: "",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stalled index read rebuilt the index and dropped a live pin",
+    },
+    {
+      name: "list the store for an index rebuild with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        "        const step = await withDeadline(\n          iterator.next(),\n          this.#readDeadlineMs,\n          \"storage.read_stalled\",\n          \"Listing the stem store made no progress\"\n        )\n",
+      replace: "        const step = await iterator.next()\n",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lease close waited on a rebuild's wedged listing",
+    },
+    {
+      name: "remove an unverifiable final in an index rebuild with no deadline",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        "    const remove = (name) =>\n      withDeadline(\n        removeEntry(this.#directory, name),\n        this.#readDeadlineMs,\n        \"storage.remove_stalled\",\n        `Removing ${name} made no progress`\n      )\n",
+      replace: "    const remove = (name) => removeEntry(this.#directory, name)\n",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lease close waited on a rebuild's wedged removal",
+    },
+    {
+      name: "give an open's evictions no signal",
+      file: "web/stem-store/opfs-store.js",
+      search: "    await this.#preflight(missing, protectedIdentities, options.signal)\n",
+      replace: "    await this.#preflight(missing, protectedIdentities)\n",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "an aborted open evicted a stem (stem lock)",
+    },
+    {
+      name: "queue an eviction on the victim's stem lock without the open's signal",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        "    return this.#withStemLock(identity, signal, async () => {\n      let evicted = false\n",
+      replace:
+        "    return this.#withStemLock(identity, undefined, async () => {\n      let evicted = false\n",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "the aborted open waited for the stem lock holder",
+    },
+    {
+      name: "queue an eviction on the index lock without the open's signal",
+      file: "web/stem-store/opfs-store.js",
+      search: "        evicted = true\n      }, signal)\n",
+      replace: "        evicted = true\n      })\n",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "the aborted open waited for the index lock holder",
+    },
+    {
+      name: "skip an eviction's signal check after its index read",
+      file: "web/stem-store/opfs-store.js",
+      search: "      await this.#mutateIndex(async (index) => {\n        throwIfAborted(signal)\n",
+      replace: "      await this.#mutateIndex(async (index) => {\n",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "an aborted open evicted a stem (index read)",
+    },
     {
       name: "omit AbortSignal from the session pin lock wait",
       file: "web/stem-store/opfs-store.js",

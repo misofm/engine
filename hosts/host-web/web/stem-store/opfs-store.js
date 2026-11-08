@@ -172,7 +172,7 @@ export class OpfsStemStore {
       if (!present) missing.push(stem)
     }
 
-    await this.#preflight(missing, protectedIdentities)
+    await this.#preflight(missing, protectedIdentities, options.signal)
 
     const ingestAbort = new AbortController()
     const removeParentAbort = forwardAbort(options.signal, ingestAbort)
@@ -776,7 +776,9 @@ export class OpfsStemStore {
     })
   }
 
-  async #preflight(missing, protectedIdentities) {
+  // `signal` reaches only the evictions, so an aborted open evicts nothing. The estimate and the
+  // index read stay unsignalled; the first eviction's lock wait refuses an abort from either.
+  async #preflight(missing, protectedIdentities, signal) {
     if (missing.length === 0 || typeof this.#storage?.estimate !== "function") return
     const requiredBytes = checkedByteSum(
       missing.map((stem) => stem.bytes),
@@ -801,7 +803,7 @@ export class OpfsStemStore {
     )
     for (const [identity, row] of victims) {
       if (availableBytes >= requiredBytes) break
-      const evicted = await this.#evictUnpinned(identity)
+      const evicted = await this.#evictUnpinned(identity, signal)
       if (evicted) availableBytes += row.bytes
     }
     if (availableBytes < requiredBytes) {
@@ -818,16 +820,26 @@ export class OpfsStemStore {
     }
   }
 
-  async #evictUnpinned(identity) {
-    return this.#withStemLock(identity, undefined, async () => {
+  // An aborted open evicts nothing once its abort is seen: both lock waits take its signal, and the
+  // mutation checks it again after the index read. The removal runs under the index lock, so it is
+  // deadlined; a timed-out removal leaves the row, the index is not rewritten, and a removal that
+  // lands later leaves a row with no file, which verify-on-open demotes and re-ingests.
+  async #evictUnpinned(identity, signal) {
+    return this.#withStemLock(identity, signal, async () => {
       let evicted = false
       await this.#mutateIndex(async (index) => {
+        throwIfAborted(signal)
         const row = index.stems[identity]
         if (row === undefined || row.pins.length !== 0) return
-        await removeEntry(this.#directory, stemFileName(identity))
+        await withDeadline(
+          removeEntry(this.#directory, stemFileName(identity)),
+          this.#readDeadlineMs,
+          "storage.remove_stalled",
+          `Evicting ${identity} made no progress`
+        )
         delete index.stems[identity]
         evicted = true
-      })
+      }, signal)
       return evicted
     })
   }
@@ -898,10 +910,18 @@ export class OpfsStemStore {
     ).catch(() => {})
   }
 
+  // Runs inside the index lock, so every OPFS step is deadlined. A stall fails typed and is not
+  // damage: rebuilding then would run more OPFS work under the lock against a store that just
+  // stalled, and would drop every pin.
   async #readIndex(repair) {
     let parsed
     try {
-      const handle = await this.#directory.getFileHandle(INDEX_FILE)
+      const handle = await withDeadline(
+        this.#directory.getFileHandle(INDEX_FILE),
+        this.#readDeadlineMs,
+        "storage.read_stalled",
+        "Opening the stem index made no progress"
+      )
       const file = await withDeadline(
         handle.getFile(),
         this.#readDeadlineMs,
@@ -917,6 +937,7 @@ export class OpfsStemStore {
         )
       )
     } catch (error) {
+      if (error instanceof StemStoreError && error.code === "storage.read_stalled") throw error
       if (error?.name === "NotFoundError") {
         if (!repair) return emptyIndex()
         return this.#rebuildIndex()
@@ -929,46 +950,72 @@ export class OpfsStemStore {
     return this.#rebuildIndex()
   }
 
+  // Runs inside the index lock, so the listing and every removal are deadlined like the hashing
+  // and the index write; a stall fails the rebuild typed and leaves the damaged index for a retry.
   async #rebuildIndex() {
     const rebuilt = emptyIndex()
     const liveLocks = await this.#liveLockNames()
-    for await (const [name, handle] of this.#directory.entries()) {
-      const match = FINAL_NAME.exec(name)
-      if (match === null || handle.kind !== "file") continue
-      const identity = `blake3:${match[1]}`
-      // A final protected by an in-flight promote is not yet an unambiguous
-      // crash artifact. Its owner will either index it or leave it for a later
-      // recovery pass after releasing the lock.
-      if (liveLocks?.has(this.#stemLockName(identity))) continue
-      try {
-        const observed = await this.#hashFile(handle, {
-          stage: "verify-rebuild",
-          identity,
-        })
-        if (observed.hex === match[1]) {
+    const remove = (name) =>
+      withDeadline(
+        removeEntry(this.#directory, name),
+        this.#readDeadlineMs,
+        "storage.remove_stalled",
+        `Removing ${name} made no progress`
+      )
+    const iterator = this.#directory.entries()
+    try {
+      while (true) {
+        const step = await withDeadline(
+          iterator.next(),
+          this.#readDeadlineMs,
+          "storage.read_stalled",
+          "Listing the stem store made no progress"
+        )
+        if (step.done) break
+        const [name, handle] = step.value
+        const match = FINAL_NAME.exec(name)
+        if (match === null || handle.kind !== "file") continue
+        const identity = `blake3:${match[1]}`
+        // A final protected by an in-flight promote is not yet an unambiguous
+        // crash artifact. Its owner will either index it or leave it for a later
+        // recovery pass after releasing the lock.
+        if (liveLocks?.has(this.#stemLockName(identity))) continue
+        let observed
+        try {
+          observed = await this.#hashFile(handle, {
+            stage: "verify-rebuild",
+            identity,
+          })
+        } catch {
+          observed = undefined
+        }
+        if (observed?.hex === match[1]) {
           rebuilt.stems[identity] = {
             bytes: observed.bytes,
             lastUsedAt: this.#now(),
             pins: [],
           }
         } else {
-          await removeEntry(this.#directory, name)
+          await remove(name)
         }
-      } catch {
-        await removeEntry(this.#directory, name)
       }
+    } finally {
+      // A timed-out step may never settle; do not wait on the iterator.
+      void Promise.resolve()
+        .then(() => iterator.return?.())
+        .catch(() => {})
     }
     await this.#writeIndex(rebuilt)
     return rebuilt
   }
 
-  async #mutateIndex(mutation) {
+  async #mutateIndex(mutation, signal) {
     return this.#withIndexLock(async () => {
       const index = await this.#readIndex(true)
       const result = await mutation(index)
       await this.#writeIndex(index)
       return result
-    })
+    }, signal)
   }
 
   // Runs inside the index lock, so every await is deadlined: one wedged

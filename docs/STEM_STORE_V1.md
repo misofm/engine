@@ -108,7 +108,10 @@ The index is crash-only metadata: if it is missing or structurally corrupt, the
 store scans final names, fully hashes each unlocked candidate, adopts an exact
 `hash(file) == filename` match with empty recovered pins, and removes candidates
 that cannot self-verify. With a structurally valid index, an absent row still
-means the unindexed final is promote debris and the sweep removes it.
+means the unindexed final is promote debris and the sweep removes it. A stalled
+index read is not damage: it fails typed `storage.read_stalled` and never
+rebuilds, because a rebuild resets every pin and would do more work against a
+store that just stalled (#2381).
 An environment without `navigator.storage.getDirectory` refuses typed
 `storage.unavailable`; there is deliberately no RAM-resident degraded mode.
 
@@ -132,6 +135,18 @@ start immediately but are not re-awaited: cleanup cannot turn the original
 typed cancellation or `storage.write_stalled` refusal into another wedge. A
 late writable settlement retries removal, and the unindexed-final sweep remains
 the crash backstop.
+
+Every OPFS step taken while holding the index lock has that local-store
+deadline (#2381): opening, reading and writing the index; a rebuild's directory
+listing, hashing and removal of a final that cannot self-verify; and an
+eviction's removal of its victim. On expiry the step fails typed
+(`storage.read_stalled`, `storage.write_stalled` or `storage.remove_stalled`)
+and the lock is released, so one wedged step cannot stall every later index
+mutation, every lease close's pin release among them. A timed-out eviction
+keeps its row; if the removal lands later, verify-on-open finds the row's file
+missing and re-ingests it. An eviction takes its open's signal on the victim's
+stem lock and on the index lock, and checks it again after the index read, so an
+aborted open evicts nothing once its abort is seen.
 
 ## Hash implementation and provenance
 

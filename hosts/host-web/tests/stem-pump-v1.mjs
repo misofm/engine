@@ -1064,22 +1064,18 @@ async function gateCloseWaitsForAReplacedPredecessor() {
 // Issue #2372: gate.close() waits only for pins, never for an aborted open's work that holds none. Each
 // leg leaves the open aborted before the store's pin phase, stuck on one wait that holds no lease and
 // has no deadline: the store's first open (a getDirectory that never settles), the quota estimate,
-// another caller's ingest that the open joined, its own staging cleanup (a removeEntry that never
-// settles), or an eviction under quota pressure queued on a stem lock another holder keeps. close()
-// must resolve at once; once the wait is released, the open must refuse and take no pin.
+// another caller's ingest that the open joined, or its own staging cleanup (a removeEntry that never
+// settles). close() must resolve at once; once the wait is released, the open must refuse and take no
+// pin.
 async function gateCloseNeverWaitsOnWorkThatHoldsNoLease() {
   const bytes = pcm16([9, -9, 3, -3], 1)
   const stemIdentity = identity(bytes)
   const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
-  const victim = pcm16([1, -1, 1, -1], 1)
-  const victimIdentity = identity(victim)
-  const victimLock = `${LOCKS}:ingest:${victimIdentity.slice("blake3:".length)}`
   const legs = [
     "wedged getDirectory",
     "wedged estimate",
     "joined ingest",
     "wedged staging cleanup",
-    "eviction behind a held stem lock",
   ]
   for (const leg of legs) {
     let reached = false
@@ -1106,7 +1102,7 @@ async function gateCloseNeverWaitsOnWorkThatHoldsNoLease() {
     const store = new OpfsStemStore({ storage, locks, tabId: "no-lease" })
     let resolves = 0
     // Streams nothing until its caller aborts.
-    let resolver = {
+    const resolver = {
       resolve(_identity, { signal }) {
         resolves += 1
         return new Promise((_resolve, reject) =>
@@ -1122,20 +1118,6 @@ async function gateCloseNeverWaitsOnWorkThatHoldsNoLease() {
         1_000
       )
       unwedge = () => direct.abort(new DOMException("Done", "AbortError"))
-    } else if (leg === "eviction behind a held stem lock") {
-      // An unpinned stem fills the store, so the open's preflight must evict it.
-      resolver = new MemoryStemResolver({ [stemIdentity]: bytes, [victimIdentity]: victim })
-      const warm = await store.openSession({
-        sessionId: "warm",
-        stems: [{ identity: victimIdentity, bytes: victim.byteLength }],
-        resolver,
-      })
-      await warm.close()
-      backend.reportedQuota = backend.usage
-      const held = {}
-      held.done = locks.request(victimLock, {}, () => new Promise((resolve) => (held.unstall = resolve)))
-      await until(() => held.unstall !== undefined, "the held stem lock")
-      unwedge = () => held.unstall()
     }
     const gate = new StemSessionGate(store, resolver)
     const opening = settledWithin(gate.open({ sessionId: "gate", stems, resume() {} }), 1_000)
@@ -1147,8 +1129,6 @@ async function gateCloseNeverWaitsOnWorkThatHoldsNoLease() {
       assert.equal(resolves, 1)
     } else if (leg === "wedged staging cleanup") {
       await until(() => resolves === 1, "the open's ingest")
-    } else if (leg === "eviction behind a held stem lock") {
-      await untilPending(locks, victimLock)
     } else {
       await until(() => reached, `the ${leg}`)
     }

@@ -14,6 +14,7 @@ export class FakeOpfsBackend {
     this.abortBlocker = options.abortBlocker
     this.removeEntryBlocker = options.removeEntryBlocker
     this.entriesBlocker = options.entriesBlocker
+    this.getFileHandleBlocker = options.getFileHandleBlocker
   }
 
   get usage() {
@@ -86,6 +87,10 @@ class FakeDirectoryHandle {
   }
 
   async getFileHandle(name, options = {}) {
+    // Awaited only when set, so a run without the hook keeps its microtask order.
+    if (this.backend.getFileHandleBlocker !== undefined) {
+      await this.backend.getFileHandleBlocker({ name, create: options.create === true })
+    }
     let child = this.node.entries.get(name)
     if (child === undefined && options.create) {
       child = fileNode()

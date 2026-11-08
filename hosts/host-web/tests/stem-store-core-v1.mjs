@@ -761,6 +761,189 @@ async function lruEvictsOnlyUnpinned() {
   await incomingLease.close()
 }
 
+const STORE_FOLDER = "miso-stems-blake3-v1"
+const STORE_LOCKS = `miso:stem-store:v1:${STORE_FOLDER}`
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+async function until(predicate, what, ticks = 1_000) {
+  for (let tried = 0; !(await predicate()); tried += 1) {
+    if (tried === ticks) throw new Error(`timed out waiting for ${what}`)
+    await tick()
+  }
+}
+
+function finalName(stem) {
+  return `blake3-${stem.identity.slice("blake3:".length)}`
+}
+
+// Issue #2381: an eviction's file removal runs under the index lock, so it is deadlined like every
+// other OPFS step there. A wedged removal must not hold the index and stall every later lease close.
+async function aWedgedEvictionNeverHoldsTheIndex() {
+  const victim = fixture("evict-wedged-victim", 4096)
+  const held = fixture("evict-wedged-held", 4096)
+  const incoming = fixture("evict-wedged-incoming", 4096)
+  const backend = new FakeOpfsBackend()
+  const resolver = new MemoryStemResolver(stemMap([victim, held, incoming]))
+  const opfs = store(backend, new FakeLockManager(), { tabId: "evict-wedged", readDeadlineMs: 20 })
+  await (
+    await opfs.openSession({ sessionId: "victim", stems: requirements([victim]), resolver })
+  ).close()
+  const lease = await opfs.openSession({ sessionId: "held", stems: requirements([held]), resolver })
+  // The unpinned victim fills the store, so the incoming open must evict it.
+  backend.reportedQuota = backend.usage
+  let reached = false
+  backend.removeEntryBlocker = ({ name }) => {
+    if (name !== finalName(victim)) return undefined
+    reached = true
+    return never()
+  }
+  const opening = settledWithin(
+    opfs.openSession({ sessionId: "incoming", stems: requirements([incoming]), resolver }),
+    500
+  )
+  await until(() => reached, "the eviction's removal")
+  const closed = await settledWithin(lease.close(), 500)
+  assert.notEqual(closed, "timed-out", "a lease close waited on an eviction's wedged removal")
+  assert.equal(closed.error, undefined)
+  assert.equal((await opening).error?.code, "storage.remove_stalled")
+}
+
+// Issue #2381: opening the index file is deadlined like reading it, and a stalled index read fails
+// typed instead of rebuilding the index. A rebuild after a stall would do more OPFS work under the
+// lock against a store that just stalled, and would drop every live pin.
+async function aWedgedIndexReadFailsTypedAndKeepsEveryPin() {
+  const closing = fixture("index-wedged-closing", 4096)
+  const kept = fixture("index-wedged-kept", 4096)
+  const backend = new FakeOpfsBackend()
+  const resolver = new MemoryStemResolver(stemMap([closing, kept]))
+  const opfs = store(backend, new FakeLockManager(), { tabId: "index-wedged", readDeadlineMs: 20 })
+  const lease = await opfs.openSession({ sessionId: "closing", stems: requirements([closing]), resolver })
+  const other = await opfs.openSession({ sessionId: "kept", stems: requirements([kept]), resolver })
+  // Only the read side wedges; a rebuild's index write would still land.
+  backend.getFileHandleBlocker = ({ name, create }) =>
+    name === "index.json" && !create ? never() : undefined
+  const closed = await settledWithin(lease.close(), 500)
+  assert.notEqual(closed, "timed-out", "a lease close waited on a wedged index open")
+  assert.deepEqual(
+    indexStems(backend)[kept.identity].pins,
+    ["session:index-wedged:kept"],
+    "a stalled index read rebuilt the index and dropped a live pin"
+  )
+  assert.equal(closed.error?.code, "storage.read_stalled")
+  backend.getFileHandleBlocker = undefined
+  await other.close()
+}
+
+// Issue #2381: a rebuild of a damaged index runs under the index lock too, so its directory listing
+// and its removal of a final that fails to self-verify are deadlined as well.
+async function aWedgedIndexRebuildNeverHoldsTheIndex() {
+  for (const leg of ["listing", "removal"]) {
+    const pinned = fixture(`rebuild-wedged-${leg}`, 4096)
+    const unverifiable = fixture(`rebuild-wedged-${leg}-corrupt`, 4096)
+    const backend = new FakeOpfsBackend()
+    const resolver = new MemoryStemResolver(stemMap([pinned, unverifiable]))
+    const opfs = store(backend, new FakeLockManager(), { tabId: "rebuild-wedged", readDeadlineMs: 20 })
+    await (
+      await opfs.openSession({ sessionId: "seed", stems: requirements([unverifiable]), resolver })
+    ).close()
+    const lease = await opfs.openSession({ sessionId: "rebuild", stems: requirements([pinned]), resolver })
+    backend.setBytes(`${STORE_FOLDER}/index.json`, encoder.encode("{"))
+    const corrupted = new Uint8Array(unverifiable.pcm)
+    corrupted[3] ^= 1
+    backend.setBytes(`${STORE_FOLDER}/${finalName(unverifiable)}`, corrupted)
+    const folder = backend.root.entries.get(STORE_FOLDER)
+    if (leg === "listing") {
+      backend.entriesBlocker = ({ node }) => (node === folder ? never() : undefined)
+    } else {
+      backend.removeEntryBlocker = ({ name }) =>
+        name === finalName(unverifiable) ? never() : undefined
+    }
+    const closed = await settledWithin(lease.close(), 500)
+    assert.notEqual(closed, "timed-out", `a lease close waited on a rebuild's wedged ${leg}`)
+    assert.equal(
+      closed.error?.code,
+      leg === "listing" ? "storage.read_stalled" : "storage.remove_stalled"
+    )
+  }
+}
+
+// Issue #2381: an aborted open evicts nothing once its abort is seen, wherever its eviction waits:
+// queued on the victim's stem lock, queued on the index lock, or in the index read under it. The
+// waits on the two locks end at the abort, so the open refuses without waiting for their holders.
+async function anAbortedOpenEvictsNothing() {
+  for (const leg of ["stem lock", "index lock", "index read"]) {
+    const victim = fixture("aborted-evict-victim", 4096)
+    const incoming = fixture("aborted-evict-incoming", 4096)
+    const backend = new FakeOpfsBackend()
+    const locks = new FakeLockManager()
+    const resolver = new MemoryStemResolver(stemMap([victim, incoming]))
+    const opfs = store(backend, locks, { tabId: "aborted-evict" })
+    await (
+      await opfs.openSession({ sessionId: "victim", stems: requirements([victim]), resolver })
+    ).close()
+    backend.reportedQuota = backend.usage
+    const hold = async (name) => {
+      const held = {}
+      held.done = locks.request(name, {}, () => new Promise((resolve) => (held.release = resolve)))
+      await until(() => held.release !== undefined, `the held ${name}`)
+      return held
+    }
+    const queued = (name) =>
+      until(
+        async () => (await locks.query()).pending.some((lock) => lock.name === name),
+        `a queued ${name} request`
+      )
+    const stemLock = `${STORE_LOCKS}:ingest:${victim.identity.slice("blake3:".length)}`
+    const indexLock = `${STORE_LOCKS}:index`
+    const stemHold = await hold(stemLock)
+    const abort = new AbortController()
+    let settled = false
+    const opening = settledWithin(
+      opfs.openSession({
+        sessionId: "incoming",
+        stems: requirements([incoming]),
+        resolver,
+        signal: abort.signal,
+      }),
+      1_000
+    ).finally(() => (settled = true))
+    await queued(stemLock)
+    let release = () => stemHold.release()
+    if (leg === "index lock") {
+      const indexHold = await hold(indexLock)
+      stemHold.release()
+      await queued(indexLock)
+      release = () => indexHold.release()
+    } else if (leg === "index read") {
+      let unwedge
+      backend.getFileHandleBlocker = ({ name, create }) =>
+        name === "index.json" && !create
+          ? new Promise((resolve) => (unwedge = resolve))
+          : undefined
+      stemHold.release()
+      await until(() => unwedge !== undefined, "the eviction's index read")
+      release = () => unwedge()
+    }
+    abort.abort(new DOMException("Switched mix", "AbortError"))
+    for (let step = 0; step < 20 && !settled; step += 1) await tick()
+    const settledWhileHeld = settled
+    release()
+    backend.getFileHandleBlocker = undefined
+    const outcome = await opening
+    assert.notEqual(outcome, "timed-out", `the aborted open never settled (${leg})`)
+    assert.equal(outcome.error?.name, "AbortError", leg)
+    for (let step = 0; step < 5; step += 1) await tick()
+    assert.ok(
+      indexStems(backend)[victim.identity] !== undefined &&
+        backend.has(`${STORE_FOLDER}/${finalName(victim)}`),
+      `an aborted open evicted a stem (${leg})`
+    )
+    if (leg !== "index read") {
+      assert.ok(settledWhileHeld, `the aborted open waited for the ${leg} holder`)
+    }
+  }
+}
+
 async function tabCloseMidStaging() {
   const stem = fixture("tab-close", 4096)
   const backend = new FakeOpfsBackend()
@@ -1149,6 +1332,10 @@ await openerDoesNotSweepActivePromote()
 await crashedSessionPinsAreRecoverable()
 await quotaFailureKeepsSurvivors()
 await lruEvictsOnlyUnpinned()
+await aWedgedEvictionNeverHoldsTheIndex()
+await aWedgedIndexReadFailsTypedAndKeepsEveryPin()
+await aWedgedIndexRebuildNeverHoldsTheIndex()
+await anAbortedOpenEvictsNothing()
 await tabCloseMidStaging()
 await abortCleansStaging()
 await wedgedDecoderObeysAbortAndDeadline()
