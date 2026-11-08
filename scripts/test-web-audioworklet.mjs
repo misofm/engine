@@ -5213,6 +5213,45 @@ async function testProcessor() {
     }
 
     {
+      // Issue #2370, `single` mode: `meter_poll` runs in `process()` after the render call, outside
+      // its containment. A trap there is a trap like the render's: the block is silenced, the
+      // failure record says trapped, and no export runs on the instance again; the dispose is
+      // answered 255 (final) without its export. Red if the throw escapes `process()` (the user
+      // agent's `processorerror`, with the trap unrecorded: the dispose then calls the export the
+      // trap left refusing, whose 1 the host retries for ever), or if the block's output stands.
+      const { processor, fake } = makeProcessor();
+      processor.port.onmessage({ data: { tag: "miso.meters.v1", requestId: 1, enabled: true } });
+      assert.equal(processor.port.posts.at(-1).message.result, 0, "the meter lease is held");
+      const after = [];
+      fake.exports.miso_engine_web_v1_meter_poll = () => {
+        for (const [name, value] of Object.entries(fake.exports)) {
+          if (typeof value !== "function") continue;
+          fake.exports[name] = (...args) => {
+            after.push(name);
+            return name.endsWith("_dispose") ? 1 : value(...args);
+          };
+        }
+        throw new Error("synthetic wasm trap from the meter_poll export");
+      };
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      let kept;
+      assert.doesNotThrow(() => { kept = processor.process([], [[left, right]]); },
+        "a meter_poll trap stays inside process()");
+      assert.equal(kept, true, "a meter_poll trap keeps the node alive");
+      assert(left.every((sample) => Object.is(sample, 0))
+        && right.every((sample) => Object.is(sample, 0)), "a meter_poll trap silences its block");
+      assert.equal(processor.stickyResult, 255, "a meter_poll trap is sticky 255");
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 2 } });
+      assert.deepEqual(processor.port.posts.at(-1).message,
+        { tag: "miso.ack.v1", requestId: 2, result: 255 }, "a meter_poll trap: the dispose is final");
+      assert.deepEqual(after, [], "a meter_poll trap: no export runs after it");
+      assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false,
+        "a meter_poll trap: the instance ends");
+    }
+
+    {
       const { processor } = makeProcessor();
       const storage = new ArrayBuffer(16);
       const incoming = structuredClone({
@@ -5631,6 +5670,42 @@ async function testProcessor() {
       assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: 0n },
         `${row.name}: the release answers no token`);
       assert.deepEqual(fake.calls.release, [], `${row.name}: no release export runs`);
+    }
+    // Issue #2370, `worker` mode: `process()` reads `meter_header_ptr` after the render call, to
+    // match the active meter set to the header render reports. A trap there is recorded as the
+    // render's is: the block is silenced, no export runs again, and the release answers no token
+    // (`0n`) without calling `host_release`. Red if the throw escapes `process()` unrecorded: the
+    // release then calls `host_release` on the trapped half.
+    {
+      const fake = createFakeExports(64);
+      const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
+      processor.port.onmessage({ data: { tag: "miso.meters.v1", requestId: 1, enabled: true } });
+      assert.equal(processor.port.posts.at(-1).message.result, 0, "worker mode: the meter lease is held");
+      const after = [];
+      fake.exports.miso_engine_web_v1_meter_header_ptr = () => {
+        for (const [name, value] of Object.entries(fake.exports)) {
+          if (typeof value !== "function") continue;
+          fake.exports[name] = (...args) => {
+            after.push(name);
+            return value(...args);
+          };
+        }
+        throw new Error("synthetic wasm trap from the meter_header_ptr export");
+      };
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      let kept;
+      assert.doesNotThrow(() => { kept = processor.process([], [[left, right]]); },
+        "worker mode: a meter_header_ptr trap stays inside process()");
+      assert.equal(kept, true, "worker mode: a meter_header_ptr trap keeps the node alive");
+      assert(left.every((sample) => Object.is(sample, 0))
+        && right.every((sample) => Object.is(sample, 0)),
+      "worker mode: a meter_header_ptr trap silences its block");
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      fromWorker({ tag: "miso.release.v1" });
+      assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: 0n },
+        "worker mode: a meter_header_ptr trap: the release answers no token");
+      assert.deepEqual(after, [], "worker mode: a meter_header_ptr trap: no export runs after it");
     }
     // R-S7-meters (3): `process()` switches to the pre-cut set only when the header render reports,
     // its frame pointer and its strip counts all match; otherwise it skips the frame and counts it.
