@@ -137,3 +137,69 @@ Every row is the spec's prediction. The same probe on the branch: rows 1-3 `Err(
 - The chain's `debug_assert!(undone, "a swapped slot swaps back")` (rack) and the graph's `debug_assert!(undone.is_ok(), "a traded row trades back")` and `debug_assert!(false, "a checked row trades its lanes")` are the same pattern one level up: an undo whose result is only asserted. A slot that refuses its swap-back leaves that slot traded under a `Defect` that says the others were swapped back.
 - The packer retries a strip whose trade hit `Defect` at the next episode, so a persistently broken bank would be reset at every episode. Pinning both strips on `Chain(Defect)` (the #2135 pin) would quarantine them for the plan's life; it is a graph change outside this issue's mapping.
 - `lane_swap_stranded` is read per stage only; no host-facing total such as `carry_refusal_count` sums it yet.
+
+**Sol's verdict on attempt 1 (`9794148d4`): FAIL**, with one MAJOR and four MINOR findings. The effect-contract fix itself was correct.
+1. MAJOR: nothing tested the rack recovery's symmetry refresh. Deleting all four refresh blocks kept `cargo test -p rack` green, yet a stale witness could mono-collapse a lane whose defaults now differ.
+2. MINOR: no effect-contract case refused two exchanges. Changing the unwind's `return Rotation::Stranded` to `continue` was caught only in rack.
+3. MINOR: on a bank with a detector link, an unwound exchange snaps an in-flight link glide to rest (`rest_link` inside `exchange_lane_defaults`). Either restore each lane's own payload after the undo, or narrow the "both lanes as they were" doc.
+4. MINOR: keep a debug tripwire at the chain for refusals that no stage counted as stranded.
+5. Write a successor for the chain and graph swap-backs, the graph's `debug_assert!(false)`, a host-facing total with a #2135 pin, and the trait-doc mismatch from item 3.
+
+### Attempt 2 (Sol's findings folded), same branch, origin/main `fe332ff80` merged
+
+- **Item 1.** `a_stranded_slot_resets_its_two_lanes_and_the_chain_reports_a_defect` now runs four cases: the effect slot and the live slot, each in a cross-chain and an in-chain swap. Every arm of both stages' stranded branch is therefore exercised.
+  - Before the swap, it asserts that both lanes hold `ChannelSymmetryWitness::RESTORED`, through `BankChain::lane_symmetry`.
+  - After the `Defect`, it asserts that both stranded lanes withhold `RESTORED`.
+  - Red on mutation: deleting each of the four refresh blocks alone turns the test red at the `RESTORED` assertion. This holds for the effect stage in the same chain and across chains, and for the live stage in both.
+- **Item 2.** Words gains `refuse_exchange_again`. New case: "step-1 exchange 2 and its unwind" (exchanges 2 and 3 refuse). It returns `Err(Stranded)`, the first lane holds the spare's bytes as its defaults, and the payloads are unchanged.
+  - Red on mutation: changing the unwind's `return Rotation::Stranded` to `continue` makes this case return `Err(Exchange)` instead of `Err(Stranded)`.
+- **Item 3 (restore, which is bounded).** `OwnPayloads::restore` runs after every undo that completes:
+  - step 1's unwind;
+  - the undo after a refused step 2;
+  - the undo after a refused step 3, which replaces the old revert of the first lane alone.
+
+  It restores the first lane's own payload, then the second's. Both payloads validated against their own lanes before the first write, and the cost is at most two extra restores. A restore that refuses returns `Stranded`.
+  - The docs of `Exchange`, `Restore` and the swap now say why: an exchange may touch a state word that a payload holds.
+  - Words gains `rests_on_exchange`: an exchange that takes sets the lane's right word to `REST`, standing in for `rest_link`. It is on for every bank in `every_lane_swap_refusal_leaves_both_lanes_unchanged` (accepted swaps included) and for the `Exchange` cases of the new test.
+  - Red on mutation, each dropping one own-payload restore:
+    - after the unwind: the `Exchange` cases leave `REST` in the payload;
+    - after step 2: the `Restore` cases leave `REST`, `[11, 12, 32343]`;
+    - after step 3: the `Restore` cases leave `REST` and `Stranded` turns into `Restore`.
+  - The trait-doc mismatch (`LaneSwap::exchange_lane_defaults`, "It changes no state word", `crates/effect-contract/src/lib.rs` 2526) is item (d) of the successor.
+- **Item 4.** `BankStage` gains `lane_swap_stranded()`, with default `0`. It replaces the two inherent accessors, so there is one source. `BankChain::swap_lanes` reads it before each slot's swap and, on a refusal, asserts `debug_assert!(stranded count moved, "a checked slot swaps its lanes, or strands and counts it")` in both arms.
+  - A counted strand passes in debug.
+  - Dropping the effect stage's count, or the live stage's, trips the assertion (`lib.rs` 5356 and 5321 under the mutation).
+- **Item 5.** The successor spec is written, ready to file. This spec names it as #SUCCESSOR. It covers:
+  - the checked chain and graph swap-backs, reported as a split strip;
+  - the graph's `debug_assert!(false)`;
+  - a host-facing `lane_swap_stranded` total, and a #2135 pin on `Chain(Defect)`;
+  - the trait-doc mismatch.
+
+  These replace the attempt-1 follow-ups above.
+- **Mutation evidence, attempt 2** (each reverted, focused test red, tree restored):
+  - `effect-contract`, release:
+    - each of the four checks back to its `debug_assert!`;
+    - the unwind skipped;
+    - the unwind's `return Stranded` changed to `continue`;
+    - the unwind in the wrong bank;
+    - each of the three own-payload restores dropped.
+  - `rack`, debug:
+    - no reset;
+    - the peer reset in the wrong bank;
+    - each stage's count dropped (the tripwire fires);
+    - each of the four symmetry refreshes deleted;
+    - the chain's swap-back skipped.
+- **No bit moved.** `silent_bank_skip` gate-3 digest on the branch: `inserts=false 7d31fea2b6652670`, `inserts=true 8e4dfb8b8dc1d599`, identical to base `3bf66dd46` and to attempt 1. The healthy path is unchanged.
+- **Gates.** Debug and release runs of the effect-contract lane-swap tests, plus the crates below, one crate at a time with `-j 4`:
+  - `cargo test --locked`: every run below passed, with none failing.
+    - `effect-contract`;
+    - `effect-contract --release --lib lane_swap`;
+    - `rack`;
+    - `graph`;
+    - `graph-compiler --test silent_bank_skip --release` (14 tests).
+  - Clippy `-D warnings` on `effect-contract`, `rack` and `graph`: clean.
+  - `cargo doc -D warnings`: clean.
+  - `cargo fmt --all --check`: clean.
+  - `check-workspace-policy.sh`: ok.
+  - `realtime_policy`: ok (312 regions).
+  - `check-web-audioworklet.sh --without-metadata-regeneration` on a rebuilt artifact and named twin: passed (`miso_engine_web_v1_render` closure=38, atomic_waits=0).

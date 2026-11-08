@@ -770,11 +770,21 @@ pub trait BankStage: Send {
 
     /// Exchange lane `lane`'s whole per-lane state -- effect state, ramps in flight, control lane,
     /// taps, dry history -- with `peer`'s lane, at a block boundary on the render thread (issue
-    /// #1747). Returns `false` and changes nothing unless [`Self::can_swap_lanes`] holds.
-    /// Allocation-free and bounded by the prepared state size and the latency.
+    /// #1747). Returns `false` and changes nothing unless [`Self::can_swap_lanes`] holds, or,
+    /// for a swap that stranded (issue #2414), having reset the two lanes and counted it in
+    /// [`Self::lane_swap_stranded`]. Allocation-free and bounded by the prepared state size and
+    /// the latency.
     fn swap_lanes(&mut self, lane: usize, peer: LanePeerMut<'_>, scratch: &mut [u8]) -> bool {
         let _ = (lane, peer, scratch);
         false
+    }
+
+    /// Lane swaps through this stage that stranded and reset their two lanes (issue #2414): a
+    /// bank's defect, recovered and counted. Saturating; read after render, and by
+    /// [`BankChain::swap_lanes`] to tell a counted strand from a refusal nobody counted. The
+    /// default `0` is a stage whose swap cannot strand.
+    fn lane_swap_stranded(&self) -> u64 {
+        0
     }
 }
 
@@ -1282,13 +1292,6 @@ impl EffectBankStage {
         self.carry_refused
     }
 
-    /// Lane swaps through this stage that stranded and reset both lanes (issue #2414; see
-    /// [`BankStage::swap_lanes`]). Saturating.
-    #[must_use]
-    pub const fn lane_swap_stranded(&self) -> u64 {
-        self.lane_swap_stranded
-    }
-
     // REALTIME_POLICY_BEGIN
     /// Whether [`Self::carry_lane_from`] would take `predecessor`'s lane `predecessor_lane` into
     /// this stage's lane `lane` with a scratch of `scratch_bytes`: both lanes exist, both banks
@@ -1445,6 +1448,10 @@ impl BankStage for EffectBankStage {
         lane_swap_scratch(&*self.processor, &self.layout).unwrap_or(0)
     }
 
+    fn lane_swap_stranded(&self) -> u64 {
+        self.lane_swap_stranded
+    }
+
     // REALTIME_POLICY_BEGIN
     /// Both lanes exist, the peer is an [`EffectBankStage`] of this program key (not only this
     /// layout: link mode, quality, ports and automation capacity too; a `lane_link` effect's
@@ -1487,7 +1494,7 @@ impl BankStage for EffectBankStage {
     ///
     /// A swap that strands ([`LaneSwapRefusal::Stranded`], issue #2414) resets both lanes to the
     /// defaults they hold, refreshes both witnesses with the `RESTORED` term withheld (the lanes'
-    /// history is a defect's), counts in [`EffectBankStage::lane_swap_stranded`] and returns
+    /// history is a defect's), counts in [`BankStage::lane_swap_stranded`] and returns
     /// `false`, so the chain swaps back the slots it already swapped.
     fn swap_lanes(&mut self, lane: usize, peer: LanePeerMut<'_>, scratch: &mut [u8]) -> bool {
         if !self.can_swap_lanes(lane, peer.as_peer(), scratch.len()) {
@@ -1970,13 +1977,6 @@ impl LiveControlEffectBankStage {
     #[must_use]
     pub const fn carry_refused(&self) -> u64 {
         self.carry_refused
-    }
-
-    /// Lane swaps through this stage that stranded and reset both lanes' effect state (issue
-    /// #2414; see [`BankStage::swap_lanes`]). Saturating.
-    #[must_use]
-    pub const fn lane_swap_stranded(&self) -> u64 {
-        self.lane_swap_stranded
     }
 
     /// The kind of lane `lane` is, if it exists: what it holds besides the effect's state, which
@@ -2515,6 +2515,10 @@ impl BankStage for LiveControlEffectBankStage {
         lane_swap_scratch(&*self.processor, &self.layout).unwrap_or(0)
     }
 
+    fn lane_swap_stranded(&self) -> u64 {
+        self.lane_swap_stranded
+    }
+
     // REALTIME_POLICY_BEGIN
     /// Both lanes exist, the peer is a [`LiveControlEffectBankStage`] of this program key, both
     /// banks declare prepared defaults of one size, the scratch holds
@@ -2558,7 +2562,7 @@ impl BankStage for LiveControlEffectBankStage {
     /// field but the effect's state: it resets both lanes' effect state to the defaults they
     /// hold, refreshes their `designed` flags, sets their `unrestored` bits (the lanes' history
     /// is a defect's, so the `RESTORED` term is withheld), counts in
-    /// [`LiveControlEffectBankStage::lane_swap_stranded`] and returns `false`, so the chain swaps
+    /// [`BankStage::lane_swap_stranded`] and returns `false`, so the chain swaps
     /// back the slots it already swapped.
     fn swap_lanes(&mut self, lane: usize, peer: LanePeerMut<'_>, scratch: &mut [u8]) -> bool {
         if !self.can_swap_lanes(lane, peer.as_peer(), scratch.len()) {
@@ -4031,8 +4035,8 @@ pub enum ChainLaneSwapRefusal {
     /// A slot refused after its check passed, a defect: the slots already swapped were swapped
     /// back. When that slot's own swap could not undo itself
     /// ([`effect_contract::LaneSwapRefusal::Stranded`], issue #2414) the slot reset both lanes'
-    /// effect state to the defaults they hold and counted it (the effect stages'
-    /// `lane_swap_stranded`); both strips otherwise stay where they were.
+    /// effect state to the defaults they hold and counted it
+    /// ([`BankStage::lane_swap_stranded`]); both strips otherwise stay where they were.
     Defect,
 }
 
@@ -5282,7 +5286,8 @@ impl BankChain {
     /// check passed is a defect: the slots already swapped are swapped back and the call returns
     /// [`ChainLaneSwapRefusal::Defect`]. The refusing slot's own lanes are as it left them: as
     /// they were, or, when its swap stranded, reset (issue #2414; see
-    /// [`ChainLaneSwapRefusal::Defect`]).
+    /// [`ChainLaneSwapRefusal::Defect`]). A debug build trips on a refusal the slot did not
+    /// count as stranded ([`BankStage::lane_swap_stranded`]), which its check should have made.
     ///
     /// The resident scratch -- the final output [`Self::final_output_lane`] and
     /// [`Self::final_output_block`] lend -- is not swapped: for the two lanes it is stale until the
@@ -5308,11 +5313,16 @@ impl BankChain {
                 self.disengage_for_carry();
                 let slots = self.slots.len();
                 for index in 0..slots {
+                    let stranded = self.slots[index].stage.lane_swap_stranded();
                     if !self.slots[index].stage.swap_lanes(
                         lane,
                         LanePeerMut::Same(other_lane),
                         scratch,
                     ) {
+                        debug_assert!(
+                            self.slots[index].stage.lane_swap_stranded() != stranded,
+                            "a checked slot swaps its lanes, or strands and counts it"
+                        );
                         for undo in self.slots[..index].iter_mut().rev() {
                             let undone =
                                 undo.stage
@@ -5338,11 +5348,16 @@ impl BankChain {
                 let slots = self.slots.len();
                 for index in 0..slots {
                     let (own, theirs) = (&mut self.slots[index], &mut other.slots[index]);
+                    let stranded = own.stage.lane_swap_stranded();
                     if !own.stage.swap_lanes(
                         lane,
                         LanePeerMut::Other(&mut *theirs.stage, other_lane),
                         scratch,
                     ) {
+                        debug_assert!(
+                            own.stage.lane_swap_stranded() != stranded,
+                            "a checked slot swaps its lanes, or strands and counts it"
+                        );
                         for (own, theirs) in self.slots[..index]
                             .iter_mut()
                             .zip(other.slots[..index].iter_mut())

@@ -17,10 +17,10 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use effect_contract::{
-    BankProcessReport, BankWidth, BypassSwitch, EffectBankProcessBlock, EffectCellWriter,
-    EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec,
-    EffectProgramKey, EffectQuality, EffectTargetError, LaneSwap, LatencySamples, LinkMode,
-    ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+    BankProcessReport, BankWidth, BypassSwitch, ChannelSymmetryWitness, EffectBankProcessBlock,
+    EffectCellWriter, EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape,
+    EffectLaneSpec, EffectProgramKey, EffectQuality, EffectTargetError, LaneSwap, LatencySamples,
+    LinkMode, ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
     ObservationFold, ObservationKind, ObservationLane, ObservationSample, ObservationTapId,
     PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
     PreparedBankMetadata, PreparedEffectBank, PreparedEffectTarget, PreparedNativeEffectBank,
@@ -1402,13 +1402,16 @@ fn a_refused_swap_leaves_both_chains_as_they_were() {
 /// Issue #2414: a slot whose bank breaks the exchange contract mid-swap -- an exchange refuses,
 /// and so does the undo of the one before it -- strands its lane swap. The chain returns
 /// `Defect` with the slots it already swapped swapped back, and the stranded slot resets both
-/// lanes to the defaults they hold (the D7 lane recovery), no other lane, and counts it. An
-/// effect slot in a cross-chain swap (the exchanges refuse in the calling chain's bank, after
-/// the peer bank's took one), and the live slot in an in-chain swap.
+/// lanes to the defaults they hold (the D7 lane recovery), no other lane, counts it, and
+/// withholds the `RESTORED` symmetry term of both lanes, whose history is a defect's. An effect
+/// slot and the live slot, each in a cross-chain swap (the exchanges refuse in the calling
+/// chain's bank, after the peer bank's took one) and in an in-chain swap.
 ///
 /// Test value: a stage that takes a stranded swap for a clean refusal and leaves the two lanes
 /// as the defect left them (no reset, no count), resets the wrong lanes or the peer's lane in
-/// the wrong bank, or a chain that does not swap back the slots before a stranded one.
+/// the wrong bank, keeps a lane's stale symmetry witness (a lane whose defaults now differ
+/// could then mono-collapse), or a chain that does not swap back the slots before a stranded
+/// one.
 #[test]
 fn a_stranded_slot_resets_its_two_lanes_and_the_chain_reports_a_defect() {
     let width = BankWidth::Four;
@@ -1418,10 +1421,24 @@ fn a_stranded_slot_resets_its_two_lanes_and_the_chain_reports_a_defect() {
         collapse: None,
     };
     // `(slot, at, other)`: the calling chain is `at`'s, chain 0.
-    for (slot, at, other) in [(2, (0, 1), (1, 2)), (1, (0, 1), (0, 3))] {
+    for (slot, at, other) in [
+        (2, (0, 1), (1, 2)),
+        (2, (0, 1), (0, 3)),
+        (1, (0, 1), (1, 2)),
+        (1, (0, 1), (0, 3)),
+    ] {
         let what = format!("slot {slot}, {at:?} with {other:?}");
         let mut world = World::new(width, 5, shape);
         let before = world.strip_defaults();
+        let restored = |world: &World, (on, lane): (usize, usize)| {
+            world.chains[on]
+                .lane_symmetry(lane)
+                .holds(ChannelSymmetryWitness::RESTORED)
+        };
+        assert!(
+            restored(&world, at) && restored(&world, other),
+            "{what}: a lane never restored holds the term"
+        );
         // The calling bank's second exchange refuses (the rotation's third across chains, its
         // second within one), and so does every later one: the undo of its first.
         world.faults[0][slot].arm(2);
@@ -1442,6 +1459,12 @@ fn a_stranded_slot_resets_its_two_lanes_and_the_chain_reports_a_defect() {
                 .lane_swap_stranded()
         };
         assert_eq!(stranded, 1, "{what}: the stranded swap is counted");
+        for stranded in [at, other] {
+            assert!(
+                !restored(&world, stranded),
+                "{what}: {stranded:?}: a stranded lane's RESTORED term is withheld"
+            );
+        }
         for chain in 0..2 {
             for bank in 0..3 {
                 let mut expected = vec![0_u32; 8];
