@@ -305,16 +305,16 @@ async function runMutationLedger() {
     {
       name: "let close() write idle after its await",
       file: "web/stem-store/session-gate.js",
-      search: '    this.#state = "idle"\n    await lease?.close()\n',
-      replace: '    this.#state = "idle"\n    await lease?.close()\n    this.#state = "idle"\n',
+      search: "    await closing\n  }\n",
+      replace: '    await closing\n    this.#state = "idle"\n  }\n',
       test: "stem-pump-v1.mjs",
       expectedFailure: "close() reported idle while a later open was loading",
     },
     {
       name: "stop forwarding the caller's signal once the lease is granted",
       file: "web/stem-store/session-gate.js",
-      search: "        onProgress: options.onProgress,\n      })\n",
-      replace: "        onProgress: options.onProgress,\n      })\n      removeParentAbort()\n",
+      search: "        onPinning,\n      })\n",
+      replace: "        onPinning,\n      })\n      removeParentAbort()\n",
       test: "stem-pump-v1.mjs",
       expectedFailure: "the aborted open never settled (caller signal, resume wait)",
     },
@@ -344,6 +344,85 @@ async function runMutationLedger() {
       replace: '      if (this.#lease === undefined) this.#state = "refused"\n',
       test: "stem-pump-v1.mjs",
       expectedFailure: "a refused open left the gate loading behind a current lease",
+    },
+    // Issue #2372: a resolved close() means a released pin. A lease closed twice shares one release;
+    // gate.close() waits for the current lease, a replaced predecessor still closing, and every open
+    // from the store's pin phase on (and only from then: before it an aborted open never takes a pin);
+    // and a failed release still rejects the close.
+    {
+      name: "let a second lease close() resolve before the first releases the pin",
+      file: "web/stem-store/opfs-store.js",
+      search: "  close() {\n    this.#closing ??= this.#release()\n",
+      replace:
+        "  close() {\n    if (this.#closing !== undefined) return Promise.resolve()\n    this.#closing ??= this.#release()\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a second close() resolved while the first still held the pin",
+    },
+    {
+      name: "let gate.close() wait only for the current lease",
+      file: "web/stem-store/session-gate.js",
+      search: "    await Promise.allSettled([closing, ...this.#releasing])\n",
+      replace: "    await Promise.allSettled([closing])\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "an aborted open's lease still held its pin (aborted by close())",
+    },
+    {
+      name: "never report a session open's pin phase",
+      file: "web/stem-store/opfs-store.js",
+      search: "    throwIfAborted(options.signal)\n    options.onPinning?.()\n",
+      replace: "    throwIfAborted(options.signal)\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "an aborted open's lease still held its pin (aborted by close())",
+    },
+    {
+      name: "report a session open's pin phase only once the pin is written",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search: "    throwIfAborted(options.signal)\n    options.onPinning?.()\n",
+          replace: "    throwIfAborted(options.signal)\n",
+        },
+        {
+          search: '    options.onProgress?.({ stage: "ready", stems: stems.length })\n',
+          replace: '    options.onPinning?.()\n    options.onProgress?.({ stage: "ready", stems: stems.length })\n',
+        },
+      ],
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "gate.close() resolved while an open in its pin write held the pin lock",
+    },
+    {
+      name: "close a replaced predecessor without gate.close() waiting for it",
+      file: "web/stem-store/session-gate.js",
+      search: "        await this.#track(replaced.close())\n",
+      replace: "        await replaced.close()\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "gate.close() resolved while a replaced predecessor still held its pin",
+    },
+    {
+      name: "let gate.close() wait for every open from its start",
+      file: "web/stem-store/session-gate.js",
+      search: "      return await this.#open(options, () => this.#track(settled))\n",
+      replace: "      this.#track(settled)\n      return await this.#open(options, () => {})\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "gate.close() waited on an aborted open's wedged getDirectory",
+    },
+    {
+      name: "let gate.close() hide a failed release of the current lease",
+      file: "web/stem-store/session-gate.js",
+      search: "    await Promise.allSettled([closing, ...this.#releasing])\n    await closing\n",
+      replace: "    await Promise.allSettled([closing, ...this.#releasing])\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "gate.close() hid a failed pin release",
+    },
+    {
+      name: "track an open's settlement on the caller's promise",
+      file: "web/stem-store/session-gate.js",
+      search:
+        "  async open(options) {\n    // Settlement is tracked on a private promise, never on the caller's, so a\n    // rejected open the caller drops is still reported as unhandled.\n    let settle\n    const settled = new Promise((resolve) => (settle = resolve))\n    try {\n      return await this.#open(options, () => this.#track(settled))\n    } finally {\n      settle()\n    }\n  }\n",
+      replace:
+        "  open(options) {\n    const opened = this.#open(options, () => this.#track(opened))\n    return opened\n  }\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the dropped open's unhandled rejection (after the pin phase)",
     },
     {
       name: "omit AbortSignal from the session pin lock wait",
