@@ -82,3 +82,40 @@ Mutants (all in `crates/builtins-compiler/src/lib.rs`), each run against `cargo 
 ### T8 (#2332): deleted, already covered
 - The shell's lifecycle mirror has a reader: since #2346 the control Worker reads `miso_engine_web_v1_status_ptr` on every `readStatus` (`hosts/host-web/web/miso-engine-v1-control-worker.js` `readStatus`), which names the `Away` shell while the half is away, and `answerStatus` reports its `state` when it is not ready.
 - It is pinned: #2346 (`1e682298f`) added `tests::the_released_status_shell_shows_a_render_side_failure_at_the_next_control_call` (`hosts/host-web/src/tests.rs`), whose test value is this row's. Re-run of the row's mutant (`AudioWorkletEngineHost::record` no longer writes `shell.state = control.lifecycle.state()`): that test fails at `tests.rs:1849`, `left: (2, 3) right: (3, 3)`. No new test.
+
+### T9 (#2279): rows for the factory-input, returned-plane and boot-reply guards
+Done last, after merging `origin/main` (#2385 and #2386 merged; `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` as merged). Tests only: the brief allows no product change here, so the guards that are unreachable are recorded, not deleted.
+
+Method: each of #2279's 23 guards was deleted in a copy of the host (its condition made `false`, or its branch removed) and `node scripts/test-web-audioworklet.mjs` was run against it (`MISO_ENGINE_WEB_HOST_TEST_MODULE`). At base all 23 are **green**. With the new rows in `scripts/test-web-audioworklet.mjs`, 13 are red; the other 10 are equivalent or unreachable, as follows.
+
+| #2279 line | Guard (current function) | Row now red | Verdict |
+|---|---|---|---|
+| 140 | `hasExactFields` on a non-object | single-mode boot "a null ready message" (`TypeError ... null to object` thrown in the port handler) | red |
+| 147 | `capturePlainRecord` non-object or array | none | equivalent: `getPrototypeOf(null)` throws inside the factory's `try` (the same `INVALID_ARGUMENT`); a primitive or an array fails the prototype check; a null-prototype array fails on its own `length` key |
+| 149 | `capturePlainRecord` foreign prototype | factory "foreign prototype" | red |
+| 158 | `capturePlainRecord` accessor | factory "hidden accessor prepared module" (an absent-reading optional field) | red |
+| 168 | `hasEnumerableShape` count | none | equivalent: for boot options, `hasRequiredEnumerableFields` refuses every record the count refuses (unknown keys are refused earlier) |
+| 175 | `hasRequiredEnumerableFields` | none | equivalent: for boot options the count refuses a hidden or missing field; for the factory a hidden required field fails the enumerable count, and a missing one throws on `.value` inside the `try` |
+| 181 | `snapshotDocument` on a non-object | none | equivalent: the intrinsic tag getter throws on a non-object inside the function's own `try`, which answers `undefined` |
+| 183 | `snapshotDocument` tag | factory "Int8Array document" | red |
+| 189 | `snapshotDocument` offset/length | none | unreachable: the intrinsic getters keep a `Uint8Array`'s `byteOffset + byteLength` inside its buffer and `byteLength == length` (an out-of-bounds view reads `0` and `0`) |
+| 201 | `snapshotBootOptions` shape | factory "hidden boot option" | red |
+| 223 | `snapshotFactory` required fields | none | equivalent, as for 175 |
+| 230 | `snapshotFactory` hidden optional | none | equivalent: a hidden optional value still counts as present, so the enumerable count refuses it (the existing "hidden defined prepared module" row) |
+| 257 | `webError` `planes` | none | unreachable: no caller passes `planes` |
+| 308 | `planeShape` grouping | returned planes "two buffers returned as sent" | red |
+| 319 | `validReturnedPlanes` count | returned planes "one plane of two returned" | red |
+| 329 | `validReturnedPlanes` split | returned planes "one buffer returned split" | red |
+| 331 | `validReturnedPlanes` aliased | returned planes "two buffers returned aliased" | red |
+| 348 | `fetchModule` not OK | single-mode boot "a module fetch that is not OK" (typed `7`) | red |
+| 1597 | factory refuses a rejected snapshot | none | equivalent: with the guard gone, `factorySnapshot.descriptors` throws inside the same `try`, the same `INVALID_ARGUMENT` |
+| 1674 | worker-mode ready reply | worker ready reply table (another backend; no memory; a ring off the quantum; a control frame below the minimum; resources at another quantum): each refuses 255, builds no worklet and terminates the Worker | red; each clause deleted alone is red at its own row too |
+| 1699 | worker-mode control port | the worker-mode boot row: "the worklet gets the control port" (one `miso.control-port.v1` per boot) | red |
+| 1706 | boot `finish` once | none | unreachable: `finish` nulls the three handlers on its first entry, and nothing else calls it |
+| 1749 | single-mode typed boot refusal | single-mode boot "a typed refusal" (result `3`, not `255`) | red |
+
+Test value, per new row: a factory record with a foreign prototype, a hidden accessor for an optional field, a non-`Uint8Array` document or a hidden boot option boots instead of being refused; a non-object ready message throws in the port handler and leaves the boot unsettled; a typed boot refusal reaches the caller as `255`; a module fetch that is not OK is compiled anyway; a submission's planes in two buffers are refused, or a reply that drops, splits or aliases planes is accepted; a Worker ready reply with the wrong backend, memory, ring, frame or resources builds a worklet; the worker-mode boot never hands the worklet its control port. No existing row reached any of these.
+
+Gates: `bash scripts/test-web-audioworklet.sh` passes (the hermetic suite, its MAX_SAFE runs and the policy self-tests). The shipped JavaScript is unchanged, so no browser run applies.
+
+Follow-up (not filed): the three unreachable guards (189, 257's `planes` parameter, 1706's `settled`) can be deleted under an issue that allows the product change.
