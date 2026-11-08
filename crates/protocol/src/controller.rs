@@ -5290,7 +5290,9 @@ fn status_for_transaction(error: &SessionStoreError) -> StatusCode {
         }
         SessionStoreError::RevisionConflict { .. } => StatusCode::RevisionConflict,
         SessionStoreError::RevisionExhausted => StatusCode::RevisionExhausted,
-        SessionStoreError::ArmTagsExhausted => StatusCode::Internal,
+        SessionStoreError::ArmTagsExhausted | SessionStoreError::MonitorCandidateWritten => {
+            StatusCode::Internal
+        }
         SessionStoreError::Edit { .. } | SessionStoreError::Validation { .. } => {
             StatusCode::ValidationFailed
         }
@@ -5348,7 +5350,8 @@ fn transaction_error_diagnostics(error: &SessionStoreError) -> Vec<Diagnostic> {
         | SessionStoreError::EmptyTransaction
         | SessionStoreError::RevisionConflict { .. }
         | SessionStoreError::RevisionExhausted
-        | SessionStoreError::ArmTagsExhausted => Vec::new(),
+        | SessionStoreError::ArmTagsExhausted
+        | SessionStoreError::MonitorCandidateWritten => Vec::new(),
     }
 }
 

@@ -1,6 +1,6 @@
-//! Issue #2394: a transaction of solo writes prepared on the whole path holds no compilation. It
-//! changes no model and no revision, and its compilation is the committed one, which the store
-//! already holds, so its preparation makes no clone of it.
+//! Issues #2394 and #2403: a transaction of solo writes prepared on the whole path changes no model
+//! and no revision. Its compilation is the committed one, which the store already holds, and its
+//! edits are checked against the committed model by borrow, so its preparation clones neither.
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use protocol::control_core::{ControlAddress, Lane, Owner, Section};
@@ -16,14 +16,16 @@ fn requested_bytes<T>(body: impl FnOnce() -> T) -> (T, u64) {
     (value, current_thread_delta_since(mark).requested_bytes)
 }
 
-/// Red if a whole-path solo preparation clones the committed `CompiledSession` again (#2394).
+/// Red if a whole-path solo preparation clones the committed `CompiledSession` (#2394) or the
+/// committed model as a candidate (#2403), even transiently.
 ///
-/// The preparation still clones the committed model as its candidate and builds its monitor-edit
-/// vector, so the ceiling is one model clone plus one compilation clone: a preparation that also
-/// clones the compilation requests at least that much, and one that does not requests the model,
-/// the monitor write and nothing near a compilation.
+/// The preparation builds its monitor-edit vector and nothing else of note, so the ceiling is one
+/// model clone: a preparation that clones the model or the compilation (which holds the model)
+/// requests at least that much. A transaction of `Observe` edits only is monitor-only too and
+/// takes the same borrowed-candidate decision in `prepare_transaction_with`; this test measures
+/// the solo.
 #[test]
-fn a_whole_path_solo_preparation_clones_no_compilation() {
+fn a_whole_path_solo_preparation_clones_no_model_or_compilation() {
     assert_installed();
     let model = parse_session_json(FIXTURE).expect("fixture");
     let track = model.tracks[0].id.clone();
@@ -58,8 +60,6 @@ fn a_whole_path_solo_preparation_clones_no_compilation() {
     let (model_clone, model_bytes) =
         requested_bytes(|| store.compiled().normalized_model().clone());
     drop(model_clone);
-    let (compiled_clone, compiled_bytes) = requested_bytes(|| store.compiled().clone());
-    drop(compiled_clone);
     let (prepared, prepare_bytes) = requested_bytes(|| {
         store
             .prepare_transaction_with_monitor(revision, &solo)
@@ -68,8 +68,8 @@ fn a_whole_path_solo_preparation_clones_no_compilation() {
     assert!(prepared.is_monitor_only() && !prepared.is_in_place());
     assert_eq!(prepared.monitor_edits().len(), 1);
     assert!(
-        prepare_bytes < model_bytes + compiled_bytes,
-        "a whole-path solo requested {prepare_bytes} bytes: at least its candidate model \
-         ({model_bytes}) and a clone of the committed compilation ({compiled_bytes})"
+        prepare_bytes < model_bytes,
+        "a whole-path solo requested {prepare_bytes} bytes: at least a clone of the committed \
+         model ({model_bytes})"
     );
 }
