@@ -213,6 +213,8 @@ export class FakeLockManager {
   #held = new Map()
   #pending = new Map()
   requests = []
+  // When set, query() awaits it first: a test stalls or fails the lock query with it.
+  queryBlocker = undefined
 
   // A request honours `signal` as the Web Locks API does: an already-aborted signal rejects
   // without queueing, and an abort while the request waits rejects it with the signal's reason
@@ -268,6 +270,8 @@ export class FakeLockManager {
   }
 
   async query() {
+    // Awaited only when set, so a run without the hook keeps its microtask order.
+    if (this.queryBlocker !== undefined) await this.queryBlocker()
     return {
       held: Array.from(this.#held.keys(), (name) => ({ name, mode: "exclusive" })),
       pending: Array.from(this.#pending.keys(), (name) => ({ name, mode: "exclusive" })),

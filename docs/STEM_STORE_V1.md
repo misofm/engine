@@ -146,6 +146,16 @@ Under the index lock a stall is never treated as damage: a rebuild whose hash
 of a final stalls fails typed and keeps that final, and a stalled index read
 never rebuilds.
 
+The Web Locks query that the first open and a rebuild make under the index lock
+has the same deadline (#2396). A query that throws or makes no progress leaves
+the lock state unknown, and a late answer is dropped. With the lock state
+unknown, the open purges no session pin and its staging sweep removes nothing:
+under Web Locks a staged file is dead only when its stem lock is free, so the
+sweep reports `storage.maintenance_stalled` and the next open retries. The
+staged-file age check applies only when there is no lock query at all. The
+finals sweep and a rebuild still run, because each removal of a final is proven
+by taking its stem lock without waiting.
+
 Outside the index lock, a read that stalls or fails is not proof of damage
 either. In verify-on-open, `verify()` and a session's `read()`, such a read
 demotes the stem only if, re-checked under the index lock, no session other

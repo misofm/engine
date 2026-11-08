@@ -1463,6 +1463,99 @@ async function aSweepNeverRemovesAFinalWhoseStemLockIsTaken() {
   await held.done
 }
 
+// Issue #2396: the Web Locks query runs under the index lock, at the store's first open and in a
+// rebuild of a damaged index, so it has the local-store deadline. A query that never settles must
+// not hold the index lock: a lease close's pin release that rebuilds the index settles, and the
+// rebuild goes on without the lock state and keeps its good final. The open is the next row.
+async function aStalledLockQueryNeverHoldsTheIndex() {
+  const stem = fixture("query-stalled", 4096)
+  const backend = new FakeOpfsBackend()
+  const locks = new FakeLockManager()
+  const lease = await store(backend, locks, { tabId: "query-stalled", readDeadlineMs: 20 }).openSession({
+    sessionId: "stalled",
+    stems: requirements([stem]),
+    resolver: new MemoryStemResolver(stemMap([stem])),
+  })
+  locks.queryBlocker = never
+  backend.setBytes(`${STORE_FOLDER}/index.json`, encoder.encode("{"))
+  const closed = await settledWithin(lease.close(), 500)
+  assert.notEqual(closed, "timed-out", "a lease close waited on a lock query that never settles")
+  assert.equal(closed.error, undefined)
+  assert.deepEqual(indexStems(backend)[stem.identity]?.pins, [])
+}
+
+// Issue #2396: under Web Locks a staged file is dead only when its stem lock is free. An open whose
+// lock query threw or stalled cannot prove that, so it removes no staged file, even one older than
+// the age check's threshold, and it keeps every pin. Here another tab is mid-download.
+async function anUnknownLockStateSweepsNothingStaged() {
+  for (const leg of ["query throws", "query stalls"]) {
+    const stem = fixture(`query-unknown-${leg}`, 4096)
+    const pinnedStem = fixture(`query-unknown-${leg}-pinned`, 4096)
+    const backend = new FakeOpfsBackend()
+    const locks = new FakeLockManager()
+    const pinned = await store(backend, locks, { tabId: "query-unknown-pinned" }).openSession({
+      sessionId: "pinned",
+      stems: requirements([pinnedStem]),
+      resolver: new MemoryStemResolver(stemMap([pinnedStem])),
+    })
+    let paused = false
+    let resume
+    const holding = new Promise((resolve) => (resume = resolve))
+    const downloading = store(backend, locks, {
+      tabId: "query-unknown-a",
+      hooks: {
+        async afterChunk() {
+          paused = true
+          await holding
+        },
+      },
+    }).openSession({
+      sessionId: "downloading",
+      stems: requirements([stem]),
+      resolver: new MemoryStemResolver(stemMap([stem]), { chunkBytes: 64 }),
+    })
+    await until(() => paused, "the download's first chunk")
+    const staged = backend.names(`${STORE_FOLDER}/staging`)
+    assert.equal(staged.length, 1)
+    locks.queryBlocker =
+      leg === "query throws"
+        ? async () => {
+            throw new Error("fake query failure")
+          }
+        : never
+    const failures = []
+    const opened = await settledWithin(
+      store(backend, locks, {
+        tabId: "query-unknown-b",
+        readDeadlineMs: 20,
+        // The staged file looks a minute old, past the age check's threshold.
+        now: () => Date.now() + 60_000,
+        hooks: { maintenanceFailure: (event) => failures.push(event.sweep) },
+      }).open(),
+      500
+    )
+    assert.notEqual(opened, "timed-out", `a store open waited on its lock query (${leg})`)
+    assert.equal(opened.error, undefined)
+    assert.deepEqual(
+      indexStems(backend)[pinnedStem.identity].pins,
+      ["session:query-unknown-pinned:pinned"],
+      `an open with unknown lock state dropped a live pin (${leg})`
+    )
+    assert.deepEqual(
+      backend.names(`${STORE_FOLDER}/staging`),
+      staged,
+      `an open with unknown lock state removed a live download's staged file (${leg})`
+    )
+    assert.deepEqual(failures, ["staging"])
+    locks.queryBlocker = undefined
+    resume()
+    const lease = await downloading
+    assert.equal((await lease.read(stem.identity)).size, stem.bytes)
+    await lease.close()
+    await pinned.close()
+  }
+}
+
 // Issue #2381: an aborted open evicts nothing once its abort is seen, wherever its eviction waits:
 // queued on the victim's stem lock, queued on the index lock, or in the index read under it. The
 // waits on the two locks end at the abort, so the open refuses without waiting for their holders.
@@ -1945,6 +2038,8 @@ await anAbortedReadNeverDemotes()
 await aMissingFinalIsDemotedEvenWhenPinned()
 await anEvictionSparesAVictimPinnedAfterItsPreflight()
 await anAbortedOpenEvictsNothing()
+await aStalledLockQueryNeverHoldsTheIndex()
+await anUnknownLockStateSweepsNothingStaged()
 await tabCloseMidStaging()
 await abortCleansStaging()
 await wedgedDecoderObeysAbortAndDeadline()
