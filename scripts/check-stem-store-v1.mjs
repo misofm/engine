@@ -415,6 +415,16 @@ async function runMutationLedger() {
       expectedFailure: "gate.close() hid a failed pin release",
     },
     {
+      name: "track an open's settlement on the caller's promise",
+      file: "web/stem-store/session-gate.js",
+      search:
+        "  async open(options) {\n    // Settlement is tracked on a private promise, never on the caller's, so a\n    // rejected open the caller drops is still reported as unhandled.\n    let settle\n    const settled = new Promise((resolve) => (settle = resolve))\n    try {\n      return await this.#open(options, () => this.#track(settled))\n    } finally {\n      settle()\n    }\n  }\n",
+      replace:
+        "  open(options) {\n    const opened = this.#open(options, () => this.#track(opened))\n    return opened\n  }\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "the dropped open's unhandled rejection (after the pin phase)",
+    },
+    {
       name: "omit AbortSignal from the session pin lock wait",
       file: "web/stem-store/opfs-store.js",
       search: '      { mode: "exclusive", signal },\n      async () => {\n        acquired()',

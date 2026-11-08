@@ -18,7 +18,7 @@ Nothing deadlocks on base. The defect is that a resolved close promises a releas
 
 ## Gates
 - Red on base: (1) a second close that resolves while the first close's release is held open by a test hook; (2) a `gate.close()` that resolves while an aborted open's lease is still pinned.
-- The stem-store JS suite is green on both browsers.
+- The stem-store JS suite is green. It runs in Node against the fakes (the qualification `stem-store` step, `node scripts/check-stem-store-v1.mjs`), so the two-browser gate does not apply.
 
 ## Evidence / attempt record
 ### Attempt 1 (Terra, 2026-11-08)
@@ -188,3 +188,16 @@ This removes the whole class, not one wait at a time. Whatever lease-free work a
 - The undeadlined `removeEntry` inside `#evictUnpinned`'s `#mutateIndex` holds the index lock, so a wedge there blocks every lease close, base's included.
 - `#readIndex`'s `getFileHandle(INDEX_FILE)` has no deadline.
 - An aborted open's eviction still runs once its stem lock frees, because `#evictUnpinned` takes no signal. That evicts an unpinned stem for an open that no longer needs the space; it holds no pin.
+
+**Verdict: PASS** (Sol, minors only). Both minors are folded into the same branch:
+- `aDroppedFailedOpenStaysUnhandled` dropped only an open that fails before the pin phase. So a non-async wrapper that tracks the caller's own promise from `onPinning` (`const p = this.#open(options, () => this.#track(p)); return p`) kept the suite green. A second leg now drops an open that fails after the pin phase: a working `FakeOpfsBackend`, `stems: []`, and a rejecting `resume()`. That mutant is a new ledger entry, `track an open's settlement on the caller's promise`, and it is `RED` at `the dropped open's unhandled rejection (after the pin phase)`.
+- The Gates section now says the suite runs in Node against the fakes, so the two-browser gate does not apply.
+
+Green after the fold:
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `--self-test --budgets`: PASS, every entry `RED` at its target.
+- `stem-pump-v1.mjs`: 8 parallel runs, all PASS.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: ok.
+
+The coordinator files the three follow-ups.

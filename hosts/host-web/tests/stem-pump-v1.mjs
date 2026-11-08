@@ -1199,22 +1199,33 @@ async function aFailedPinReleaseRejectsEveryClose() {
 }
 
 // Issue #2372: the gate tracks its opens on a private promise, so an open whose caller drops the
-// promise still surfaces its rejection as unhandled.
+// promise still surfaces its rejection as unhandled: one that fails before the store's pin phase (an
+// unavailable store) and one that fails after it (a rejected resume), once the gate is tracking it.
 async function aDroppedFailedOpenStaysUnhandled() {
-  const gate = new StemSessionGate(
-    new OpfsStemStore({ storage: {}, locks: new FakeLockManager() }),
-    new MemoryStemResolver({})
-  )
-  const unhandled = []
-  const record = (_reason, promise) => unhandled.push(promise)
-  process.on("unhandledRejection", record)
-  let dropped
-  try {
-    dropped = gate.open({ sessionId: "dropped", stems: [], resume() {} })
-    await until(() => unhandled.includes(dropped), "the dropped open's unhandled rejection", 50)
-  } finally {
-    // Handling it now would only add a late-handling warning; the event is the claim.
-    process.off("unhandledRejection", record)
+  const legs = [
+    { leg: "before the pin phase", storage: {}, resume() {} },
+    {
+      leg: "after the pin phase",
+      storage: new FakeOpfsBackend().storage(),
+      resume: () => Promise.reject(new Error("route changed")),
+    },
+  ]
+  for (const { leg, storage, resume } of legs) {
+    const gate = new StemSessionGate(
+      new OpfsStemStore({ storage, locks: new FakeLockManager(), tabId: "dropped" }),
+      new MemoryStemResolver({})
+    )
+    const unhandled = []
+    const record = (_reason, promise) => unhandled.push(promise)
+    process.on("unhandledRejection", record)
+    let dropped
+    try {
+      dropped = gate.open({ sessionId: "dropped", stems: [], resume })
+      await until(() => unhandled.includes(dropped), `the dropped open's unhandled rejection (${leg})`)
+    } finally {
+      // Handling it now would only add a late-handling warning; the event is the claim.
+      process.off("unhandledRejection", record)
+    }
   }
 }
 
