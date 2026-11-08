@@ -1513,7 +1513,7 @@ impl BankStage for EffectBankStage {
     /// program key and the two counters.
     ///
     /// A swap that strands ([`LaneSwapRefusal::Stranded`], issue #2414) recovers both lanes
-    /// ([`EffectBankStage::recover_lane`]), counts in [`BankStage::lane_swap_stranded`] and
+    /// (`EffectBankStage::recover_lane`), counts in [`BankStage::lane_swap_stranded`] and
     /// returns `false`, so the chain swaps back the slots it already swapped.
     fn swap_lanes(&mut self, lane: usize, peer: LanePeerMut<'_>, scratch: &mut [u8]) -> bool {
         if !self.can_swap_lanes(lane, peer.as_peer(), scratch.len()) {
@@ -1567,7 +1567,7 @@ impl BankStage for EffectBankStage {
         true
     }
 
-    /// Both lanes' [`EffectBankStage::recover_lane`]; a peer that is not an [`EffectBankStage`]
+    /// Both lanes' `EffectBankStage::recover_lane`; a peer that is not an [`EffectBankStage`]
     /// keeps its lane.
     fn reset_swapped_lanes(&mut self, lane: usize, peer: LanePeerMut<'_>) {
         self.recover_lane(lane);
@@ -2593,7 +2593,7 @@ impl BankStage for LiveControlEffectBankStage {
     ///
     /// A swap that strands ([`LaneSwapRefusal::Stranded`], issue #2414) has moved no per-lane
     /// field but the effect's state: it recovers both lanes
-    /// ([`LiveControlEffectBankStage::recover_lane`]: effect state reset to the defaults they
+    /// (`LiveControlEffectBankStage::recover_lane`: effect state reset to the defaults they
     /// hold, `designed` refreshed, `RESTORED` withheld), counts in
     /// [`BankStage::lane_swap_stranded`] and returns `false`, so the chain swaps
     /// back the slots it already swapped.
@@ -2721,7 +2721,7 @@ impl BankStage for LiveControlEffectBankStage {
         true
     }
 
-    /// Both lanes' [`LiveControlEffectBankStage::recover_lane`]; a peer that is not a
+    /// Both lanes' `LiveControlEffectBankStage::recover_lane`; a peer that is not a
     /// [`LiveControlEffectBankStage`] keeps its lane.
     fn reset_swapped_lanes(&mut self, lane: usize, peer: LanePeerMut<'_>) {
         self.recover_lane(lane);
