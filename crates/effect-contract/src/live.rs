@@ -3660,12 +3660,13 @@ mod lane_swap_tests {
     /// Four lanes of three words (common, left, right), and per lane `defaults` prepared default
     /// bytes, distinct per lane and per seed (`None`: undeclared). `refuse_restore_call` names
     /// the restore call (counted from 1) that refuses; every other restore commits, unless its
-    /// payload holds [`POISON`].
+    /// payload holds [`POISON`]. `untwinned` drops the `&mut` twin of the lane swap hook alone.
     struct Words {
         lanes: [[u32; 3]; 4],
         defaults: Option<[Vec<u8>; 4]>,
         restores: u32,
         refuse_restore_call: Option<u32>,
+        untwinned: bool,
     }
 
     /// A common word no restore of any bank accepts: a lane holding it has a payload its own
@@ -3691,6 +3692,16 @@ mod lane_swap_tests {
             }),
             restores: 0,
             refuse_restore_call,
+            untwinned: false,
+        }
+    }
+
+    /// [`words`] whose [`PreparedNativeEffectBank::lane_swap_mut`] is `None` while its
+    /// [`PreparedNativeEffectBank::lane_swap`] is not: a hook whose twins disagree (#2392).
+    fn untwinned(seed: u32) -> Words {
+        Words {
+            untwinned: true,
+            ..words(seed, None)
         }
     }
 
@@ -3766,8 +3777,8 @@ mod lane_swap_tests {
 
         fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
             match self.defaults {
-                Some(_) => Some(self),
-                None => None,
+                Some(_) if !self.untwinned => Some(self),
+                _ => None,
             }
         }
     }
@@ -3827,7 +3838,9 @@ mod lane_swap_tests {
     /// undeclared or mismatched defaults, sizes its scratch without the defaults, skips the
     /// payload or rotation undo after a restore refusal, writes a lane before it knows both
     /// lanes' own payloads restore (issue #2324: the undo of a refused step 3 then refuses too),
-    /// leaves the defaults behind on an accepted swap, or names the wrong refusal.
+    /// leaves the defaults behind on an accepted swap, names the wrong refusal, or reads only one
+    /// twin of a bank's lane swap hook (issue #2392: a bank whose `&mut` twin is absent then
+    /// half-rotates the defaults before the swap notices).
     #[test]
     fn every_lane_swap_refusal_leaves_both_lanes_unchanged() {
         let scratch_bytes =
@@ -3838,7 +3851,7 @@ mod lane_swap_tests {
             None
         );
         type Case = (Words, Option<Words>, usize, usize, usize, LaneSwapRefusal);
-        let cases: [Case; 12] = [
+        let cases: [Case; 15] = [
             // The defaults are checked before the scratch, so a short scratch does not mask them.
             (
                 with_defaults(1, None, None),
@@ -3858,6 +3871,31 @@ mod lane_swap_tests {
             ),
             (
                 with_defaults(1, None, None),
+                None,
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Defaults,
+            ),
+            // Issue #2392: a hook whose `&mut` twin is absent, in either bank or in one bank.
+            (
+                untwinned(1),
+                Some(words(100, None)),
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Defaults,
+            ),
+            (
+                words(1, None),
+                Some(untwinned(100)),
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Defaults,
+            ),
+            (
+                untwinned(1),
                 None,
                 1,
                 2,
