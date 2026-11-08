@@ -3234,7 +3234,8 @@ fn crossfade_tail(
 }
 // REALTIME_POLICY_END
 
-/// Why [`swap_bank_lanes`] exchanged nothing. Every refusal leaves both lanes as they were.
+/// Why [`swap_bank_lanes`] exchanged nothing. Every refusal but
+/// [`Stranded`](Self::Stranded) leaves both lanes as they were.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LaneSwapRefusal {
     /// The scratch is shorter than [`swap_bank_lanes_scratch_bytes`].
@@ -3253,10 +3254,27 @@ pub enum LaneSwapRefusal {
     /// writes (#1279 D6); a bank that swaps lanes has stated its verdict
     /// ([`LaneSwap::validate_lane_payload`](crate::LaneSwap::validate_lane_payload), #2392).
     Payload,
+    /// A bank refused a defaults exchange after the checks passed (issue #2414): a defect,
+    /// since both lanes exist and the spare has the declared length, the only two reasons
+    /// [`LaneSwap::exchange_lane_defaults`](crate::LaneSwap::exchange_lane_defaults) may refuse.
+    /// Nothing was left half-rotated: every exchange that took was undone, last first, each by
+    /// the same exchange again through the same spare, and each lane then restored its own
+    /// payload, which puts back any state word an exchange touched (see [`swap_bank_lanes`]).
+    Exchange,
     /// A bank refused a restore after the checks passed: a defect, since both payloads are the
     /// banks' own, of one layout, under the lanes' own defaults, and both validated. Nothing was
-    /// left half-swapped: the swap was undone (see [`swap_bank_lanes`]).
+    /// left half-swapped: the rotation was undone and each lane restored its own payload (see
+    /// [`swap_bank_lanes`]).
     Restore,
+    /// The swap could not undo itself (issue #2414): after an exchange or a restore refused, an
+    /// exchange of the undo refused too, or so did a restore that puts a lane's own payload back
+    /// after the undo. A defect, and the one refusal that does **not** leave both lanes as they
+    /// were: any per-lane state of either lane may differ. Either lane may hold the other lane's
+    /// or the spare's defaults, the first lane the second's payload, and either lane a state
+    /// word an exchange touched and no restore put back (a detector link's glide seated at
+    /// rest). The caller must recover both lanes rather than assume nothing moved (`rack`
+    /// resets them to the defaults they hold, the D7 lane recovery, and counts it).
+    Stranded,
 }
 
 // REALTIME_POLICY_BEGIN
@@ -3315,29 +3333,129 @@ fn swap_payload_input(
     StatePayloadInput::new(common, left, &right[..sizes.right_bytes as usize], sizes)
 }
 
-/// Exchange two lanes' prepared defaults through `spare`: three in-place exchanges, which swap
-/// the two lanes' bytes whatever `spare` held. `spare` comes back holding what it held as the
-/// first lane's exchange hands it back, which a bank may canonicalise, so it is not promised to
-/// be byte-for-byte as it was; nothing reads it afterwards. Calling it twice is the identity on
-/// the two lanes. Returns whether every exchange took; the caller has checked the lanes and the
-/// length, so each exchange takes.
-fn rotate_lane_defaults<'one, 'two>(
+/// What [`rotate_lane_defaults`] did (issue #2414).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Rotation {
+    /// Every exchange took: the two lanes' defaults traded.
+    Rotated,
+    /// An exchange refused, and every exchange before it was undone: both lanes hold their own
+    /// defaults again.
+    Unwound,
+    /// An exchange refused, and so did the undo of an exchange before it: the lanes are not as
+    /// they were.
+    Stranded,
+}
+
+/// Exchange `step` of [`rotate_lane_defaults`]: the first lane's for steps 0 and 2, the second
+/// lane's for step 1.
+fn rotation_exchange<'one, 'two>(
     first: &mut (dyn PreparedNativeEffectBank + 'one),
     first_lane: usize,
     second: Option<&mut (dyn PreparedNativeEffectBank + 'two)>,
     second_lane: usize,
+    step: usize,
     spare: &mut [u8],
 ) -> bool {
-    // first = X, spare = A.
-    let mut taken = exchange_lane_defaults(first, first_lane, spare);
-    // second = A, spare = B.
-    taken &= match second {
-        Some(bank) => exchange_lane_defaults(bank, second_lane, spare),
-        None => exchange_lane_defaults(first, second_lane, spare),
-    };
-    // first = B, spare = X.
-    taken &= exchange_lane_defaults(first, first_lane, spare);
-    taken
+    match (step, second) {
+        (1, Some(bank)) => exchange_lane_defaults(bank, second_lane, spare),
+        (1, None) => exchange_lane_defaults(first, second_lane, spare),
+        _ => exchange_lane_defaults(first, first_lane, spare),
+    }
+}
+
+/// Both lanes' own payloads, as a swap snapshotted them before its first write (issue #2414).
+struct OwnPayloads<'a> {
+    first_track: u32,
+    second_track: u32,
+    state_layout_version: u32,
+    sizes: StatePayloadSizes,
+    first: &'a [u8],
+    second: &'a [u8],
+}
+
+impl OwnPayloads<'_> {
+    /// Restore each lane's own payload after an undo has put both lanes' own defaults back: an
+    /// exchange may touch a state word a payload holds (a lane whose defaults carry its detector
+    /// link seats its link weights at rest), so the undo of the defaults alone does not leave the
+    /// lanes as they were. Both payloads validated against their own lanes before the first
+    /// write. `false` at the first restore that refuses.
+    fn restore<'one, 'two>(
+        &self,
+        first: &mut (dyn PreparedNativeEffectBank + 'one),
+        second: Option<&mut (dyn PreparedNativeEffectBank + 'two)>,
+    ) -> bool {
+        let (Ok(own_first), Ok(own_second)) = (
+            swap_payload_input(self.first, self.sizes),
+            swap_payload_input(self.second, self.sizes),
+        ) else {
+            return false;
+        };
+        let version = self.state_layout_version;
+        if first
+            .restore_track_state_payload(self.first_track, version, own_first)
+            .is_err()
+        {
+            return false;
+        }
+        match second {
+            Some(bank) => bank.restore_track_state_payload(self.second_track, version, own_second),
+            None => first.restore_track_state_payload(self.second_track, version, own_second),
+        }
+        .is_ok()
+    }
+}
+
+/// Exchange two lanes' prepared defaults through `spare`: three in-place exchanges, which swap
+/// the two lanes' bytes whatever `spare` held. `spare` comes back holding what it held as the
+/// first lane's exchange hands it back, which a bank may canonicalise, so it is not promised to
+/// be byte-for-byte as it was; nothing reads it afterwards. Calling it twice is the identity on
+/// the two lanes.
+///
+/// Each exchange is checked (issue #2414). The caller has checked the lanes and the length, so
+/// an exchange that refuses is a bank's defect, and the exchanges that took are undone, last
+/// first: an exchange through the same spare is its own inverse on the lane, which gets back
+/// the bytes it wrote itself, exactly. An undo exchange that refuses as well strands the lanes.
+/// At most five exchanges, each bounded by the defaults size.
+fn rotate_lane_defaults<'one, 'two>(
+    first: &mut (dyn PreparedNativeEffectBank + 'one),
+    first_lane: usize,
+    mut second: Option<&mut (dyn PreparedNativeEffectBank + 'two)>,
+    second_lane: usize,
+    spare: &mut [u8],
+) -> Rotation {
+    // Steps 0, 1 and 2, from first = X, second = Y, spare = A: first = A, spare = X; second = X,
+    // spare = Y; first = Y, spare = A.
+    let mut taken = 0;
+    while taken < 3 {
+        if !rotation_exchange(
+            first,
+            first_lane,
+            second.as_deref_mut(),
+            second_lane,
+            taken,
+            spare,
+        ) {
+            break;
+        }
+        taken += 1;
+    }
+    if taken == 3 {
+        return Rotation::Rotated;
+    }
+    while taken > 0 {
+        taken -= 1;
+        if !rotation_exchange(
+            first,
+            first_lane,
+            second.as_deref_mut(),
+            second_lane,
+            taken,
+            spare,
+        ) {
+            return Rotation::Stranded;
+        }
+    }
+    Rotation::Unwound
 }
 
 /// Exchange the whole state of lane `first_lane` of `first` with lane `second_lane` of `second`,
@@ -3369,21 +3487,34 @@ fn rotate_lane_defaults<'one, 'two>(
 /// issue #2324), which writes nothing. Then:
 ///
 /// 1. The defaults rotate. Precondition: both lanes exist (their snapshots took) and `spare` is
-///    exactly the declared length (checked), the only two reasons an exchange refuses.
+///    exactly the declared length (checked), the only two reasons an exchange refuses. That is
+///    the bank's promise, and the swap does not take it on trust (issue #2414): an exchange
+///    that refuses has every exchange before it undone, each lane restores its own payload
+///    (below), and the call returns [`LaneSwapRefusal::Exchange`].
 /// 2. The first lane restores the second's payload, now under the second lane's defaults. A
 ///    refused restore changes nothing (a restore validates the whole payload before it commits).
 /// 3. The second lane restores the first's payload, under the first lane's defaults.
 ///
 /// Steps 2 and 3 restore a bank's own payload of one layout under the defaults it was written
 /// with, which a bank never refuses (the carry's own-payload rule, #1279 D6), so a refusal there
-/// is a defect, and it is still undone: a refused step 3 restores the first lane from its own
-/// payload, under its own defaults once the rotation has undone itself (step 1's precondition
-/// is unchanged). That undo is the one write whose success the swap needs, and it is not
-/// assumed: it is the validation that passed before the first write, of the same payload into
-/// the same lane under the same defaults, and the verdict reads no running state. Both lanes are
-/// then as they were, and the call returns [`LaneSwapRefusal::Restore`]. Both banks must run one
+/// is a defect, and it is still undone: the rotation undoes itself (step 1's precondition is
+/// unchanged), and then each lane restores its own payload under its own defaults. An exchange
+/// may touch a state word a payload holds (a bank whose defaults carry a lane's detector link
+/// seats the lane's link weights at rest, ending a glide in flight), so the defaults' undo alone
+/// would not leave the lanes as they were; the own payloads put every such word back. The same
+/// two restores follow step 1's unwind. They are the writes whose success the undo needs, and
+/// they are not assumed: each is the validation that passed before the first write, of the same
+/// payload into the same lane under the same defaults, and the verdict reads no running state.
+/// Both lanes are then as they were, and the call returns [`LaneSwapRefusal::Restore`]. Both banks must run one
 /// layout (`state_layout_version` and `sizes`), and a caller swaps only populated lanes: a
 /// padded lane never swaps.
+///
+/// Every undo is checked as well (issue #2414). An undo rotation that does not complete, or an
+/// own-payload restore that refuses, leaves the lanes in a state the swap cannot restore,
+/// and the call returns [`LaneSwapRefusal::Stranded`] at once, with no further write: never
+/// `Ok`, and never a refusal that says nothing moved. An undo rotation that refuses unwinds its
+/// own exchanges, as step 1 does, so when those take the two lanes' defaults are left traded
+/// under untraded payloads.
 ///
 /// A collapsed bank holds a stale right channel; the caller disengages its chain first, as the
 /// plan-swap carry does.
@@ -3392,12 +3523,13 @@ fn rotate_lane_defaults<'one, 'two>(
 ///
 /// Two snapshots, two validations and two restores: each lane's state is read twice and written
 /// twice and each payload is validated twice (once alone, once inside its restore), plus two
-/// payloads of `scratch`, plus three passes over one lane's defaults. Allocation-free, lock-free
-/// and bounded by the prepared state size.
+/// payloads of `scratch`, plus three passes over one lane's defaults. A refusal after the
+/// checks adds at most eight passes over the defaults (a rotation and its undo, each of up to
+/// five) and two restores. Allocation-free, lock-free and bounded by the prepared state size.
 ///
 /// # Errors
 ///
-/// [`LaneSwapRefusal`], with both lanes unchanged.
+/// [`LaneSwapRefusal`], with both lanes unchanged, except [`LaneSwapRefusal::Stranded`].
 pub fn swap_bank_lanes(
     first: &mut dyn PreparedNativeEffectBank,
     first_lane: usize,
@@ -3484,18 +3616,35 @@ pub fn swap_bank_lanes(
         return Err(LaneSwapRefusal::Payload);
     }
     // Step 1. Precondition: both lanes snapshotted, so both exist; `spare` has the declared length.
-    let rotated =
-        rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare);
-    debug_assert!(rotated, "a checked lane's defaults exchange");
+    // After an undo, both lanes' own payloads: they validated before the first write.
+    let own = OwnPayloads {
+        first_track,
+        second_track,
+        state_layout_version,
+        sizes,
+        first: first_payload,
+        second: second_payload,
+    };
+    match rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare) {
+        Rotation::Rotated => {}
+        Rotation::Unwound if own.restore(first, second.as_deref_mut()) => {
+            return Err(LaneSwapRefusal::Exchange);
+        }
+        Rotation::Unwound | Rotation::Stranded => return Err(LaneSwapRefusal::Stranded),
+    }
     // Step 2. Precondition: the second lane's own payload, under the second lane's defaults.
     if first
         .restore_track_state_payload(first_track, state_layout_version, from_second)
         .is_err()
     {
         let undone =
-            rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare);
-        debug_assert!(undone, "a checked lane's defaults exchange");
-        return Err(LaneSwapRefusal::Restore);
+            rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare)
+                == Rotation::Rotated;
+        return Err(if undone && own.restore(first, second.as_deref_mut()) {
+            LaneSwapRefusal::Restore
+        } else {
+            LaneSwapRefusal::Stranded
+        });
     }
     // Step 3. Precondition: the first lane's own payload, under the first lane's defaults.
     let restored = match second.as_deref_mut() {
@@ -3505,18 +3654,15 @@ pub fn swap_bank_lanes(
         None => first.restore_track_state_payload(second_track, state_layout_version, from_first),
     };
     if restored.is_err() {
-        let undone = rotate_lane_defaults(first, first_lane, second, second_lane, spare);
-        debug_assert!(undone, "a checked lane's defaults exchange");
-        // Precondition: the first lane's own payload, under its own defaults again, which
-        // validated before the first write.
-        let own = swap_payload_input(first_payload, sizes);
-        let reverted = own.is_ok_and(|own| {
-            first
-                .restore_track_state_payload(first_track, state_layout_version, own)
-                .is_ok()
+        // The first lane holds the second's payload until its own is restored.
+        let undone =
+            rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare)
+                == Rotation::Rotated;
+        return Err(if undone && own.restore(first, second) {
+            LaneSwapRefusal::Restore
+        } else {
+            LaneSwapRefusal::Stranded
         });
-        debug_assert!(reverted, "a restore its own validation passed");
-        return Err(LaneSwapRefusal::Restore);
     }
     Ok(())
 }
@@ -3659,15 +3805,29 @@ mod lane_swap_tests {
 
     /// Four lanes of three words (common, left, right), and per lane `defaults` prepared default
     /// bytes, distinct per lane and per seed (`None`: undeclared). `refuse_restore_call` names
-    /// the restore call (counted from 1) that refuses; every other restore commits, unless its
-    /// payload holds [`POISON`]. `untwinned` drops the `&mut` twin of the lane swap hook alone.
+    /// the restore call (counted from 1) that refuses, and `refuse_restore_again` a second one;
+    /// every other restore commits, unless its payload holds [`POISON`].
+    /// `refuse_exchange_call` names the defaults exchange call (counted from 1) that refuses, as
+    /// a bank that breaks the exchange contract would (issue #2414), and `refuse_exchange_again`
+    /// a second one; every other exchange takes. With `rests_on_exchange` an exchange that takes
+    /// also sets its lane's right word to [`REST`], as a bank whose defaults carry the lane's
+    /// detector link seats its link weights at rest. `untwinned` drops the `&mut` twin of the
+    /// lane swap hook alone.
     struct Words {
         lanes: [[u32; 3]; 4],
         defaults: Option<[Vec<u8>; 4]>,
         restores: u32,
         refuse_restore_call: Option<u32>,
+        refuse_restore_again: Option<u32>,
+        exchanges: u32,
+        refuse_exchange_call: Option<u32>,
+        refuse_exchange_again: Option<u32>,
+        rests_on_exchange: bool,
         untwinned: bool,
     }
+
+    /// The word [`Words::rests_on_exchange`] writes.
+    const REST: u32 = 0x7E57;
 
     /// A common word no restore of any bank accepts: a lane holding it has a payload its own
     /// snapshot writes and its own restore refuses (issue #2324).
@@ -3692,6 +3852,11 @@ mod lane_swap_tests {
             }),
             restores: 0,
             refuse_restore_call,
+            refuse_restore_again: None,
+            exchanges: 0,
+            refuse_exchange_call: None,
+            refuse_exchange_again: None,
+            rests_on_exchange: false,
             untwinned: false,
         }
     }
@@ -3750,7 +3915,9 @@ mod lane_swap_tests {
             input: StatePayloadInput<'_>,
         ) -> Result<(), StatePayloadError> {
             self.restores += 1;
-            if self.refuse_restore_call == Some(self.restores) {
+            if self.refuse_restore_call == Some(self.restores)
+                || self.refuse_restore_again == Some(self.restores)
+            {
                 return Err(StatePayloadError {
                     code: "effect.state.refused",
                 });
@@ -3812,6 +3979,12 @@ mod lane_swap_tests {
         }
 
         fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+            self.exchanges += 1;
+            if self.refuse_exchange_call == Some(self.exchanges)
+                || self.refuse_exchange_again == Some(self.exchanges)
+            {
+                return false;
+            }
             let Some(own) = self.defaults.as_mut().and_then(|all| all.get_mut(lane)) else {
                 return false;
             };
@@ -3819,6 +3992,9 @@ mod lane_swap_tests {
                 return false;
             }
             own.swap_with_slice(bytes);
+            if self.rests_on_exchange {
+                self.lanes[lane][2] = REST;
+            }
             true
         }
     }
@@ -3833,6 +4009,8 @@ mod lane_swap_tests {
     /// #1747: every refusal of [`swap_bank_lanes`] leaves both lanes' payloads and prepared
     /// defaults as they were, including the restore refusals after the defaults rotated, which
     /// the undo must put back; and an accepted swap exchanges the payloads and defaults exactly.
+    /// Every bank's exchange rests a state word ([`Words::rests_on_exchange`]), which the undo
+    /// of a restore refusal puts back from both lanes' own payloads (issue #2414).
     ///
     /// Test value: a swap that restores before it has both snapshots, accepts a bank with
     /// undeclared or mismatched defaults, sizes its scratch without the defaults, skips the
@@ -3840,7 +4018,8 @@ mod lane_swap_tests {
     /// lanes' own payloads restore (issue #2324: the undo of a refused step 3 then refuses too),
     /// leaves the defaults behind on an accepted swap, names the wrong refusal, or reads only one
     /// twin of a bank's lane swap hook (issue #2392: a bank whose `&mut` twin is absent then
-    /// half-rotates the defaults before the swap notices).
+    /// half-rotates the defaults before the swap notices), or undoes the defaults without
+    /// restoring each lane's own payload (issue #2414: a link bank's glide stays at rest).
     #[test]
     fn every_lane_swap_refusal_leaves_both_lanes_unchanged() {
         let scratch_bytes =
@@ -3985,6 +4164,10 @@ mod lane_swap_tests {
         for (index, (mut first, mut second, first_lane, second_lane, scratch, refusal)) in
             cases.into_iter().enumerate()
         {
+            first.rests_on_exchange = true;
+            if let Some(bank) = second.as_mut() {
+                bank.rests_on_exchange = true;
+            }
             let (first_before, second_before) = (lanes(&first), second.as_ref().map(lanes));
             let mut scratch = vec![0_u8; scratch];
             let result = swap_bank_lanes(
@@ -4009,6 +4192,8 @@ mod lane_swap_tests {
         // Accepted, across two banks and within one: payloads and defaults trade exactly, and
         // nothing else moves.
         let (mut first, mut second) = (words(1, None), words(100, None));
+        first.rests_on_exchange = true;
+        second.rests_on_exchange = true;
         let mut scratch = vec![0_u8; scratch_bytes];
         assert_eq!(
             swap_bank_lanes(&mut first, 1, Some(&mut second), 2, 1, SIZES, &mut scratch),
@@ -4039,5 +4224,263 @@ mod lane_swap_tests {
         expected.0.swap(0, 3);
         expected.1.as_mut().expect("declared").swap(0, 3);
         assert_eq!(lanes(&one), expected);
+    }
+
+    /// Issue #2414: a bank whose defaults exchange refuses after the checks passed -- a broken
+    /// exchange contract -- never gets an `Ok` and never a refusal that says nothing moved when
+    /// something did. A refused step-1 exchange has every exchange before it undone and returns
+    /// [`LaneSwapRefusal::Exchange`] with both lanes as they were, payloads included, though the
+    /// exchanges rested a state word ([`Words::rests_on_exchange`]); a refused unwind exchange,
+    /// a refused undo exchange after a refused step 2 or step 3, or a refused revert of the
+    /// first lane's payload returns [`LaneSwapRefusal::Stranded`], with the lanes as documented.
+    /// In debug and release alike.
+    ///
+    /// Test value: a swap that folds its exchanges without checking each (it returns `Ok` with
+    /// one lane holding the spare's bytes, or both keeping their own defaults under traded
+    /// payloads), skips or misorders the undo of the exchanges that took, undoes the second
+    /// lane's exchange in the wrong bank, carries on past a refused unwind exchange, leaves a
+    /// state word an exchange rested after an unwind, reports a refused undo or revert as
+    /// `Restore`, or ignores the result of an own-payload restore after an undo (it reports
+    /// `Exchange` or `Restore` for lanes it could not put back).
+    #[test]
+    fn a_refused_exchange_or_undo_is_never_reported_as_unmoved() {
+        /// The lanes after the call, as a function of the lanes before.
+        #[derive(Clone, Copy, Debug)]
+        enum After {
+            /// Both lanes as they were.
+            Unchanged,
+            /// The defaults traded; the payloads not.
+            DefaultsTraded,
+            /// The defaults traded, and the first lane holds the second's payload.
+            DefaultsTradedFirstHoldsSecond,
+            /// The defaults as they were, and the first lane holds the second's payload.
+            FirstHoldsSecond,
+            /// The first lane holds the spare's prior bytes as its defaults.
+            FirstHoldsSpare,
+        }
+        /// `(case, the first bank's two refused exchanges, the second bank's (`None`: one bank),
+        /// the first bank's two refused restores, outcome, lanes after)`.
+        type Case = (
+            &'static str,
+            [Option<u32>; 2],
+            Option<Option<u32>>,
+            [Option<u32>; 2],
+            LaneSwapRefusal,
+            After,
+        );
+        let scratch_bytes =
+            swap_bank_lanes_scratch_bytes(&words(1, None), SIZES).expect("declared defaults");
+        use After::{
+            DefaultsTraded, DefaultsTradedFirstHoldsSecond, FirstHoldsSecond, FirstHoldsSpare,
+            Unchanged,
+        };
+        use LaneSwapRefusal::{Exchange, Stranded};
+        // One bank: exchanges 1 to 3 are step 1's, 4 to 6 the undo's; restores 1 and 2 are steps
+        // 2 and 3, restore 3 the revert.
+        let cases: [Case; 17] = [
+            (
+                "step-1 exchange 1",
+                [Some(1), None],
+                None,
+                [None; 2],
+                Exchange,
+                Unchanged,
+            ),
+            (
+                "step-1 exchange 2",
+                [Some(2), None],
+                None,
+                [None; 2],
+                Exchange,
+                Unchanged,
+            ),
+            (
+                "step-1 exchange 3",
+                [Some(3), None],
+                None,
+                [None; 2],
+                Exchange,
+                Unchanged,
+            ),
+            // The unwind of exchange 1 refuses too: the first lane keeps the spare's bytes.
+            (
+                "step-1 exchange 2 and its unwind",
+                [Some(2), Some(3)],
+                None,
+                [None; 2],
+                Stranded,
+                FirstHoldsSpare,
+            ),
+            // Two banks: the second lane's exchange is the second bank's first.
+            (
+                "step-1 exchange 2, two banks",
+                [None; 2],
+                Some(Some(1)),
+                [None; 2],
+                Exchange,
+                Unchanged,
+            ),
+            // The undo unwinds its own exchanges, so the defaults stay traded.
+            (
+                "undo exchange 1 after step 2",
+                [Some(4), None],
+                None,
+                [Some(1), None],
+                Stranded,
+                DefaultsTraded,
+            ),
+            (
+                "undo exchange 2 after step 2",
+                [Some(5), None],
+                None,
+                [Some(1), None],
+                Stranded,
+                DefaultsTraded,
+            ),
+            (
+                "undo exchange 3 after step 2",
+                [Some(6), None],
+                None,
+                [Some(1), None],
+                Stranded,
+                DefaultsTraded,
+            ),
+            (
+                "undo exchange 1 after step 3",
+                [Some(4), None],
+                None,
+                [Some(2), None],
+                Stranded,
+                DefaultsTradedFirstHoldsSecond,
+            ),
+            (
+                "undo exchange 2 after step 3",
+                [Some(5), None],
+                None,
+                [Some(2), None],
+                Stranded,
+                DefaultsTradedFirstHoldsSecond,
+            ),
+            (
+                "undo exchange 3 after step 3",
+                [Some(6), None],
+                None,
+                [Some(2), None],
+                Stranded,
+                DefaultsTradedFirstHoldsSecond,
+            ),
+            (
+                "step-3 revert",
+                [None; 2],
+                None,
+                [Some(2), Some(3)],
+                Stranded,
+                FirstHoldsSecond,
+            ),
+            // An own-payload restore after a completed undo refuses (restores counted from 1):
+            // the swap strands. A refused restore changes nothing, so each leaves both lanes
+            // with their own defaults and payloads.
+            // Unwound (exchange 2 refuses, its unwind takes); the first lane's own restore, call
+            // 1, refuses.
+            (
+                "unwind, first own restore",
+                [Some(2), None],
+                None,
+                [Some(1), None],
+                Stranded,
+                Unchanged,
+            ),
+            // Unwound; the first lane's own restore (call 1) takes, the second's (call 2)
+            // refuses.
+            (
+                "unwind, second own restore",
+                [Some(2), None],
+                None,
+                [Some(2), None],
+                Stranded,
+                Unchanged,
+            ),
+            // Step 2 (call 1) refuses and the rotation undoes; the first lane's own restore
+            // (call 2) refuses.
+            (
+                "step 2, first own restore",
+                [None; 2],
+                None,
+                [Some(1), Some(2)],
+                Stranded,
+                Unchanged,
+            ),
+            // Step 2 (call 1) refuses; the first lane's own restore (call 2) takes, the second's
+            // (call 3) refuses.
+            (
+                "step 2, second own restore",
+                [None; 2],
+                None,
+                [Some(1), Some(3)],
+                Stranded,
+                Unchanged,
+            ),
+            // Step 2 (call 1) takes, step 3 (call 2) refuses; the first lane's own restore (call
+            // 3) puts its payload back, the second's (call 4) refuses.
+            (
+                "step 3, second own restore",
+                [None; 2],
+                None,
+                [Some(2), Some(4)],
+                Stranded,
+                Unchanged,
+            ),
+        ];
+        for (case, [exchange, exchange_again], second_exchange, [restore, again], refusal, after) in
+            cases
+        {
+            // An unwound swap restores both lanes' own payloads, so the word its exchanges rested
+            // is put back.
+            let rests = refusal == Exchange;
+            let mut first = words(1, restore);
+            first.refuse_exchange_call = exchange;
+            first.refuse_exchange_again = exchange_again;
+            first.refuse_restore_again = again;
+            first.rests_on_exchange = rests;
+            let mut second = second_exchange.map(|refused| {
+                let mut bank = words(100, None);
+                bank.refuse_exchange_call = refused;
+                bank.rests_on_exchange = rests;
+                bank
+            });
+            let (first_before, second_before) = (lanes(&first), second.as_ref().map(lanes));
+            // The spare's prior bytes are none of the lanes' defaults.
+            let mut scratch = vec![0xA5_u8; scratch_bytes];
+            let result = swap_bank_lanes(
+                &mut first,
+                1,
+                second
+                    .as_mut()
+                    .map(|bank| bank as &mut dyn PreparedNativeEffectBank),
+                2,
+                1,
+                SIZES,
+                &mut scratch,
+            );
+            assert_eq!(result, Err(refusal), "{case}");
+            let mut expected = first_before.clone();
+            let defaults = expected.1.as_mut().expect("declared");
+            match after {
+                Unchanged => {}
+                DefaultsTraded => defaults.swap(1, 2),
+                DefaultsTradedFirstHoldsSecond => {
+                    defaults.swap(1, 2);
+                    expected.0[1] = expected.0[2];
+                }
+                FirstHoldsSecond => expected.0[1] = expected.0[2],
+                FirstHoldsSpare => defaults[1] = vec![0xA5; DEFAULTS],
+            }
+            assert_eq!(lanes(&first), expected, "{case}: first bank");
+            assert_eq!(
+                second.as_ref().map(lanes),
+                second_before,
+                "{case}: second bank"
+            );
+        }
     }
 }

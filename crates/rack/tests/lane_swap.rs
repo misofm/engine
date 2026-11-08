@@ -13,14 +13,14 @@
 //! This file has its own test binary so that `bench_support`'s audited allocator serves it.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use effect_contract::{
-    BankProcessReport, BankWidth, BypassSwitch, EffectBankProcessBlock, EffectCellWriter,
-    EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec,
-    EffectProgramKey, EffectQuality, EffectTargetError, LaneSwap, LatencySamples, LinkMode,
-    ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+    BankProcessReport, BankWidth, BypassSwitch, ChannelSymmetryWitness, EffectBankProcessBlock,
+    EffectCellWriter, EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape,
+    EffectLaneSpec, EffectProgramKey, EffectQuality, EffectTargetError, LaneSwap, LatencySamples,
+    LinkMode, ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
     ObservationFold, ObservationKind, ObservationLane, ObservationSample, ObservationTapId,
     PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
     PreparedBankMetadata, PreparedEffectBank, PreparedEffectTarget, PreparedNativeEffectBank,
@@ -32,7 +32,7 @@ use engine::realtime::{
 };
 use rack::{
     AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, ChainLanePeer, ChainLaneSwapRefusal,
-    EffectBankStage, LiveControlEffectBankStage,
+    EffectBankStage, LanePeerMut, LiveControlEffectBankStage,
 };
 
 const QUANTUM: u32 = 8;
@@ -169,6 +169,42 @@ struct StripBank {
     lanes: Vec<[Channel; 2]>,
     defaults: Arc<[AtomicU64]>,
     collapsing: bool,
+    /// Shared with the test: a broken exchange contract to arm, and the lane resets it led to.
+    fault: Arc<Fault>,
+}
+
+/// A bank's arming of a broken exchange contract (issue #2414), and its full lane resets.
+#[derive(Debug, Default)]
+struct Fault {
+    /// Every defaults exchange from this call on (counted from 1) refuses; `0` never.
+    refuse_from: AtomicU32,
+    /// Only the exchange of call `refuse_from` refuses; every later one takes.
+    once: AtomicBool,
+    exchanges: AtomicU32,
+    /// Per lane: [`ResetKind::FullToDefaults`] lane resets.
+    resets: [AtomicU32; 8],
+}
+
+impl Fault {
+    /// From now on, refuse every exchange from the `call`-th on.
+    fn arm(&self, call: u32) {
+        self.exchanges.store(0, Ordering::Relaxed);
+        self.once.store(false, Ordering::Relaxed);
+        self.refuse_from.store(call, Ordering::Relaxed);
+    }
+
+    /// From now on, refuse the `call`-th exchange alone.
+    fn arm_once(&self, call: u32) {
+        self.arm(call);
+        self.once.store(true, Ordering::Relaxed);
+    }
+
+    fn resets(&self) -> Vec<u32> {
+        self.resets
+            .iter()
+            .map(|count| count.load(Ordering::Relaxed))
+            .collect()
+    }
 }
 
 impl StripBank {
@@ -191,6 +227,7 @@ impl StripBank {
             lanes,
             defaults,
             collapsing,
+            fault: Arc::default(),
         }
     }
 
@@ -232,7 +269,14 @@ impl PreparedNativeEffectBank for StripBank {
             + engine::realtime::retained::arc(&self.defaults)
     }
     fn reset(&mut self, _kind: ResetKind) {}
-    fn reset_lane(&mut self, _lane: usize, _kind: ResetKind) {}
+    /// Counts a full reset, the recovery of a stranded swap (issue #2414); changes no state.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        if kind == ResetKind::FullToDefaults
+            && let Some(count) = self.fault.resets.get(lane)
+        {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
         let lanes = self.lanes.len();
@@ -382,6 +426,12 @@ impl LaneSwap for StripBank {
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        let call = self.fault.exchanges.fetch_add(1, Ordering::Relaxed) + 1;
+        let from = self.fault.refuse_from.load(Ordering::Relaxed);
+        let once = self.fault.once.load(Ordering::Relaxed);
+        if from != 0 && (call == from || (!once && call > from)) {
+            return false;
+        }
         let (Some(own), Ok(word)) = (self.defaults.get(lane), <[u8; 8]>::try_from(&*bytes)) else {
             return false;
         };
@@ -475,6 +525,8 @@ struct World {
     first_sample: u64,
     /// Per chain, per slot: the bank's prepared defaults, per lane.
     defaults: [[Arc<[AtomicU64]>; 3]; 2],
+    /// Per chain, per slot: the bank's [`Fault`].
+    faults: [[Arc<Fault>; 3]; 2],
     /// Mono inputs and both-channel writes ([`Shape::collapse`]).
     collapsing: bool,
     /// Render under the gate's snapshot, as production does; [`LiveSnapshot::ALL`] otherwise.
@@ -495,6 +547,7 @@ impl World {
         let mut writers = Vec::new();
         let mut readers = Vec::new();
         let mut defaults = Vec::new();
+        let mut faults = Vec::new();
         let collapsing = shape.collapse.is_some();
         let chains = core::array::from_fn(|chain| {
             let mut controls: Vec<Option<EffectControlLane>> = Vec::new();
@@ -540,6 +593,7 @@ impl World {
                 gapped[0] = false;
             }
             let mut chain_defaults = Vec::new();
+            let mut chain_faults = Vec::new();
             let skew = shape.collapse.and_then(|collapse| collapse.skew);
             let mut bank = |slot: usize, rng: &mut Rng| {
                 let mut bank = StripBank::new(width, rng, collapsing);
@@ -550,6 +604,7 @@ impl World {
                     bank.lanes[lane][1].pole = SKEWED_POLE;
                 }
                 chain_defaults.push(Arc::clone(&bank.defaults));
+                chain_faults.push(Arc::clone(&bank.fault));
                 bank
             };
             let effect = |bank: StripBank| {
@@ -569,6 +624,7 @@ impl World {
             .expect("stage");
             let third = effect(bank(2, &mut rng));
             defaults.push(chain_defaults);
+            faults.push(chain_faults);
             let slots = vec![
                 BankSlot {
                     stage: first,
@@ -604,6 +660,12 @@ impl World {
             position: (0..2 * lanes).map(|s| (s / lanes, s % lanes)).collect(),
             first_sample: 0,
             defaults: defaults
+                .into_iter()
+                .map(|chain| chain.try_into().expect("three slots"))
+                .collect::<Vec<_>>()
+                .try_into()
+                .expect("two chains"),
+            faults: faults
                 .into_iter()
                 .map(|chain| chain.try_into().expect("three slots"))
                 .collect::<Vec<_>>()
@@ -1345,4 +1407,201 @@ fn a_refused_swap_leaves_both_chains_as_they_were() {
         );
         assert_unchanged(&mut world, &mut twin, &format!("case {index}"));
     }
+}
+
+/// Issue #2414: a slot whose bank breaks the exchange contract mid-swap -- an exchange refuses,
+/// and so does the undo of the one before it -- strands its lane swap. The chain returns
+/// `Defect` with the slots it already swapped swapped back, and the stranded slot resets both
+/// lanes to the defaults they hold (the D7 lane recovery), no other lane, counts it, and
+/// withholds the `RESTORED` symmetry term of both lanes, whose history is a defect's. An effect
+/// slot and the live slot, each in a cross-chain swap (the exchanges refuse in the calling
+/// chain's bank, after the peer bank's took one) and in an in-chain swap.
+///
+/// Test value: a stage that takes a stranded swap for a clean refusal and leaves the two lanes
+/// as the defect left them (no reset, no count), resets the wrong lanes or the peer's lane in
+/// the wrong bank, keeps a lane's stale symmetry witness (a lane whose defaults now differ
+/// could then mono-collapse), or a chain that does not swap back the slots before a stranded
+/// one.
+#[test]
+fn a_stranded_slot_resets_its_two_lanes_and_the_chain_reports_a_defect() {
+    let width = BankWidth::Four;
+    let shape = Shape {
+        padded: false,
+        slot_gap: false,
+        collapse: None,
+    };
+    // `(slot, at, other)`: the calling chain is `at`'s, chain 0.
+    for (slot, at, other) in [
+        (2, (0, 1), (1, 2)),
+        (2, (0, 1), (0, 3)),
+        (1, (0, 1), (1, 2)),
+        (1, (0, 1), (0, 3)),
+    ] {
+        let what = format!("slot {slot}, {at:?} with {other:?}");
+        let mut world = World::new(width, 5, shape);
+        let before = world.strip_defaults();
+        let restored = |world: &World, (on, lane): (usize, usize)| {
+            world.chains[on]
+                .lane_symmetry(lane)
+                .holds(ChannelSymmetryWitness::RESTORED)
+        };
+        assert!(
+            restored(&world, at) && restored(&world, other),
+            "{what}: a lane never restored holds the term"
+        );
+        // The calling bank's second exchange refuses (the rotation's third across chains, its
+        // second within one), and so does every later one: the undo of its first.
+        world.faults[0][slot].arm(2);
+        let mut scratch = world.scratch();
+        assert_eq!(
+            world.swap(at, other, &mut scratch),
+            Err(ChainLaneSwapRefusal::Defect),
+            "{what}"
+        );
+        world.faults[0][slot].arm(0);
+        let stranded = if slot == 1 {
+            world
+                .stage_mut::<LiveControlEffectBankStage>(0, slot)
+                .lane_swap_stranded()
+        } else {
+            world
+                .stage_mut::<EffectBankStage>(0, slot)
+                .lane_swap_stranded()
+        };
+        assert_eq!(stranded, 1, "{what}: the stranded swap is counted");
+        for stranded in [at, other] {
+            assert!(
+                !restored(&world, stranded),
+                "{what}: {stranded:?}: a stranded lane's RESTORED term is withheld"
+            );
+        }
+        for chain in 0..2 {
+            for bank in 0..3 {
+                let mut expected = vec![0_u32; 8];
+                for &(on, lane) in &[at, other] {
+                    if on == chain && bank == slot {
+                        expected[lane] += 1;
+                    }
+                }
+                assert_eq!(
+                    world.faults[chain][bank].resets(),
+                    expected,
+                    "{what}: chain {chain} slot {bank}: the stranded lanes, and only they, reset"
+                );
+            }
+        }
+        // The slots before the stranded one were swapped back: every strip holds its own
+        // defaults there.
+        let after = world.strip_defaults();
+        for strip in 0..world.strips() {
+            for bank in 0..slot {
+                assert_eq!(
+                    after[strip][bank], before[strip][bank],
+                    "{what}: strip {strip} slot {bank}: swapped back"
+                );
+            }
+        }
+    }
+}
+
+/// Issue #2414: a stage's lane swap whose bank refuses its first defaults exchange alone, a
+/// broken exchange contract that the swap unwinds cleanly (`LaneSwapRefusal::Exchange`), runs
+/// none of a stranded swap's recovery: the stage returns `false` and resets no lane, counts
+/// nothing, and leaves both lanes' `RESTORED` term held. Each stage is called directly
+/// ([`BankStage::swap_lanes`]), so the chain's debug tripwire is out of the path: the effect
+/// stage and the live stage, each with a peer lane in the same stage and in another stage.
+///
+/// Test value: a recovery that runs on any refusal rather than on `Stranded` alone, in the
+/// shared reset or in either stage's count and symmetry refresh, in either arm.
+#[test]
+fn a_cleanly_refused_stage_swap_runs_no_recovery() {
+    let width = BankWidth::Four;
+    let shape = Shape {
+        padded: false,
+        slot_gap: false,
+        collapse: None,
+    };
+    // `(slot, other chain)`: chain 0's lane 1 with lane 2 of chain 0 (the same stage) or of
+    // chain 1 (another stage of the same slot).
+    for (slot, other_chain) in [(2, 0), (2, 1), (1, 0), (1, 1)] {
+        let what = format!("slot {slot}, peer in chain {other_chain}");
+        let mut world = World::new(width, 5, shape);
+        world.faults[0][slot].arm_once(1);
+        let mut scratch = world.scratch();
+        let [first, second] = &mut world.chains;
+        let swapped = if other_chain == 0 {
+            first.slot_stage_mut(slot).expect("a stage").swap_lanes(
+                1,
+                LanePeerMut::Same(2),
+                &mut scratch,
+            )
+        } else {
+            let peer = second.slot_stage_mut(slot).expect("a stage");
+            first.slot_stage_mut(slot).expect("a stage").swap_lanes(
+                1,
+                LanePeerMut::Other(peer, 2),
+                &mut scratch,
+            )
+        };
+        world.faults[0][slot].arm(0);
+        assert!(!swapped, "{what}: the swap refused");
+        for chain in 0..2 {
+            assert_eq!(
+                world.faults[chain][slot].resets(),
+                vec![0_u32; 8],
+                "{what}: chain {chain}: no lane reset"
+            );
+            let stage = world.chains[chain].slot_stage_mut(slot).expect("a stage");
+            assert_eq!(stage.lane_swap_stranded(), 0, "{what}: nothing counted");
+        }
+        for (chain, lane) in [(0, 1), (other_chain, 2)] {
+            assert!(
+                world.chains[chain]
+                    .lane_symmetry(lane)
+                    .holds(ChannelSymmetryWitness::RESTORED),
+                "{what}: ({chain}, {lane}) keeps its RESTORED term"
+            );
+        }
+    }
+}
+
+/// Issue #2414: in a debug build, a slot that refuses its lane swap after the chain's check
+/// passed without counting a strand ([`BankStage::lane_swap_stranded`]) trips the chain: here
+/// a bank whose first exchange refuses alone, which the swap unwinds cleanly. `other` is the
+/// peer lane: in the calling chain, or in the other chain.
+#[cfg(debug_assertions)]
+fn uncounted_refusal(other: (usize, usize)) {
+    let mut world = World::new(
+        BankWidth::Four,
+        5,
+        Shape {
+            padded: false,
+            slot_gap: false,
+            collapse: None,
+        },
+    );
+    world.faults[0][2].arm_once(1);
+    let mut scratch = world.scratch();
+    let _ = world.swap((0, 1), other, &mut scratch);
+}
+
+/// [`uncounted_refusal`] within one chain.
+///
+/// Test value: a chain whose in-chain arm drops its tripwire, so a refusal no stage recovered
+/// or counted passes for a recovered defect.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a checked slot swaps its lanes, or strands and counts it")]
+fn an_uncounted_refusal_trips_the_chain_in_debug() {
+    uncounted_refusal((0, 2));
+}
+
+/// [`uncounted_refusal`] across two chains.
+///
+/// Test value: the same tripwire dropped from the cross-chain arm.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a checked slot swaps its lanes, or strands and counts it")]
+fn an_uncounted_cross_chain_refusal_trips_the_chain_in_debug() {
+    uncounted_refusal((1, 2));
 }
