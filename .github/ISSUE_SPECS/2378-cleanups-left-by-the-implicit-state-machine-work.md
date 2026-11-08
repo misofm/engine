@@ -104,3 +104,23 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
   `submix_strip`, `tail_composition`) are green, `audit` and `console-workload` build. Only the
   test/tool compile path changes; the production `compile_projected` path is untouched, so no
   rendered bit can move.
+- **C14, done: all three guards deleted** from `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js`.
+  - `snapshotDocument`'s offset/length comparison: the intrinsic getters keep a `Uint8Array` view
+    inside its buffer with `byteLength == length`, and a detached or out-of-bounds view reads
+    `0`/`0`/`0`, so the comparison never refused anything. The refusals it seemed to make are made
+    elsewhere: a `SharedArrayBuffer` backing by the intrinsic `ArrayBuffer` `byteLength` getter,
+    which throws on it (that call stays, with a comment saying why), and a detached or
+    out-of-bounds view by the copy's `set`, which throws on it (Node 24: both `TypeError`). The
+    `byteOffset` and `byteLength` intrinsic captures only fed the comparison and go with it.
+  - `webError`'s `planes` parameter: no caller passes a third argument. A peer's error that
+    carries planes is forwarded as the peer's own frozen message, so `MisoError.planes` in the
+    `.d.ts` stays, and the `.d.ts` is unchanged.
+  - The boot `finish`'s `settled`: `finish` can run at most once, because its first call replaces
+    (resolve) or clears (reject) every Worker handler that calls it, handlers are looked up at
+    dispatch so a second queued event reaches the replacement, and the `postMessage` failure path
+    runs inside the executor before any handler can. A comment now says so.
+  - Evidence: `bash scripts/test-web-audioworklet.sh` (hermetic main-realm and worklet suites with
+    their mutation rows) is green. Its rows that reach these sites, "SharedArrayBuffer document",
+    "detached document" and "Int8Array document", stay green; deleting the kept `byteLength`
+    call turns "SharedArrayBuffer document" red (`expected rejection`,
+    `test-web-audioworklet.mjs:644`), so the row that pins the refusal still discriminates.
