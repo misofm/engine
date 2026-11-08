@@ -3805,3 +3805,148 @@ mod canonical_preparation {
         }
     }
 }
+
+/// A mute curve on both lanes of track 0 of `model`: unmuted, muted at `mute`, unmuted again at
+/// `unmute` (control `6`, the builtin mute, #1651).
+#[cfg(feature = "test-support")]
+fn mute_curve(model: &SessionModel, mute: u64, unmute: u64) -> Automation {
+    let step = |start_sample, end_sample, start_value, end_value| AutomationSegment {
+        shape: AutomationShape::Step,
+        start_sample,
+        end_sample,
+        start_value,
+        end_value,
+        unit: ParameterUnit::Linear,
+    };
+    Automation {
+        id: id("mute-0"),
+        target: ControlAddress {
+            owner: Owner::Strip(model.tracks[0].id.clone()),
+            section: Section::Builtins,
+            control: 6,
+            lane: ParameterChannel::Both,
+        },
+        segments: vec![step(0, mute, 0.0, 1.0), step(mute, unmute, 1.0, 0.0)],
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// #2377 T5 (mutant n1 of #2362): a curve unmute whose ramp crosses a block boundary leaves the
+/// hold running through the block's end, so a live write that frees the lane at the next entry
+/// releases the cell's hold there (R17-10). Track 0 rides linearly from `-30` to `0` dB over
+/// `[0, 10_000)` under a mute curve muted over `[300, 900)`, with a mute length of 240 samples:
+/// the unmute at 900 (offset 4 of the block at 896, quantum 128) ramps to 1,140, past the block's
+/// end. The ride's grid events under the mute owe a move. A live fader write of `-10` dB over
+/// window 0 at the entry 1,024 frees the lane, which discharges the move; from 1,087 the lane
+/// follows the curve, at each completion sample `64k + 63` exactly, on every render form.
+///
+/// Test value: red if the cursor's `rehold` records a hold that ends past the block as ending on
+/// the block's last sample (`EndsAtBlockEnd`): the owed move is then due at the entry and lands
+/// over `J` in place of the release, so the lane lags the curve until the move's end.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_curve_unmute_ramping_past_its_block_and_freed_at_the_next_entry_releases_its_hold() {
+    use builtins::BuiltinLaneSelector::Both;
+    const FRAMES: u64 = 3_072;
+    let mut model = plain(1, 128);
+    model.control_smoothing = smoothing(5.0);
+    let entry = fader_entry(
+        &model,
+        0,
+        ParameterChannel::Both,
+        vec![segment(AutomationShape::Linear, 0, 10_000, -30.0, 0.0)],
+    );
+    model.automation = vec![entry.clone(), mute_curve(&model, 300, 900)];
+    let (out, entries) = acted(
+        &model,
+        128,
+        FRAMES,
+        &[Act {
+            fader: Some((Both, -10.0, 0)),
+            ..act(1_024)
+        }],
+    );
+    assert_eq!(entries, [1_024], "the write lands at its entry");
+    for t in (1_024 + 63..FRAMES).step_by(64) {
+        let expected = composed(curve(&entry, t as i64), 0.0);
+        for (plane, out) in out.iter().enumerate() {
+            assert_eq!(
+                out[t as usize].to_bits(),
+                expected.to_bits(),
+                "plane {plane}: completion sample {t}"
+            );
+        }
+    }
+}
+
+/// #2377 T5 attempt 2 (mutant f2 of #2362): a hold that ends by itself on a block's last sample,
+/// with nothing owed, releases nothing at the next entry, so an offsets jump applied on the free
+/// lane at that entry keeps its own hold. Track 0 is prepared muted on a curve flat at `-30` dB to
+/// `W + 50` and then fading to `0` dB at 10,000; a live unmute over `W` samples is drained at 0,
+/// `W` the first multiple of the quantum at or after 1,200, so the unmute ramp ends on the last
+/// sample of a block and the flat curve leaves nothing remembered; an offsets write `S = -6` dB
+/// with a 480-sample ramp lands at the entry `W`. From `W` both lanes equal the never-muted twin
+/// that takes the same write at `W`, at quanta 128 and 64, on every render form.
+///
+/// Test value: red if the R17-10 release also fires on a hold that ended by itself
+/// (`HoldAtBlockEnd::EndsAtBlockEnd` with nothing owed): `release_at_entry` then overwrites the
+/// hold the offsets jump set at that entry, and the fade's grid events from `W + 50` cut its
+/// 480-sample ramp.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_hold_that_ended_by_itself_keeps_an_entry_jumps_hold_with_nothing_owed() {
+    use builtins::BuiltinLaneSelector::Both;
+    const FRAMES: u64 = 4_096;
+    for quantum in [128_u32, 64] {
+        let window = 1_200_u32.div_ceil(quantum) * quantum;
+        let (model, _) = muted_ride(
+            vec![
+                segment(
+                    AutomationShape::Linear,
+                    0,
+                    u64::from(window) + 50,
+                    -30.0,
+                    -30.0,
+                ),
+                segment(
+                    AutomationShape::Linear,
+                    u64::from(window) + 50,
+                    10_000,
+                    -30.0,
+                    0.0,
+                ),
+            ],
+            10.0,
+        );
+        let jump = Act {
+            offsets: Some((-6.0, 480)),
+            ..act(u64::from(window))
+        };
+        let (twin, _) = acted(&never_muted(&model), quantum, FRAMES, &[jump]);
+        let (out, entries) = acted(
+            &model,
+            quantum,
+            FRAMES,
+            &[
+                Act {
+                    mute: Some((Both, false, window)),
+                    ..act(0)
+                },
+                jump,
+            ],
+        );
+        assert_eq!(
+            entries,
+            [0, u64::from(window)],
+            "each act lands at its own entry"
+        );
+        let from = window as usize;
+        for plane in 0..2 {
+            assert_eq!(
+                first_difference(&out[plane][from..], &twin[plane][from..]).map(|at| at + from),
+                None,
+                "quantum {quantum}, plane {plane}: the never-muted twin from {from}"
+            );
+        }
+    }
+}

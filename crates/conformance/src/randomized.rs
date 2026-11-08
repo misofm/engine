@@ -207,6 +207,11 @@ pub struct DifferentialCoverage {
     pub bounded_blocks: u64,
     /// Blocks that failed the D7 bound, and whose whole-bank recovery was checked.
     pub recoveries: u64,
+    /// Own snapshots restored from the state a hostile block left (issue #2377 T7).
+    pub hostile_own_restores: u64,
+    /// Blocks a lane's restored twin rendered beside the lane after its hostile block (issue
+    /// #2377 T7, attempt 2).
+    pub hostile_continued_blocks: u64,
     /// Scenarios run twin against twin, because no width bound a bank.
     pub scalar_scenarios: u64,
 }
@@ -248,6 +253,8 @@ impl DifferentialCoverage {
         self.state_comparisons += other.state_comparisons;
         self.bounded_blocks += other.bounded_blocks;
         self.recoveries += other.recoveries;
+        self.hostile_own_restores += other.hostile_own_restores;
+        self.hostile_continued_blocks += other.hostile_continued_blocks;
         self.scalar_scenarios += other.scalar_scenarios;
     }
 }
@@ -713,6 +720,32 @@ fn run_scalar(
             }
         }
         if terminal {
+            for (lane, (oracle, twin)) in pairs.iter_mut().enumerate() {
+                for (who, effect) in [("oracle", oracle), ("twin", twin)] {
+                    own_snapshot_restores_after_hostile(
+                        effect.as_mut(),
+                        sizes,
+                        version,
+                        audited_calls,
+                        &format!("{context}: lane {lane}'s {who}"),
+                    );
+                    coverage.hostile_own_restores += 1;
+                }
+            }
+            for (lane, (oracle, _)) in pairs.iter_mut().enumerate() {
+                continue_past_hostile(
+                    factory,
+                    requests[lane],
+                    oracle.as_mut(),
+                    shape,
+                    draw,
+                    first + frames as u64,
+                    (sizes, version),
+                    audited_calls,
+                    &format!("{context}: lane {lane}"),
+                    coverage,
+                );
+            }
             coverage.recoveries += 1;
             return;
         }
@@ -1350,6 +1383,58 @@ fn run_width(
                         "{context}: the {who} wrote a word outside the D7 bound"
                     );
                 }
+            }
+            // Issue #2377 T7: the render differential cannot continue past this block (the bank
+            // and its scalar instances may have parted, by design), but the own-snapshot rule
+            // holds of any state an effect reaches, so it is checked here, on the state the
+            // hostile words left: a non-finite input word still in a delay line the check has
+            // not reached (#2324) included.
+            for (lane, scalar) in scalars.iter_mut().enumerate() {
+                own_snapshot_restores_after_hostile(
+                    scalar.as_mut(),
+                    sizes,
+                    version,
+                    audited_calls,
+                    &format!("{context}: lane {lane}'s scalar instance"),
+                );
+                let payload = snapshot_lane(bank.as_ref(), lane, sizes, audited_calls);
+                let input =
+                    StatePayloadInput::new(&payload.common, &payload.left, &payload.right, sizes)
+                        .expect("the prepared sizes");
+                if let Err(error) = audited(audited_calls, "restore_track_state_payload", || {
+                    bank.restore_track_state_payload(lane as u32, version, input)
+                }) {
+                    panic!(
+                        "{context}: bank lane {lane}'s own snapshot after the hostile block \
+                         refused ({})",
+                        error.code
+                    );
+                }
+                assert!(
+                    same_payload(
+                        &snapshot_lane(bank.as_ref(), lane, sizes, audited_calls),
+                        &payload
+                    ),
+                    "{context}: bank lane {lane}'s snapshot after the hostile block does not \
+                     survive its own restore"
+                );
+                coverage.hostile_own_restores += 2;
+            }
+            // A scalar instance and a twin restored from its snapshot run one code path, so,
+            // unlike the bank, they stay comparable past the hostile block.
+            for (lane, scalar) in scalars.iter_mut().enumerate() {
+                continue_past_hostile(
+                    factory,
+                    requests[lane],
+                    scalar.as_mut(),
+                    shape,
+                    draw,
+                    first + frames as u64,
+                    (sizes, version),
+                    audited_calls,
+                    &format!("{context}: lane {lane}'s scalar instance"),
+                    coverage,
+                );
             }
             coverage.recoveries += 1;
             return;
@@ -2099,6 +2184,131 @@ fn snapshot_lane(
     payload
 }
 
+/// The own-snapshot rule (#1279 D6) on the state a hostile block left (issue #2377 T7): `effect`'s
+/// snapshot restores into `effect` and writes itself back word for word. A scenario ends at its
+/// hostile block, so the restores at block boundaries never meet that state.
+fn own_snapshot_restores_after_hostile(
+    effect: &mut dyn PreparedNativeEffect,
+    sizes: StatePayloadSizes,
+    version: u32,
+    armed: bool,
+    context: &str,
+) {
+    let payload = snapshot_scalar(effect, sizes, armed);
+    let input = StatePayloadInput::new(&payload.common, &payload.left, &payload.right, sizes)
+        .expect("the prepared sizes");
+    if let Err(error) = audited(armed, "restore_state_payload", || {
+        effect.restore_state_payload(version, input)
+    }) {
+        panic!(
+            "{context}: its own snapshot after the hostile block refused ({})",
+            error.code
+        );
+    }
+    assert!(
+        same_payload(&snapshot_scalar(effect, sizes, armed), &payload),
+        "{context}: its snapshot after the hostile block does not survive its own restore"
+    );
+}
+
+/// The fewest frames a lane renders beside its restored twin after its hostile block.
+const POST_HOSTILE_FRAMES: usize = 2_048;
+
+/// Frames a lane renders beside its restored twin after its hostile block: at least
+/// [`POST_HOSTILE_FRAMES`], and twice the effect's prepared latency, so a hostile word held in a
+/// lookahead line (the limiter's `B`, its latency) reaches the output, and its D7 recovery is met
+/// on both, whatever the effect's latency at this quality and rate.
+fn post_hostile_frames(shape: Shape) -> usize {
+    let latency = usize::try_from(shape.quality.latency.0).unwrap_or(usize::MAX);
+    POST_HOSTILE_FRAMES.max(latency.saturating_mul(2))
+}
+
+/// Restored against continued past the hostile block (issue #2377 T7, attempt 2): a fresh
+/// instance takes `oracle`'s snapshot of the state the hostile words left, and both render the
+/// same legal blocks from `first` for [`post_hostile_frames`], which must match bit for bit, with
+/// the same reports, inside the D7 bound. Sound because both are one scalar code path; a bank and
+/// its scalar instances may part on the hostile block by design, so the bank is not continued.
+#[allow(clippy::too_many_arguments)]
+fn continue_past_hostile(
+    factory: &dyn NativeEffectFactory,
+    request: PrepareEffectRequest<'_>,
+    oracle: &mut dyn PreparedNativeEffect,
+    shape: Shape,
+    draw: &mut Draw,
+    mut first: u64,
+    (sizes, version): (StatePayloadSizes, u32),
+    armed: bool,
+    context: &str,
+    coverage: &mut DifferentialCoverage,
+) {
+    let Continuation { mut twin, .. } =
+        Continuation::take(factory, request, oracle, 0, sizes, version, armed, context);
+    let connected = matches!(
+        shape.ports.sidechain,
+        PreparedSidechainPort::Connected { .. }
+    );
+    let mut rendered = 0;
+    let total = post_hostile_frames(shape);
+    while rendered < total {
+        let frames = draw.frames(shape.quantum as usize).max(1);
+        let (profile, other, side_profile) = (
+            legal_profile(draw),
+            legal_profile(draw),
+            legal_profile(draw),
+        );
+        let mut left: Vec<f32> = (0..frames).map(|_| draw.sample(profile)).collect();
+        let mut right: Vec<f32> = (0..frames).map(|_| draw.sample(other)).collect();
+        let side_left: Vec<f32> = (0..frames).map(|_| draw.sample(side_profile)).collect();
+        let side_right: Vec<f32> = (0..frames).map(|_| draw.sample(side_profile)).collect();
+        let side = connected.then_some((side_left.as_slice(), side_right.as_slice()));
+        let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
+        let oracle_report = render_scalar(
+            oracle,
+            (&mut left, &mut right),
+            side,
+            first,
+            &[],
+            shape.quantum,
+            None,
+            armed,
+        );
+        let twin_report = render_scalar(
+            twin.as_mut(),
+            (&mut twin_left, &mut twin_right),
+            side,
+            first,
+            &[],
+            shape.quantum,
+            None,
+            armed,
+        );
+        let at = format!("{context}, {rendered} frames past the hostile block");
+        assert_eq!(
+            oracle_report, twin_report,
+            "{at}: the restored twin reports"
+        );
+        for (plane, ours, theirs) in [("left", &left, &twin_left), ("right", &right, &twin_right)] {
+            if let Some(frame) = first_difference(ours, theirs) {
+                panic!(
+                    "{at}: {plane} frame {frame}: the restored twin rendered {:#010x} where the \
+                     continued instance rendered {:#010x}",
+                    theirs[frame].to_bits(),
+                    ours[frame].to_bits()
+                );
+            }
+        }
+        if !shape.bypass {
+            assert!(
+                left.iter().chain(&right).all(|word| within_d7_bound(*word)),
+                "{at}: a word outside the D7 bound"
+            );
+        }
+        coverage.hostile_continued_blocks += 1;
+        rendered += frames;
+        first += frames as u64;
+    }
+}
+
 /// Whether two payloads carry the same words, where a restore may write a signed zero back as
 /// `+0.0` (the multiband compressor and the compressor normalise the zeros they read).
 fn same_payload(a: &Payload, b: &Payload) -> bool {
@@ -2528,6 +2738,11 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
     assert!(
         coverage.restores > 0 && coverage.resets > 0,
         "nothing was restored or reset: {coverage:?}"
+    );
+    assert!(
+        coverage.hostile_own_restores > 0 && coverage.hostile_continued_blocks > 0,
+        "no own snapshot was restored, and no restored twin continued, past a hostile block: \
+         {coverage:?}"
     );
     assert!(
         coverage.continuations > 0

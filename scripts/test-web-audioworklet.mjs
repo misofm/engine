@@ -540,6 +540,45 @@ async function testMainRealm() {
       for (const [label, makeCase] of refusalCases) {
         await assertRefusal(label, makeCase());
       }
+      // Issue #2377 T9 (#2279's follow-up): the factory-input guards that are each the only check
+      // refusing their record: a foreign prototype (`capturePlainRecord`), an optional field held
+      // by a hidden accessor, which reads as absent without the accessor check, a typed array
+      // that is not a `Uint8Array` (`snapshotDocument`), and a hidden boot option
+      // (`snapshotBootOptions`'s enumerable shape). Beside an enumerable optional field whose value
+      // is `undefined` (counted as enumerable, not as present), a hidden required field
+      // (`snapshotFactory`'s required-field check) and a hidden defined optional field (its
+      // enumerable check) are each the only refusal: the counts agree.
+      const guardRefusals = [
+        ["foreign prototype", () => Object.assign(Object.create({ inherited: true }), makeFactory())],
+        ["hidden accessor prepared module", () => {
+          const factory = makeFactory();
+          Object.defineProperty(factory, "preparedModule", {
+            configurable: true, get: () => unsupportedPreparationModule,
+          });
+          return factory;
+        }],
+        ["Int8Array document", () => makeFactory({ document: new Int8Array(4) })],
+        ["hidden boot option", () => {
+          const options = { ...limits };
+          Object.defineProperty(options, "reserved2", { enumerable: false });
+          return makeFactory({ options });
+        }],
+        ["hidden required document beside an undefined optional", () => {
+          const factory = makeFactory({ bootCommand: undefined });
+          Object.defineProperty(factory, "document", { enumerable: false });
+          return factory;
+        }],
+        ["hidden defined prepared module beside an undefined optional", () => {
+          const factory = makeFactory({ bootCommand: undefined });
+          Object.defineProperty(factory, "preparedModule", {
+            configurable: true, value: unsupportedPreparationModule,
+          });
+          return factory;
+        }],
+      ];
+      for (const [label, makeCase] of guardRefusals) {
+        await assertRefusal(label, makeCase());
+      }
 
       const literalOptions = { ...limits };
       await assertAccepted("same-realm literal records", makeFactory({ options: literalOptions }));
@@ -1276,6 +1315,36 @@ async function testMainRealm() {
     assert.equal(FakeNode.latest.disconnectCount, 1, "creation rejection disconnects the node");
     readyMutation = null;
 
+    // Issue #2377 T9: a single-mode ready message that is not an object fails the boot with 255
+    // (`hasExactFields` answers it, rather than throwing in the port's handler), and the
+    // worklet's typed boot refusal reaches the caller typed; a module fetch that is not OK is
+    // refused `UNSUPPORTED` (7).
+    for (const [label, ready, result] of [
+      ["a null ready message", () => null, 255],
+      ["a typed refusal", () => ({ tag: "miso.error.v1", requestId: 0, result: 3 }), 3],
+      ["a module fetch that is not OK", null, 7],
+    ]) {
+      const savedFetch = globalThis.fetch;
+      readyMutation = ready;
+      if (ready === null) {
+        globalThis.fetch = async () => ({ ok: false, arrayBuffer: async () => new ArrayBuffer(0) });
+      }
+      try {
+        await errorResult(createMisoAudioWorkletHost({
+          context,
+          document: new Uint8Array(),
+          options: limits,
+          simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "processor.js",
+        }), result).catch((error) => {
+          throw new Error(`single-mode boot: ${label}`, { cause: error });
+        });
+      } finally {
+        readyMutation = null;
+        globalThis.fetch = savedFetch;
+      }
+    }
+
     const schemaHost = await createMisoAudioWorkletHost({
       context,
       document: new Uint8Array(),
@@ -1741,6 +1810,60 @@ async function testMainRealm() {
     }), 255);
     planeMutation = null;
     await planeHost.dispose();
+
+    // Issue #2377 T9: the returned-plane guards. Two planes in two buffers come back as sent and
+    // are accepted (each plane's buffer is its own group); one plane of two, one buffer's planes
+    // returned in two buffers, and two buffers' planes returned in one each fail the host.
+    {
+      const twoBuffers = () => [new Float32Array(4), new Float32Array(4)];
+      const oneBuffer = () => {
+        const storage = new ArrayBuffer(32);
+        return [new Float32Array(storage, 0, 4), new Float32Array(storage, 16, 4)];
+      };
+      mixedSuccess = true;
+      for (const [label, planes, mutation] of [
+        ["two buffers returned as sent", twoBuffers, null],
+        ["one plane of two returned", twoBuffers, (response) => ({
+          ...response, planes: [response.planes[0]],
+        })],
+        ["one buffer returned split", oneBuffer, (response) => ({
+          ...response,
+          planes: [new Float32Array(new ArrayBuffer(32), 0, 4), new Float32Array(new ArrayBuffer(32), 16, 4)],
+        })],
+        ["two buffers returned aliased", twoBuffers, (response) => {
+          const storage = new ArrayBuffer(16);
+          return { ...response, planes: [new Float32Array(storage), new Float32Array(storage)] };
+        }],
+      ]) {
+        const guardHost = await createMisoAudioWorkletHost({
+          context,
+          document: new Uint8Array(),
+          options: limits,
+          simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "processor.js",
+        });
+        planeMutation = mutation;
+        const submitted = guardHost.submitSource({
+          sourceId: "source", generation: 1n, startFrame: 0n,
+          sampleRateHz: 48000, planes: planes(), frames: 4, endOfRegion: false,
+        });
+        try {
+          if (mutation === null) {
+            const reply = await submitted;
+            assert.equal(reply.planes.length, 2, `${label}: both planes return`);
+            assert.notEqual(reply.planes[0].buffer, reply.planes[1].buffer, `${label}: in their own buffers`);
+          } else {
+            await errorResult(submitted, 255).catch((error) => {
+              throw new Error(`returned planes: ${label}`, { cause: error });
+            });
+          }
+        } finally {
+          planeMutation = null;
+        }
+        await guardHost.dispose().catch(() => undefined);
+      }
+      mixedSuccess = false;
+    }
 
     // #106 F3: the in-flight bound is per source and equals the ring depth in quanta
     // (sourceRingFrames 256 / quantumFrames 64 = 4). Red mutation: return `true` from
@@ -2481,6 +2604,8 @@ async function testMainRealm() {
       const originalMemory = WebAssembly.Memory;
       const workers = [];
       let workerBehaviour = "ready";
+      // Issue #2377 T9: a rewrite of the Worker's ready reply, or `null`.
+      let workerReadyMutation = null;
       class FakeWorker {
         onmessage = null;
         onerror = null;
@@ -2502,12 +2627,13 @@ async function testMainRealm() {
             } else if (workerBehaviour === "refuse") {
               reply({ tag: "miso.error.v1", requestId: 0, result: 3 });
             } else {
-              reply({
+              const ready = {
                 tag: "miso.worker-ready.v1", requestId: 0, result: 0, handle: 5,
                 token: (5n << 32n) | 1n, reservation: 70000, metersAttached: true,
                 backend: "simd128", resources: resourceReport(1, 64), memoryBytes: 1310720,
                 sourceRingFrames: 40 * 64, controlFrameBytes: 16384,
-              });
+              };
+              reply(workerReadyMutation === null ? ready : workerReadyMutation(ready));
             }
           } else if (message.tag === "miso.control.v1") {
             if (workerBehaviour === "controlSilent") return;
@@ -2544,6 +2670,8 @@ async function testMainRealm() {
           }
         };
         const nodesBefore = FakeNode.count;
+        const controlPorts = () => events.filter((event) => event[0] === "control-port").length;
+        const portsBefore = controlPorts();
         const host = await createMisoAudioWorkletHost({
           context,
           document: new Uint8Array([1, 2]),
@@ -2553,6 +2681,8 @@ async function testMainRealm() {
         });
         assert.equal(host.instanceMode, "worker", "an isolated page runs worker mode");
         assert.equal(FakeNode.count, nodesBefore + 1);
+        // Issue #2377 T9: the boot hands the worklet the Worker's channel port, once.
+        assert.equal(controlPorts(), portsBefore + 1, "the worklet gets the control port");
         const worker = workers.at(-1);
         assert.equal(worker.url, "https://example.test/assets/miso-engine-v1-control-worker.js",
           "the Worker is resolved beside the worklet module");
@@ -3407,6 +3537,30 @@ async function testMainRealm() {
         // #1332 S8: a worklet whose construction failed (perhaps after it adopted the half): the
         // Worker is asked to dispose, and answers, before it is terminated.
         {
+          // Issue #2377 T9: a Worker ready reply the page cannot use refuses the boot with 255
+          // before a worklet is built, and terminates the Worker.
+          for (const [label, mutation] of [
+            ["another backend", (ready) => ({ ...ready, backend: "scalar" })],
+            ["no memory", (ready) => ({ ...ready, memoryBytes: 0 })],
+            ["a ring off the quantum", (ready) => ({ ...ready, sourceRingFrames: 40 * 64 + 1 })],
+            ["a control frame below the minimum", (ready) => ({ ...ready, controlFrameBytes: 16383 })],
+            ["resources at another quantum", (ready) => ({ ...ready, resources: resourceReport(1, 128) })],
+          ]) {
+            workerReadyMutation = mutation;
+            const nodes = FakeNode.count;
+            try {
+              await errorResult(createMisoAudioWorkletHost({
+                context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+                workletModuleUrl: "https://example.test/w.js",
+              }), 255).catch((error) => {
+                throw new Error(`worker ready reply: ${label}`, { cause: error });
+              });
+            } finally {
+              workerReadyMutation = null;
+            }
+            assert.equal(FakeNode.count, nodes, `${label}: no worklet is built`);
+            assert.equal(workers.at(-1).terminated, true, `${label}: the Worker is terminated`);
+          }
           readyMutation = () => ({ tag: "miso.error.v1", requestId: 0, result: 9 });
           await assert.rejects(createMisoAudioWorkletHost({
             context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",

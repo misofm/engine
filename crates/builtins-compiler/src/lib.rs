@@ -1692,7 +1692,7 @@ impl FaderJumpStage for FaderMuteRampBuiltins {
         Self::gain_held(self, channel) == Some(true)
     }
     fn muted(&self, channel: usize) -> bool {
-        self.is_muted(channel) && self.is_armed(channel) != Some(true)
+        self.is_muted(channel) == Some(true) && self.is_armed(channel) != Some(true)
     }
     fn ramp_remaining(&self, channel: usize) -> u32 {
         Self::ramp_remaining(self, channel).unwrap_or(0)
@@ -9462,7 +9462,7 @@ fn render_oracle_fader(
                 |_, channel| {
                     Some(ChannelHold {
                         held: fader.gain_held(channel)?,
-                        muted: fader.is_muted(channel) && fader.is_armed(channel) != Some(true),
+                        muted: fader.is_muted(channel)? && fader.is_armed(channel) != Some(true),
                         remaining: fader.ramp_remaining(channel)?,
                         stage_gain: None,
                     })

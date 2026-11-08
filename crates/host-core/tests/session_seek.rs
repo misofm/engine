@@ -15,12 +15,12 @@
 #[path = "support/successor.rs"]
 mod successor;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use bench_support::alloc as bench_alloc;
+use bench_support::producer::StopOnDrop;
 use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo};
 use graph_compiler::Backend;
 use host_core::{SourceControlSet, test_only_timeline_at};
@@ -36,6 +36,23 @@ const Q: u64 = QUANTUM as u64;
 const SEEKS: usize = 10_000;
 /// The span after a block's start the session thread pushes within.
 const PUSH_WINDOW_NS: u64 = 40_000;
+/// How long the session thread waits on the render thread's progress (its first blocks, the next
+/// block, a backpressured seek, a seek landing) before it names the stall instead of spinning.
+const PROGRESS_DEADLINE: Duration = Duration::from_secs(30);
+
+/// One wait of the session thread on the render thread (issue #2377 T6, #2296): it panics if the
+/// render thread has ended, which only its panic does before the release, or if `waiting` has made
+/// no progress within [`PROGRESS_DEADLINE`] of `since`.
+fn check_render(render_finished: &dyn Fn() -> bool, since: Instant, waiting: &str) {
+    assert!(
+        !render_finished(),
+        "the render thread ended before it was released, while {waiting}"
+    );
+    assert!(
+        since.elapsed() < PROGRESS_DEADLINE,
+        "{waiting}: no progress within {PROGRESS_DEADLINE:?}"
+    );
+}
 
 fn id(value: &str) -> StableId {
     StableId::parse(value).expect("stable ID")
@@ -121,8 +138,8 @@ fn render_block(plan: &mut PreparedRenderPlan, output: &mut [f32]) -> u64 {
 /// Render back to back until `stop`, publishing the next block's sample in `position`.
 fn render_thread(
     mut plan: PreparedRenderPlan,
-    stop: Arc<AtomicBool>,
-    position: Arc<AtomicU64>,
+    stop: &AtomicBool,
+    position: &AtomicU64,
 ) -> Rendered {
     let mut output = vec![0.0_f32; QUANTUM * 2];
     engine::realtime::audit::warm_up();
@@ -167,8 +184,13 @@ fn landed(sources: &SourceControlSet, id: &str, generation: u64) -> Option<(u64,
     (report.generation == generation).then_some((report.first_sample, report.source_frame))
 }
 
-/// Push [`SEEKS`] session seeks, each after the one before it has landed on both sources.
-fn session_thread(sources: &mut SourceControlSet, position: &AtomicU64) -> Vec<Seek> {
+/// Push [`SEEKS`] session seeks, each after the one before it has landed on both sources. Every
+/// wait on the render thread goes through [`check_render`].
+fn session_thread(
+    sources: &mut SourceControlSet,
+    position: &AtomicU64,
+    render_finished: &dyn Fn() -> bool,
+) -> Vec<Seek> {
     let mut seeks = Vec::with_capacity(SEEKS);
     let mut state = 0x2545_f491_4f6c_dd1d_u64;
     let mut next = || {
@@ -189,7 +211,9 @@ fn session_thread(sources: &mut SourceControlSet, position: &AtomicU64) -> Vec<S
         // Push at a random instant shortly after a block begins, where the render's source set
         // pops the timeline and then each source: a push there lands between two of the pops.
         let seen = position.load(Ordering::Acquire);
+        let since = Instant::now();
         while position.load(Ordering::Acquire) == seen {
+            check_render(render_finished, since, "the next block");
             core::hint::spin_loop();
         }
         let wait = Duration::from_nanos(next() % PUSH_WINDOW_NS);
@@ -197,13 +221,18 @@ fn session_thread(sources: &mut SourceControlSet, position: &AtomicU64) -> Vec<S
         while start.elapsed() < wait {
             core::hint::spin_loop();
         }
+        let since = Instant::now();
         loop {
             match sources.seek_session(generation, timeline_sample, anchor) {
                 Ok(()) => break,
-                Err(error) if error.is_backpressure() => thread::yield_now(),
+                Err(error) if error.is_backpressure() => {
+                    check_render(render_finished, since, "a backpressured seek");
+                    thread::yield_now();
+                }
                 Err(error) => panic!("seek {generation}: {error:?}"),
             }
         }
+        let since = Instant::now();
         let (long, short) = loop {
             if let (Some(long), Some(short)) = (
                 landed(sources, LONG, generation),
@@ -211,6 +240,7 @@ fn session_thread(sources: &mut SourceControlSet, position: &AtomicU64) -> Vec<S
             ) {
                 break (long, short);
             }
+            check_render(render_finished, since, "a seek landing");
             thread::yield_now();
         };
         seeks.push(Seek {
@@ -227,19 +257,26 @@ fn run(backend: Backend) {
     let session = Session::compile(two_sources());
     let host = session.prepare(backend);
     let mut sources = host.sources;
-    let stop = Arc::new(AtomicBool::new(false));
-    let position = Arc::new(AtomicU64::new(0));
-    let renderer = {
-        let (stop, position) = (Arc::clone(&stop), Arc::clone(&position));
+    let stop = AtomicBool::new(false);
+    let position = AtomicU64::new(0);
+    // Issue #2377 T6 (#2296): scoped, with the release bound right after the spawn, so a session
+    // panic releases the render thread before the scope joins it, and every session wait checks
+    // that render still runs, so a render panic ends the test instead of spinning it.
+    let (seeks, rendered) = thread::scope(|scope| {
         let plan = host.plan;
-        thread::spawn(move || render_thread(plan, stop, position))
-    };
-    while position.load(Ordering::Acquire) == 0 {
-        thread::yield_now();
-    }
-    let seeks = session_thread(&mut sources, &position);
-    stop.store(true, Ordering::Release);
-    let rendered = renderer.join().expect("the render thread");
+        let (stop, position) = (&stop, &position);
+        let renderer = scope.spawn(move || render_thread(plan, stop, position));
+        let release = StopOnDrop(stop);
+        let render_finished = || renderer.is_finished();
+        let since = Instant::now();
+        while position.load(Ordering::Acquire) == 0 {
+            check_render(&render_finished, since, "the first blocks");
+            thread::yield_now();
+        }
+        let seeks = session_thread(&mut sources, position, &render_finished);
+        drop(release);
+        (seeks, renderer.join().expect("the render thread"))
+    });
 
     assert_eq!(
         rendered.allocator,

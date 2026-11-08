@@ -130,7 +130,7 @@ fn a_windowed_move_is_monotone_and_lands_exactly_on_its_target() {
             FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
         live.set_fader_db(BuiltinLaneSelector::Both, db, window)
             .expect("domain");
-        let target = live.target_gain(0);
+        let target = live.target_gain(0).expect("lane 0");
         let frames = window as usize + 2;
         let mut left = vec![1.0_f32; frames];
         let mut right = vec![1.0_f32; frames];
@@ -181,7 +181,10 @@ fn mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero() {
     const WINDOW: u32 = 4;
     let mut live = FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
     live.set_mute(BuiltinLaneSelector::Both, true, WINDOW);
-    assert!(live.is_muted(0) && live.is_muted(1));
+    assert_eq!(
+        (live.is_muted(0), live.is_muted(1)),
+        (Some(true), Some(true))
+    );
     let mut left = [-1.0_f32; 8];
     let mut right = [-1.0_f32; 8];
     live.process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
@@ -201,7 +204,7 @@ fn mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero() {
 
     // Unmuting returns to the lane's fader gain, again as a ramp.
     live.set_mute(BuiltinLaneSelector::Both, false, WINDOW);
-    assert!(!live.is_muted(0));
+    assert_eq!(live.is_muted(0), Some(false));
     let mut left = [1.0_f32; 8];
     let mut right = [1.0_f32; 8];
     live.process(DualMonoBlock::new(&mut left, &mut right, 8).expect("block"));
@@ -336,14 +339,14 @@ fn a_long_fader_or_mute_move_stays_inside_its_endpoints() {
     ] {
         let mut live =
             FaderMuteRampBuiltins::new(parameters(from_db, from_db, false, false)).expect("fader");
-        let start = live.target_gain(0);
+        let start = live.target_gain(0).expect("lane 0");
         let target = if mute {
             live.set_mute(BuiltinLaneSelector::Both, true, window);
             0.0
         } else {
             live.set_fader_db(BuiltinLaneSelector::Both, to_db, window)
                 .expect("domain");
-            live.target_gain(0)
+            live.target_gain(0).expect("lane 0")
         };
         let (low, high) = (start.min(target), start.max(target));
         let frames = window as usize + 64;
@@ -579,12 +582,12 @@ impl Subject {
             },
             Self::Scalar(track) => ChannelState {
                 flags: [
-                    track.is_muted(channel),
+                    track.is_muted(channel).expect("a channel"),
                     track.is_armed(channel).expect("a channel"),
                     track.gain_held(channel).expect("a channel"),
                 ],
                 remaining: track.ramp_remaining(channel).expect("a channel"),
-                target: track.target_gain(channel).to_bits(),
+                target: track.target_gain(channel).expect("a channel").to_bits(),
             },
         }
     }
@@ -1191,7 +1194,8 @@ fn a_repeated_mute_leaves_the_stage_as_it_was() {
 /// The scalar fader's lane queries answer `None` for a lane above `1`, as the bank's do for a
 /// channel above `1`.
 ///
-/// Red if a lane out of range wraps onto another lane (lane 2 read as lane 0's muted state).
+/// Red if a lane out of range wraps onto another lane (lane 2 read as lane 0's muted state, or
+/// lane 3 read as lane 1's target).
 #[test]
 fn the_scalar_fader_refuses_a_lane_out_of_range() {
     let mut track = FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
@@ -1209,6 +1213,14 @@ fn the_scalar_fader_refuses_a_lane_out_of_range() {
     assert_eq!(track.gain_held(2), None, "no third lane");
     assert_eq!(track.ramp_remaining(0), Some(0), "a mute with no ramp");
     assert_eq!(track.ramp_remaining(2), None, "no third lane");
+    assert_eq!(track.is_muted(0), Some(true), "muted");
+    assert_eq!(track.is_muted(2), None, "no third lane");
+    assert_eq!(
+        track.target_gain(1),
+        Some(1.0),
+        "the right lane's unity target"
+    );
+    assert_eq!(track.target_gain(3), None, "no fourth lane");
 }
 
 /// Gate 5: 1,000 blocks of `process_with` with operations allocate and free nothing.
