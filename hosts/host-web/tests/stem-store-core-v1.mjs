@@ -654,74 +654,74 @@ async function aHoldlessDemoteLeavesAFinalAnotherHoldOwns() {
 // a final that the late removal would then delete; once it lands, the open promotes and reads.
 async function aHoldNeverWritesAFinalItIsStillRemoving() {
   for (const leg of ["lands", "aborted"]) {
-  const stem = fixture(`recheck-fence-${leg}`, 4096)
-  const backend = new FakeOpfsBackend()
-  const locks = new FakeLockManager()
-  const resolver = new MemoryStemResolver(stemMap([stem]))
-  let estimateReached
-  let releaseEstimate
-  const reached = new Promise((resolve) => (estimateReached = resolve))
-  const gate = new Promise((resolve) => (releaseEstimate = resolve))
-  const shared = backend.storage()
-  const a = new OpfsStemStore({
-    storage: {
-      getDirectory: shared.getDirectory,
-      async estimate() {
-        estimateReached()
-        await gate
-        return shared.estimate()
+    const stem = fixture(`recheck-fence-${leg}`, 4096)
+    const backend = new FakeOpfsBackend()
+    const locks = new FakeLockManager()
+    const resolver = new MemoryStemResolver(stemMap([stem]))
+    let estimateReached
+    let releaseEstimate
+    const reached = new Promise((resolve) => (estimateReached = resolve))
+    const gate = new Promise((resolve) => (releaseEstimate = resolve))
+    const shared = backend.storage()
+    const a = new OpfsStemStore({
+      storage: {
+        getDirectory: shared.getDirectory,
+        async estimate() {
+          estimateReached()
+          await gate
+          return shared.estimate()
+        },
       },
-    },
-    locks,
-    tabId: "recheck-a",
-    readDeadlineMs: 20,
-  })
-  const abort = new AbortController()
-  const opening = settledWithin(
-    a.openSession({ sessionId: "A", stems: requirements([stem]), resolver, signal: abort.signal }),
-    1_000
-  )
-  // A's verify loop found a miss; it waits in its quota preflight while another tab indexes the stem.
-  await reached
-  await (
-    await store(backend, locks, { tabId: "recheck-t" }).openSession({
-      sessionId: "T",
-      stems: requirements([stem]),
-      resolver,
+      locks,
+      tabId: "recheck-a",
+      readDeadlineMs: 20,
     })
-  ).close()
-  const corrupted = new Uint8Array(stem.pcm)
-  corrupted[9] ^= 1
-  backend.setBytes(`${STORE_FOLDER}/${finalName(stem)}`, corrupted)
-  let land
-  backend.removeEntryBlocker = ({ name }) =>
-    name === finalName(stem) && land === undefined ? new Promise((resolve) => (land = resolve)) : undefined
-  let settledEarly = false
-  opening.then(() => (settledEarly = !landed))
-  let landed = false
-  releaseEstimate()
-  await until(() => land !== undefined, "the recheck's removal")
-  await new Promise((resolve) => setTimeout(resolve, 60))
-  assert.equal(settledEarly, false, "a hold wrote a final while its own removal of that final was unsettled")
-  if (leg === "aborted") {
-    // The wait for the hold's own removal ends at the open's abort; the lock stays until it lands.
-    landed = true
-    abort.abort(new DOMException("Switched mix", "AbortError"))
-    const aborted = await opening
-    assert.notEqual(aborted, "timed-out", "a hold's wait for its own removal ignored the open's abort")
-    assert.equal(aborted.error?.name, "AbortError")
+    const abort = new AbortController()
+    const opening = settledWithin(
+      a.openSession({ sessionId: "A", stems: requirements([stem]), resolver, signal: abort.signal }),
+      1_000
+    )
+    // A's verify loop found a miss; it waits in its quota preflight while another tab indexes the stem.
+    await reached
+    await (
+      await store(backend, locks, { tabId: "recheck-t" }).openSession({
+        sessionId: "T",
+        stems: requirements([stem]),
+        resolver,
+      })
+    ).close()
+    const corrupted = new Uint8Array(stem.pcm)
+    corrupted[9] ^= 1
+    backend.setBytes(`${STORE_FOLDER}/${finalName(stem)}`, corrupted)
+    let land
+    backend.removeEntryBlocker = ({ name }) =>
+      name === finalName(stem) && land === undefined ? new Promise((resolve) => (land = resolve)) : undefined
+    let settledEarly = false
+    opening.then(() => (settledEarly = !landed))
+    let landed = false
+    releaseEstimate()
+    await until(() => land !== undefined, "the recheck's removal")
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(settledEarly, false, "a hold wrote a final while its own removal of that final was unsettled")
+    if (leg === "aborted") {
+      // The wait for the hold's own removal ends at the open's abort; the lock stays until it lands.
+      landed = true
+      abort.abort(new DOMException("Switched mix", "AbortError"))
+      const aborted = await opening
+      assert.notEqual(aborted, "timed-out", "a hold's wait for its own removal ignored the open's abort")
+      assert.equal(aborted.error?.name, "AbortError")
+      backend.removeEntryBlocker = undefined
+      land()
+      continue
+    }
     backend.removeEntryBlocker = undefined
+    landed = true
     land()
-    continue
-  }
-  backend.removeEntryBlocker = undefined
-  landed = true
-  land()
-  const outcome = await opening
-  assert.notEqual(outcome, "timed-out")
-  assert.equal(outcome.error, undefined)
-  assert.equal((await outcome.value.read(stem.identity)).size, stem.bytes)
-  await outcome.value.close()
+    const outcome = await opening
+    assert.notEqual(outcome, "timed-out")
+    assert.equal(outcome.error, undefined)
+    assert.equal((await outcome.value.read(stem.identity)).size, stem.bytes)
+    await outcome.value.close()
   }
 }
 
@@ -730,38 +730,38 @@ async function aHoldNeverWritesAFinalItIsStillRemoving() {
 // would drop that pin and remove the file that session plays from.
 async function aStalledVerifyKeepsAPinnedStem() {
   for (const leg of ["stall", "read error"]) {
-  const stem = fixture(`stalled-verify-${leg}`, 4096)
-  const backend = new FakeOpfsBackend()
-  const resolver = new MemoryStemResolver(stemMap([stem]))
-  const opfs = store(backend, new FakeLockManager(), { tabId: "stalled-verify", readDeadlineMs: 20 })
-  const pinned = await opfs.openSession({ sessionId: "T", stems: requirements([stem]), resolver })
-  const requests = resolver.requests.length
-  let failures = 1
-  backend.getFileBlocker = ({ name }) => {
-    if (name !== finalName(stem) || failures-- <= 0) return undefined
-    if (leg === "stall") return never()
-    const failure = new Error("transient read failure")
-    failure.name = "NotReadableError"
-    throw failure
-  }
-  const outcome = await settledWithin(
-    opfs.openSession({ sessionId: "A", stems: requirements([stem]), resolver }),
-    500
-  )
-  assert.notEqual(outcome, "timed-out")
-  assert.ok(
-    indexStems(backend)[stem.identity]?.pins.includes("session:stalled-verify:T") &&
-      resolver.requests.length === requests,
-    `a stalled verify demoted a pinned stem (${leg})`
-  )
-  // A stall reports a stall; a hard read error keeps its own class.
-  assert.equal(
-    outcome.error?.code,
-    leg === "stall" ? "storage.read_stalled" : "stem.read.failed",
-    `a refused demotion misreported its read failure (${leg})`
-  )
-  assert.equal((await pinned.read(stem.identity)).size, stem.bytes)
-  await pinned.close()
+    const stem = fixture(`stalled-verify-${leg}`, 4096)
+    const backend = new FakeOpfsBackend()
+    const resolver = new MemoryStemResolver(stemMap([stem]))
+    const opfs = store(backend, new FakeLockManager(), { tabId: "stalled-verify", readDeadlineMs: 20 })
+    const pinned = await opfs.openSession({ sessionId: "T", stems: requirements([stem]), resolver })
+    const requests = resolver.requests.length
+    let failures = 1
+    backend.getFileBlocker = ({ name }) => {
+      if (name !== finalName(stem) || failures-- <= 0) return undefined
+      if (leg === "stall") return never()
+      const failure = new Error("transient read failure")
+      failure.name = "NotReadableError"
+      throw failure
+    }
+    const outcome = await settledWithin(
+      opfs.openSession({ sessionId: "A", stems: requirements([stem]), resolver }),
+      500
+    )
+    assert.notEqual(outcome, "timed-out")
+    assert.ok(
+      indexStems(backend)[stem.identity]?.pins.includes("session:stalled-verify:T") &&
+        resolver.requests.length === requests,
+      `a stalled verify demoted a pinned stem (${leg})`
+    )
+    // A stall reports a stall; a hard read error keeps its own class.
+    assert.equal(
+      outcome.error?.code,
+      leg === "stall" ? "storage.read_stalled" : "stem.read.failed",
+      `a refused demotion misreported its read failure (${leg})`
+    )
+    assert.equal((await pinned.read(stem.identity)).size, stem.bytes)
+    await pinned.close()
   }
 }
 

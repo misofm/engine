@@ -861,11 +861,11 @@ async function runMutationLedger() {
         {
           search:
             "      await this.#demoteUnreadable(stem.identity, hold, undefined, error)\n      return false\n",
-          replace: "      throw error\n",
+          replace: "      throw classifyStorageError(error, \"x\", { code: \"stem.read.failed\" })\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
-      expectedFailure: "a refused demotion misreported its read failure (read error)",
+      expectedFailure: "a stalling unpinned final never healed (open)",
     },
     {
       name: "let the reading session's own pin protect its unreadable stem",

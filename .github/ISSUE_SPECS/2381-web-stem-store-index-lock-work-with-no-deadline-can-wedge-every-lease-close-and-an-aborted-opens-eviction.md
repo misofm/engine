@@ -522,3 +522,13 @@ The two surviving mutants the verdict called pre-existing:
 - that an abort never demotes;
 - the error each refused call reports;
 - that the promote wait ends at the open's abort.
+
+**Verdict: PASS** (Sol). Both documented limitations are accepted:
+- keep-offline pins are lost with a demoted row, as on base;
+- without Web Locks, a crashed tab's dead session pin blocks a heal. This is an accepted limitation of a configuration that is nearly unreachable: OPFS without Web Locks.
+
+Two cosmetic minors are folded into the same branch:
+- The ledger row "let a stalled verify-on-open keep an unpinned final" rethrows with a typed `classifyStorageError(error, "x", { code: "stem.read.failed" })`, which keeps the error class. It goes red at `a stalling unpinned final never healed (open)` again.
+- The bodies of the new leg loops in `aHoldNeverWritesAFinalItIsStillRemoving` and `aStalledVerifyKeepsAPinnedStem` are re-indented, with whitespace-only changes.
+
+After merging `origin/main`, `node scripts/check-stem-store-v1.mjs` and `node scripts/check-stem-store-v1.mjs --self-test --budgets` both pass.
