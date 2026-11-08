@@ -185,30 +185,32 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
     decides differently and no rendered bit moves; both crates' suites (39 tests, the bank and
     rest suites' restores and swaps among them) are green.
 
-**Remaining (not landed in attempt 1; the bundle reached its half-day bound).** Each is
-independent of the rows above and can be split into its own issue.
-- **C2.** (a) Pairing `lane_default_bytes` with `validate_track_state_payload` (and
-  `exchange_lane_defaults`) at the type level, e.g. one `Option<&dyn LaneSwap>` hook: a
-  `PreparedNativeEffectBank` trait change over the eight banking effects, `rack`'s and
-  `effect-contract`'s test banks, and `rack`'s and `live.rs`'s callers. `swap_bank_lanes` runs on
-  the render thread (`Runtime::pack_lanes`), so a returned trait object adds `call_indirect`
-  sites there that the call-graph gate pins; that needs a decision before it is built.
-  (b) Tying the limiter's `history[k]` bitwise to its main-ring word: first prove the relation
-  across both resets, the D7 recovery, the collapse disengage copy, restores and lookahead moves,
-  or a live lane's own snapshot becomes unrestorable (the #2324 failure shape).
-- **C4.** A trait-level `Drained` token. #2326 recorded why it left the trait unchanged: a token in
-  `BankStage::process` touches 41 impls, and every `begin_block` override outside `rack` would
-  have to mint one, so the type would prove nothing. A shape that does prove something (a token
-  only `rack` can mint, handed to the stages it drives) is a design question for this row's owner.
-- **C7.** Removing the whole-path solo's clone of the committed compilation
-  (`TransactionForm::MonitorWhole(CompiledSession)`, `crates/protocol/src/model.rs:1769`) needs
-  `compiled()`'s readers (`control-plane`'s non-in-place branch, the controller's
-  `removed_arm_tags`) to read the store's compilation instead; folding the controller's
-  `(monitor_only, session_committed)` match (`controller.rs:3350`) into the token's form is the
-  same change. Protocol and `control-plane`.
-- **C12.** One generated source for both MSB1 seek-case consumers: a packaging change across the
-  pinned engine artifact (`scripts/build-web-audioworklet.sh`, the SDK's `ARTIFACT_SET`) and the
-  SDK's staged prelude (`sdk/codegen/stage-package.mjs`), as #2282 recorded.
+**Rows not landed: successors and drops** (corrected in the attempt 2 fold, after Sol's verdict).
+- **C2(a), successor #SUCC-C2A.** Pair `lane_default_bytes` with `validate_track_state_payload`
+  and `exchange_lane_defaults` at the type level (one `LaneSwap` hook). Attempt 1's reason was
+  wrong: `swap_bank_lanes` already dispatches through `&mut dyn PreparedNativeEffectBank`, and the
+  call-graph closure stops at `executor.render`, so no new pinned `call_indirect` site appears.
+  The real cost is a trait change across the eight banking effects, their test banks and the
+  callers.
+- **C2(b), successor #SUCC-C2B.** Tie the limiter's `history[k]` bitwise to its main-ring word,
+  once the relation is proven across every writer (resets, D7, the collapse disengage copy,
+  restores, lookahead moves), so no live lane's own snapshot becomes unrestorable (the #2324
+  failure shape).
+- **C7, successor #SUCC-C7.** Fold the whole-path solo's `MonitorWhole(CompiledSession)` clone
+  (`crates/protocol/src/model.rs:1769`) and the controller's second commit decision, the
+  `(monitor_only, session_committed)` match (`controller.rs:3369`), into the token's form.
+- **C15's follow-up, carried in #SUCC-C2A's spec.** With the reset's write gone, the fader's
+  `ramp[c].remaining` is pure per-block scratch, rebuilt at the top of every ramping block in
+  `process_plane` (`crates/builtins/src/lib.rs:3704-3710`); it should become a local there.
+- **C4, dropped.** `rack`'s `run_with_input`, the one render driver of a bank chain, already
+  requires `Drained` (`crates/rack/src/drain.rs`; `render_slots` and `skip_block` take it by
+  value, `crates/rack/src/lib.rs:4609`, `:4714`), and no direct driver of a stage exists. A
+  trait-level token would be minted by every `begin_block` override and prove nothing (#2326).
+  Reopen if a second driver appears.
+- **C12, dropped.** #2282's shared case table, `sdk/test/msb1-consumer-cases.mjs`, already runs
+  every seek case against both consumers and so guards their drift, and the two copies differ on
+  purpose (the prelude cannot allocate in `process()`). A generated shared source would buy no
+  guard the table does not give, at the cost of a packaging change to the pinned artifact.
 
 **Gates (attempt 1 head, one crate at a time, `-j 4`).**
 - `cargo test --locked`: `protocol` (all targets), `control-plane --features test-support` (102),
@@ -230,3 +232,45 @@ independent of the rows above and can be split into its own issue.
   closure (`render` 11 sites over 5 members, `meter_poll` 2). Not run here: the Playwright
   Chromium and WebKit legs, which need a PulseAudio sink this host lacks; C14 changes only the
   main-realm host's input checks, which the hermetic suite drives.
+
+### Verdict on attempt 1 (Sol): FAIL, one MAJOR
+
+Every landed row except C9 was judged sound.
+1. **MAJOR, C9.** `materialize_prepared` never checked the token's lease, though
+   `check_prepared_structural` refuses `WrongController`. Sol's scratch test: two controllers at
+   the same revision with different models; the foreign `materialize_prepared` returns `Ok`, the
+   token now carries the foreign model, and `owner.commit_prepared_structural` commits it
+   (`session_id` becomes `"foreign"`). Attempt 1's test reached the store refusal only through
+   such a foreign controller, so its trigger becomes unreachable once the lease is checked.
+2. **MINOR, C3.** The doc and test-value text were wrong about the two silence clocks: the rest
+   scan (`channel_rest_lanes`) does not read them, and `silence_advance` would turn a `-0.0`
+   positive. Refusing `-0.0` there only rejects a word the engine never writes.
+3. **MINOR, C1.** `LimiterCore::lanes_at_rest` should say why it keeps its own debug check rather
+   than `trusted`.
+4. **Remaining rows.** C4 and C12 are dropped, C2(a)'s reason is corrected, C15 gains a
+   follow-up, and C2(a), C2(b) and C7 get stateless successor specs.
+
+### Attempt 2 (Terra): the fold, on the same branch
+
+- **C9.** `materialize_prepared` now runs `check_prepared_structural` first (issued, current,
+  revision) and returns the new typed `MaterializePreparedError::Token(PreparedCommandCommitError)`
+  before touching the token; the store's refusal is `MaterializePreparedError::Store`. Its one
+  production caller (`control-plane` `commit_live`) still maps any error to `Internal`. The
+  attempt-1 test is replaced by
+  `controller::tests::another_controllers_materialization_is_refused_and_the_owner_keeps_its_model`:
+  a foreign controller at the same revision whose model has another `session_id` is refused with
+  `Token(WrongController)`, the token stays in place, and the owner's materialization and commit
+  install the owner's own model. Red on base's behaviour (the token check skipped, and the
+  refusal assertion dropped so the commit runs): `assertion left == right failed: the owner kept
+  its own session, left: StableId("foreign"), right: StableId("demo.session")` at
+  `controller/tests.rs:1890`. With the check skipped but the refusal assertion kept, it is red at
+  `:1882`. The store half of the claim (a refused materialization leaves the transaction as it
+  was) is now structural, not tested: `SessionStore::materialize` takes the transaction `&mut`
+  and assigns it only after `?` passed, and through the controller a current token can no longer
+  meet a store refusal, so one test holds the row's one reachable claim.
+- **C3.** `integral_within`'s doc (both crates) and both tests' test-value text now say that a
+  `-0.0` countdown would never step and never read at rest, while a `-0.0` silence clock is
+  refused only because the engine never writes one.
+- **C1.** `LimiterCore::lanes_at_rest`'s doc says it keeps its own check because it believes
+  `silent_claim_stands` (the claim with the ramp and glide legs), which `trusted` would not check.
+- **Remaining rows.** Recorded above; the three successor specs are written for root to file.
