@@ -173,9 +173,10 @@ Folded on the same branch, after merging origin/main:
    in the issue comment. Both probes were rerun on the folded tree and were byte-identical to the base's
    (the same two digests).
 
-Gates on the merged, folded tree: `cargo test --locked -j 4` for `protocol` (`--all-targets
---features test-support`) and `control-plane` (`--features test-support,protocol/test-support`),
-and `cargo clippy --locked -p protocol -p control-plane -p host-core --all-targets --all-features --
--D warnings`. `cargo fmt --check` and `scripts/check-workspace-policy.sh` also ran. Results are
-below.
-
+Gates on the merged, folded tree (`082522049`), all green or clean:
+- `cargo test --locked -j 4` for `protocol` (`--all-targets --features test-support`) and
+  `control-plane` (`--features test-support,protocol/test-support`).
+- `cargo clippy --locked -p protocol -p control-plane -p host-core -p capi -p host-web --all-targets
+  --all-features -- -D warnings`.
+- `cargo fmt --check`, `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p protocol`, and
+  `scripts/check-workspace-policy.sh`.
