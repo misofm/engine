@@ -63,3 +63,55 @@ Base `9c391cb46`; branch `codex/issue-2372-close-waits-for-pin-release`.
 - `gateCloseWaitsForEveryAbortedOpensLease`: red if `gate.close()` resolves before an aborted open has closed its granted lease. Its second leg is also red if `close()` waits only for the newest open and not for an earlier superseded one. The #2266 matrix awaits `env.closing` but checks pins only after the aborted open itself has settled, so it cannot see this order.
 
 **Follow-up (not filed).** An aborted `openSession` that joined another caller's in-flight ingest of the same stem waits for that ingest without its own signal (`opfs-store.js` `#ensureIngested`, `if (existing !== undefined) return existing`). With this fix, `gate.close()` waits for that too. That case needs a second caller on the same `OpfsStemStore` instance. With one gate per store, every ingest the gate's opens joined belongs to an open that is itself aborted, so the wait stays bounded by the abort.
+
+**Verdict: FAIL** (Sol, one MAJOR). `gate.close()` now waits for every in-flight open, but `openSession` has two waits that ignore the open's signal, and neither of them holds a lease. A wedged one makes `close()` hang, where base resolved:
+- (a) `await this.open()` (`opfs-store.js` 153): the store open, and `getDirectory`/`getDirectoryHandle` have no deadline;
+- (b) the joined-ingest `return existing` (`opfs-store.js` 306).
+
+The class comment at `session-gate.js` 14-15 overclaimed. MINORs:
+- The sync `open()` wrapper's `opened.catch(() => {})` handled the caller's own promise, so a dropped failing `gate.open()` no longer raised `unhandledrejection`.
+- Dropping the trailing `await closing` left the suite green, so it was not an equivalent mutant.
+- `docs/STEM_STORE_V1.md` did not say that `close()` waits for aborted opens, nor why that wait is bounded.
+
+The two-browser gate is not applicable: the stem-store suite runs only in Node against fakes, as the qualification `stem-store` step runs it.
+
+### Attempt 2 (Terra, 2026-11-08)
+**Fix.**
+- `openSession` waits for the store open with `abortable(this.open(), options.signal)`. The memoized open keeps running for other callers, and `abortable` attaches to it, so its rejection is never unhandled.
+- A joiner returns `abortable(existing, options.signal)`.
+- The audit for other signal-less, deadline-free waits found one more of the same kind: `#preflight`'s `storage.estimate()`. It now takes the open's signal the same way. An abort there falls into the existing catch, and the ingest's own signal check refuses the open next.
+- What an aborted open still waits through is the store's index work: index reads, pin writes, eviction and lease closes. That is the work base `close()` already awaited for the current lease, and its index reads and writes are deadlined. The class comment and `docs/STEM_STORE_V1.md` now say exactly this, and why the wait in `close()` is bounded.
+- `open()` is `async` again and tracks its settlement on a private deferred, which its outermost `finally` resolves. The caller's promise is left alone.
+- `docs/STEM_STORE_V1.md` states the memoized rejection: a failed release rejects that `close()` and every later one, and `gate.close()` rejects with it.
+
+**Red on the attempt-1 code** (`e4b1f3b4b` store and gate, each test or leg run alone):
+- `gateCloseNeverWaitsOnWorkThatHoldsNoLease`, three legs:
+  - `gate.close() waited on an aborted open's wedged getDirectory`
+  - `... wedged estimate`
+  - `... joined ingest`. That leg first checks that the gate's open is not queued on the ingest's stem lock, so it really joined.
+- `aDroppedFailedOpenStaysUnhandled`: `timed out waiting for the dropped open's unhandled rejection`.
+- `aFailedPinReleaseRejectsEveryClose` is green on attempt 1, because attempt 1 already had both behaviours. It is the guard for the trailing `await closing` and for the memoized rejection; see the mutations.
+
+**Mutations of the fix** (by hand, and four of them as new ledger entries):
+- `await this.open()` without `abortable`: red, `wedged getDirectory`.
+- The estimate without `abortable`: red, `wedged estimate`.
+- A plain `return existing`: red, `joined ingest`.
+- Drop the trailing `await closing`: red, `gate.close() hid a failed pin release`.
+- Track the settlement on the caller's promise (attempt 1's wrapper): red, `timed out waiting for the dropped open's unhandled rejection`. This one is by hand only. No local text edit of the `async open()` form reproduces it without also dropping the tracking, which would turn an earlier test red first.
+- Equivalent, by reason: dropping `#settling.delete` only retains settled promises, so it is a memory leak with no observable effect. Dropping `abortable`'s already-aborted branch only delays the refusal to the next signal check, since every later wait in `openSession` checks the same signal.
+- The existing ledger entry "content-key -> per-session store directory" anchored on `await this.open()`, so it now anchors on the new line, and it is still `RED` at its target.
+
+**Test value.**
+- `gateCloseNeverWaitsOnWorkThatHoldsNoLease`: red if an aborted session open keeps waiting on work that holds no lease and has no deadline: the store open, the quota estimate, or another caller's ingest it joined. That makes `gate.close()` hang. No other test wedges any of the three.
+- `aFailedPinReleaseRejectsEveryClose`: red if `gate.close()` swallows a failed release of the current lease, or if a repeat `lease.close()` resolves after a failed release. No other test fails a release.
+- `aDroppedFailedOpenStaysUnhandled`: red if the gate's settlement tracking marks the caller's promise handled, which hides a dropped open's failure. No other test watches `unhandledRejection`.
+
+**On base `9c391cb46`.** `aFailedPinReleaseRejectsEveryClose` is red: `Missing expected rejection: a repeat close() reported a release that failed`. A repeat close resolves at once after a failed release.
+
+**Green** at the attempt-2 commit:
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS. Every ledger entry is `RED` at its target, including the seven #2372 entries.
+- `stem-pump-v1.mjs`: 5 serial runs and 8 parallel runs, all PASS.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- No Rust and no render path changed. The two-browser gate is not applicable, per the attempt-1 verdict.

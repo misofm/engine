@@ -1001,6 +1001,104 @@ async function gateCloseWaitsForEveryAbortedOpensLease() {
   }
 }
 
+// Issue #2372: gate.close() waits for its aborted opens, so an aborted open must stop waiting on work
+// that holds no lease and has no deadline of its own: the store's first open (here a getDirectory that
+// never settles), the quota estimate, and another caller's ingest that the open joined.
+async function gateCloseNeverWaitsOnWorkThatHoldsNoLease() {
+  const bytes = pcm16([9, -9, 3, -3], 1)
+  const stemIdentity = identity(bytes)
+  const stems = [{ identity: stemIdentity, bytes: bytes.byteLength }]
+  const wedged = () => new Promise(() => {})
+  for (const leg of ["wedged getDirectory", "wedged estimate", "joined ingest"]) {
+    const backend = new FakeOpfsBackend()
+    const locks = new FakeLockManager()
+    let reached = false
+    const storage = backend.storage()
+    if (leg === "wedged getDirectory") {
+      storage.getDirectory = () => ((reached = true), wedged())
+    } else if (leg === "wedged estimate") {
+      storage.estimate = () => ((reached = true), wedged())
+    }
+    const store = new OpfsStemStore({ storage, locks, tabId: "no-lease" })
+    let resolves = 0
+    // Streams nothing until its caller aborts.
+    const resolver = {
+      resolve(_identity, { signal }) {
+        resolves += 1
+        return new Promise((_resolve, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+        )
+      },
+    }
+    const direct = new AbortController()
+    const directOpen =
+      leg === "joined ingest"
+        ? settledWithin(store.openSession({ sessionId: "direct", stems, resolver, signal: direct.signal }), 1_000)
+        : undefined
+    const gate = new StemSessionGate(store, resolver)
+    const opening = settledWithin(gate.open({ sessionId: "gate", stems, resume() {} }), 1_000)
+    if (leg === "joined ingest") {
+      await until(() => resolves === 1, "the direct open's ingest")
+      for (let step = 0; step < 5; step += 1) await tick()
+      // The gate's open is not queued behind the ingest's stem lock, so it joined the ingest.
+      assert.equal((await locks.query()).pending.length, 0, "the gate's open never joined the ingest")
+      assert.equal(resolves, 1)
+    } else {
+      await until(() => reached, `the ${leg}`)
+    }
+    const closed = await settledWithin(gate.close(), 500)
+    assert.notEqual(closed, "timed-out", `gate.close() waited on an aborted open's ${leg}`)
+    assert.equal((await opening).error?.name, "AbortError", leg)
+    direct.abort(new DOMException("Done", "AbortError"))
+    if (directOpen !== undefined) assert.notEqual(await directOpen, "timed-out", leg)
+  }
+}
+
+// Issue #2372: a lease close that fails rejects gate.close(), and every later close() of that lease
+// shares the same rejection rather than reporting a release that never happened.
+async function aFailedPinReleaseRejectsEveryClose() {
+  const bytes = pcm16([6, -6, 2, -2], 1)
+  const stemIdentity = identity(bytes)
+  let failIndexWrites = false
+  const backend = new FakeOpfsBackend({
+    writeBlocker({ fileName }) {
+      if (failIndexWrites && fileName === "index.json") throw new Error("index write failed")
+    },
+  })
+  const gate = new StemSessionGate(
+    new OpfsStemStore({ storage: backend.storage(), locks: new FakeLockManager(), tabId: "release-fails" }),
+    new MemoryStemResolver({ [stemIdentity]: bytes })
+  )
+  const lease = await gate.open({
+    sessionId: "x",
+    stems: [{ identity: stemIdentity, bytes: bytes.byteLength }],
+    resume() {},
+  })
+  failIndexWrites = true
+  await assert.rejects(gate.close(), /index write failed/, "gate.close() hid a failed pin release")
+  await assert.rejects(lease.close(), /index write failed/, "a repeat close() reported a release that failed")
+}
+
+// Issue #2372: the gate tracks its opens on a private promise, so an open whose caller drops the
+// promise still surfaces its rejection as unhandled.
+async function aDroppedFailedOpenStaysUnhandled() {
+  const gate = new StemSessionGate(
+    new OpfsStemStore({ storage: {}, locks: new FakeLockManager() }),
+    new MemoryStemResolver({})
+  )
+  const unhandled = []
+  const record = (_reason, promise) => unhandled.push(promise)
+  process.on("unhandledRejection", record)
+  let dropped
+  try {
+    dropped = gate.open({ sessionId: "dropped", stems: [], resume() {} })
+    await until(() => unhandled.includes(dropped), "the dropped open's unhandled rejection", 50)
+  } finally {
+    // Handling it now would only add a late-handling warning; the event is the claim.
+    process.off("unhandledRejection", record)
+  }
+}
+
 async function refusedGateNeverBecomesInteractive() {
   const events = []
   let resumed = false
@@ -1555,6 +1653,9 @@ await closeNeverOverwritesALaterOpen()
 await closeReachesTheNewestOpen()
 await everyLeaseCloseWaitsForThePinRelease()
 await gateCloseWaitsForEveryAbortedOpensLease()
+await gateCloseNeverWaitsOnWorkThatHoldsNoLease()
+await aFailedPinReleaseRejectsEveryClose()
+await aDroppedFailedOpenStaysUnhandled()
 await refusedGateNeverBecomesInteractive()
 await rejectedResumeDoesNotLeakPins()
 await selfDrivingFillsWithoutPumpMessages()

@@ -12,12 +12,16 @@ import { StemStoreError } from "./opfs-store.js"
  * open can never commit, and its store lease (with its session pin lock) is
  * closed on the way out instead of blocking a newer open of the same session.
  * The wait for `resume()` ends at that abort too, and the store open takes the
- * same signal; only the bounded lease closes are awaited to completion.
+ * same signal, so every wait of an aborted open ends at the abort except the
+ * store's own index work (index reads, pin writes, eviction and lease closes).
+ * That is the work a lease close does, and its index reads and writes are
+ * deadlined.
  *
  * `close()` resolves only once every open in flight when it was called has
  * settled, and an open settles only after it has closed every lease it took
  * out of the gate or was granted, so a resolved `close()` has released every
- * pin those opens held (#2372).
+ * pin those opens held (#2372). Every one of those opens is aborted by then,
+ * so that wait is bounded the way waiting for a lease close is.
  */
 export class StemSessionGate {
   #store
@@ -45,12 +49,18 @@ export class StemSessionGate {
   /**
    * @param {{sessionId: string, stems: Array<{identity: string, bytes: number}>, resume: () => unknown, onProgress?: (event: object) => void, signal?: AbortSignal}} options
    */
-  open(options) {
-    const opened = this.#open(options)
-    const settled = opened.catch(() => {})
+  async open(options) {
+    // Settlement is tracked on a private promise, never on the caller's, so a
+    // rejected open the caller drops is still reported as unhandled.
+    let settle
+    const settled = new Promise((resolve) => (settle = resolve))
     this.#settling.add(settled)
-    void settled.then(() => this.#settling.delete(settled))
-    return opened
+    try {
+      return await this.#open(options)
+    } finally {
+      this.#settling.delete(settled)
+      settle()
+    }
   }
 
   async #open(options) {

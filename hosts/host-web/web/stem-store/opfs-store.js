@@ -150,7 +150,9 @@ export class OpfsStemStore {
    * @param {{sessionId: string, stems: Array<{identity: string, bytes: number}>, resolver: {resolve: Function}, signal?: AbortSignal, onProgress?: (event: object) => void}} options
    */
   async openSession(options) {
-    await this.open()
+    // The store open is shared and has no deadline of its own, so an aborted
+    // session open stops waiting for it (the open itself runs on).
+    await abortable(this.open(), options.signal)
     const sessionId = nonemptyText(options.sessionId, "sessionId")
     if (typeof options.resolver?.resolve !== "function") {
       throw new TypeError("openSession needs a StemResolver")
@@ -167,7 +169,7 @@ export class OpfsStemStore {
       if (!present) missing.push(stem)
     }
 
-    await this.#preflight(missing, protectedIdentities)
+    await this.#preflight(missing, protectedIdentities, options.signal)
 
     const ingestAbort = new AbortController()
     const removeParentAbort = forwardAbort(options.signal, ingestAbort)
@@ -303,7 +305,9 @@ export class OpfsStemStore {
 
   async #ensureIngested(stem, resolver, options) {
     const existing = this.#inFlight.get(stem.identity)
-    if (existing !== undefined) return existing
+    // A joined ingest belongs to another caller and runs on its signal, so a
+    // joiner stops waiting for it at its own abort.
+    if (existing !== undefined) return abortable(existing, options.signal)
     const promise = this.#withStemLock(stem.identity, options.signal, async () => {
       if (await this.#verifyIndexed(stem, options.onProgress, options.signal)) return
       let lastError
@@ -770,7 +774,7 @@ export class OpfsStemStore {
     })
   }
 
-  async #preflight(missing, protectedIdentities) {
+  async #preflight(missing, protectedIdentities, signal) {
     if (missing.length === 0 || typeof this.#storage?.estimate !== "function") return
     const requiredBytes = checkedByteSum(
       missing.map((stem) => stem.bytes),
@@ -778,8 +782,10 @@ export class OpfsStemStore {
     )
     let estimate
     try {
-      estimate = await this.#storage.estimate()
+      // No deadline of its own either, so an aborted open stops waiting.
+      estimate = await abortable(this.#storage.estimate(), signal)
     } catch {
+      // An abort lands here too; the ingest's own signal check refuses it next.
       return
     }
     if (!finiteNonnegative(estimate.quota) || !finiteNonnegative(estimate.usage)) return
@@ -1485,6 +1491,19 @@ function throwIfAborted(signal) {
   if (signal?.aborted) {
     throw signal.reason ?? new DOMException("Stem operation aborted", "AbortError")
   }
+}
+
+/** Settles as `promise` does, or rejects once `signal` aborts; `promise` itself runs on. */
+function abortable(promise, signal) {
+  if (signal === undefined) return promise
+  let abort
+  return new Promise((resolve, reject) => {
+    abort = () =>
+      reject(signal.reason ?? new DOMException("Stem operation aborted", "AbortError"))
+    promise.then(resolve, reject)
+    if (signal.aborted) abort()
+    else signal.addEventListener("abort", abort, { once: true })
+  }).finally(() => signal.removeEventListener("abort", abort))
 }
 
 function monotonicNow() {

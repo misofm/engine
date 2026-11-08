@@ -154,11 +154,22 @@ rejects with the abort reason. Its waits for `resume()` and for the session pin
 lock end at the same abort, so an aborted open never keeps its lease for a
 resume that does not settle, nor waits on another holder of that pin. `close()`
 reports `idle` at once, and an open started while the old lease closes owns the
-state from then on (#2266). A resolved close means a released pin: every
-`StemSessionLease.close()` call shares the first call's release, and
-`StemSessionGate.close()` resolves only after every open it found in flight,
-including one a newer open had already superseded, has closed the leases it
-held (#2372).
+state from then on (#2266).
+
+A resolved close means a released pin (#2372). Every `StemSessionLease.close()`
+call shares the first call's release, so a release that fails rejects that
+call and every later one: a lease never reports a release that did not happen,
+and `StemSessionGate.close()` rejects with the same error when the current
+lease's release fails. `StemSessionGate.close()` waits for every open it finds
+in flight to settle, including one a newer open had already superseded, and an
+open settles only after it has closed every lease it held. That wait is
+bounded, because every such open is aborted by then. An aborted open stops
+waiting at the abort for everything except the store's own index work (index
+reads, pin writes, eviction and lease closes), whose index reads and writes are
+deadlined. In particular it stops waiting for the store's first open, the quota
+estimate, and another caller's ingest that it had joined. None of these holds a
+lease; the first two have no deadline, and a joined ingest can run for a whole
+download.
 
 The PCM pump is a dedicated module Worker. MSB1 ring descriptors cross the
 Worker port after construction; they are never processor options. The Worker
