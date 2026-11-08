@@ -1559,6 +1559,32 @@ async function runMutationLedger() {
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a wedged integrity removal failed with the wrong error",
     },
+    {
+      name: "fail an open on a rejected fallback-final removal",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      await this.#removeDemoted(stem.identity, hold)\n      throw new StemStoreError(",
+          replace: "      await this.#removeFinal(stem.identity, hold, (removal) => withDeadline(removal, this.#readDeadlineMs, \"storage.remove_stalled\", \"x\").catch((error) => { if (!(error instanceof StemStoreError)) throw error }))\n      throw new StemStoreError(",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a wedged integrity removal rejected failed the open",
+    },
+    {
+      name: "give a retry's wait for fenced steps no signal",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        if (attempt > 0) {\n          // A step of this hold still in flight could land on the staged file or the final the retry\n          // writes, and the retry's promote would wait on it with no deadline. So the retry runs only\n          // once every fenced step has settled; a step that rejected has settled (#2397).\n          await withDeadline(\n            settled(hold.fences),\n            this.#readDeadlineMs,\n            \"storage.write_stalled\",\n            `An earlier attempt at ${stem.identity} left a step unsettled`,\n            options.signal\n          )\n        }\n",
+          replace: "        if (attempt > 0) {\n          // A step of this hold still in flight could land on the staged file or the final the retry\n          // writes, and the retry's promote would wait on it with no deadline. So the retry runs only\n          // once every fenced step has settled; a step that rejected has settled (#2397).\n          await withDeadline(\n            settled(hold.fences),\n            this.#readDeadlineMs,\n            \"storage.write_stalled\",\n            `An earlier attempt at ${stem.identity} left a step unsettled`\n          )\n        }\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a wedged staging abort (integrity, aborted) failed with the wrong error",
+    },
     // Issue #278's opt-in Worker cadence. Two mutations, because "off by default" and "stop
     // interrupts" are two claims and one of them staying green would hide the other. The first is
     // the compatibility claim in particular: nothing about the shipped worker changed for a host

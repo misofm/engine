@@ -1605,6 +1605,8 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     { leg: "staging close", code: "storage.write_stalled", fenced: true },
     { leg: "staging abort", code: "stem.resolve.failed", fenced: true },
     { leg: "staging abort (integrity)", code: "storage.write_stalled", fenced: true },
+    // The open is aborted while the staging abort is wedged, so the retry's wait must refuse at once.
+    { leg: "staging abort (integrity, aborted)", name: "AbortError", fenced: true },
     { leg: "staging abort rejected (integrity)", code: undefined, fenced: false },
     // Keep first of the cleanup legs: the ledger's staging-cleanup entries name it as their target.
     { leg: "staging cleanup (integrity)", code: "storage.write_stalled", fenced: true },
@@ -1617,8 +1619,9 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     { leg: "fallback close", moveSupported: false, code: "storage.write_stalled", fenced: true },
     { leg: "quota removal", code: "storage.insufficient", fenced: true },
     { leg: "integrity removal", moveSupported: false, code: "storage.write_stalled", fenced: true },
+    { leg: "integrity removal rejected", moveSupported: false, code: undefined, fenced: false },
   ]
-  for (const { leg, call, code, fenced, moveSupported } of legs) {
+  for (const { leg, call, code, name, fenced, moveSupported } of legs) {
     const stem = fixture(`stem-lock-step-${leg}`, 4096)
     const final = finalName(stem)
     const staged = `stem-lock-step-${stem.identity.slice("blake3:".length)}`
@@ -1631,7 +1634,10 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
       readDeadlineMs: 20,
       hooks: {
         afterFallbackCopy() {
-          if (corrupt) backend.setBytes(`${STORE_FOLDER}/${final}`, encoder.encode("corrupt"))
+          if (!corrupt) return
+          backend.setBytes(`${STORE_FOLDER}/${final}`, encoder.encode("corrupt"))
+          // Only the first copy is corrupt, so a retry can open.
+          if (leg === "integrity removal rejected") corrupt = false
         },
       },
     })
@@ -1642,8 +1648,10 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     }
     let reached = false
     let unwedge
+    const abort = new AbortController()
     const wedge = () => {
       reached = true
+      if (leg === "staging abort (integrity, aborted)") abort.abort(new DOMException("Switched mix", "AbortError"))
       return new Promise((resolve) => (unwedge = resolve))
     }
     const on = (target) => ({ fileName }) => (fileName === target && !reached ? wedge() : undefined)
@@ -1686,7 +1694,7 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
         },
       }
       backend.abortBlocker = on(staged)
-    } else if (leg === "staging abort (integrity)" || leg === "staging abort rejected (integrity)") {
+    } else if (leg.startsWith("staging abort (integrity") || leg === "staging abort rejected (integrity)") {
       // The first delivery overruns the declaration; a retry would get the right bytes.
       let resolves = 0
       resolver = {
@@ -1696,7 +1704,7 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
           return { stream: new ReadableStream({ start: (controller) => (controller.enqueue(bytes), controller.close()) }) }
         },
       }
-      if (leg === "staging abort (integrity)") {
+      if (leg !== "staging abort rejected (integrity)") {
         backend.abortBlocker = on(staged)
       } else {
         // The abort rejects at once: nothing is left in flight, so the retry runs, as on base.
@@ -1716,18 +1724,28 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
       } else {
         corrupt = true
       }
-      backend.removeEntryBlocker = ({ name }) => (name === final && !reached ? wedge() : undefined)
+      backend.removeEntryBlocker = ({ name }) => {
+        if (name !== final || reached) return undefined
+        if (leg !== "integrity removal rejected") return wedge()
+        // The removal rejects at once: it has settled, so the retry runs.
+        reached = true
+        throw Object.assign(new Error("removal refused"), { name: "InvalidModificationError" })
+      }
     }
     const outcome = await settledWithin(
       call === "verify"
         ? opfs.verify(stem.identity)
-        : opfs.openSession({ sessionId: "A", stems: requirements([stem]), resolver }),
+        : opfs.openSession({ sessionId: "A", stems: requirements([stem]), resolver, signal: abort.signal }),
       500
     )
     assert.ok(reached, `the ${leg} was never wedged`)
     assert.notEqual(outcome, "timed-out", `a stem-lock hold waited on a wedged ${leg} past its deadline`)
-    assert.equal(outcome.error?.code, code, `a wedged ${leg} failed with the wrong error`)
-    if (code === undefined) assert.equal(outcome.error, undefined, `a wedged ${leg} failed the open`)
+    if (name !== undefined) {
+      assert.equal(outcome.error?.name, name, `a wedged ${leg} failed with the wrong error`)
+    } else {
+      assert.equal(outcome.error?.code, code, `a wedged ${leg} failed with the wrong error`)
+      if (code === undefined) assert.equal(outcome.error, undefined, `a wedged ${leg} failed the open`)
+    }
     const stemLock = `${STORE_LOCKS}:ingest:${stem.identity.slice("blake3:".length)}`
     const isHeld = async () => (await locks.query()).held.some((lock) => lock.name === stemLock)
     for (let step = 0; step < 5; step += 1) await tick()
