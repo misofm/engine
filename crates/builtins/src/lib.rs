@@ -7256,8 +7256,8 @@ fn zero(value: f32) -> f32 {
 pub mod test_support {
     use super::{
         BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinMatrixBank, BuiltinParameterError,
-        FaderMuteRampBuiltins, FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2,
-        MatrixBuiltins, MatrixStageKernel, SvfSection, lane_read,
+        FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2, MatrixBuiltins,
+        MatrixStageKernel, SvfSection, lane_read,
     };
 
     /// How many design bounds (#1329 D4) preparation has computed on the calling thread: one
