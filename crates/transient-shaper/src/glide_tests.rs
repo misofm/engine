@@ -674,8 +674,8 @@ fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
                 let lanes = LinkLanes::<L>::new(&modes[..L::WIDTH]);
                 let gather = || {
                     [
-                        LinkRamp::<L>::gather(&ramps, 0),
-                        LinkRamp::<L>::gather(&ramps, 1),
+                        gather_link_weight::<L, 8>(&ramps, 0),
+                        gather_link_weight::<L, 8>(&ramps, 1),
                     ]
                 };
                 let (mut weights_left, mut weights_right) = (gather(), gather());
@@ -732,13 +732,8 @@ fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
                         }
                     }
                 }
-                let mut remaining = [0.0_f32; 8];
                 for weight in weights_left.iter().chain(&weights_right) {
-                    weight.remaining.store(&mut remaining);
-                    assert!(
-                        remaining[..L::WIDTH].iter().all(|word| *word == 0.0),
-                        "the glide arrived"
-                    );
+                    assert!(!L::mask_any(weight.in_flight()), "the glide arrived");
                 }
             }
         }

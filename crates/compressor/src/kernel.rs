@@ -8,9 +8,9 @@ use effect_contract::LinkMode;
 use effect_runtime::bank::positive_zero_lanes;
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
 use effect_runtime::envelope::rms_follow;
-use effect_runtime::ramp::LinearRamp;
+use effect_runtime::ramp::{LinearRamp, RampLanes};
 use lane::Lane;
-use lane::kernels::{gain_mix_step, ramp_toward};
+use lane::kernels::gain_mix_step;
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 use crate::design::{
@@ -657,16 +657,16 @@ impl<L: Lane, const DUAL_MONO: bool> DetectLaw<L> for Prepared<DUAL_MONO> {
 /// `link` is `w_link`, `avg` is `w_avg`.
 #[derive(Clone, Copy)]
 struct LinkWeights<L: Lane> {
-    link: RampVec<L>,
-    avg: RampVec<L>,
+    link: RampLanes<L>,
+    avg: RampLanes<L>,
 }
 
 impl<L: Lane> LinkWeights<L> {
     #[inline(always)]
     fn gather(channel: &Channel<L>) -> Self {
         Self {
-            link: RampVec::gather(&channel.link_ramps[0]),
-            avg: RampVec::gather(&channel.link_ramps[1]),
+            link: RampLanes::gather(&channel.link_ramps[0]),
+            avg: RampLanes::gather(&channel.link_ramps[1]),
         }
     }
 
@@ -685,7 +685,7 @@ impl<L: Lane> LinkWeights<L> {
         let all = zero.eq(zero);
         self.link.advance_where(all);
         self.avg.advance_where(all);
-        L::mask_or(self.link.remaining.gt(zero), self.avg.remaining.gt(zero))
+        L::mask_or(self.link.in_flight(), self.avg.in_flight())
     }
 
     /// The D3 blend of one channel: `combined = max + w_avg * (avg - max)`,
@@ -693,8 +693,8 @@ impl<L: Lane> LinkWeights<L> {
     /// no fused multiply-add, and the scalar and vector lanes must agree).
     #[inline(always)]
     fn blend(&self, own: L, maximum: L, average: L) -> L {
-        let combined = maximum.add(self.avg.current.mul(average.sub(maximum)));
-        own.add(self.link.current.mul(combined.sub(own)))
+        let combined = maximum.add(self.avg.current().mul(average.sub(maximum)));
+        own.add(self.link.current().mul(combined.sub(own)))
     }
 }
 
@@ -1283,79 +1283,6 @@ const MIX_BIT: u8 = 1 << 6;
 const RATE_PARAMETER: [usize; 2] = [3, 4];
 const RATE_WORD: [usize; 2] = [COEF_ATTACK, COEF_RELEASE];
 
-/// One parameter's (or one rate coefficient's) `LinearRamp` on every lane, as lane vectors.
-///
-/// `remaining` is carried as `f32`. It is an integer no greater than [`SMOOTHING_SAMPLES`] (a
-/// restored payload is validated to that bound), so the conversion both ways is exact and the
-/// compares below are integer compares.
-#[derive(Clone, Copy)]
-struct RampVec<L: Lane> {
-    current: L,
-    target: L,
-    step: L,
-    remaining: L,
-}
-
-impl<L: Lane> RampVec<L> {
-    #[inline(always)]
-    fn gather(ramps: &[LinearRamp; MAX_WIDTH]) -> Self {
-        let mut current = [0.0_f32; MAX_WIDTH];
-        let mut target = [0.0_f32; MAX_WIDTH];
-        let mut step = [0.0_f32; MAX_WIDTH];
-        let mut remaining = [0.0_f32; MAX_WIDTH];
-        for (lane, ramp) in ramps.iter().enumerate().take(L::WIDTH) {
-            current[lane] = ramp.current();
-            target[lane] = ramp.target();
-            step[lane] = ramp.step();
-            remaining[lane] = ramp.remaining() as f32;
-        }
-        Self {
-            current: L::load(&current),
-            target: L::load(&target),
-            step: L::load(&step),
-            remaining: L::load(&remaining),
-        }
-    }
-
-    /// Writes back what an advance can change: `current`, `step` and `remaining`.
-    #[inline(always)]
-    fn scatter(self, ramps: &mut [LinearRamp; MAX_WIDTH]) {
-        let mut current = [0.0_f32; MAX_WIDTH];
-        let mut step = [0.0_f32; MAX_WIDTH];
-        let mut remaining = [0.0_f32; MAX_WIDTH];
-        self.current.store(&mut current);
-        self.step.store(&mut step);
-        self.remaining.store(&mut remaining);
-        for (lane, ramp) in ramps.iter_mut().enumerate().take(L::WIDTH) {
-            ramp.record_advance(current[lane], step[lane], remaining[lane] as u32);
-        }
-    }
-
-    /// `LinearRamp::next_value` on the lanes of `gate`, as selects: `remaining == 0` leaves every
-    /// word as it is (at rest: `current` is its `target`, issue #2368),
-    /// `remaining == 1` assigns the target and clears the step, and otherwise the word advances
-    /// once by `ramp_toward(current, step, target)` (the step added, held inside `[min(current,
-    /// target), max(current, target)]` so it never passes its target, issue #1409) and `remaining`
-    /// counts down. Lanes outside `gate` are untouched. Returns the lanes that were in flight,
-    /// which are the lanes `next_value` would have advanced.
-    #[inline(always)]
-    fn advance_where(&mut self, gate: L::Mask) -> L::Mask {
-        let zero = L::zero();
-        let one = L::splat(1.0);
-        let moving = L::mask_and(gate, self.remaining.gt(zero));
-        let last = L::mask_and(moving, self.remaining.eq(one));
-        let next = L::select(
-            last,
-            self.target,
-            ramp_toward(self.current, self.step, self.target),
-        );
-        self.current = L::select(moving, next, self.current);
-        self.step = L::select(last, zero, self.step);
-        self.remaining = L::select(moving, self.remaining.sub(one), self.remaining);
-        moving
-    }
-}
-
 /// One channel's ramps and coefficient words as lane vectors, for one ramping prefix.
 ///
 /// `Channel::advance_ramps` per frame, lane-wide: gathered once per block, advanced once per
@@ -1365,9 +1292,9 @@ impl<L: Lane> RampVec<L> {
 struct ChannelRamps<L: Lane> {
     /// Parameters with a ramp in flight on some lane at the start of the prefix.
     active: u8,
-    ramps: [RampVec<L>; RAMP_COUNT],
+    ramps: [RampLanes<L>; RAMP_COUNT],
     /// The attack and release coefficient ramps.
-    rates: [RampVec<L>; 2],
+    rates: [RampLanes<L>; 2],
     words: [L; COEF_COUNT],
 }
 
@@ -1382,8 +1309,8 @@ impl<L: Lane> ChannelRamps<L> {
         }
         Self {
             active,
-            ramps: core::array::from_fn(|parameter| RampVec::gather(&channel.ramps[parameter])),
-            rates: core::array::from_fn(|slot| RampVec::gather(&channel.rate_ramps[slot])),
+            ramps: core::array::from_fn(|parameter| RampLanes::gather(&channel.ramps[parameter])),
+            rates: core::array::from_fn(|slot| RampLanes::gather(&channel.rate_ramps[slot])),
             words: core::array::from_fn(|word| L::load(&channel.words[word])),
         }
     }
@@ -1421,9 +1348,9 @@ impl<L: Lane> ChannelRamps<L> {
             }
         }
         let curve = design_curve::<L>(
-            self.ramps[0].current,
-            self.ramps[1].current,
-            self.ramps[2].current,
+            self.ramps[0].current(),
+            self.ramps[1].current(),
+            self.ramps[2].current(),
         );
         for (word, value) in [
             (COEF_THRESHOLD, curve.threshold_db),
@@ -1447,14 +1374,14 @@ impl<L: Lane> ChannelRamps<L> {
                 let moved = self.ramps[parameter].advance_where(all);
                 self.rates[slot].advance_where(moved);
                 let word = RATE_WORD[slot];
-                self.words[word] = L::select(moved, self.rates[slot].current, self.words[word]);
+                self.words[word] = L::select(moved, self.rates[slot].current(), self.words[word]);
             }
         }
         for (parameter, word) in [(5, COEF_MAKEUP), (6, COEF_MIX)] {
             if self.active & (1 << parameter) != 0 {
                 let moved = self.ramps[parameter].advance_where(all);
                 self.words[word] =
-                    L::select(moved, self.ramps[parameter].current, self.words[word]);
+                    L::select(moved, self.ramps[parameter].current(), self.words[word]);
             }
         }
     }
