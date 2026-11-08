@@ -3241,16 +3241,17 @@ pub enum LaneSwapRefusal {
     Scratch,
     /// A lane index does not fit the payload calls' `u32` track index.
     Lane,
-    /// A bank has not declared its prepared per-lane defaults
-    /// ([`PreparedNativeEffectBank::lane_default_bytes`]), or the two banks declare different
-    /// sizes.
+    /// A bank does not swap lanes ([`PreparedNativeEffectBank::lane_swap`], whose
+    /// [`LaneSwap::lane_default_bytes`](crate::LaneSwap::lane_default_bytes) declares its
+    /// prepared per-lane defaults), or the two banks declare different sizes.
     Defaults,
     /// A bank refused to snapshot its lane (an unsupported effect, or a lane out of range).
     Snapshot,
     /// A lane's own payload does not restore into it
     /// ([`PreparedNativeEffectBank::validate_track_state_payload`]), found before any write
     /// (issue #2324). A defect of that bank, which must restore every payload its own lane
-    /// writes (#1279 D6), or a bank that has not stated its restore's verdict.
+    /// writes (#1279 D6); a bank that swaps lanes has stated its verdict
+    /// ([`LaneSwap::validate_lane_payload`](crate::LaneSwap::validate_lane_payload), #2392).
     Payload,
     /// A bank refused a restore after the checks passed: a defect, since both payloads are the
     /// banks' own, of one layout, under the lanes' own defaults, and both validated. Nothing was
@@ -3261,15 +3262,37 @@ pub enum LaneSwapRefusal {
 // REALTIME_POLICY_BEGIN
 /// The scratch bytes [`swap_bank_lanes`] needs to swap two lanes of `bank` (or of `bank` and
 /// another bank of its layout) whose payloads have `sizes`: two whole payloads and one lane's
-/// prepared defaults. `None` when the bank has not declared its defaults, or on overflow. The
-/// caller allocates it once, at preparation.
+/// prepared defaults. `None` when the bank does not swap lanes
+/// ([`PreparedNativeEffectBank::lane_swap`]), or on overflow. The caller allocates it once, at
+/// preparation.
 #[must_use]
 pub fn swap_bank_lanes_scratch_bytes(
     bank: &dyn PreparedNativeEffectBank,
     sizes: StatePayloadSizes,
 ) -> Option<usize> {
     let payloads = usize::try_from(sizes.total()?.checked_mul(2)?).ok()?;
-    payloads.checked_add(bank.lane_default_bytes()?)
+    payloads.checked_add(bank.lane_swap()?.lane_default_bytes())
+}
+
+/// `bank`'s declared defaults size, read through both twins of its lane swap hook
+/// ([`PreparedNativeEffectBank::lane_swap`] and [`PreparedNativeEffectBank::lane_swap_mut`]);
+/// `None` when either is absent or the two disagree, so a hook whose twins drift apart refuses
+/// before any write rather than at the exchange.
+fn lane_swap_defaults(bank: &mut (dyn PreparedNativeEffectBank + '_)) -> Option<usize> {
+    let defaults = bank.lane_swap()?.lane_default_bytes();
+    (bank.lane_swap_mut()?.lane_default_bytes() == defaults).then_some(defaults)
+}
+
+/// Exchange lane `lane`'s prepared defaults of `bank` with `bytes`
+/// ([`LaneSwap::exchange_lane_defaults`](crate::LaneSwap::exchange_lane_defaults)); `false`
+/// for a bank that does not swap lanes, which the caller has already refused.
+fn exchange_lane_defaults(
+    bank: &mut (dyn PreparedNativeEffectBank + '_),
+    lane: usize,
+    bytes: &mut [u8],
+) -> bool {
+    bank.lane_swap_mut()
+        .is_some_and(|swap| swap.exchange_lane_defaults(lane, bytes))
 }
 
 /// One payload's three sections in `scratch`, cut at `sizes`.
@@ -3306,14 +3329,14 @@ fn rotate_lane_defaults<'one, 'two>(
     spare: &mut [u8],
 ) -> bool {
     // first = X, spare = A.
-    let mut taken = first.exchange_lane_defaults(first_lane, spare);
+    let mut taken = exchange_lane_defaults(first, first_lane, spare);
     // second = A, spare = B.
     taken &= match second {
-        Some(bank) => bank.exchange_lane_defaults(second_lane, spare),
-        None => first.exchange_lane_defaults(second_lane, spare),
+        Some(bank) => exchange_lane_defaults(bank, second_lane, spare),
+        None => exchange_lane_defaults(first, second_lane, spare),
     };
     // first = B, spare = X.
-    taken &= first.exchange_lane_defaults(first_lane, spare);
+    taken &= exchange_lane_defaults(first, first_lane, spare);
     taken
 }
 
@@ -3326,7 +3349,8 @@ fn rotate_lane_defaults<'one, 'two>(
 ///   state (#1279 D3): filter and envelope state, designed coefficients, every ramp in flight
 ///   and the lane's clocks.
 /// * The lane's prepared per-lane defaults
-///   ([`PreparedNativeEffectBank::exchange_lane_defaults`]), which a reset, a D7 recovery or a
+///   ([`LaneSwap::exchange_lane_defaults`](crate::LaneSwap::exchange_lane_defaults)), which a
+///   reset, a D7 recovery or a
 ///   restore's validation reads and which the carry deliberately leaves with the successor.
 ///
 /// Anything a bank keeps per *bank* rather than per lane -- a shared cursor -- stays. Two banks
@@ -3383,11 +3407,11 @@ pub fn swap_bank_lanes(
     sizes: StatePayloadSizes,
     scratch: &mut [u8],
 ) -> Result<(), LaneSwapRefusal> {
-    let defaults = first.lane_default_bytes();
+    let defaults = lane_swap_defaults(first);
     if defaults.is_none()
         || second
-            .as_deref()
-            .is_some_and(|bank| bank.lane_default_bytes() != defaults)
+            .as_deref_mut()
+            .is_some_and(|bank| lane_swap_defaults(bank) != defaults)
     {
         return Err(LaneSwapRefusal::Defaults);
     }
@@ -3621,8 +3645,8 @@ mod carry_tests {
 mod lane_swap_tests {
     use super::{LaneSwapRefusal, swap_bank_lanes, swap_bank_lanes_scratch_bytes};
     use crate::{
-        BankProcessReport, BankWidth, EffectBankProcessBlock, PreparedNativeEffectBank, ResetKind,
-        StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
+        BankProcessReport, BankWidth, EffectBankProcessBlock, LaneSwap, PreparedNativeEffectBank,
+        ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     };
 
     const SIZES: StatePayloadSizes = StatePayloadSizes {
@@ -3636,12 +3660,13 @@ mod lane_swap_tests {
     /// Four lanes of three words (common, left, right), and per lane `defaults` prepared default
     /// bytes, distinct per lane and per seed (`None`: undeclared). `refuse_restore_call` names
     /// the restore call (counted from 1) that refuses; every other restore commits, unless its
-    /// payload holds [`POISON`].
+    /// payload holds [`POISON`]. `untwinned` drops the `&mut` twin of the lane swap hook alone.
     struct Words {
         lanes: [[u32; 3]; 4],
         defaults: Option<[Vec<u8>; 4]>,
         restores: u32,
         refuse_restore_call: Option<u32>,
+        untwinned: bool,
     }
 
     /// A common word no restore of any bank accepts: a lane holding it has a payload its own
@@ -3667,6 +3692,16 @@ mod lane_swap_tests {
             }),
             restores: 0,
             refuse_restore_call,
+            untwinned: false,
+        }
+    }
+
+    /// [`words`] whose [`PreparedNativeEffectBank::lane_swap_mut`] is `None` while its
+    /// [`PreparedNativeEffectBank::lane_swap`] is not: a hook whose twins disagree (#2392).
+    fn untwinned(seed: u32) -> Words {
+        Words {
+            untwinned: true,
+            ..words(seed, None)
         }
     }
 
@@ -3736,9 +3771,22 @@ mod lane_swap_tests {
             Ok(())
         }
 
+        fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+            self.defaults.as_ref().map(|_| self as &dyn LaneSwap)
+        }
+
+        fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+            match self.defaults {
+                Some(_) if !self.untwinned => Some(self),
+                _ => None,
+            }
+        }
+    }
+
+    impl LaneSwap for Words {
         /// The restore's content verdict: the lane and [`POISON`], never the call count, which
         /// stands for a restore that refuses after its validation passed.
-        fn validate_track_state_payload(
+        fn validate_lane_payload(
             &self,
             track_index: u32,
             _state_layout_version: u32,
@@ -3757,8 +3805,10 @@ mod lane_swap_tests {
             Ok(())
         }
 
-        fn lane_default_bytes(&self) -> Option<usize> {
-            self.defaults.as_ref().map(|defaults| defaults[0].len())
+        fn lane_default_bytes(&self) -> usize {
+            self.defaults
+                .as_ref()
+                .map_or(0, |defaults| defaults[0].len())
         }
 
         fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
@@ -3788,7 +3838,9 @@ mod lane_swap_tests {
     /// undeclared or mismatched defaults, sizes its scratch without the defaults, skips the
     /// payload or rotation undo after a restore refusal, writes a lane before it knows both
     /// lanes' own payloads restore (issue #2324: the undo of a refused step 3 then refuses too),
-    /// leaves the defaults behind on an accepted swap, or names the wrong refusal.
+    /// leaves the defaults behind on an accepted swap, names the wrong refusal, or reads only one
+    /// twin of a bank's lane swap hook (issue #2392: a bank whose `&mut` twin is absent then
+    /// half-rotates the defaults before the swap notices).
     #[test]
     fn every_lane_swap_refusal_leaves_both_lanes_unchanged() {
         let scratch_bytes =
@@ -3799,7 +3851,7 @@ mod lane_swap_tests {
             None
         );
         type Case = (Words, Option<Words>, usize, usize, usize, LaneSwapRefusal);
-        let cases: [Case; 12] = [
+        let cases: [Case; 15] = [
             // The defaults are checked before the scratch, so a short scratch does not mask them.
             (
                 with_defaults(1, None, None),
@@ -3819,6 +3871,31 @@ mod lane_swap_tests {
             ),
             (
                 with_defaults(1, None, None),
+                None,
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Defaults,
+            ),
+            // Issue #2392: a hook whose `&mut` twin is absent, in either bank or in one bank.
+            (
+                untwinned(1),
+                Some(words(100, None)),
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Defaults,
+            ),
+            (
+                words(1, None),
+                Some(untwinned(100)),
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Defaults,
+            ),
+            (
+                untwinned(1),
                 None,
                 1,
                 2,

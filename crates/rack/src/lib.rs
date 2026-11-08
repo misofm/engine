@@ -808,8 +808,8 @@ impl LanePeerMut<'_> {
 
 /// The scratch a lane swap of `processor`'s lanes under `layout` needs
 /// ([`effect_contract::swap_bank_lanes_scratch_bytes`]: two payloads and one lane's prepared
-/// defaults), or `None` -- the stage cannot swap -- when the bank has not declared its defaults or
-/// the size overflows.
+/// defaults), or `None` -- the stage cannot swap -- when the bank does not swap lanes
+/// ([`PreparedNativeEffectBank::lane_swap`]) or the size overflows.
 fn lane_swap_scratch(
     processor: &dyn PreparedNativeEffectBank,
     layout: &EffectLaneLayout,
@@ -818,7 +818,7 @@ fn lane_swap_scratch(
 }
 
 /// Whether `processor` can swap a lane with `peer`'s with a scratch of `scratch_bytes`: it
-/// declares its defaults, `peer` declares the same size, and the scratch holds
+/// swaps lanes, `peer` declares the same defaults size, and the scratch holds
 /// [`lane_swap_scratch`]. The check [`effect_contract::swap_bank_lanes`] would refuse
 /// ([`effect_contract::LaneSwapRefusal::Defaults`] or `Scratch`), made before any write.
 fn lane_swap_scratch_fits(
@@ -827,7 +827,10 @@ fn lane_swap_scratch_fits(
     layout: &EffectLaneLayout,
     scratch_bytes: usize,
 ) -> bool {
-    processor.lane_default_bytes() == peer.lane_default_bytes()
+    let defaults = |bank: &dyn PreparedNativeEffectBank| {
+        bank.lane_swap().map(|swap| swap.lane_default_bytes())
+    };
+    defaults(processor) == defaults(peer)
         && lane_swap_scratch(processor, layout).is_some_and(|needed| scratch_bytes >= needed)
 }
 

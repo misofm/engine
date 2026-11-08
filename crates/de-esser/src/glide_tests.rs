@@ -698,7 +698,11 @@ fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_ref
     let Under::Bank(processor, _) = &mut bank else {
         unreachable!("a bank")
     };
-    assert!(processor.exchange_lane_defaults(0, &mut incoming));
+    assert!(
+        processor
+            .lane_swap_mut()
+            .is_some_and(|swap| swap.exchange_lane_defaults(0, &mut incoming))
+    );
     assert_eq!(
         bank.link_words(0),
         rest_words(LinkMode::Maximum),
