@@ -2432,8 +2432,8 @@ fn a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold() {
 /// whether that ramp is 1 or 480 samples. From the first grid completion sample after the move's
 /// end the lane has also converged to the never-muted session taking the same write at `W` (the
 /// composed curve, the coincident -6 dB included); that alone does not pin the due move, which
-/// the ramp comparison does. (This pins the base rule; whether the due move should override
-/// a jump whose own hold is newer is an open question for the owner, #2362.)
+/// the ramp comparison does. The due move keeps priority by ruling: see
+/// `docs/rulings/fader-due-move-versus-entry-jump-2026-11-08.md` (#2374).
 ///
 /// Test value: red if the R17-10 release of the ended unmute overwrites the hold the offsets
 /// jump set at the same entry (the fade's grid events from 1,100 cut the 480-sample ramp); and

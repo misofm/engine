@@ -1236,7 +1236,8 @@ enum HoldAtBlockEnd {
     /// The held ramp ends on the block's last sample: an owed move is due at the next block's
     /// first sample, which is the first sample the stage reports the gain free. A gain the
     /// stage finds free there ended by itself, so nothing is released; an offsets jump at that
-    /// entry leaves it as it is.
+    /// entry leaves it as it is, and the due move keeps priority over the jump's ramp
+    /// (`docs/rulings/fader-due-move-versus-entry-jump-2026-11-08.md`, #2374).
     EndsAtBlockEnd,
 }
 

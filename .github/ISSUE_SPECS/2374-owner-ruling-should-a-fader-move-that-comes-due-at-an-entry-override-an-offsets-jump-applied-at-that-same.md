@@ -19,4 +19,4 @@ The F1 rule says a jump's hold is newer than a ramp that a live write ended. By 
 - B: the flipped contrast case is red on base, the rest of `stored_fader_automation.rs` is unchanged and green, the graph fixtures are regenerated if a plan word moves, and the no-bit-moved evidence covers every other case.
 
 ## Evidence / attempt record
-(empty)
+**Ruled 2026-11-08: option A** (owner-delegated answer, `docs/rulings/fader-due-move-versus-entry-jump-2026-11-08.md`). F1 protects a jump from a *release*; a due move is an obligation to rejoin the authored curve, not a superseded ramp. The catch-up keeps the fader length so a short jump ramp cannot make it a step. Both readings settle at the same value. Option B would need new lane state or bring back the step. Change: the ruling record plus two comments that cite it. No code or rendered bit moved, and the contrast case already pins the rule.
