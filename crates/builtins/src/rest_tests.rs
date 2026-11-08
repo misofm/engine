@@ -457,9 +457,8 @@ impl<L: Lane> Probe for FaderProbe<L> {
         mask
     }
 
-    /// Both channels' ramp words, countdown, remembered gain, phase and mute mask bit. The
-    /// kernel's `f32` countdown word is residue, recomputed from the `u32` before every read and
-    /// absent from the lane export, so it is left out.
+    /// Both channels' ramp words, countdown, remembered gain, phase and mute mask bit: every
+    /// per-lane word the stage holds (the kernel's `f32` countdown word is a render-path local).
     fn lane_state(&self, lane: usize, out: &mut Vec<u32>) {
         for channel in 0..2 {
             let ramp = &self.stage.ramp[channel];

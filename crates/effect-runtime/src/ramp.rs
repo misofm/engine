@@ -44,7 +44,7 @@
 //! #2390).
 
 use lane::Lane;
-use lane::kernels::{RampSegment, ramp_toward};
+use lane::kernels::{EXACT_COUNTDOWN, RampSegment, ramp_toward};
 
 /// A linear ramp from `current` to `target` in `remaining` samples.
 ///
@@ -331,11 +331,6 @@ impl Default for LinearRamp {
 /// The widest lane vector a [`RampLanes`] gathers: AVX2's eight `f32` lanes.
 const RAMP_LANES: usize = 8;
 
-/// The longest countdown a lane vector carries exactly: `2^24`, the largest power of two whose
-/// every smaller integer is an `f32`. It covers the longest link glide
-/// (`effect_contract::LINK_GLIDE_MAX_SAMPLES`) and every parameter window.
-const EXACT_COUNTDOWN: u32 = 1 << 24;
-
 /// One [`LinearRamp`] per lane, as four lane vectors (issue #2376): a block loop's working copy
 /// of a parameter (or a coefficient, or a link weight) across a bank.
 ///
@@ -343,8 +338,10 @@ const EXACT_COUNTDOWN: u32 = 1 << 24;
 /// [`RampLanes::advance`] (or [`RampLanes::advance_where`]) walks [`LinearRamp::next_value`]'s
 /// law once per frame lane-wide, and [`RampLanes::scatter`] writes the run's end back through
 /// [`LinearRamp::record_advance`], so the scalar ramps keep their phase invariant and a run
-/// boundary is not observable. The countdown is carried as an `f32` integer of at most `2^24`,
-/// so it converts both ways exactly and its compares are integer compares.
+/// boundary is not observable. The countdown is carried as an `f32` integer of at most
+/// [`EXACT_COUNTDOWN`] (`2^24`, the one bound every lane-word countdown shares, issue #2410), so
+/// it converts both ways exactly and its compares are integer compares. The bound covers the
+/// longest link glide (`effect_contract::LINK_GLIDE_MAX_SAMPLES`) and every parameter window.
 ///
 /// A lane vector holds no enum and takes no branch per frame: the countdown is the phase, as it
 /// is in [`LinearRamp`], and every update is a select.
