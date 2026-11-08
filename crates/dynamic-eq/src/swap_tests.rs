@@ -48,11 +48,28 @@ fn request(values: &[InitialParameterValue], link: LinkMode) -> PrepareEffectReq
     }
 }
 
-/// A random point of `parameter`'s lattice, so an enumeration or a switch takes a choice.
-fn value(draw: &mut Draw, parameter: &ParameterDescriptor) -> f32 {
-    let points = parameter_lattice_points(parameter).expect("a lawful lattice");
-    let point = &points[draw.below(points.len())];
-    decimal_to_f32(&point.canonical).expect("a convertible point")
+/// Each parameter's lattice as `f32`s, by descriptor index, built once: the lattice is a pure
+/// function of the descriptor, and rebuilding it per draw dominated the test's run time.
+fn lattices() -> &'static [Vec<f32>] {
+    static LATTICES: std::sync::OnceLock<Vec<Vec<f32>>> = std::sync::OnceLock::new();
+    LATTICES.get_or_init(|| {
+        DYNAMIC_EQ_PARAMETERS
+            .iter()
+            .map(|parameter| {
+                parameter_lattice_points(parameter)
+                    .expect("a lawful lattice")
+                    .iter()
+                    .map(|point| decimal_to_f32(&point.canonical).expect("a convertible point"))
+                    .collect()
+            })
+            .collect()
+    })
+}
+
+/// A random point of parameter `index`'s lattice, so an enumeration or a switch takes a choice.
+fn value(draw: &mut Draw, index: usize) -> f32 {
+    let lattice = &lattices()[index];
+    lattice[draw.below(lattice.len())]
 }
 
 /// Random initial values on every parameter's lattice, each channel its own.
@@ -65,7 +82,7 @@ fn draw_values(draw: &mut Draw) -> Vec<InitialParameterValue> {
             } else {
                 ParameterChannel::Right
             },
-            value: value(draw, &DYNAMIC_EQ_PARAMETERS[slot / 2]),
+            value: value(draw, slot / 2),
         })
         .collect()
 }
@@ -159,7 +176,7 @@ impl Probe for DynamicEqProbe {
     fn automate(&mut self, strip: usize, how: Automate, first_sample: u64) -> Automation {
         let feed = &mut self.feeds[strip];
         let mut spans = Vec::new();
-        for (parameter, spec) in DYNAMIC_EQ_PARAMETERS.iter().enumerate() {
+        for parameter in 0..DYNAMIC_EQ_PARAMETERS.len() {
             for channel in [ParameterChannel::Left, ParameterChannel::Right] {
                 let wanted = match how {
                     Automate::Nothing => false,
@@ -171,7 +188,7 @@ impl Probe for DynamicEqProbe {
                         channel,
                         parameter_index: parameter as u32,
                         sample: first_sample,
-                        value: value(feed, spec),
+                        value: value(feed, parameter),
                     });
                 }
             }
