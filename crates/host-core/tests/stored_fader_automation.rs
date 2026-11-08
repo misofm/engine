@@ -3805,3 +3805,76 @@ mod canonical_preparation {
         }
     }
 }
+
+/// A mute curve on both lanes of track 0 of `model`: unmuted, muted at `mute`, unmuted again at
+/// `unmute` (control `6`, the builtin mute, #1651).
+#[cfg(feature = "test-support")]
+fn mute_curve(model: &SessionModel, mute: u64, unmute: u64) -> Automation {
+    let step = |start_sample, end_sample, start_value, end_value| AutomationSegment {
+        shape: AutomationShape::Step,
+        start_sample,
+        end_sample,
+        start_value,
+        end_value,
+        unit: ParameterUnit::Linear,
+    };
+    Automation {
+        id: id("mute-0"),
+        target: ControlAddress {
+            owner: Owner::Strip(model.tracks[0].id.clone()),
+            section: Section::Builtins,
+            control: 6,
+            lane: ParameterChannel::Both,
+        },
+        segments: vec![step(0, mute, 0.0, 1.0), step(mute, unmute, 1.0, 0.0)],
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// #2377 T5 (mutant n1 of #2362): a curve unmute whose ramp crosses a block boundary leaves the
+/// hold running through the block's end, so a live write that frees the lane at the next entry
+/// releases the cell's hold there (R17-10). Track 0 rides linearly from `-30` to `0` dB over
+/// `[0, 10_000)` under a mute curve muted over `[300, 900)`, with a mute length of 240 samples:
+/// the unmute at 900 (offset 4 of the block at 896, quantum 128) ramps to 1,140, past the block's
+/// end. The ride's grid events under the mute owe a move. A live fader write of `-10` dB over
+/// window 0 at the entry 1,024 frees the lane, which discharges the move; from 1,087 the lane
+/// follows the curve, at each completion sample `64k + 63` exactly, on every render form.
+///
+/// Test value: red if the cursor's `rehold` records a hold that ends past the block as ending on
+/// the block's last sample (`EndsAtBlockEnd`): the owed move is then due at the entry and lands
+/// over `J` in place of the release, so the lane lags the curve until the move's end.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_curve_unmute_ramping_past_its_block_and_freed_at_the_next_entry_releases_its_hold() {
+    use builtins::BuiltinLaneSelector::Both;
+    const FRAMES: u64 = 3_072;
+    let mut model = plain(1, 128);
+    model.control_smoothing = smoothing(5.0);
+    let entry = fader_entry(
+        &model,
+        0,
+        ParameterChannel::Both,
+        vec![segment(AutomationShape::Linear, 0, 10_000, -30.0, 0.0)],
+    );
+    model.automation = vec![entry.clone(), mute_curve(&model, 300, 900)];
+    let (out, entries) = acted(
+        &model,
+        128,
+        FRAMES,
+        &[Act {
+            fader: Some((Both, -10.0, 0)),
+            ..act(1_024)
+        }],
+    );
+    assert_eq!(entries, [1_024], "the write lands at its entry");
+    for t in (1_024 + 63..FRAMES).step_by(64) {
+        let expected = composed(curve(&entry, t as i64), 0.0);
+        for (plane, out) in out.iter().enumerate() {
+            assert_eq!(
+                out[t as usize].to_bits(),
+                expected.to_bits(),
+                "plane {plane}: completion sample {t}"
+            );
+        }
+    }
+}
