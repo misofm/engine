@@ -714,7 +714,7 @@ fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
             // glides.
             coef.set_lane_link(0, to, every_lane(L::WIDTH));
             ramps[0].set_target(link_glide_weights(to)[0], SAMPLES);
-            let mut weight = RampLanes::<L>::gather_link(&ramps[..L::WIDTH]);
+            let mut weight = RampLanes::<L>::gather(&ramps[..L::WIDTH]);
             for frame in 1..=FRAMES {
                 let peaks = |scale: f32, salt: u32| -> [f32; MAXIMUM_WIDTH] {
                     core::array::from_fn(|lane| {
@@ -761,12 +761,7 @@ fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
                     );
                 }
             }
-            let mut remaining = [0.0_f32; MAXIMUM_WIDTH];
-            weight.remaining.store(&mut remaining);
-            assert!(
-                remaining[..L::WIDTH].iter().all(|word| *word == 0.0),
-                "the glide arrived"
-            );
+            assert!(!L::mask_any(weight.in_flight()), "the glide arrived");
         }
     }
     lane::each_lane!(|L| check::<L>());

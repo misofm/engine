@@ -72,11 +72,11 @@ use effect_runtime::envelope::{ArCoef, ar_one_pole_step};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as spec_value_valid,
 };
-use effect_runtime::ramp::LinearRamp;
+use effect_runtime::ramp::{LinearRamp, RampLanes};
 use effect_runtime::state_payload::{
     RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, read_u32, write_f32, write_ramp,
 };
-use lane::kernels::{gain_mix_step, ramp_toward};
+use lane::kernels::gain_mix_step;
 use lane::{Backend, Lane};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
@@ -547,64 +547,27 @@ fn link<L: Lane, const LINK: u8>(left: L, right: L, lanes: &LinkLanes<L>) -> (L,
     }
 }
 
-/// One link weight of one channel across the lanes (issue #1370 D2), for a prefix with a glide in
-/// flight: gathered from the lanes' [`LinearRamp`]s at the prefix's start and scattered back at
-/// its end, so the weights move as vectors and never as per-lane scalars.
-#[derive(Clone, Copy)]
-struct LinkRamp<L: Lane> {
-    current: L,
-    target: L,
-    step: L,
-    remaining: L,
+/// One link weight of one channel across the lanes (issue #1370 D2), as the lane vectors a prefix
+/// with a glide in flight advances: lane `l` is `ramps[l][weight]`. Gathered from the lanes'
+/// [`LinearRamp`]s at the prefix's start and scattered back at its end ([`scatter_link_weight`]),
+/// so the weights move as vectors and never as per-lane scalars. A countdown of at most
+/// `LINK_GLIDE_MAX_SAMPLES` is exact in `f32`.
+#[inline(always)]
+fn gather_link_weight<L: Lane, const W: usize>(
+    ramps: &[[LinearRamp; LINK_WEIGHTS]; W],
+    weight: usize,
+) -> RampLanes<L> {
+    RampLanes::gather(ramps.iter().map(|lane| &lane[weight]))
 }
 
-impl<L: Lane> LinkRamp<L> {
-    /// Lane `l` of the result is `ramps[l][weight]`. A countdown of at most
-    /// `LINK_GLIDE_MAX_SAMPLES` is exact in `f32`.
-    fn gather<const W: usize>(ramps: &[[LinearRamp; LINK_WEIGHTS]; W], weight: usize) -> Self {
-        let mut words = [[0.0_f32; 8]; 4];
-        for (lane, ramps) in ramps.iter().enumerate() {
-            let ramp = ramps[weight];
-            words[0][lane] = ramp.current();
-            words[1][lane] = ramp.target();
-            words[2][lane] = ramp.step();
-            words[3][lane] = ramp.remaining() as f32;
-        }
-        Self {
-            current: L::load(&words[0]),
-            target: L::load(&words[1]),
-            step: L::load(&words[2]),
-            remaining: L::load(&words[3]),
-        }
-    }
-
-    fn scatter<const W: usize>(self, ramps: &mut [[LinearRamp; LINK_WEIGHTS]; W], weight: usize) {
-        let mut words = [[0.0_f32; 8]; 3];
-        self.current.store(&mut words[0]);
-        self.step.store(&mut words[1]);
-        self.remaining.store(&mut words[2]);
-        for (lane, ramps) in ramps.iter_mut().enumerate() {
-            let ramp = &mut ramps[weight];
-            ramp.record_advance(words[0][lane], words[1][lane], words[2][lane] as u32);
-        }
-    }
-
-    /// One frame of `LinearRamp::next_value`, lane-wide: `remaining = max(remaining - 1, 0)`,
-    /// then the clamped step while it is still positive and the exact target once it is not (on
-    /// a settled lane, `current` is already its target bit for bit, so the update is the
-    /// identity).
-    #[inline(always)]
-    fn advance(&mut self) {
-        let zero = L::zero();
-        self.remaining = self.remaining.sub(L::splat(1.0)).max(zero);
-        let stepping = self.remaining.gt(zero);
-        self.current = L::select(
-            stepping,
-            ramp_toward(self.current, self.step, self.target),
-            self.target,
-        );
-        self.step = L::select(stepping, self.step, zero);
-    }
+/// Writes [`gather_link_weight`]'s lanes back into `ramps[l][weight]`.
+#[inline(always)]
+fn scatter_link_weight<L: Lane, const W: usize>(
+    lanes: RampLanes<L>,
+    ramps: &mut [[LinearRamp; LINK_WEIGHTS]; W],
+    weight: usize,
+) {
+    lanes.scatter(ramps.iter_mut().map(|lane| &mut lane[weight]));
 }
 
 /// One channel's detector under a glide (issue #1370 D3): both weights advance one frame, and a
@@ -619,15 +582,14 @@ fn glide_level<L: Lane>(
     maximum: L,
     average: L,
     prepared: L,
-    weights: &mut [LinkRamp<L>; LINK_WEIGHTS],
+    weights: &mut [RampLanes<L>; LINK_WEIGHTS],
 ) -> L {
     for weight in weights.iter_mut() {
         weight.advance();
     }
-    let zero = L::zero();
-    let gliding = L::mask_or(weights[0].remaining.gt(zero), weights[1].remaining.gt(zero));
-    let combined = maximum.add(weights[1].current.mul(average.sub(maximum)));
-    let blend = own.add(weights[0].current.mul(combined.sub(own)));
+    let gliding = L::mask_or(weights[0].in_flight(), weights[1].in_flight());
+    let combined = maximum.add(weights[1].current().mul(average.sub(maximum)));
+    let blend = own.add(weights[0].current().mul(combined.sub(own)));
     L::select(gliding, blend, prepared)
 }
 
@@ -640,8 +602,8 @@ fn glide_link<L: Lane, const MONO: bool>(
     left: L,
     right: L,
     lanes: &LinkLanes<L>,
-    weights_left: &mut [LinkRamp<L>; LINK_WEIGHTS],
-    weights_right: &mut [LinkRamp<L>; LINK_WEIGHTS],
+    weights_left: &mut [RampLanes<L>; LINK_WEIGHTS],
+    weights_right: &mut [RampLanes<L>; LINK_WEIGHTS],
 ) -> (L, L) {
     let (prepared_left, prepared_right) = link::<L, LINK_MIXED>(left, right, lanes);
     let own_left = left.abs();
@@ -766,7 +728,7 @@ fn glide_step<L: Lane, const MONO: bool>(
     pr: &Params<L>,
     bypass: L::Mask,
     lanes: &LinkLanes<L>,
-    weights: &mut [[LinkRamp<L>; LINK_WEIGHTS]; 2],
+    weights: &mut [[RampLanes<L>; LINK_WEIGHTS]; 2],
 ) {
     let [weights_left, weights_right] = weights;
     if MONO {
@@ -1346,8 +1308,8 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         let split = head * L::WIDTH;
         let gather = |ramps: &Ramps<W>| {
             [
-                LinkRamp::<L>::gather(&ramps.links, 0),
-                LinkRamp::<L>::gather(&ramps.links, 1),
+                gather_link_weight::<L, W>(&ramps.links, 0),
+                gather_link_weight::<L, W>(&ramps.links, 1),
             ]
         };
         let mut weights = [gather(&self.left), gather(&self.right)];
@@ -1391,12 +1353,12 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         }
         let [weights_left, weights_right] = weights;
         for (weight, ramp) in weights_left.into_iter().enumerate() {
-            ramp.scatter(&mut self.left.links, weight);
+            scatter_link_weight(ramp, &mut self.left.links, weight);
         }
         self.left_env = el;
         if !MONO {
             for (weight, ramp) in weights_right.into_iter().enumerate() {
-                ramp.scatter(&mut self.right.links, weight);
+                scatter_link_weight(ramp, &mut self.right.links, weight);
             }
             self.right_env = er;
         }

@@ -110,12 +110,11 @@ use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
 use effect_runtime::params::{
     ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
 };
-use effect_runtime::ramp::LinearRamp;
+use effect_runtime::ramp::{LinearRamp, RampLanes};
 use effect_runtime::state_payload::{
     HEADER_WORDS, StateLayout, ramp_path_inside, read_f32, read_header, read_ramp, read_u32,
     validate_lengths, write_f32, write_header, write_u32,
 };
-use lane::kernels::ramp_toward;
 use lane::{Backend, Lane, flush};
 
 /// Parameters in the frozen descriptor.
@@ -1282,12 +1281,12 @@ fn ramp_values<const DISPATCH: u8, L: Lane>(
     match DISPATCH {
         DISPATCH_RUNTIME => {
             if stationary {
-                (limit.resting_value(), release.resting_value())
+                (limit.current(), release.current())
             } else {
                 (limit.advance(), release.advance())
             }
         }
-        DISPATCH_STATIONARY => (limit.resting_value(), release.resting_value()),
+        DISPATCH_STATIONARY => (limit.current(), release.current()),
         DISPATCH_RAMPING => (limit.advance(), release.advance()),
         _ => unreachable!("invalid limiter dispatch"),
     }
@@ -1513,121 +1512,6 @@ fn census_streams(streams: bool, steady: usize, slots: FrameSlots) {
             }
         }
     });
-}
-
-/// A linear ramp of one coefficient, held as lanes for the block loop.
-#[derive(Clone, Copy)]
-struct RampLanes<L: Lane> {
-    current: L,
-    target: L,
-    step: L,
-    remaining: L,
-}
-
-impl<L: Lane> RampLanes<L> {
-    /// A ramp at rest at `+0.0` on every lane: the unused glide weight of a body with no glide.
-    #[inline(always)]
-    fn rest() -> Self {
-        let zero = L::zero();
-        Self {
-            current: zero,
-            target: zero,
-            step: zero,
-            remaining: zero,
-        }
-    }
-
-    /// [`gather`](Self::gather) for a link weight (issue #1370): its countdown runs to
-    /// `LINK_GLIDE_MAX_SAMPLES`, `2^24`, which `f32` holds exactly, and the 16-bit narrowing
-    /// `gather` makes for a 64-update coefficient ramp would cut it.
-    #[inline]
-    fn gather_link(ramps: &[LinearRamp]) -> Self {
-        let mut words = [[0.0_f32; MAXIMUM_WIDTH]; 4];
-        for (lane, ramp) in ramps.iter().enumerate() {
-            words[0][lane] = ramp.current();
-            words[1][lane] = ramp.target();
-            words[2][lane] = ramp.step();
-            words[3][lane] = ramp.remaining() as f32;
-        }
-        Self {
-            current: L::load(&words[0]),
-            target: L::load(&words[1]),
-            step: L::load(&words[2]),
-            remaining: L::load(&words[3]),
-        }
-    }
-
-    /// Gathers `width` scalar ramps into one lane-wide ramp.
-    #[inline]
-    fn gather(ramps: &[LinearRamp]) -> Self {
-        let mut current = [0.0_f32; MAXIMUM_WIDTH];
-        let mut target = [0.0_f32; MAXIMUM_WIDTH];
-        let mut step = [0.0_f32; MAXIMUM_WIDTH];
-        let mut remaining = [0.0_f32; MAXIMUM_WIDTH];
-        for (lane, ramp) in ramps.iter().enumerate() {
-            current[lane] = ramp.current();
-            target[lane] = ramp.target();
-            step[lane] = ramp.step();
-            remaining[lane] = f32::from(ramp.remaining() as u16);
-        }
-        Self {
-            current: L::load(&current),
-            target: L::load(&target),
-            step: L::load(&step),
-            remaining: L::load(&remaining),
-        }
-    }
-
-    /// Writes the lane-wide ramp back into `width` scalar ramps.
-    #[inline]
-    fn scatter(self, ramps: &mut [LinearRamp]) {
-        let mut current = [0.0_f32; MAXIMUM_WIDTH];
-        let mut remaining = [0.0_f32; MAXIMUM_WIDTH];
-        let mut step = [0.0_f32; MAXIMUM_WIDTH];
-        self.current.store(&mut current);
-        self.remaining.store(&mut remaining);
-        self.step.store(&mut step);
-        for (lane, ramp) in ramps.iter_mut().enumerate() {
-            ramp.record_advance(current[lane], step[lane], remaining[lane] as u32);
-        }
-    }
-
-    /// Produces this sample's value and advances the ramp (decision D11).
-    ///
-    /// `remaining = max(remaining - 1, 0)` then `current = select(remaining > 0,
-    /// ramp_toward(current, step, target), target)`: the step added and held inside
-    /// `[min(current, target), max(current, target)]`, so no coefficient passes its target (issue
-    /// #1409); the last ramping sample is an assignment of the target, never an addition, which
-    /// is exactly `LinearRamp::next_value` and is why a block boundary is not observable. `step` is
-    /// cleared on the snap so a resting ramp cannot drift.
-    #[inline(always)]
-    fn advance(&mut self) -> L {
-        let zero = L::zero();
-        self.remaining = self.remaining.sub(L::splat(1.0)).max(zero);
-        let stepping = self.remaining.gt(zero);
-        self.current = L::select(
-            stepping,
-            ramp_toward(self.current, self.step, self.target),
-            self.target,
-        );
-        self.step = L::select(stepping, self.step, zero);
-        self.current
-    }
-
-    /// This sample's value when the ramp is known to be stationary, advancing nothing.
-    ///
-    /// Issue #144 item 6. Unlike the compressor and the gate, this effect had no ramping split at
-    /// all: [`RampLanes::advance`] ran four times per frame, every frame, whether or not anything
-    /// was moving -- and outside a sixty-four-sample window after a ceiling or release change,
-    /// nothing ever is. At rest `advance` computes `remaining = max(0 - 1, 0) = 0`, `stepping =
-    /// false`, `current = select(false, .., target) = target` and `step = select(false, step, 0)
-    /// = 0`; with the rest invariant `current == target` bitwise and `step == 0` already true,
-    /// every one of those is the identity. Returning `current` is therefore the same value and
-    /// the same state, which is what makes the skip class A rather than a re-tuning.
-    #[inline(always)]
-    const fn resting_value(&self) -> L {
-        self.current
-    }
 }
 
 /// `10^((ceiling_db - 1) / 20)`, designed in `f64` and rounded once to `f32`.
@@ -2232,10 +2116,11 @@ impl<L: Lane> HotChannel<L> {
     /// [`load`](Self::load) for the stationary dispatch of the uniform bodies (issue #991).
     ///
     /// `history`, `reduction` and `box_sum` as `load`. The window is one splat of lane 0's,
-    /// because [`lanes_uniform`] holds on every uniform body. Each ramp gathers `current` only:
-    /// under `DISPATCH_STATIONARY` the frame bodies read a ramp through
-    /// [`RampLanes::resting_value`] alone, so `target`, `step` and `remaining` are never read and
-    /// are left `+0.0`. A link glide never reaches this path: its frames render through
+    /// because [`lanes_uniform`] holds on every uniform body. Each ramp gathers `current` only
+    /// and rests there ([`RampLanes::resting`]): every ramp is at rest on this path, so its
+    /// target is its `current` with a `+0.0` step and a `0` countdown, and these are the vectors
+    /// a full gather would load. Under `DISPATCH_STATIONARY` the frame bodies read a ramp through
+    /// [`RampLanes::current`] alone. A link glide never reaches this path: its frames render through
     /// [`limiter_block_glide`] under the ramping dispatch, and the uniform bodies read no link
     /// weight.
     #[inline(always)]
@@ -2250,31 +2135,20 @@ impl<L: Lane> HotChannel<L> {
             limit[lane] = limit_ramp.current();
             release[lane] = release_ramp.current();
         }
-        let zero = L::zero();
         Self {
             history: History::<L>::load(state),
             reduction: L::load(&state.reduction),
             box_sum: L::load(&state.box_sum),
             window: L::splat(state.lane[0].window as f32),
-            limit: RampLanes {
-                current: L::load(&limit),
-                target: zero,
-                step: zero,
-                remaining: zero,
-            },
-            release: RampLanes {
-                current: L::load(&release),
-                target: zero,
-                step: zero,
-                remaining: zero,
-            },
+            limit: RampLanes::resting(L::load(&limit)),
+            release: RampLanes::resting(L::load(&release)),
         }
     }
 
     /// [`store`](Self::store) for the stationary dispatch (issue #991): `history`, `reduction`
     /// and `box_sum` only. No stationary frame advances a ramp, so `store`'s scatter would write
-    /// back the bits it gathered (`remaining` is `0` at rest, exact through the `u16`/`f32`
-    /// round trip); skipping it leaves every ramp word as it was.
+    /// back the bits it gathered (`remaining` is `0` at rest, exact through the `f32` round
+    /// trip); skipping it leaves every ramp word as it was.
     #[inline(always)]
     fn store_stationary(self, state: &mut ChannelState) {
         self.history.store(state);
@@ -2888,12 +2762,12 @@ fn ramp_value<const DISPATCH: u8, L: Lane>(stationary: bool, ramp: &mut RampLane
     match DISPATCH {
         DISPATCH_RUNTIME => {
             if stationary {
-                ramp.resting_value()
+                ramp.current()
             } else {
                 ramp.advance()
             }
         }
-        DISPATCH_STATIONARY => ramp.resting_value(),
+        DISPATCH_STATIONARY => ramp.current(),
         DISPATCH_RAMPING => ramp.advance(),
         _ => unreachable!("invalid limiter dispatch"),
     }
@@ -3231,11 +3105,11 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane, const GLIDE: bool>(
     // Issue #1370: the link weights, lane-wide, only under a glide.
     let mut glide = if GLIDE {
         [
-            RampLanes::<L>::gather_link(&left.link[..width]),
-            RampLanes::<L>::gather_link(&right.link[..width]),
+            RampLanes::<L>::gather(&left.link[..width]),
+            RampLanes::<L>::gather(&right.link[..width]),
         ]
     } else {
-        [RampLanes::<L>::rest(); 2]
+        [RampLanes::<L>::resting(L::zero()); 2]
     };
     #[cfg(test)]
     observe_dispatch::<DISPATCH>(DispatchRoute::DualPerLane);
@@ -3354,14 +3228,14 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane, const GLIDE: bool>(
 #[inline(always)]
 fn glide_peak<L: Lane>(own: L, linked: L, prepared: L, weight: &mut RampLanes<L>) -> L {
     let current = weight.advance();
-    let gliding = weight.remaining.gt(L::zero());
+    let gliding = weight.in_flight();
     let blend = own.add(current.mul(linked.sub(own)));
     L::select(gliding, blend, prepared)
 }
 
 /// The ramp prefix of a dual block with a link glide in flight (issue #1370 D3): the per-lane
 /// body with every lane's peak through [`glide_peak`], under the ramping dispatch, which at rest
-/// is the identity on every ramp word ([`RampLanes::resting_value`]), so a stationary lane's bits
+/// is the identity on every ramp word ([`RampLanes::current`]), so a stationary lane's bits
 /// are the bits either dispatch renders. The per-lane body renders each lane exactly as the
 /// uniform one does, and the glide never takes the #990 linked pair, whose one gain path needs
 /// both channels' peaks equal.
@@ -6255,9 +6129,9 @@ fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane, const GLIDE: bool>(
     let mut hot_left = HotChannel::<L>::load(left);
     // Issue #1370: the left link weight, lane-wide, only under a glide.
     let mut glide = if GLIDE {
-        RampLanes::<L>::gather_link(&left.link[..width])
+        RampLanes::<L>::gather(&left.link[..width])
     } else {
-        RampLanes::<L>::rest()
+        RampLanes::<L>::resting(L::zero())
     };
     #[cfg(test)]
     observe_dispatch::<DISPATCH>(DispatchRoute::MonoPerLane);
@@ -7411,60 +7285,6 @@ mod tests {
         }
     }
 
-    /// Issue #144 item 6: the stationary hoist reads the value `advance` would have produced.
-    ///
-    /// This effect had no ramping split at all -- four `RampLanes::advance` per frame, every
-    /// frame. The hoist skips them when nothing is moving, so the gate is that `resting_value`
-    /// and `advance` agree bitwise at rest, *and* that `advance` leaves the state untouched
-    /// there. If either half stopped holding, the skip would be a re-tuning rather than a
-    /// no-op, which is exactly the failure the class-A bar exists to catch.
-    #[test]
-    fn the_stationary_hoist_reads_what_advancing_would_have_produced() {
-        fn check<L: Lane>() {
-            let values = [0.0_f32, -1.0, 0.25, 100.0, -0.5, 3.0, 1.0e-7, 7.0];
-            let mut scalar = [LinearRamp::fixed(0.0); MAXIMUM_WIDTH];
-            for (lane, ramp) in scalar.iter_mut().enumerate().take(L::WIDTH) {
-                *ramp = LinearRamp::fixed(values[lane]);
-            }
-            assert!(
-                ramps_are_stationary(&scalar[..L::WIDTH]),
-                "width {}: ramps built at rest must read as stationary",
-                L::WIDTH
-            );
-
-            let mut lanes = RampLanes::<L>::gather(&scalar[..L::WIDTH]);
-            let mut rested = [0.0_f32; MAXIMUM_WIDTH];
-            let mut advanced = [0.0_f32; MAXIMUM_WIDTH];
-            // Several frames, because the hoist skips the whole block, not one sample.
-            for frame in 0..8 {
-                lanes.resting_value().store(&mut rested);
-                let before = lanes;
-                lanes.advance().store(&mut advanced);
-                for lane in 0..L::WIDTH {
-                    assert_eq!(
-                        rested[lane].to_bits(),
-                        advanced[lane].to_bits(),
-                        "width {} lane {lane} frame {frame}: resting value diverged",
-                        L::WIDTH
-                    );
-                }
-                let mut before_state = [0.0_f32; MAXIMUM_WIDTH];
-                let mut after_state = [0.0_f32; MAXIMUM_WIDTH];
-                before.current.store(&mut before_state);
-                lanes.current.store(&mut after_state);
-                for lane in 0..L::WIDTH {
-                    assert_eq!(
-                        before_state[lane].to_bits(),
-                        after_state[lane].to_bits(),
-                        "width {} lane {lane} frame {frame}: advancing at rest moved the state",
-                        L::WIDTH
-                    );
-                }
-            }
-        }
-        lane::each_lane!(|L| check::<L>());
-    }
-
     /// A ramp with a window open is never stationary, however small the move.
     #[test]
     fn an_open_window_is_never_stationary() {
@@ -7483,50 +7303,6 @@ mod tests {
             ramps_are_stationary(&redundant),
             "a redundant retarget must not open a window"
         );
-    }
-
-    /// E13: the lane-wide coefficient ramp is `LinearRamp::next_value`, snap included.
-    ///
-    /// `RampLanes::advance` is a second implementation of the runtime's D11 law, in the vector
-    /// domain, so it needs its own gate: `remaining = max(remaining - 1, 0)` then
-    /// `current = select(remaining > 0, current + step, target)`. The scalar ramp is the oracle and
-    /// the comparison is `to_bits`, at every width and across the snap.
-    #[test]
-    fn the_lane_ramp_reproduces_the_scalar_ramp_bit_for_bit() {
-        fn check<L: Lane>() {
-            let mut scalar = [LinearRamp::fixed(0.0); MAXIMUM_WIDTH];
-            let starts = [0.0_f32, -1.0, 0.25, 100.0, -0.5, 3.0, 0.0, 7.0];
-            let targets = [1.0_f32, 2.0, 0.25, -100.0, 0.5, -3.0, 1.0e-4, 0.0];
-            for (lane, ramp) in scalar.iter_mut().enumerate().take(L::WIDTH) {
-                *ramp = LinearRamp::fixed(starts[lane]);
-                ramp.set_target(targets[lane], RAMP_UPDATES);
-            }
-            let mut lanes = RampLanes::<L>::gather(&scalar[..L::WIDTH]);
-            let mut expected = scalar;
-            let mut produced = [0.0_f32; MAXIMUM_WIDTH];
-            for update in 0..RAMP_UPDATES + 4 {
-                lanes.advance().store(&mut produced);
-                for lane in 0..L::WIDTH {
-                    assert_eq!(
-                        produced[lane].to_bits(),
-                        expected[lane].next_value().to_bits(),
-                        "width {} lane {lane} update {update}",
-                        L::WIDTH
-                    );
-                }
-            }
-            // The scattered state is the scalar state, so a block boundary is not observable.
-            let mut scattered = scalar;
-            lanes.scatter(&mut scattered[..L::WIDTH]);
-            for lane in 0..L::WIDTH {
-                assert_eq!(
-                    scattered[lane].current().to_bits(),
-                    expected[lane].current().to_bits()
-                );
-                assert_eq!(scattered[lane].remaining(), expected[lane].remaining());
-            }
-        }
-        lane::each_lane!(|L| check::<L>());
     }
 
     /// E8: one body, three widths; PCM, per-track payload bytes and reports agree by `to_bits`.

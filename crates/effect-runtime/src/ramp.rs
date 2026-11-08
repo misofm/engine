@@ -31,6 +31,15 @@
 //! `lane::kernels::ramp_block` applies them. `advance_block` advances the scalar state
 //! by exactly the same iterated additions the kernel performs, which is what makes the two agree
 //! bit for bit (`tests/ramp.rs`).
+//!
+//! # Lane vectors (issue #2376)
+//!
+//! A bank whose per-frame loop reads a ramp's value every frame (a detector link weight, a
+//! coefficient that is redesigned each frame) cannot describe the block with one segment. It
+//! gathers the lanes' ramps into a [`RampLanes`], advances that by the same law lane-wide inside
+//! the loop, and scatters it back once through [`LinearRamp::record_advance`]. This is the one
+//! lane-vector walk of the law; the compressor, the transient shaper and the true-peak limiter
+//! use it (`tests/ramp_lanes.rs`).
 
 use lane::Lane;
 use lane::kernels::{RampSegment, ramp_toward};
@@ -314,5 +323,160 @@ impl LinearRamp {
 impl Default for LinearRamp {
     fn default() -> Self {
         Self::fixed(0.0)
+    }
+}
+
+/// The widest lane vector a [`RampLanes`] gathers: AVX2's eight `f32` lanes.
+const RAMP_LANES: usize = 8;
+
+/// The longest countdown a lane vector carries exactly: `2^24`, the largest power of two whose
+/// every smaller integer is an `f32`. It covers the longest link glide
+/// (`effect_contract::LINK_GLIDE_MAX_SAMPLES`) and every parameter window.
+const EXACT_COUNTDOWN: u32 = 1 << 24;
+
+/// One [`LinearRamp`] per lane, as four lane vectors (issue #2376): a block loop's working copy
+/// of a parameter (or a coefficient, or a link weight) across a bank.
+///
+/// [`RampLanes::gather`] reads the lanes' ramps at the start of a run of frames,
+/// [`RampLanes::advance`] (or [`RampLanes::advance_where`]) walks [`LinearRamp::next_value`]'s
+/// law once per frame lane-wide, and [`RampLanes::scatter`] writes the run's end back through
+/// [`LinearRamp::record_advance`], so the scalar ramps keep their phase invariant and a run
+/// boundary is not observable. The countdown is carried as an `f32` integer of at most `2^24`,
+/// so it converts both ways exactly and its compares are integer compares.
+///
+/// A lane vector holds no enum and takes no branch per frame: the countdown is the phase, as it
+/// is in [`LinearRamp`], and every update is a select.
+#[derive(Clone, Copy, Debug)]
+pub struct RampLanes<L: Lane> {
+    current: L,
+    target: L,
+    step: L,
+    remaining: L,
+}
+
+impl<L: Lane> RampLanes<L> {
+    /// Every lane at rest at its word of `value`: target `value`, step `+0.0`, countdown `0`.
+    ///
+    /// For a loop that knows its ramps are at rest and reads [`RampLanes::current`] alone (the
+    /// limiter's stationary dispatch), and for an unused glide weight (`resting(L::zero())`).
+    #[must_use]
+    #[inline(always)]
+    pub fn resting(value: L) -> Self {
+        let zero = L::zero();
+        Self {
+            current: value,
+            target: value,
+            step: zero,
+            remaining: zero,
+        }
+    }
+
+    /// Lane `l` is the `l`-th ramp of `ramps`. The first [`Lane::WIDTH`] are read; a lane past
+    /// the end rests at `+0.0`.
+    ///
+    /// Panics in debug builds if a ramp's countdown exceeds `2^24`, which no engine ramp reaches.
+    #[must_use]
+    #[inline(always)]
+    pub fn gather<'a, I>(ramps: I) -> Self
+    where
+        I: IntoIterator<Item = &'a LinearRamp>,
+    {
+        const { assert!(L::WIDTH <= RAMP_LANES) };
+        let mut words = [[0.0_f32; RAMP_LANES]; 4];
+        for (lane, ramp) in ramps.into_iter().take(L::WIDTH).enumerate() {
+            debug_assert!(ramp.remaining <= EXACT_COUNTDOWN, "an exact countdown");
+            words[0][lane] = ramp.current;
+            words[1][lane] = ramp.target;
+            words[2][lane] = ramp.step;
+            words[3][lane] = ramp.remaining as f32;
+        }
+        Self {
+            current: L::load(&words[0]),
+            target: L::load(&words[1]),
+            step: L::load(&words[2]),
+            remaining: L::load(&words[3]),
+        }
+    }
+
+    /// Writes lane `l` back into the `l`-th ramp of `ramps` (the first [`Lane::WIDTH`]) through
+    /// [`LinearRamp::record_advance`]: what an advance can change, `current`, `step` and
+    /// `remaining`. Each ramp keeps its own target.
+    #[inline(always)]
+    pub fn scatter<'a, I>(self, ramps: I)
+    where
+        I: IntoIterator<Item = &'a mut LinearRamp>,
+    {
+        let mut words = [[0.0_f32; RAMP_LANES]; 3];
+        self.current.store(&mut words[0]);
+        self.step.store(&mut words[1]);
+        self.remaining.store(&mut words[2]);
+        for (lane, ramp) in ramps.into_iter().take(L::WIDTH).enumerate() {
+            ramp.record_advance(words[0][lane], words[1][lane], words[2][lane] as u32);
+        }
+    }
+
+    /// The value each lane has reached: the value the previous frame used.
+    ///
+    /// At rest it is also the value [`RampLanes::advance`] would return, and the advance would
+    /// change no word (`tests/ramp_lanes.rs`), so a loop that knows its ramps are at rest may read
+    /// this instead of advancing.
+    #[must_use]
+    #[inline(always)]
+    pub const fn current(&self) -> L {
+        self.current
+    }
+
+    /// The lanes with frames still to produce: [`LinearRamp::is_ramping`], lane-wide.
+    #[must_use]
+    #[inline(always)]
+    pub fn in_flight(&self) -> L::Mask {
+        self.remaining.gt(L::zero())
+    }
+
+    /// One frame of [`LinearRamp::next_value`] on every lane, returning the frame's value.
+    ///
+    /// `remaining = max(remaining - 1, 0)`, then `current = select(remaining > 0,
+    /// ramp_toward(current, step, target), target)` and the step cleared where it is not: the step
+    /// added and held inside `[min(current, target), max(current, target)]`, so no word passes
+    /// its target (issue #1409), and the last ramping frame an assignment of the target, never an
+    /// addition (D11). On a lane at rest every word is unchanged: its `current` is its target and
+    /// its step `+0.0`, bit for bit (issue #2368).
+    #[inline(always)]
+    pub fn advance(&mut self) -> L {
+        let zero = L::zero();
+        self.remaining = self.remaining.sub(L::splat(1.0)).max(zero);
+        let stepping = self.remaining.gt(zero);
+        self.current = L::select(
+            stepping,
+            ramp_toward(self.current, self.step, self.target),
+            self.target,
+        );
+        self.step = L::select(stepping, self.step, zero);
+        self.current
+    }
+
+    /// [`RampLanes::advance`] on the lanes of `gate` only; every word of every other lane is
+    /// untouched. Returns the lanes it advanced that were in flight, which are the lanes
+    /// [`LinearRamp::next_value`] would have moved.
+    ///
+    /// As selects: an in-flight lane with one frame left takes its target and a `+0.0` step, any
+    /// other in-flight lane takes `ramp_toward(current, step, target)`, and its countdown drops
+    /// by one. A gated loop (the compressor's rate coefficients, which advance only where their
+    /// parameter moved) needs it; [`RampLanes::advance`] is the same walk on every lane.
+    #[inline(always)]
+    pub fn advance_where(&mut self, gate: L::Mask) -> L::Mask {
+        let zero = L::zero();
+        let one = L::splat(1.0);
+        let moving = L::mask_and(gate, self.remaining.gt(zero));
+        let last = L::mask_and(moving, self.remaining.eq(one));
+        let next = L::select(
+            last,
+            self.target,
+            ramp_toward(self.current, self.step, self.target),
+        );
+        self.current = L::select(moving, next, self.current);
+        self.step = L::select(last, zero, self.step);
+        self.remaining = L::select(moving, self.remaining.sub(one), self.remaining);
+        moving
     }
 }
