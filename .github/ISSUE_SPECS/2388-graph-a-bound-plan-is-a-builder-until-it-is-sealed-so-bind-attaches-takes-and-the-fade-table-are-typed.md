@@ -102,11 +102,12 @@ below, not filed.
 
   The `host.inventory.identity` arms of the reads and takes are gone (unreachable: the plan is a
   graph plan). No outcome or error precedence moves.
+- console-workload reads its effect lanes from the bound plan before the seal
+  (`SessionRuntime::effect_lanes`; corrected in the second fold below). Its `bank_counters`, its
+  ideal bank-slot runs and its reverb test read that copy.
 - Test-only addition: `graph::test_only_bank_effect_lanes(&mut PreparedRenderPlan)` (doc-hidden,
-  `test-support`). Two evidence readers read a sealed, rendered plan's lanes and have no bound
-  plan: console-workload's `bank_counters` and chain-shape rows, and host-core's
-  `successor_swap::insert_forms`. Bind placed those lanes and render moves no binding
-  (`response_bindings` is fixed at bind), so the read is unchanged.
+  `test-support`). One test reads a host-prepared plan's lanes, which is sealed:
+  host-core's `successor_swap::insert_forms`.
 - Test callers move mechanically: a bind that is unwrapped and rendered gets `.seal()`. A fixture
   that also hand-builds a carry returns the bound plan:
   - graph-compiler's `console_banking::bind_arm`, now followed by `arm` on the sealed plan;
@@ -247,6 +248,39 @@ attempt 1 fold below.
      added.
 
 **Gates (fold head).** `cargo test --locked -p graph --all-targets --features graph/test-support`:
-148 passed. Graph doctests: 2 passed (the `compile_fail` pair). `RUSTDOCFLAGS="-D warnings" cargo doc --locked
---no-deps -p graph`: ok. `cargo fmt --check`: ok. The fold changes doc comments and this record
+148 passed. Graph doctests: 2 passed (the `compile_fail` pair). `RUSTDOCFLAGS="-D warnings"
+cargo doc --locked --no-deps -p graph`: ok. `cargo fmt --check`: ok. The fold changes doc comments and this record
 only, so no render path or test moved.
+
+### Attempt 1 second fold (Terra): qualification on PR #2402
+
+**The failure.** Three jobs failed with `error[E0425]: cannot find function
+test_only_bank_effect_lanes in crate graph`:
+- the AArch64 release digest gates;
+- the release-mode lane, math and wasm-gates digest gates;
+- the wasm guests' "Build the wasmtime runner".
+
+console-workload's **library** called the `test-support`-gated read, and wasm-gates, wasm-gate-guest
+and bench depend on that library without the feature. The local `cargo test --release -p audit -p
+console-workload` gate passed only because console-workload's own dev-dependency turns
+`graph/test-support` on.
+
+**The fix.** The read is a bind read, so console-workload now takes it from the bound plan before
+the seal (`bound.plan.bank_effect_lanes()` in `SessionRuntime::build`) and keeps the rows in
+`SessionRuntime::effect_lanes`. `bank_counters`, `ideal_bank_slot_runs` and the reverb test read
+that copy. Each row's location, owner and effect ID are bind's home location, the same whenever
+they are read, and none of these readers uses `kind`. So the evidence is unchanged.
+`test_only_bank_effect_lanes` stays test-support only, for host-core's `insert_forms` (built with
+`host-core/test-support`, which turns on `graph/test-support`).
+
+**Gates (second fold head).** The three failing jobs' own commands, run locally:
+- `cargo build --locked --release -p wasm-gates`: ok.
+- `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`: 129 passed,
+  8 ignored. This is a superset of the AArch64 job's `-p wasm-gates` step, run here on x86-64.
+
+Also run:
+- `cargo build --locked --release -p bench`: ok.
+- `cargo check --locked --workspace` (no features): ok.
+- `cargo test --locked --release -p audit -p console-workload`: 84 passed.
+- `cargo clippy --locked -p console-workload --all-targets -- -D warnings`: ok.
+- `cargo fmt --check`: ok.

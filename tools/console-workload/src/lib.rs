@@ -908,9 +908,9 @@ pub fn bank_counters(workload: Workload, blocks: u64) -> [u64; 7] {
             .unwrap_or_else(|_| panic!("{}: block {block} rendered", workload.kind()));
     }
     let utilisation = runtime.utilisation;
-    let track_units: BTreeSet<u32> = graph::test_only_bank_effect_lanes(&mut runtime.plan)
-        .unwrap_or_default()
-        .into_iter()
+    let track_units: BTreeSet<u32> = runtime
+        .effect_lanes
+        .iter()
         .filter(|(strip, _)| tracks.contains(strip.as_ref()))
         .filter_map(|(_, lane)| match lane.location {
             graph::GraphEffectSite::Lane(at) => Some(at.unit),
@@ -1527,6 +1527,7 @@ fn console_model(workload: Workload) -> SessionModel {
 /// `sum over slots of ceil(A / W)` over all its groups' active members at once.
 fn ideal_bank_slot_runs(
     plan: &mut PreparedRenderPlan,
+    lanes: &[(Box<str>, graph::GraphEffectLane)],
     model: &SessionModel,
     input: InputSignal,
     report: &graph_compiler::GraphRackBankReport,
@@ -1595,13 +1596,12 @@ fn ideal_bank_slot_runs(
             .unwrap_or(false)
     };
     let key_class = key_class_ideal(report, model, &active);
-    let lanes = graph::test_only_bank_effect_lanes(plan).unwrap_or_default();
     let groups = graph::test_only_bank_slot_runs(plan)
         .into_iter()
         .map(|group| {
             // (slot, active lanes) over the group's units.
             let mut by_slot: std::collections::BTreeMap<u16, u64> = Default::default();
-            for (strip, lane) in &lanes {
+            for (strip, lane) in lanes {
                 let graph::GraphEffectSite::Lane(at) = lane.location else {
                     continue;
                 };
@@ -1870,6 +1870,10 @@ pub struct SessionRuntime {
     /// read from its channels, and `None` on every other arm.
     live_lanes: Option<controls::LiveLanes>,
     plan: PreparedRenderPlan,
+    /// The plan's effect lanes, read from the bound plan before its seal
+    /// ([`graph::GraphBoundPlan::bank_effect_lanes`], #2388): each instance's home location, owner
+    /// and effect ID. Evidence only, never touched inside the clock.
+    effect_lanes: Vec<(Box<str>, graph::GraphEffectLane)>,
     /// The plan's gate handle: every live value is a latest-target cell, written under a stamp
     /// of this gate and revealed by publishing the stamp's revision on it (decision 15, D15-2).
     gate: PlanRevisionGate,
@@ -2359,7 +2363,7 @@ impl SessionRuntime {
             .filter(|node| !is_track_input(node))
             .map(|node| GraphNodeBinding::identity(node.clone()))
             .collect();
-        let bound = artifact
+        let mut bound = artifact
             .into_bound_with_source_set(
                 GraphRuntimeBindings {
                     envelope,
@@ -2374,8 +2378,10 @@ impl SessionRuntime {
                     workload.kind(),
                     failure.code
                 )
-            })
-            .seal();
+            });
+        // #2388: the effect lanes are a bind read of the bound plan, read before its seal.
+        let effect_lanes = bound.plan.bank_effect_lanes();
+        let bound = bound.seal();
         let (plan, meter_consumers, strip_controls) =
             (bound.plan, bound.meter_consumers, bound.track_controls);
         assert_eq!(
@@ -2424,13 +2430,14 @@ impl SessionRuntime {
         // has to be this switch and cannot be a fixture edit.
         plan.force_mono_collapse_off(workload.collapse_forced_off());
         let (bsr_ideal, bsr_ideal_key_class) =
-            ideal_bank_slot_runs(&mut plan, &model, input, &rack_cohorts);
+            ideal_bank_slot_runs(&mut plan, &effect_lanes, &model, input, &rack_cohorts);
         let gate = plan.take_revision_gate().expect("the plan's gate handle");
         let mut runtime = Self {
             strip_controls,
             superseded,
             live_lanes: attached,
             plan,
+            effect_lanes,
             gate,
             output: Box::new(OutputPlanes([0.0; QUANTUM * 2])),
             meter_consumers,
@@ -3887,7 +3894,7 @@ mod tests {
             }
             (runtime, sink.finish_hex())
         };
-        let (mut runtime, reverb) = render(c1(C1State::Reverb));
+        let (runtime, reverb) = render(c1(C1State::Reverb));
         let model = console_model(c1(C1State::Reverb));
         let session = compile_session(&model, compile_caps()).expect("compiled session");
         let registry = launch_native_effect_registry().expect("launch effect registry");
@@ -3900,9 +3907,9 @@ mod tests {
             .map(|entry| entry.track_id.as_str())
             .collect();
         assert_eq!(reverbs, ["aux.b"], "the strips that carry a reverb");
-        let banked = graph::test_only_bank_effect_lanes(&mut runtime.plan)
-            .unwrap_or_default()
-            .into_iter()
+        let banked = runtime
+            .effect_lanes
+            .iter()
             .any(|(_, lane)| lane.effect_id.as_ref() == "reverb");
         assert!(!banked, "the reverb renders per node, in no bank");
         let fed = model
