@@ -4359,7 +4359,7 @@ struct GraphExecutor {
     next_block_sample: u64,
     /// How far this plan reads its sources ahead of its render clock (#1396 D1): the source
     /// section's block entry reads from `time.absolute_sample + source_read_offset`. Set on the
-    /// control thread before publication.
+    /// bound plan, before its seal ([`GraphBoundPlan::set_source_read_offset`], #2412).
     source_read_offset: u64,
     /// Restores a swap's carry refused on a per-node successor instance, which no bank stage
     /// counts (#1281, #1279 D6). Saturating; read after render.
@@ -5378,6 +5378,34 @@ impl<S> GraphBoundPlan<S> {
             "the mono collapse join is sealed while the render audit is armed"
         );
         self.executor().runtime.arm_mono_collapse(eligible);
+    }
+
+    /// Read the plan's sources `offset` samples ahead of its render clock, `ΣP` (#1396 D1): a
+    /// block that renders from absolute sample `r` reads source time from `r + offset`. 0 until
+    /// this is called.
+    ///
+    /// A plan's offset is fixed once it can render (#2412): it is set here, on the bound plan,
+    /// and a sealed plan has no setter (E0599):
+    ///
+    /// ```compile_fail,E0599
+    /// fn offset_sealed(plan: graph::GraphBoundPlan) {
+    ///     plan.seal().set_source_read_offset(128);
+    /// }
+    /// ```
+    ///
+    /// The bound plan takes it. This twin differs from the doctest above only in setting it before
+    /// the seal, so a renamed item or a typo in the shared code turns it red (issue #1422 D2):
+    ///
+    /// ```
+    /// fn offset_bound(mut plan: graph::GraphBoundPlan) {
+    ///     plan.set_source_read_offset(128);
+    /// }
+    /// ```
+    ///
+    /// A later call before the seal replaces an earlier one: the plan has not rendered under
+    /// either.
+    pub fn set_source_read_offset(&mut self, offset: u64) {
+        self.executor().source_read_offset = offset;
     }
 
     /// The same plan in its next state.
@@ -7356,8 +7384,8 @@ impl PreparedPlanExecutor for GraphExecutor {
         Some(self)
     }
 
-    fn set_source_read_offset(&mut self, offset: u64) {
-        self.source_read_offset = offset;
+    fn source_read_offset(&self) -> u64 {
+        self.source_read_offset
     }
 
     // REALTIME_POLICY_BEGIN
