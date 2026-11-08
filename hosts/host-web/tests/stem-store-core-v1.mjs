@@ -260,21 +260,21 @@ async function wedgedDemoteDeleteIsBounded() {
     assert.equal(outcome.value, false)
     assert.equal(indexStems(backend)[stem.identity], undefined, "a demoted stem stayed indexed")
 
-    // Issue #2381: the timed-out delete may still land, so the stem lock outlives it. A second
-    // verify of that stem in this store neither runs nor waits silently: it refuses typed one
-    // deadline later. Then the delete fails and leaves the corrupt final, so a third verify demotes
-    // again; now one step of the index write under the index lock hangs.
+    // Issue #2381: the timed-out delete may still land, so the stem lock outlives it and the next
+    // verify of that stem waits until the delete settles. Here it fails and leaves the corrupt final,
+    // so the second verify demotes again; now one step of the index write under the index lock hangs.
     backend.removeEntryBlocker = undefined
     backend[blocker] = ({ fileName }) => (fileName === "index.json" ? never() : undefined)
-    const second = await settledWithin(opfs.verify(stem.identity), 500)
-    assert.notEqual(second, "timed-out", "a verify waited silently on a demote's unsettled delete")
-    assert.equal(
-      second.error?.code,
-      "storage.remove_stalled",
-      "a verify ran while a demote's delete of its final was unsettled"
+    let secondSettled = false
+    const second = opfs.verify(stem.identity)
+    second.then(
+      () => (secondSettled = true),
+      () => (secondSettled = true)
     )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    assert.equal(secondSettled, false, "a verify ran while a demote's delete of its final was unsettled")
     failDelete()
-    const wedgedWrite = await settledWithin(opfs.verify(stem.identity), 500)
+    const wedgedWrite = await settledWithin(second, 500)
     assert.notEqual(
       wedgedWrite,
       "timed-out",
@@ -650,8 +650,8 @@ async function aHoldlessDemoteLeavesAFinalAnotherHoldOwns() {
 
 // Issue #2381: one hold never writes a final while a removal of that final it started is unsettled.
 // Here an open's ingest recheck finds a corrupt row that another tab indexed after the open's own
-// verify loop, demotes it, and the removal wedges. The open must refuse typed, not promote a final
-// that the late removal would then delete.
+// verify loop, demotes it, and the removal wedges. The open must wait for that removal, not promote
+// a final that the late removal would then delete; once it lands, the open promotes and reads.
 async function aHoldNeverWritesAFinalItIsStillRemoving() {
   const stem = fixture("recheck-fence", 4096)
   const backend = new FakeOpfsBackend()
@@ -694,22 +694,27 @@ async function aHoldNeverWritesAFinalItIsStillRemoving() {
   let land
   backend.removeEntryBlocker = ({ name }) =>
     name === finalName(stem) && land === undefined ? new Promise((resolve) => (land = resolve)) : undefined
+  let settledEarly = false
+  opening.then(() => (settledEarly = !landed))
+  let landed = false
   releaseEstimate()
+  await until(() => land !== undefined, "the recheck's removal")
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(settledEarly, false, "a hold wrote a final while its own removal of that final was unsettled")
+  backend.removeEntryBlocker = undefined
+  landed = true
+  land()
   const outcome = await opening
   assert.notEqual(outcome, "timed-out")
-  assert.equal(
-    outcome.error?.code,
-    "storage.remove_stalled",
-    "a hold wrote a final while its own removal of that final was unsettled"
-  )
-  backend.removeEntryBlocker = undefined
-  land()
+  assert.equal(outcome.error, undefined)
+  assert.equal((await outcome.value.read(stem.identity)).size, stem.bytes)
+  await outcome.value.close()
 }
 
-// Issue #2381: a stalled read in verify-on-open is a stall, not damage. It fails the open typed and
-// leaves the stem indexed, pinned and on disk; a demotion would drop another session's pin and
-// remove the file that session plays from.
-async function aStalledVerifyNeverDemotesAStem() {
+// Issue #2381: a read that stalls is not proof of damage. A stalled verify-on-open read of a stem
+// another session pins fails the open typed and leaves the row, the pin and the file; a demotion
+// would drop that pin and remove the file that session plays from.
+async function aStalledVerifyKeepsAPinnedStem() {
   const stem = fixture("stalled-verify", 4096)
   const backend = new FakeOpfsBackend()
   const resolver = new MemoryStemResolver(stemMap([stem]))
@@ -732,6 +737,137 @@ async function aStalledVerifyNeverDemotesAStem() {
   assert.equal(outcome.error?.code, "storage.read_stalled")
   assert.equal((await pinned.read(stem.identity)).size, stem.bytes)
   await pinned.close()
+}
+
+// Issue #2381: a final no session pins whose reads always stall heals, as it did on base: the stalled
+// verify-on-open, or a stalled verify(), demotes it, and the next open re-ingests it.
+async function aStallingUnpinnedFinalHeals() {
+  for (const leg of ["open", "verify"]) {
+    const stem = fixture(`stalling-${leg}`, 4096)
+    const backend = new FakeOpfsBackend()
+    const resolver = new MemoryStemResolver(stemMap([stem]))
+    const opfs = store(backend, new FakeLockManager(), { tabId: "stalling", readDeadlineMs: 20 })
+    await (await opfs.openSession({ sessionId: "seed", stems: requirements([stem]), resolver })).close()
+    // Every read stalls until the final is removed.
+    let broken = true
+    backend.getFileBlocker = ({ name }) => (name === finalName(stem) && broken ? never() : undefined)
+    backend.removeEntryBlocker = ({ name }) => {
+      if (name === finalName(stem)) broken = false
+    }
+    if (leg === "verify") {
+      const verified = await settledWithin(opfs.verify(stem.identity), 500)
+      assert.notEqual(verified, "timed-out")
+      assert.equal(verified.value, false, "a stalled verify() kept an unpinned final it cannot read")
+    }
+    const opened = await settledWithin(
+      opfs.openSession({ sessionId: "after", stems: requirements([stem]), resolver }),
+      1_000
+    )
+    assert.notEqual(opened, "timed-out")
+    assert.equal(opened.error, undefined, `a stalling unpinned final never healed (${leg})`)
+    assert.equal((await opened.value.read(stem.identity)).size, stem.bytes)
+    await opened.value.close()
+  }
+}
+
+// Issue #2381: a stalled read() of a stem another session pins fails typed and keeps the row and
+// the file, so the other session still reads.
+async function aStalledReadKeepsAStemAnotherSessionPins() {
+  const stem = fixture("stalled-read", 4096)
+  const backend = new FakeOpfsBackend()
+  const resolver = new MemoryStemResolver(stemMap([stem]))
+  const opfs = store(backend, new FakeLockManager(), { tabId: "stalled-read", readDeadlineMs: 20 })
+  const a = await opfs.openSession({ sessionId: "a", stems: requirements([stem]), resolver })
+  const b = await opfs.openSession({ sessionId: "b", stems: requirements([stem]), resolver })
+  let stalls = 1
+  backend.getFileBlocker = ({ name }) =>
+    name === finalName(stem) && stalls-- > 0 ? never() : undefined
+  const read = await settledWithin(a.read(stem.identity), 500)
+  assert.notEqual(read, "timed-out")
+  assert.equal(read.error?.code, "storage.read_stalled")
+  assert.ok(
+    backend.has(`${STORE_FOLDER}/${finalName(stem)}`) &&
+      indexStems(backend)[stem.identity]?.pins.includes("session:stalled-read:b"),
+    "a stalled read demoted a stem another session pins"
+  )
+  assert.equal((await b.read(stem.identity)).size, stem.bytes)
+  await a.close()
+  await b.close()
+}
+
+// Issue #2381: a holdless removal (a read failure's demotion) keeps the stem lock until the removal
+// settles. A later wait for that lock, here verify(), waits for it rather than running, and the
+// wait ends at its own abort; once the removal settles the lock is free again, past the abandoned
+// place in the no-Web-Locks queue too.
+async function aHoldlessRemovalKeepsTheStemLockUntilItSettles() {
+  for (const leg of ["Web Locks", "no Web Locks"]) {
+    const stem = fixture(`holdless-removal-${leg}`, 4096)
+    const backend = new FakeOpfsBackend()
+    const resolver = new MemoryStemResolver(stemMap([stem]))
+    const locks = leg === "Web Locks" ? new FakeLockManager() : {}
+    const opfs = store(backend, locks, { tabId: "holdless-removal", readDeadlineMs: 20 })
+    const lease = await opfs.openSession({ sessionId: "s", stems: requirements([stem]), resolver })
+    backend.getFileBlocker = ({ name }) => {
+      if (name !== finalName(stem)) return undefined
+      backend.getFileBlocker = undefined
+      const failure = new Error("transient read failure")
+      failure.name = "NotReadableError"
+      throw failure
+    }
+    let land
+    backend.removeEntryBlocker = ({ name }) =>
+      name === finalName(stem) ? new Promise((resolve) => (land = resolve)) : undefined
+    // The demotion's own wait is deadlined and best-effort, so the read still fails promptly.
+    const read = await settledWithin(lease.read(stem.identity), 500)
+    assert.notEqual(read, "timed-out")
+    assert.equal(read.error?.code, "stem.read.failed")
+    assert.notEqual(land, undefined)
+    const abort = new AbortController()
+    let verified = false
+    const verifying = settledWithin(opfs.verify(stem.identity, { signal: abort.signal }), 500)
+    verifying.then(() => (verified = true))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    assert.equal(verified, false, `a verify ran while a holdless removal of its final was unsettled (${leg})`)
+    abort.abort(new DOMException("Done", "AbortError"))
+    const aborted = await verifying
+    assert.notEqual(aborted, "timed-out", `a wait for a removing stem lock ignored its abort (${leg})`)
+    assert.equal(aborted.error?.name, "AbortError")
+    backend.removeEntryBlocker = undefined
+    land()
+    const after = await settledWithin(opfs.verify(stem.identity), 500)
+    assert.notEqual(after, "timed-out", `the stem lock stayed taken after the removal settled (${leg})`)
+    assert.equal(after.value, false)
+    await lease.close()
+  }
+}
+
+// Issue #2381: verify-on-open demotes only on what it read. A failed index write of its `lastUsedAt`
+// stamp is not a read of the stem: it fails the open and never demotes the stem.
+async function aFailedLastUsedWriteNeverDemotes() {
+  const stem = fixture("last-used-write", 4096)
+  let failOnce = false
+  const backend = new FakeOpfsBackend({
+    writeBlocker({ fileName }) {
+      if (fileName !== "index.json" || !failOnce) return undefined
+      failOnce = false
+      throw new Error("index write failed")
+    },
+  })
+  const resolver = new MemoryStemResolver(stemMap([stem]))
+  const opfs = store(backend, new FakeLockManager(), { tabId: "last-used" })
+  await (await opfs.openSession({ sessionId: "seed", stems: requirements([stem]), resolver })).close()
+  const requests = resolver.requests.length
+  failOnce = true
+  const outcome = await settledWithin(
+    opfs.openSession({ sessionId: "A", stems: requirements([stem]), resolver }),
+    500
+  )
+  assert.notEqual(outcome, "timed-out")
+  assert.ok(
+    resolver.requests.length === requests && indexStems(backend)[stem.identity] !== undefined,
+    "a failed lastUsedAt write demoted the stem"
+  )
+  assert.match(String(outcome.error), /index write failed/)
 }
 
 // Issue #2381: a failed fallback copy starts two removals of its final without awaiting them, the
@@ -1014,32 +1150,34 @@ async function aWedgedEvictionNeverHoldsTheIndex() {
     reached = true
     return never()
   }
-  const opening = settledWithin(
-    opfs.openSession({ sessionId: "incoming", stems: requirements([incoming]), resolver }),
-    500
-  )
+  const abort = new AbortController()
+  const opening = opfs.openSession({
+    sessionId: "incoming",
+    stems: requirements([incoming]),
+    resolver,
+    signal: abort.signal,
+  })
   await until(() => reached, "the eviction's removal")
   const closed = await settledWithin(lease.close(), 500)
   assert.notEqual(closed, "timed-out", "a lease close waited on an eviction's wedged removal")
   assert.equal(closed.error, undefined)
-  assert.equal(
-    (await opening).error?.code,
-    "storage.remove_stalled",
-    "an eviction waited on its wedged removal past the deadline"
-  )
+  // A removal has no deadline; the open's wait for it ends at the open's abort.
+  abort.abort(new DOMException("Switched mix", "AbortError"))
+  const aborted = await settledWithin(opening, 500)
+  assert.notEqual(aborted, "timed-out", "an eviction's wait for its removal ignored the open's abort")
+  assert.equal(aborted.error?.name, "AbortError")
 }
 
-// Issue #2381: a timed-out removal may still land, so an eviction keeps the victim's stem lock until
-// its removal settles. An open of the victim's own stem started meanwhile must not verify and pin the
-// file the removal is about to delete. From another tab it waits, then finds a miss and re-ingests.
-// From the same store it refuses typed one deadline after the drain starts, rather than waiting on a
-// removal that may never settle.
-async function aTimedOutEvictionHoldsTheStemLockUntilItsRemovalSettles() {
+// Issue #2381: an eviction keeps the victim's stem lock until its removal settles, even once its own
+// open stopped waiting at an abort. An open of the victim's own stem started meanwhile, from another
+// tab or from this store, must not verify and pin the file the removal is about to delete: it waits
+// for the lock, then finds a miss and re-ingests.
+async function anEvictionHoldsTheStemLockUntilItsRemovalSettles() {
   for (const leg of ["another tab", "same tab", "same tab, no Web Locks"]) {
     const victim = fixture("late-evict-victim", 4096)
     const incoming = fixture("late-evict-incoming", 4096)
     const backend = new FakeOpfsBackend()
-    // Without Web Locks the store falls back to its own FIFO, which only one store shares.
+    // Without Web Locks the store falls back to its own queue, which only one store shares.
     const locks = leg === "same tab, no Web Locks" ? {} : new FakeLockManager()
     const resolver = new MemoryStemResolver(stemMap([victim, incoming]))
     const opfs = store(backend, locks, { tabId: "late-evict", readDeadlineMs: 20 })
@@ -1048,11 +1186,19 @@ async function aTimedOutEvictionHoldsTheStemLockUntilItsRemovalSettles() {
     await (
       await opfs.openSession({ sessionId: "seed", stems: requirements([victim]), resolver })
     ).close()
+    // The other store's first open, and its debris sweep, run before the eviction starts.
+    await other.open()
     backend.reportedQuota = backend.usage
     let land
     backend.removeEntryBlocker = ({ name }) =>
       name === finalName(victim) ? new Promise((resolve) => (land = resolve)) : undefined
-    const evicting = opfs.openSession({ sessionId: "A", stems: requirements([incoming]), resolver })
+    const abort = new AbortController()
+    const evicting = opfs.openSession({
+      sessionId: "A",
+      stems: requirements([incoming]),
+      resolver,
+      signal: abort.signal,
+    })
     await until(() => land !== undefined, "the eviction's removal")
     let reopened = false
     const reopening = settledWithin(
@@ -1060,34 +1206,20 @@ async function aTimedOutEvictionHoldsTheStemLockUntilItsRemovalSettles() {
       1_000
     )
     reopening.then(() => (reopened = true))
-    await assert.rejects(evicting, (error) => error.code === "storage.remove_stalled")
-    if (leg !== "another tab") {
-      const refused = await reopening
-      assert.notEqual(refused, "timed-out", `a same-store open waited silently on an unsettled removal (${leg})`)
-      assert.equal(
-        refused.error?.code,
-        "storage.remove_stalled",
-        `an open verified a final that a timed-out eviction was still removing (${leg})`
-      )
-    } else {
-      await new Promise((resolve) => setTimeout(resolve, 40))
-      assert.equal(
-        reopened,
-        false,
-        "an open verified a final that a timed-out eviction was still removing (another tab)"
-      )
-    }
+    abort.abort(new DOMException("Switched mix", "AbortError"))
+    await assert.rejects(evicting, (error) => error.name === "AbortError")
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    assert.equal(
+      reopened,
+      false,
+      `an open verified a final that an eviction was still removing (${leg})`
+    )
     backend.removeEntryBlocker = undefined
     land()
-    // Once the removal lands the lock is free again, also past the refused waiter's abandoned place.
-    const later = leg === "another tab" ? await reopening : await settledWithin(
-      other.openSession({ sessionId: "C", stems: requirements([victim]), resolver }),
-      1_000
-    )
-    assert.notEqual(later, "timed-out", `the stem lock stayed taken after the removal settled (${leg})`)
-    assert.equal(later.error, undefined, `the stem lock stayed taken after the removal settled (${leg})`)
-    assert.equal((await later.value.read(victim.identity)).size, victim.bytes)
-    await later.value.close()
+    const lease = await reopening
+    assert.notEqual(lease, "timed-out", `the stem lock stayed taken after the removal settled (${leg})`)
+    assert.equal((await lease.value.read(victim.identity)).size, victim.bytes)
+    await lease.value.close()
   }
 }
 
@@ -1669,14 +1801,18 @@ await crashedSessionPinsAreRecoverable()
 await quotaFailureKeepsSurvivors()
 await lruEvictsOnlyUnpinned()
 await aWedgedEvictionNeverHoldsTheIndex()
-await aTimedOutEvictionHoldsTheStemLockUntilItsRemovalSettles()
+await anEvictionHoldsTheStemLockUntilItsRemovalSettles()
 await aWedgedIndexReadFailsTypedAndKeepsEveryPin()
 await aWedgedIndexRebuildNeverHoldsTheIndex()
 await aSweepNeverRemovesAFinalWhoseStemLockIsTaken()
 await aFallbackCleanupHoldsTheStemLockUntilItsRemovalsSettle()
 await aHoldlessDemoteLeavesAFinalAnotherHoldOwns()
 await aHoldNeverWritesAFinalItIsStillRemoving()
-await aStalledVerifyNeverDemotesAStem()
+await aStalledVerifyKeepsAPinnedStem()
+await aStallingUnpinnedFinalHeals()
+await aStalledReadKeepsAStemAnotherSessionPins()
+await aHoldlessRemovalKeepsTheStemLockUntilItSettles()
+await aFailedLastUsedWriteNeverDemotes()
 await anAbortedOpenEvictsNothing()
 await tabCloseMidStaging()
 await abortCleansStaging()

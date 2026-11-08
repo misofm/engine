@@ -142,36 +142,40 @@ directory listing, hashing and removal of a final that cannot self-verify. On
 expiry the step fails typed (`storage.read_stalled`, `storage.write_stalled` or
 `storage.remove_stalled`) and the lock is released, so one wedged step cannot
 stall every later index mutation, every lease close's pin release among them.
-A stall is never treated as damage. A rebuild whose hash of a final stalls
-fails typed and keeps that final, and a verify-on-open read that stalls fails
-the open typed `storage.read_stalled` and leaves the stem indexed, pinned and on
-disk; only corruption, a missing file or a read error demotes.
+Under the index lock a stall is never treated as damage: a rebuild whose hash
+of a final stalls fails typed and keeps that final, and a stalled index read
+never rebuilds.
 
-A final is removed only under its stem lock, and that lock is not released
-until the removal settles, even after the caller's deadline has passed. A
-timed-out removal may still land, and a later holder could otherwise verify and
-pin the very file it then deletes. Eviction and demotion drop the row first,
-under the index lock, then remove the file under the stem lock alone. Past its
-deadline an eviction fails its open typed `storage.remove_stalled` and a
-demotion leaves its final as debris; either way the stem lock waits for the
-removal. A failed fallback copy's unawaited removals hold the stem lock the same
-way, and within one hold no final is written while a removal that hold started
-is unsettled: the write waits one deadline, then fails typed
-`storage.remove_stalled`.
+Outside the index lock, a read that stalls or fails is not proof of damage
+either. In verify-on-open, `verify()` and a session's `read()`, such a read
+demotes the stem only if, re-checked under the index lock, no pin other than
+the reading session's own holds it. Otherwise the call fails typed (verify-on-open
+and `verify()` with `storage.read_stalled`, `read()` with its usual typed error)
+and the row and file stay. An unpinned final whose reads keep stalling is
+therefore demoted and re-ingested, while a stem another session plays from is
+left alone. Corruption, a wrong length and a missing file still demote
+unconditionally.
 
-A removal belongs to a hold only when its caller is inside that hold. A removal
-made under the index lock (a rebuild's or the open-time sweep's), or with no
-stem lock held (a demotion after a read failure), takes the stem lock without
-waiting and leaves the final alone when it is held, by another tab or by another
-hold in this store.
+A final is removed only inside a hold of its stem lock, and the hold is released
+only when the removal settles; a removal has no deadline. A caller that already
+holds the stem lock removes inside its own hold. Every other caller (a rebuild,
+the open-time sweep, a demotion after a read failure) takes the lock without
+waiting, and leaves the final alone when the lock is held, by another tab or by
+another hold in this store. How long a caller waits for its own removal is
+separate from the lock: an eviction's open waits until the removal settles or
+the open is aborted, a demotion waits at most the local-store deadline (it is
+best-effort), and a rebuild or sweep under the index lock waits at most its
+deadline and then fails typed. Eviction and demotion drop the row first, under
+the index lock, so no removal runs under it. A failed fallback copy's unawaited
+removals hold the stem lock the same way, and within one hold no final is
+written until every removal that hold started has settled.
 
-A wait for a stem lock that a hold in the same store is draining refuses typed
-`storage.remove_stalled` one deadline after the drain starts, so `verify()`, an
-open's verify loop or its ingest never waits silently on a removal that may not
-settle. A waiter in another tab sees only a held lock: its wait ends at its own
-signal, or when the removal settles and the lock is released. Without Web Locks
-the store serialises its stem locks with a local queue that honours the same
-signal, deadline and without-waiting rules.
+A wait for a stem lock, in this store or another tab, simply waits for the
+holder; it ends when the lock is released or at the waiter's own abort. A
+caller without a signal, such as `verify()` without one, can therefore wait as
+long as a wedged removal does. Without Web Locks the store serialises its stem
+locks with a local queue that honours the same signal and without-waiting
+rules.
 
 An eviction takes its open's signal on the victim's stem lock and on the index
 lock, and checks it again after the index read, so an aborted open evicts

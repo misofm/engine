@@ -278,3 +278,169 @@ Base `dfc3ac325`; branch `codex/issue-2381-index-lock-deadlines`.
 - that a removal belongs to a hold only when its caller is inside it;
 - the same-store waiter's typed refusal, and the cross-tab wait;
 - the local fallback's queue.
+
+**Verdict: FAIL** (Sol, four MAJORs; holds are now right, so there is no BLOCKER). Reproducers are in `repro3/`.
+- (1) A holdless `ifAvailable` removal holds the lock without registering a drain, so `verify()` and an unsignalled open hang silently.
+- (2) The drain timer is never cancelled when the drain ends, so a waiter refuses spuriously behind a later, legitimate hold.
+- (3) Stall-is-not-damage in `#verifyIndexed`, the rebuild and `verify()` means a final whose reads always stall is never healed, and every open fails forever. Base re-downloaded it.
+- (4) `read()`'s failure path still demotes on a stall, which contradicts the new docs.
+- Minors:
+  - (5) a waiter timer of 0 survives every test;
+  - (6) `#verifyIndexed`'s try also covers the `lastUsedAt` mutation;
+  - (7) OPFS awaits run under the stem lock with no deadline, which predates this branch (successor);
+  - (8) the `#SUCCESSOR` placeholder.
+- The coordinator rescoped attempt 4 to a simpler model that binds it. Its points are:
+  - (A) the index-lock contract;
+  - (B) one removal primitive with no deadline and no drains;
+  - (C) one stall-versus-damage rule outside the index lock;
+  - (D) tests and ledger for exactly that;
+  - (E) a successor for (7).
+
+### Attempt 4 (Terra, 2026-11-08)
+**A. Index lock.** Unchanged from attempt 3:
+- the index open, read and write deadlines;
+- the `#readIndex` and rebuild-hash stall rethrows;
+- the rebuild listing deadline;
+- the eviction deleting its row first, with no OPFS step under the index lock.
+
+The rebuild's and the sweep's removals run under the index lock, so the caller's *wait* for them keeps its deadline: `withDeadline`, and `#sweepStep` for the sweep. The removal itself does not, and its stem lock outlives it.
+
+**B. One removal primitive.**
+- Deleted: `#stemDrains`, `#stemWaiters`, `#waitForStemLock`, the drain notification, the waiter timers and the `remove_stalled` refusals.
+- `#withStemLock(identity, signal, work, ifAvailable)` acquires the lock, runs `work(hold)`, and releases only after `settled(hold.fences)`. With `ifAvailable` it returns `false` when the lock is held or queued for.
+- `#removeFinal(identity, hold, wait)`:
+  - fences the removal into `hold`;
+  - with no `hold`, wraps itself in `#withStemLock(…, ifAvailable)`;
+  - waits for the removal through `wait` only.
+- The eviction waits through `abortable(removal, signal)`.
+- `#promote` waits plainly for `settled(hold.fences)`.
+- Every stem-lock wait, same-store or cross-tab, ends at the lock's release or at the waiter's own abort. The no-Web-Locks queue honours the signal, and its abandoned and finished places clean up.
+
+**One deviation from B, with evidence.** A demotion's own wait keeps base's best-effort deadline (`withDeadline(…).catch(() => {})`). The removal itself has no deadline and keeps the lock until it settles. With the wait abortable-only, base's own row `wedgedDemoteDeleteIsBounded` goes red: `a demote awaited a wedged delete without a deadline`. In that run, `verify()` called with no signal hangs on the wedged delete. `read()`'s failure path would hang the same way. This is not new machinery. It is base's existing wait, and the ledger now holds it with an entry.
+
+**C. Stall versus damage outside the index lock.**
+- `#demoteUnreadable(identity, hold, ownPin, error)` re-checks the row under the index lock. It demotes, and removes the file through `#removeDemoted`, only when no pin other than `ownPin` holds the row. Otherwise:
+  - a `storage.read_stalled` error is rethrown as is;
+  - any other error is wrapped in `storage.read_stalled`;
+  - the row and the file stay.
+- The rule is used for:
+  - verify-on-open's read and hash;
+  - `verify()`'s hash;
+  - `read()`'s failure path. Here `StemSessionLease` passes its own pin as `read(identity, { ownPin })`, an internal option outside the `.d.ts`, like `onPinning`. A missing file is still damage and demotes unconditionally.
+- Verify-on-open has no own pin: same-session reopen plumbing was written, and dropped as unguarded.
+- Corruption and a wrong length still demote unconditionally.
+- `#verifyIndexed`'s try now covers only the `getFile` and the hash (finding 6). The hash line keeps its `const observed = await this.#hashOpenFile(...)` shape, which an existing static check pins: it now ends in `.catch(unreadable)`.
+
+**D. Tests** (`stem-store-core-v1.mjs`).
+- Kept unchanged:
+  - the index rows;
+  - the rebuild legs: listing, removal with the lock held, and hash (`rebuild-stall`);
+  - the sweep skip;
+  - both fallback-fence legs;
+  - `aHoldlessDemoteLeavesAFinalAnotherHoldOwns` (`same-store-bypass`);
+  - `anAbortedOpenEvictsNothing`.
+- Adapted:
+  - `wedgedDemoteDeleteIsBounded`: the second verify waits while the delete is unsettled.
+  - `aWedgedEvictionNeverHoldsTheIndex`: the evicting open's wait ends at its abort.
+  - `anEvictionHoldsTheStemLockUntilItsRemovalSettles` (`late-evict`), three legs: another tab, the same tab, and the same tab with no Web Locks. The evicting open is aborted, and the B open must stay pending until the removal lands, then read. The other store opens first, so its own debris sweep does not mask the mutation.
+  - `aHoldNeverWritesAFinalItIsStillRemoving`: the recheck waits for its own removal, then promotes and reads.
+  - `aStalledVerifyKeepsAPinnedStem` (`recheck-stall`).
+- New:
+  - `aStallingUnpinnedFinalHeals` (r2), with open and `verify()` legs;
+  - `aStalledReadKeepsAStemAnotherSessionPins` (r3);
+  - `aHoldlessRemovalKeepsTheStemLockUntilItSettles` (r1, now a wait that ends at abort), with Web Locks and no-Web-Locks legs;
+  - `aFailedLastUsedWriteNeverDemotes` (finding 6).
+- Removed: every drain-refusal leg and assertion.
+
+**Red** (each test run alone; "a3" is the attempt-3 store `55de84185`, "a2" is `3315395f8`, "base" is `dfc3ac325`):
+- `aStallingUnpinnedFinalHeals`:
+  - a3 `never healed (open)`;
+  - a2 and base `a stalled verify() kept an unpinned final it cannot read`.
+- `aStalledReadKeepsAStemAnotherSessionPins`: a3, a2 and base `a stalled read demoted a stem another session pins`.
+- `aStalledVerifyKeepsAPinnedStem`: a2 and base `a stalled verify demoted a pinned stem`. Green on a3, which never demoted on a stall.
+- `aHoldlessRemovalKeepsTheStemLockUntilItSettles`:
+  - base `a verify ran while a holdless removal of its final was unsettled (Web Locks)`;
+  - a2 `a wait for a removing stem lock ignored its abort (no Web Locks)`;
+  - green on a3, whose waits also ended at abort.
+- `aFailedLastUsedWriteNeverDemotes`: red on a3, a2 and base. They demote and re-download on the failed write.
+- `aHoldNeverWritesAFinalItIsStillRemoving`: a3, a2 and base `a hold wrote a final while its own removal of that final was unsettled`.
+- `wedgedDemoteDeleteIsBounded`: a3 and base `a verify ran while a demote's delete of its final was unsettled`.
+- `anEvictionHoldsTheStemLockUntilItsRemovalSettles`:
+  - a3 and a2 reject `remove_stalled` instead of `AbortError`;
+  - base hangs, exit 13.
+- `aWedgedEvictionNeverHoldsTheIndex`:
+  - base `a lease close waited on an eviction's wedged removal`;
+  - a2 and a3 reject `remove_stalled`, not `AbortError`.
+- The reviewer's reproducers on this attempt:
+  - r1: `verify()` and an unsignalled open now wait, by the model;
+  - r2: every open succeeds, and `verify()` returns true after the heal;
+  - r3: `a.read` fails `storage.read_stalled`, the final is kept, and `b.read` is OK;
+  - r4: no spurious refusal; L and W both return `false`;
+  - `same-store-bypass`: the final is kept, and B reads OK;
+  - `recheck-stall`: A fails `storage.read_stalled`;
+  - `rebuild-stall`: `read_stalled` after 21 ms, final kept;
+  - `late-evict`: B stays pending until the removal lands, A completes, and B reads OK.
+
+**Mutation ledger** (`--self-test --budgets`: PASS, 87 `RED` lines). The #2381 block has 33 entries, one per guard of this model. Each is `RED` at its target:
+- A (6 entries):
+  - the raw eviction removal under the index lock;
+  - the index open deadline;
+  - the stalled-read rebuild;
+  - the listing deadline;
+  - the rebuild removal deadline;
+  - the rebuild hash stall.
+- B (17 entries):
+  - the eviction wait ignoring its abort;
+  - an evicted final removed outside the hold;
+  - the lock released as soon as its work settles;
+  - a demoted final removed outside the hold;
+  - the demotion wait with no deadline;
+  - the two fallback fences;
+  - the ambient-hold check restored;
+  - the holdless lock released early;
+  - a taken lock removed anyway;
+  - the sweep's raw removal;
+  - the rebuild's raw removal;
+  - the promote fence;
+  - the local wait ignoring its signal;
+  - the abandoned local place;
+  - the finished local place never dropped;
+  - the local `ifAvailable` wait.
+- C (6 entries):
+  - a pinned unreadable stem demoted;
+  - stalled verify-on-open never demoting;
+  - the reader's own pin protecting its stem;
+  - `read()` demoting on any failure;
+  - `verify()` never demoting on a stall;
+  - the `lastUsedAt` failure demoting.
+- Aborted evictions (4 entries):
+  - the preflight signal, now red at its earlier gate `an eviction's wait for its removal ignored the open's abort`;
+  - the stem-lock signal;
+  - the index-lock signal;
+  - the in-mutation check.
+- Removed with the machinery: the drain, notification, waiter-timer and refusal entries.
+- Retargeted older anchors, all still `RED`:
+  - `trust warm filename without verify-on-open`;
+  - the two verify-on-open length arms, whose indentation changed.
+
+**Green** at the attempt-4 commit:
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS.
+- `stem-store-core-v1.mjs`: 8 parallel runs and 3 serial `--budgets` runs, all PASS.
+- `stem-pump-v1.mjs`: 4 parallel runs, PASS.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- Not applicable: no Rust and no render path changed. The suite runs in Node against the fakes.
+
+**Docs.** `docs/STEM_STORE_V1.md` describes exactly this model:
+- the index-lock deadlines;
+- the stall rule;
+- the single removal rule, with each caller's wait;
+- that stem-lock waits end at release or abort;
+- the local queue.
+
+**Successors.**
+- #SUCCESSOR: the `locks.query()` deadline.
+- #SUCCESSOR2: OPFS awaits with no deadline inside a stem-lock hold (finding 7).
+
+The coordinator files both.
