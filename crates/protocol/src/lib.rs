@@ -69,8 +69,8 @@ pub use model::{
 pub use queue::{
     ControlCommandSlot, CounterTelemetryRecord, ProtocolQueueConfig, ProtocolQueueError,
     ProtocolQueueResourceReport, ProtocolQueues, QueueKind, QueueReport, ReliableEnqueueError,
-    ReliableEventReservation, ReliableEventReservations, ReliableHeader, ReliablePayload,
-    ReliableSlot, TelemetryCounters, TelemetryKey, TelemetryRecord,
+    ReliableEventReservation, ReliableHeader, ReliablePayload, ReliableSlot, TelemetryCounters,
+    TelemetryKey, TelemetryRecord,
 };
 pub use session_wire::{DecodedSessionTransaction, SessionTransactionFrame};
 pub use typed_frame::{

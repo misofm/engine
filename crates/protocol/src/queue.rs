@@ -182,29 +182,11 @@ pub struct ReliableEventReservation {
     armed: bool,
 }
 
-/// Multiple atomic reliable-event capacity holds for one structural invalidation.
-#[derive(Debug)]
-pub struct ReliableEventReservations {
-    generation: QueueGeneration,
-    remaining: usize,
-    reservations: Arc<AtomicUsize>,
-}
-
 impl Drop for ReliableEventReservation {
     fn drop(&mut self) {
         if self.armed {
             self.reservations.fetch_sub(1, Ordering::AcqRel);
             self.armed = false;
-        }
-    }
-}
-
-impl Drop for ReliableEventReservations {
-    fn drop(&mut self) {
-        if self.remaining != 0 {
-            self.reservations
-                .fetch_sub(self.remaining, Ordering::AcqRel);
-            self.remaining = 0;
         }
     }
 }
@@ -509,23 +491,6 @@ impl ProtocolQueues {
         })
     }
 
-    /// Reserve every reliable event an action needs before it commits. A failure
-    /// ([`Self::check_reliable_event_room`]) leaves the queue and the action's caller-owned state
-    /// unchanged.
-    pub fn reserve_reliable_events(
-        &mut self,
-        count: usize,
-    ) -> Result<ReliableEventReservations, QueueReport> {
-        self.check_reliable_event_room(count)?;
-        self.reliable_event_reservations
-            .fetch_add(count, Ordering::AcqRel);
-        Ok(ReliableEventReservations {
-            generation: self.events.producer.generation(),
-            remaining: count,
-            reservations: Arc::clone(&self.reliable_event_reservations),
-        })
-    }
-
     /// Check, in every build and before anything changes, that a hold was issued by this queue
     /// (#2254). A hold's units are counted in the shared count of the queue that issued it, and
     /// only there; committing it anywhere else would take a unit from a count that never had it
@@ -549,40 +514,6 @@ impl ProtocolQueues {
             |count| count.checked_sub(1),
         );
         assert!(taken.is_ok(), "an issued hold's unit is counted");
-    }
-
-    /// Commit one event from a prior multi-event reservation.
-    ///
-    /// # Panics
-    ///
-    /// When `reservations` was issued by another queue or has no unit left: both are caller
-    /// defects, refused in every build before anything changes.
-    pub fn commit_reserved_reliable_event(
-        &mut self,
-        reservations: &mut ReliableEventReservations,
-        value: ReliableSlot,
-    ) {
-        self.assert_issued_here(reservations.generation, &reservations.reservations);
-        assert_ne!(
-            reservations.remaining, 0,
-            "a multi-event hold commits at most the events it reserved"
-        );
-        self.take_reserved_unit();
-        reservations.remaining -= 1;
-        match self.events.producer.try_push(value) {
-            Ok(()) => {}
-            Err(_) => unreachable!("a reserved reliable-event slot must remain available"),
-        }
-    }
-
-    /// Release all uncommitted multi-event reservation capacity on a failed transaction.
-    ///
-    /// # Panics
-    ///
-    /// When `reservations` was issued by another queue (its units still return to that queue).
-    pub fn release_reliable_events(&mut self, reservations: ReliableEventReservations) {
-        self.assert_issued_here(reservations.generation, &reservations.reservations);
-        drop(reservations);
     }
 
     /// Publish the exact event covered by a prior reservation. The reservation makes a full
@@ -987,35 +918,40 @@ mod tests {
             .reserve_reliable_event()
             .expect("the other queue's own hold");
 
-        let mut many = issuer.reserve_reliable_events(1).expect("reserve");
-        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            other.commit_reserved_reliable_event(&mut many, event);
-        }));
-        assert!(refused.is_err(), "a foreign multi-event hold is refused");
         let single = issuer.reserve_reliable_event().expect("reserve");
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             other.commit_reliable_event(single, event);
         }));
-        assert!(refused.is_err(), "a foreign single hold is refused");
+        assert!(refused.is_err(), "a foreign hold is refused");
 
         assert_eq!(
             other.report(QueueKind::ReliableEvent).occupancy,
             0,
             "no event entered room the other queue never reserved"
         );
+        let second = other.reserve_reliable_event().expect("one slot is free");
         assert!(
-            other.reserve_reliable_events(2).is_err(),
+            other.reserve_reliable_event().is_err(),
             "the other queue's own hold still excludes its room"
         );
-        drop(held);
-        drop(many);
-        let all = issuer
-            .reserve_reliable_events(2)
-            .expect("the issuer's holds return all of its room");
+        drop((held, second));
+        let all = [
+            issuer.reserve_reliable_event(),
+            issuer.reserve_reliable_event(),
+        ];
+        assert!(
+            all.iter().all(Result::is_ok),
+            "the refused hold returned the issuer's room as it unwound"
+        );
         drop(all);
-        other
-            .reserve_reliable_events(2)
-            .expect("the other queue's room returns once its hold is released");
+        let all = [
+            other.reserve_reliable_event(),
+            other.reserve_reliable_event(),
+        ];
+        assert!(
+            all.iter().all(Result::is_ok),
+            "the other queue's room returns once its holds are released"
+        );
     }
 
     #[test]

@@ -81,3 +81,13 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
   writing each row inside its check loop turns `a_read_checks_the_whole_batch_before_it_writes_a_row`
   red at line 1550 ("a refused batch writes no row"). `control-plane` `observation_bindings` (22)
   and the C ABI's two observation-read tests are green.
+- **C6, done.** `ReliableEventReservations`, its `Drop`, `reserve_reliable_events`,
+  `commit_reserved_reliable_event` and `release_reliable_events` leave `crates/protocol/src/queue.rs`
+  and the crate's re-exports; their only caller was the #2254 test. That test keeps its claim
+  (a hold is committed only by its issuer, and a refused hold changes neither queue) over single
+  holds: two reservations each on both queues show every unit came back. Mutation: commenting
+  out `assert_issued_here` in `commit_reliable_event` turns it red ("a foreign hold is refused",
+  `queue.rs:925`). `compile_children_warm` is now `#[cfg(all(test, feature = "test-support"))]`:
+  on base `cargo clippy -p control-plane --all-targets -- -D warnings` fails with "function
+  `compile_children_warm` is never used" (`compile.rs:2729`); it is green now, and so is the
+  `--all-features` run. No render code is touched.
