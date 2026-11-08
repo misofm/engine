@@ -41,7 +41,7 @@ use graph::{
 };
 use graph_compiler::{
     Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
-    PreparedGraphBuiltinsBound,
+    PreparedGraphBuiltinsSealed,
 };
 use rack::RackLocation;
 use session::{
@@ -165,7 +165,7 @@ impl GraphRuntimeProcessor for Identity {
     }
 }
 
-fn bind(artifact: PreparedGraphBuiltinsArtifact) -> PreparedGraphBuiltinsBound {
+fn bind(artifact: PreparedGraphBuiltinsArtifact) -> PreparedGraphBuiltinsSealed {
     let envelope = artifact.envelope();
     let nodes = artifact
         .external_binding_nodes()
@@ -188,6 +188,7 @@ fn bind(artifact: PreparedGraphBuiltinsArtifact) -> PreparedGraphBuiltinsBound {
             observers: Vec::new(),
         })
         .unwrap_or_else(|_| panic!("graph bind"))
+        .seal()
 }
 
 fn render(plan: &mut PreparedRenderPlan, output: &mut [f32; QUANTUM * 2], first_sample: u64) {

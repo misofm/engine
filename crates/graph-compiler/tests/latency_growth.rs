@@ -463,7 +463,8 @@ fn render(artifact: PreparedGraphBuiltinsArtifact, blocks: usize) -> [Vec<f32>; 
             },
             source_set,
         )
-        .unwrap_or_else(|failure| panic!("graph bind: {:?}", failure.code));
+        .unwrap_or_else(|failure| panic!("graph bind: {:?}", failure.code))
+        .seal();
     let plan: &mut PreparedRenderPlan = &mut bound.plan;
     let mut planes = [Vec::new(), Vec::new()];
     let mut output = [0.0_f32; QUANTUM * 2];

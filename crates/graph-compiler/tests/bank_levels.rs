@@ -431,7 +431,7 @@ pub fn compile_bind_render(
             return outcome;
         }
     };
-    let mut plan = bound.plan;
+    let mut plan = bound.plan.seal();
     if collapse == Collapse::Armed {
         let mono_source: BTreeSet<Box<str>> = session_structural_symmetry(&session)
             .into_iter()

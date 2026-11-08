@@ -428,6 +428,7 @@ impl Bound {
         let mut plan = artifact
             .into_bound(bindings)
             .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .seal()
             .plan;
         let gate = plan.take_revision_gate();
         Self {
@@ -1408,7 +1409,8 @@ fn retained(
     let bindings = bindings(&artifact, feeds);
     let bound = artifact
         .into_bound(bindings)
-        .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+        .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+        .seal();
     let window = current_thread_delta_since(mark);
     drop(bound);
     let live_bytes = window
@@ -1440,7 +1442,8 @@ fn retained_transition(
     let bindings = bindings(&artifact, feeds);
     let bound = artifact
         .into_bound(bindings)
-        .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+        .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+        .seal();
     let window = current_thread_delta_since(mark);
     drop(bound);
     let live_bytes = window
@@ -1559,7 +1562,8 @@ fn route_control_resources_cover_the_attached_state() {
     let bindings = bindings(&artifact, &feeds);
     let bound = artifact
         .into_bound(bindings)
-        .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+        .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+        .seal();
     drop(bound);
 }
 

@@ -417,7 +417,8 @@ fn bind_and_render_every_track(plan: PreparedGraphPlan, inputs: Vec<GraphNodeId>
             nodes: bindings,
             observers: Vec::new(),
         })
-        .unwrap_or_else(|failure| panic!("65,537-input bind: {}", failure.code));
+        .unwrap_or_else(|failure| panic!("65,537-input bind: {}", failure.code))
+        .seal();
     let frames = HAND_BUILT_FRAMES as usize;
     let mut pcm = vec![f32::NAN; frames * 2];
     bound
@@ -794,7 +795,8 @@ fn compiles_and_binds_65_537_tracks_with_builtins() {
             nodes,
             observers: Vec::new(),
         })
-        .unwrap_or_else(|failure| panic!("with-builtins scale bind: {}", failure.code));
+        .unwrap_or_else(|failure| panic!("with-builtins scale bind: {}", failure.code))
+        .seal();
     let frames = envelope.quantum.0 as usize;
     let mut pcm = vec![0.0_f32; frames * 2];
     bound

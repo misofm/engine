@@ -394,6 +394,21 @@ fn bind_with(
     observed: bool,
     setup: Setup,
 ) -> Bound {
+    let (plan, finish) = bind_unsealed(model, schedules, observed, setup);
+    finish(plan.seal())
+}
+
+/// [`bind_with`]'s bound plan, before its seal, and what finishes it once sealed: its gate and
+/// its mono collapse, as `host-core`'s prepare takes and arms them on the sealed plan.
+fn bind_unsealed(
+    model: &SessionModel,
+    schedules: &[Arc<[Block]>],
+    observed: bool,
+    setup: Setup,
+) -> (
+    graph::GraphBoundPlan,
+    impl FnOnce(PreparedRenderPlan) -> Bound,
+) {
     let session = compile_session(
         model,
         CompileCaps {
@@ -531,29 +546,31 @@ fn bind_with(
         })
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
     let controls = bound.track_controls;
-    let mut plan = bound.plan;
-    let gate = if setup.live || setup.effects_live {
-        plan.take_revision_gate()
-    } else {
-        None
-    };
     let mono_source: std::collections::BTreeSet<Box<str>> = session_structural_symmetry(&session)
         .into_iter()
         .filter(|(_, witness)| witness.eligible())
         .map(|(track, _)| track)
         .collect();
-    plan.arm_mono_collapse(&|track: &str| mono_source.contains(track));
-    Bound {
-        plan,
-        frames,
-        latency,
-        pack: true,
-        sinks,
-        bound_banks,
-        controls,
-        gate,
-        effect_controls,
-    }
+    let finish = move |mut plan: PreparedRenderPlan| {
+        let gate = if setup.live || setup.effects_live {
+            plan.take_revision_gate()
+        } else {
+            None
+        };
+        plan.arm_mono_collapse(&|track: &str| mono_source.contains(track));
+        Bound {
+            plan,
+            frames,
+            latency,
+            pack: true,
+            sinks,
+            bound_banks,
+            controls,
+            gate,
+            effect_controls,
+        }
+    };
+    (bound.plan, finish)
 }
 
 impl Bound {
@@ -1238,14 +1255,11 @@ fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
 fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Setup) -> Pair {
     let tracks = model.tracks.len();
     let all_strips = tracks + model.submixes.len();
-    let mut before = bind_with(model, schedules, true, setup);
-    let mut after = bind_with(model, schedules, true, setup);
-    let inputs: BTreeMap<_, _> = graph::builtin_input_lanes(&mut before.plan)
-        .expect("a graph plan")
-        .into_iter()
-        .collect();
-    let input_moves: Vec<_> = graph::builtin_input_lanes(&mut after.plan)
-        .expect("a graph plan")
+    let (mut before, finish_before) = bind_unsealed(model, schedules, true, setup);
+    let (mut after, finish_after) = bind_unsealed(model, schedules, true, setup);
+    let inputs: BTreeMap<_, _> = before.builtin_input_lanes().into_iter().collect();
+    let input_moves: Vec<_> = after
+        .builtin_input_lanes()
         .into_iter()
         .map(|(strip, successor)| graph::GraphLaneMove {
             successor,
@@ -1253,13 +1267,13 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
         })
         .collect();
     assert_eq!(input_moves.len(), all_strips, "every input section carries");
-    let strips: BTreeMap<_, _> = graph::builtin_strip_lanes(&mut before.plan)
-        .expect("a graph plan")
+    let strips: BTreeMap<_, _> = before
+        .builtin_strip_lanes()
         .into_iter()
         .map(|(strip, lane)| ((strip, lane.owner), lane.location))
         .collect();
-    let strip_moves: Vec<_> = graph::builtin_strip_lanes(&mut after.plan)
-        .expect("a graph plan")
+    let strip_moves: Vec<_> = after
+        .builtin_strip_lanes()
         .into_iter()
         .map(|(strip, lane)| graph::GraphStripMove {
             owner: lane.owner,
@@ -1273,13 +1287,13 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
         2 * all_strips,
         "every fader and matrix carries"
     );
-    let effects: BTreeMap<_, _> = graph::bank_effect_lanes(&mut before.plan)
-        .expect("a graph plan")
+    let effects: BTreeMap<_, _> = before
+        .bank_effect_lanes()
         .into_iter()
         .map(|(strip, lane)| ((strip, lane.effect_id), lane.location))
         .collect();
-    let effect_moves: Vec<_> = graph::bank_effect_lanes(&mut after.plan)
-        .expect("a graph plan")
+    let effect_moves: Vec<_> = after
+        .bank_effect_lanes()
         .into_iter()
         .map(|(strip, lane)| graph::GraphEffectMove {
             successor: lane.location,
@@ -1291,8 +1305,9 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
         effect_moves.len() >= 3 * tracks,
         "every console effect carries"
     );
+    let mut before = finish_before(before.seal());
     let mut carry = graph::carry_builder(
-        after.plan,
+        after,
         graph::GraphCarryProgram {
             predecessor: graph::plan_identity(&mut before.plan).expect("a graph plan"),
             sources: Box::default(),
@@ -1303,8 +1318,113 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
     carry.builtin_inputs(input_moves).expect("input carry");
     carry.builtin_strips(strip_moves).expect("strip carry");
     carry.effects(effect_moves, 0).expect("effect carry");
-    after.plan = carry.seal();
+    let after = finish_after(carry.seal());
     Pair { before, after }
+}
+
+/// D6 and P11 of #1276. Staging the input section refuses a padding lane and a repeated successor
+/// or predecessor lane (a section without a carry program does not compile, #2375). At the swap
+/// block a predecessor lane that does not resolve refuses the whole hand-over, before any lane
+/// moves. Red if install accepts a padding lane, or if the swap block copies the lanes that
+/// resolve and skips the rest.
+///
+/// Moved here from `host-core`'s `successor_swap` by #2388: a host-prepared plan is sealed, so a
+/// hand-over is staged by hand only on a bound plan.
+#[test]
+fn a_bad_input_move_is_refused_whole() {
+    const BLOCKS: u64 = 8;
+    // Nine tracks, so the last input bank of every width holds fewer strips than lanes.
+    let mut model = session(first_sixteen);
+    model.tracks.truncate(9);
+    let kept: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    model.routes.retain(|route| {
+        matches!(&route.source, RouteSource::Track { track_id, .. } if kept.contains(track_id))
+    });
+    model.automation.clear();
+    let schedules: Vec<Arc<[Block]>> = (0..TRACKS)
+        .map(|_| Arc::from(vec![Block::Signal(0.5); BLOCKS as usize + 64]))
+        .collect();
+    let (mut predecessor, finish_predecessor) =
+        bind_unsealed(&model, &schedules, false, Setup::DESK);
+    let lanes: BTreeMap<_, _> = predecessor.builtin_input_lanes().into_iter().collect();
+    let mut predecessor = finish_predecessor(predecessor.seal());
+    let (mut successor, finish_successor) = bind_unsealed(&model, &schedules, false, Setup::DESK);
+    let successor_lanes: BTreeMap<_, _> = successor.builtin_input_lanes().into_iter().collect();
+    let step = |successor, predecessor| graph::GraphLaneMove {
+        successor,
+        predecessor,
+    };
+    // The bank the strips fill partly: its lane after the last strip is padding.
+    let members = |unit: u32| {
+        successor_lanes
+            .values()
+            .filter(|location| location.unit == unit)
+            .count()
+    };
+    let last = *successor_lanes
+        .values()
+        .max_by_key(|location| (location.unit, location.lane))
+        .expect("input lanes");
+    let filled = members(last.unit);
+    assert!(filled < width().width(), "the last input bank is partial");
+    let padding = graph::GraphLaneLocation {
+        lane: u16::try_from(filled).expect("a lane"),
+        ..last
+    };
+    let (into, other) = (successor_lanes["ch00"], successor_lanes["ch01"]);
+    let mut carry = graph::carry_builder(
+        successor,
+        graph::GraphCarryProgram {
+            predecessor: graph::plan_identity(&mut predecessor.plan).expect("a graph plan"),
+            sources: Box::default(),
+            timeline: false,
+        },
+    )
+    .expect("a program that moves no source");
+    assert_eq!(
+        carry.builtin_inputs(vec![step(padding, lanes["ch00"])]),
+        Err(graph::GraphCarryInstallError::InputLaneOutOfRange)
+    );
+    assert_eq!(
+        carry.builtin_inputs(vec![step(into, lanes["ch00"]), step(into, lanes["ch08"])]),
+        Err(graph::GraphCarryInstallError::DuplicateInputLane)
+    );
+    // A predecessor location past every unit: it sorts after ch00's valid move.
+    let nowhere = graph::GraphLaneLocation {
+        unit: u32::MAX,
+        ..lanes["ch08"]
+    };
+    carry
+        .builtin_inputs(vec![step(into, lanes["ch00"]), step(other, nowhere)])
+        .expect("successor lanes resolve; predecessor lanes are checked at the swap block");
+    let mut successor = finish_successor(carry.seal());
+
+    // Render the predecessor so ch00's filters hold state, then hand over.
+    let frames = predecessor.frames;
+    let mut pcm = vec![0.0_f32; frames * 2];
+    for block in 0..BLOCKS {
+        predecessor.render(block, true, &mut pcm);
+    }
+    assert_eq!(
+        successor.plan.adopt_predecessor_plan(&mut predecessor.plan),
+        engine::realtime::CarryOutcome::PredecessorMismatch
+    );
+    // Nothing moved: the successor's blocks are a fresh plan's blocks on the same input, through
+    // the first one its input sections reach past the plan's latency.
+    let mut fresh = bind_with(&model, &schedules, false, Setup::DESK);
+    let reach = successor.latency.div_ceil(frames as u64) + 1;
+    assert!(reach <= 64, "the schedules cover the latency");
+    let mut fresh_pcm = vec![0.0_f32; frames * 2];
+    let bits = |pcm: &[f32]| {
+        pcm.iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>()
+    };
+    for block in BLOCKS..BLOCKS + reach {
+        fresh.render(block, true, &mut fresh_pcm);
+        successor.render(block, true, &mut pcm);
+        assert_eq!(bits(&pcm), bits(&fresh_pcm), "block {block}");
+    }
 }
 
 /// Gate 3 (#1782a): a plan whose strips trade bank lanes renders exactly the unmoved plan.
