@@ -1238,10 +1238,10 @@ export class OpfsStemStore {
   }
 
   async #sweepStaging(liveLocks, budgetEnd) {
-    // Under Web Locks a staged file is dead only when its stem lock is free. A query that threw or
-    // stalled leaves that unproven, so nothing staged is removed. The age check below is only for a
-    // store with no lock query at all (#2396).
-    if (liveLocks === null && typeof this.#locks?.query === "function") {
+    // Under Web Locks (`request` decides, as in #acquireStemLock) a staged file is dead only when its
+    // stem lock is free. A query that is missing, threw or stalled leaves that unproven, so nothing
+    // staged is removed. The age check below is only for a store with no Web Locks at all (#2396).
+    if (liveLocks === null && typeof this.#locks?.request === "function") {
       throw new StemStoreError(
         "storage.maintenance_stalled",
         "Web Locks did not report which staged files are live"

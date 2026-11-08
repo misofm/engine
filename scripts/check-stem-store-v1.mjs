@@ -1105,13 +1105,64 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "    if (liveLocks === null && typeof this.#locks?.query === \"function\") {\n",
+            "    if (liveLocks === null && typeof this.#locks?.request === \"function\") {\n",
           replace: "    if (false) {\n",
         },
       ],
       test: "stem-store-core-v1.mjs",
       expectedFailure:
         "an open with unknown lock state removed a live download's staged file (query throws)",
+    },
+    {
+      name: "key the staging guard on the lock query instead of Web Locks requests",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    if (liveLocks === null && typeof this.#locks?.request === \"function\") {\n",
+          replace:
+            "    if (liveLocks === null && typeof this.#locks?.query === \"function\") {\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure:
+        "an open with unknown lock state removed a live download's staged file (no lock query)",
+    },
+    {
+      name: "skip the staged-file age check without Web Locks",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search: "      if (liveLocks === null) {\n        try {\n",
+          replace: "      if (false) {\n        try {\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "the age check removed a fresh staged file",
+    },
+    {
+      name: "treat every staged file as old enough without Web Locks",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search: "          oldEnough = this.#now() - file.lastModified >= 30_000\n",
+          replace: "          oldEnough = true\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "the age check removed a fresh staged file",
+    },
+    {
+      name: "never treat a staged file as old enough without Web Locks",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search: "          oldEnough = this.#now() - file.lastModified >= 30_000\n",
+          replace: "          oldEnough = false\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "the age check kept a dead staged file",
     },
     // Issue #278's opt-in Worker cadence. Two mutations, because "off by default" and "stop
     // interrupts" are two claims and one of them staying green would hide the other. The first is

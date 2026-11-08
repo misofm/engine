@@ -1485,10 +1485,10 @@ async function aStalledLockQueryNeverHoldsTheIndex() {
 }
 
 // Issue #2396: under Web Locks a staged file is dead only when its stem lock is free. An open whose
-// lock query threw or stalled cannot prove that, so it removes no staged file, even one older than
-// the age check's threshold, and it keeps every pin. Here another tab is mid-download.
+// lock query threw, stalled or is missing cannot prove that, so it removes no staged file, even one
+// older than the age check's threshold, and it keeps every pin. Here another tab is mid-download.
 async function anUnknownLockStateSweepsNothingStaged() {
-  for (const leg of ["query throws", "query stalls"]) {
+  for (const leg of ["query throws", "query stalls", "no lock query"]) {
     const stem = fixture(`query-unknown-${leg}`, 4096)
     const pinnedStem = fixture(`query-unknown-${leg}-pinned`, 4096)
     const backend = new FakeOpfsBackend()
@@ -1517,12 +1517,17 @@ async function anUnknownLockStateSweepsNothingStaged() {
     await until(() => paused, "the download's first chunk")
     const staged = backend.names(`${STORE_FOLDER}/staging`)
     assert.equal(staged.length, 1)
-    locks.queryBlocker =
-      leg === "query throws"
-        ? async () => {
-            throw new Error("fake query failure")
-          }
-        : never
+    if (leg === "no lock query") {
+      // Web Locks requests still work; only the query is absent.
+      locks.query = undefined
+    } else {
+      locks.queryBlocker =
+        leg === "query throws"
+          ? async () => {
+              throw new Error("fake query failure")
+            }
+          : never
+    }
     const failures = []
     const opened = await settledWithin(
       store(backend, locks, {
@@ -1548,12 +1553,34 @@ async function anUnknownLockStateSweepsNothingStaged() {
     )
     assert.deepEqual(failures, ["staging"])
     locks.queryBlocker = undefined
+    delete locks.query
     resume()
     const lease = await downloading
     assert.equal((await lease.read(stem.identity)).size, stem.bytes)
     await lease.close()
     await pinned.close()
   }
+}
+
+// Issue #2396: with no Web Locks at all, the staging sweep's only evidence is a staged file's age.
+// A file older than 30 seconds is removed as dead, and a fresher one is kept as a possible live write.
+async function theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks() {
+  const backend = new FakeOpfsBackend()
+  await store(backend, {}, { tabId: "age-seed" }).open()
+  const staging = await (
+    await (await backend.storage().getDirectory()).getDirectoryHandle(STORE_FOLDER)
+  ).getDirectoryHandle("staging")
+  const dead = `age-dead-${"a".repeat(64)}`
+  const fresh = `age-fresh-${"b".repeat(64)}`
+  await staging.getFileHandle(dead, { create: true })
+  await staging.getFileHandle(fresh, { create: true })
+  const nodes = backend.root.entries.get(STORE_FOLDER).entries.get("staging").entries
+  nodes.get(dead).lastModified = Date.now() - 60_000
+  nodes.get(fresh).lastModified = Date.now()
+  await store(backend, {}, { tabId: "age-open" }).open()
+  const left = backend.names(`${STORE_FOLDER}/staging`)
+  assert.ok(left.includes(fresh), "the age check removed a fresh staged file")
+  assert.ok(!left.includes(dead), "the age check kept a dead staged file")
 }
 
 // Issue #2381: an aborted open evicts nothing once its abort is seen, wherever its eviction waits:
@@ -2040,6 +2067,7 @@ await anEvictionSparesAVictimPinnedAfterItsPreflight()
 await anAbortedOpenEvictsNothing()
 await aStalledLockQueryNeverHoldsTheIndex()
 await anUnknownLockStateSweepsNothingStaged()
+await theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks()
 await tabCloseMidStaging()
 await abortCleansStaging()
 await wedgedDecoderObeysAbortAndDeadline()

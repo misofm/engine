@@ -36,7 +36,7 @@ Base `343cbfd36`; branch `codex/issue-2396-locks-query-deadline`.
 **Decision: what the callers do on expiry.** A query that throws or makes no progress within `readDeadlineMs` leaves the lock state unknown, and `#liveLockNames` returns `null`, as the contract says. A late answer is dropped by the `withDeadline` race. Each caller's `null` path was checked against the rule that it must lose no pin and remove only what it can prove dead:
 - The pin purge purges nothing. Kept.
 - The finals sweep and the rebuild remove a final only after taking its stem lock without waiting. A live holder in any tab keeps the lock, so the removal is proven without the snapshot. Kept. The rebuild still runs, so a damaged index heals.
-- The staging sweep is the one exception to the contract's "existing unknown-lock-state paths". Its age check is not proof. A live download writes its staged file through a writable that, on real OPFS, does not update the file's `lastModified` until it closes, so a download longer than 30 seconds looks dead. Under Web Locks the only proof is that the stem lock is free. So when the store has a lock query and it gave no answer, the staging sweep removes nothing. It reports `storage.maintenance_stalled` to the maintenance hook, and the open succeeds. The age check stays only for a store with no lock query at all.
+- The staging sweep is the one exception to the contract's "existing unknown-lock-state paths". Its age check is not proof. A live download writes its staged file through a writable, and that writable need not update the file's `lastModified` before it closes, so a download longer than 30 seconds can look dead. In a spec-compliant browser, an open writable's File System lock also makes the sweep's raw `removeEntry` fail. The guard still stands, because the store must not rely on that lock, and the Node fakes do not model it. Neither behaviour was verified in a browser for this issue. Under Web Locks, the only proof that a staged file is dead is that its stem lock is free. So when the store has Web Locks requests and no answered query, the staging sweep removes nothing. It reports `storage.maintenance_stalled` to the maintenance hook, and the open succeeds. The check is `typeof this.#locks?.request === "function"`, the same test `#acquireStemLock` uses to decide that stem locks are cross-tab, so a lock manager with `request` but no `query` is covered too (fold, below). The age check stays only for a store with no Web Locks at all.
 - This applies to a query that throws as well as one that stalls, so there is one rule for "the query gave no answer". On base a throwing query age-swept staging. That is the same hazard, and the `query throws` leg below is red on base for it.
 - Failing the open typed was considered and rejected. The sweeps are best-effort by design (`openSurvivesFailingSweeps`), and failing typed would make a stalled lock manager block every mix for nothing the open needs.
 
@@ -72,3 +72,26 @@ Base `343cbfd36`; branch `codex/issue-2396-locks-query-deadline`.
 **Docs.** `docs/STEM_STORE_V1.md` states the query deadline, that a late answer is dropped, that an unanswered query purges no pin and sweeps no staged file, that the age check is only for a store with no lock query, and why the finals sweep and a rebuild still run.
 
 **#2381's binding model is unchanged.** The only new deadline is on an index-lock step. No removal of a final changes, and none gains a deadline. No new stall rule is added: an unanswered query is unknown state, not damage. `session-gate.js` and #2372's pin-phase model are untouched.
+
+**Verdict: PASS** (Sol, minors only). Folded on the same branch:
+1. The staging guard is keyed on `typeof this.#locks?.request === "function"`, as `#acquireStemLock` is, not on `query`. This removes attempt 1's follow-up, in which a lock manager with `request` but no `query` still age-swept the staged files of live cross-tab writers. The code comment, `docs/STEM_STORE_V1.md` and the ledger's search string are updated to match.
+2. The age-check path had no test: both `if (liveLocks === null)` → `if (false)` and `oldEnough = true` kept the suite green. There is a new no-Web-Locks row, `theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks`. A staged file a minute old is removed, and a fresh one is kept.
+3. Decision bullet 3 and `docs/STEM_STORE_V1.md` now say that in a spec-compliant browser an open writable's File System lock makes the raw `removeEntry` fail. They also say that the guard stands anyway, because the store must not rely on that lock and the fakes do not model it. The hazard is not presented as browser-verified.
+
+**Fold tests.**
+- `anUnknownLockStateSweepsNothingStaged` gains a `no lock query` leg. The `FakeLockManager` keeps `request` and loses `query`. Red on the attempt-1 store `11f4a52ce`: `an open with unknown lock state removed a live download's staged file (no lock query)`. Test value: red if the guard is keyed on the lock query rather than on Web Locks requests.
+- `theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks`. Test value: red if the no-Web-Locks sweep skips the age check and removes a fresh, possibly live, staged file, or never removes an old dead one. No other test reaches the age check.
+
+**Fold ledger.** Four new entries, each `RED` at its target:
+- the guard keyed on `query`: `... staged file (no lock query)`;
+- `if (liveLocks === null) {` → `if (false) {`: `the age check removed a fresh staged file`;
+- `oldEnough = true`: `the age check removed a fresh staged file`;
+- `oldEnough = false` (an old file never counts as dead): `the age check kept a dead staged file`. `if (oldEnough)` → `if (false)` was tried first and dropped: it also disables the Web Locks path removal, so `tabCloseMidStaging` already goes red at it, outside this row.
+
+**Green after merging `origin/main` (`9806fdce0`):**
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS, 101 `RED` lines (97 at attempt 1, plus the 4 fold entries).
+- `stem-store-core-v1.mjs --budgets`: 4 parallel runs, all PASS.
+- `stem-pump-v1.mjs`: PASS.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
