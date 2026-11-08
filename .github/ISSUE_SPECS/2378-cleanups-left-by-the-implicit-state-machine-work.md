@@ -67,3 +67,17 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
   forced to `activation` was green on every test (the level-off branch had no reader, nor did the
   base's `gate_from = INACTIVE` write), so that test now also asserts the gate reads shut once the
   level is off, and the mutant is red at line 525.
+- **C5, done.** The row is `host_core::observation` (the issue's "engine" area is the origin's
+  #2307 wording). `read_into` had no production caller; the C ABI and the browser read through
+  `control-plane`'s `read_with`. It goes, with the `RowsTooShort` refusal only it returned (and
+  its `None` arm in `control-plane`'s `observation_refusal`), `ObservationRow`'s `Default`,
+  `ObservationReading`'s `Default` impl, and `tap: Option`: a row's `tap` is now
+  `&'static ObservationDescriptor`, so `wire_row` reads its unit directly. Every row a read wrote
+  carried `Some(tap)` before, so the `map_or(Db, ..)` fallback was unreachable and the wire bytes
+  are unchanged. No render code is touched. The two `tests/effect_observation.rs` tests that
+  called `read_into` read through `read_with` (a `read_rows` helper recording each write); the
+  batch test now asserts a refused batch makes no `write` call, which replaces the sentinel-row
+  comparison, and that a good batch writes positions 0 and 1 once each. Mutation: `read_with`
+  writing each row inside its check loop turns `a_read_checks_the_whole_batch_before_it_writes_a_row`
+  red at line 1550 ("a refused batch writes no row"). `control-plane` `observation_bindings` (22)
+  and the C ABI's two observation-read tests are green.
