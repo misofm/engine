@@ -19,7 +19,10 @@
 //! token goes to `0` first and `half` to `0` last, so no deposit reuses the entry while the token
 //! word is still being written) or cancels (the half's address and the token are stored back, and
 //! the token is unconsumed). Every operation is a bounded scan of four entries: no allocation, no
-//! free, no lock and no wait, so both exports may run on the render thread.
+//! free, no lock and no wait, so both exports may run on the render thread. The one exception is
+//! [`free_disposed`] (#2373), the control instance's sweep at each boot and dispose: it claims
+//! entries the same way and frees the halves whose session was disposed, which no host can take
+//! back.
 //!
 //! # The instance reservation
 //!
@@ -41,8 +44,9 @@ use crate::RenderHost;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// How many released render halves the registry holds at once. One Worker instance holds one host
-/// and releases one half; the other entries are slack for a release whose adoption is pending
-/// while a second host (a test's, or a page that boots again) releases its own.
+/// and releases one half; the other entries are slack for halves whose adoption is pending: a
+/// disposed session's orphan until the control instance's next boot or dispose frees it (#2373),
+/// or a second host's half (a native test's, where each thread is an instance).
 pub const HANDOFF_SLOTS: usize = 4;
 
 /// The token word of an entry an adoption has claimed and not yet confirmed or cancelled.
@@ -118,26 +122,40 @@ pub(crate) fn take<R>(
     if token == 0 || token == CLAIMED {
         return None;
     }
-    let entry = ENTRIES.iter().find(|entry| {
-        entry
-            .token
-            .compare_exchange(token, CLAIMED, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-    })?;
+    let entry = ENTRIES.iter().find(|entry| claim(entry, token))?;
+    Some(decide(entry, token, accept))
+}
+
+/// Claim `entry` for `token`: `true` when the entry held that token, which is now [`CLAIMED`].
+/// The `Acquire` half of the exchange sees the half the deposit stored before its token.
+fn claim(entry: &Entry, token: u64) -> bool {
+    entry
+        .token
+        .compare_exchange(token, CLAIMED, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+}
+
+/// Offer the half of an entry [`claim`] claimed for `token` to `accept`, then confirm (the entry
+/// is free) or cancel (the half and its token go back, unconsumed).
+fn decide<R>(
+    entry: &Entry,
+    token: u64,
+    accept: impl FnOnce(RenderHost) -> Result<R, RenderHost>,
+) -> Result<R, ()> {
     let raw = entry.half.load(Ordering::Acquire);
     // SAFETY: the token named this entry, so the deposit stored a live half's address before it
-    // stored the token, and the claim above is the only one that can succeed for it.
+    // stored the token, and the caller's claim is the only one that can succeed for it.
     let render = unsafe { from_raw(raw) };
     match accept(render) {
         Ok(value) => {
             entry.token.store(0, Ordering::Release);
             entry.half.store(0, Ordering::Release);
-            Some(Ok(value))
+            Ok(value)
         }
         Err(render) => {
             entry.half.store(into_raw(render), Ordering::Release);
             entry.token.store(token, Ordering::Release);
-            Some(Err(()))
+            Err(())
         }
     }
 }
@@ -147,6 +165,36 @@ pub(crate) const fn token_handle(token: u64) -> u32 {
     (token >> 32) as u32
 }
 // REALTIME_POLICY_END
+
+/// Free every half in the registry whose session was disposed (#2373): an orphan, released after
+/// its host's dispose, that no host can take back (a booted host takes back only its own half)
+/// and that would otherwise hold its entry for the life of the memory. The instance that boots
+/// hosts calls it at each boot and each dispose, so every orphan is freed by the first of the
+/// two after its release, and a dispose of the last host leaves the registry empty.
+///
+/// Each entry is claimed as an adoption claims it, by its token, so the sweep and an adoption
+/// never both hold a half. A half whose session is live goes back under its token, unconsumed;
+/// an adoption of that token in the same moment finds no entry and is refused, as it is against
+/// any other claim. The token load is only a hint: the claim is the exchange.
+///
+/// Control work: it frees, so only an instance that bound no reservation calls it, never the
+/// render-only one, and never inside a render-locked export.
+pub(crate) fn free_disposed() {
+    for entry in &ENTRIES {
+        let token = entry.token.load(Ordering::Relaxed);
+        if token == 0 || token == CLAIMED || !claim(entry, token) {
+            continue;
+        }
+        let freed = decide(entry, token, |render| {
+            if render.session_disposed() {
+                Ok(render)
+            } else {
+                Err(render)
+            }
+        });
+        drop(freed);
+    }
+}
 
 /// The stack an instance reservation gives a second instance (owner decision O6).
 pub const INSTANCE_STACK_BYTES: usize = 2 << 20;
@@ -335,6 +383,15 @@ fn canary_intact(canary: usize) -> bool {
     })
 }
 // REALTIME_POLICY_END
+
+/// How many entries hold a half (#2373 gate). Test support only.
+#[cfg(feature = "test-support")]
+pub(crate) fn occupied_for_test() -> usize {
+    ENTRIES
+        .iter()
+        .filter(|entry| entry.half.load(Ordering::Acquire) != 0)
+        .count()
+}
 
 /// Overwrite one byte of `reservation`'s canary, as a stack overflow would (#1332 S6 gate).
 /// Test support only.
