@@ -14,10 +14,10 @@
 //! The oracles, every one by bits:
 //!
 //! * **armed against forced dual.** host-core arms the mono collapse at prepare
-//!   (`PreparedRenderPlan::arm_mono_collapse`); `force_mono_collapse_off(true)` renders every chain
-//!   dual. The collapse is a bit-exact optimisation, so the two must agree -- the class #970 was
-//!   (the collapse armed on a chain that does not gather the track input). The armed collapse must
-//!   fire on some seed, or the comparison proves nothing.
+//!   (`graph::GraphBoundPlan::arm_mono_collapse`); `force_mono_collapse_off(true)` renders every
+//!   chain dual. The collapse is a bit-exact optimisation, so the two must agree -- the class
+//!   #970 was (the collapse armed on a chain that does not gather the track input). The armed
+//!   collapse must fire on some seed, or the comparison proves nothing.
 //!
 //! And the invariant a differential cannot see: legal input never leaves the D7 block bound.
 //!

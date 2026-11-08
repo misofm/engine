@@ -212,17 +212,10 @@ fn the_block_entry_holds_the_newest_published_lengths() {
     let superseded = realtime::LiveValuesSuperseded::new();
     // Warm any process static the attach touches on a throwaway plan, so the counted attach
     // below sees the cell's own allocations alone.
-    let mut warm = bound();
-    drop(
-        warm.attach_jump_lengths(PREPARED, &superseded)
-            .expect("a graph plan's cell"),
-    );
-    drop(warm);
-    let mut plan = bound();
+    drop(bound().attach_jump_lengths(PREPARED, &superseded));
+    let plan = bound();
     let mark = bench_support::alloc::current_thread_counters();
-    let mut producer = plan
-        .attach_jump_lengths(PREPARED, &superseded)
-        .expect("a graph plan's cell");
+    let (plan, mut producer) = plan.attach_jump_lengths(PREPARED, &superseded);
     let cell = bench_support::alloc::current_thread_delta_since(mark);
     assert_eq!(
         cell.requested_bytes - cell.released_bytes,
@@ -233,10 +226,6 @@ fn the_block_entry_holds_the_newest_published_lengths() {
         (cell.allocations, cell.deallocations, cell.reallocations),
         (2, 0, 0),
         "the cell is two allocations: the shared lane and the plan's reader"
-    );
-    assert_eq!(
-        plan.attach_jump_lengths(PREPARED, &superseded).err(),
-        Some(GraphJumpLengthError::AlreadyAttached)
     );
     let (mut gate, mut owner, _exchange) = exchange(plan.seal());
     // Warm the process statics and the thread-local reader before any count.

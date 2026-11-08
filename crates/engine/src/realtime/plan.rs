@@ -205,10 +205,11 @@ pub struct PlanUnitEligibility {
     /// `true` for a homogeneous bank chain, `false` for a single dispatched op.
     pub banked: bool,
     /// Issue #970: `true` only for a bank chain every lane of which begins at its track's
-    /// `PostInputBuiltins` stage, the one unit the mono collapse (`arm_mono_collapse`) may arm on
-    /// the structural join alone; `false` for every later chain of a split strip and for a single
-    /// op. Since issue #987 a later chain whose every lane gathers a same-track bank producer is
-    /// armed too, and collapses only on a block its producers rendered with bit-identical planes;
+    /// `PostInputBuiltins` stage, the one unit the mono collapse
+    /// (`graph::GraphBoundPlan::arm_mono_collapse`) may arm on the structural join alone; `false`
+    /// for every later chain of a split strip and for a single op. Since issue #987 a later chain
+    /// whose every lane gathers a same-track bank producer is armed too, and collapses only on a
+    /// block its producers rendered with bit-identical planes;
     /// [`armed_on_input`](Self::armed_on_input) marks it. A caller reading
     /// [`all_lanes_eligible`](Self::all_lanes_eligible) as collapse evidence tests this and
     /// [`witness_is_vacuous`](Self::witness_is_vacuous) first.
@@ -564,20 +565,6 @@ pub trait PreparedPlanExecutor: Send {
     #[doc(hidden)]
     fn force_mono_collapse_off(&mut self, forced: bool) {
         let _ = forced;
-    }
-    /// Perform the mono collapse's structural join and arm the cohorts it admits.
-    ///
-    /// `eligible(track_id)` is the **structural** half of the channel-symmetry witness -- the
-    /// `SOURCE` term, decided from the compiled session by
-    /// `session_structural_symmetry`. Every chain is unarmed until this is called, and an
-    /// unarmed chain never collapses: the runtime half a chain carries is source agnostic (see
-    /// [`PlanUnitEligibility::lane_eligible`]) and would admit a track whose two channels read
-    /// two different source channels.
-    ///
-    /// Off the render thread, once, after bind.
-    #[doc(hidden)]
-    fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
-        let _ = eligible;
     }
     /// `[observed stages, declared taps, armed taps]`, walked over the **built** runtime.
     ///
@@ -1341,20 +1328,6 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0; 3], PreparedPlanExecutor::bank_collapse_transitions)
-    }
-    /// Perform the mono collapse's structural join and arm the cohorts it admits.
-    ///
-    /// See [`PreparedPlanExecutor::arm_mono_collapse`]. Until a caller does this, no chain of this
-    /// plan collapses -- which is the safe default and the reason the join is explicit.
-    #[doc(hidden)]
-    pub fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
-        assert!(
-            !super::audit::is_render_scope_active(),
-            "the mono collapse join is sealed while the render audit is armed"
-        );
-        if let Some(executor) = self.executor.as_deref_mut() {
-            executor.arm_mono_collapse(eligible);
-        }
     }
     /// Force every bank chain's mono collapse off, or back on. Bind-time, outside render.
     #[doc(hidden)]
