@@ -18,7 +18,7 @@
 //! * the four terms a *runtime* object can see are not the whole answer. [`SOURCE`] is decided
 //!   from the compiled session, keyed by track id, and a chain sees only anonymous lanes -- so a
 //!   chain must be handed that half explicitly (`BankChain::arm_mono_collapse`) and declines until
-//!   it is. The join is `PreparedRenderPlan::arm_mono_collapse`.
+//!   it is. The join is `graph::GraphBoundPlan::arm_mono_collapse`.
 //!
 //! [`SOURCE`]: ChannelSymmetryWitness::SOURCE
 //!

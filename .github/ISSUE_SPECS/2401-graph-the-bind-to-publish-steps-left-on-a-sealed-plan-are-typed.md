@@ -34,4 +34,203 @@ Brief it with a declared file set, and split it if it can't reach a closable sli
 - Clippy `-D warnings`, `cargo doc -D warnings`, `cargo fmt --check`, `scripts/check-workspace-policy.sh`, `graph_fixture --check` and the realtime policy tool.
 
 ## Evidence / attempt record
-(empty)
+
+### Attempt 1 (Terra), base `origin/main` @ `9d9bec3e7`
+
+**Slice.** The graph-side steps: the two attaches, `plan_identity` and the mono-collapse join
+(the spec's own suggested first part). The engine-level gate steps (`take_revision_gate`,
+`stamp_held_gate`, `set_source_read_offset`) are a proposed successor, not filed. The donation
+stays on the sealed plans, for the reason below.
+
+**Claims re-verified at base** (`9d9bec3e7`).
+- `PreparedRenderPlan::arm_mono_collapse` (`crates/engine/src/realtime/plan.rs:1350`,
+  doc-hidden) is the join. `prepare_or_project` runs it on the sealed plan
+  (`crates/host-core/src/prepare.rs:5883`), and so do the graph-compiler, builtins-compiler and
+  graph test fixtures and console-workload's library (`tools/console-workload/src/lib.rs:2427`).
+  Holds. The rule it carries is `BankChain::arm_mono_collapse`'s obligation
+  (`crates/rack/src/lib.rs:4894`): arm "once, before this chain renders its first block". The
+  engine asserted only the render-scope half; nothing stopped a sealed plan that had rendered
+  from being armed.
+- `set_source_read_offset` is set on the sealed plan (`prepare.rs:5769`). Holds.
+- `take_revision_gate` (`plan.rs:1020`) returns `Some` once, then `None`; taken at
+  `crates/control-plane/src/compile.rs:2471`, `crates/host-core/src/limiter_linked_session.rs:442`
+  and 77 more sites in 41 files. Holds.
+- `stamp_held_gate` (`plan.rs:1040`) stamps on the sealed plan (`prepare.rs:5905`) and returns
+  `None` once the handle is taken. Holds.
+- `graph::donate_sources` (`crates/host-core/src/source.rs:1207`) returns `false` for pairs its
+  own check refuses. Holds; kept, see below.
+- `prepare_or_project` keeps an unreachable `host.inventory.identity` arm on
+  `graph::plan_identity(&mut plan)` (`prepare.rs:5771`). Holds.
+- `GraphBoundPlan::attach_jump_lengths` and `attach_automation_program` refuse a second call
+  with `AlreadyAttached` (`crates/graph/src/lib.rs:2080`, `:2132`). Holds. Only
+  `crates/graph/tests/jump_lengths.rs:238` tested a refusal; the program's had no test.
+
+**Design.**
+- Two new `GraphBoundPlan` states, `ProgramAttached` and `JumpLengthsAttached`, between
+  `BindTables` and `TablesTaken`. The one-shot steps run in a fixed order, and any may be
+  skipped: program, jump-length cell, bind tables, fade table, seal. Each step consumes the plan
+  and returns it in its own state, which offers only the later steps:
+  - `attach_automation_program(self, Option<Arc<Program>>) -> GraphBoundPlan<ProgramAttached>`,
+    on a `BindTables` plan only. It takes an `Option` so the type does not depend on whether the
+    session has stored automation; `None` attaches nothing, as before.
+  - `attach_jump_lengths(self, ..) -> (GraphBoundPlan<JumpLengthsAttached>, producer)`, on the
+    sealed trait `NoJumpLengths` (`BindTables`, `ProgramAttached`).
+  - `take_bind_tables` moves to `HoldsBindTables` (`BindTables`, `ProgramAttached`,
+    `JumpLengthsAttached`); `NoFadeTable` gains the two new states.
+  - `GraphAutomationProgramError` and `GraphJumpLengthError` are removed. No other crate
+    matched on them.
+- `GraphBoundPlan::plan_identity(&self) -> u64`, on every state. `prepare_or_project` reads it
+  before the seal, and its `host.inventory.identity` arm is gone. The free
+  `graph::plan_identity(&mut PreparedRenderPlan) -> Option<u64>` stays for test callers that read
+  a sealed predecessor; source's `None`-for-a-plain-plan assertion keeps it tested.
+- The mono-collapse join moves onto the bound plan: `GraphBoundPlan::arm_mono_collapse(&mut
+  self, eligible)`, on every state, with the engine's render-scope assertion. The engine's
+  `PreparedRenderPlan::arm_mono_collapse` and the `PreparedPlanExecutor::arm_mono_collapse`
+  trait hook are removed (graph was the hook's only implementer), so a sealed plan, which may
+  have rendered, has no join. This types the half of the chain's obligation that mattered: a
+  bound plan cannot render, so a chain is armed before its first block.
+  - **Not one-shot, on purpose.** A second join before the seal is harmless: each call answers
+    every chain afresh from `eligible` (`crates/graph/src/runtime.rs:5072`,
+    `BankChain::arm_mono_collapse` is `collapse_source = structural`), so the last call before the
+    seal wins and no chain has rendered under an earlier answer. A one-shot state would add a
+    sixth state for no defect.
+  - `prepare_or_project` joins just before the hand-over builder takes the plan. The join is
+    infallible and reads only the compiled session, so moving it ahead of the projection checks
+    changes no outcome or error precedence. No carry section reads the arming before the swap
+    block: `GraphCarryBuilder::seal` (`crates/graph/src/lib.rs`) only moves staged sections into
+    the executor, and the one cross-chain check that compares arming (`BankChain::swap_lanes`,
+    `crates/rack/src/lib.rs:5129`) runs at render, after the seal either way.
+  - `force_mono_collapse_off` stays on the sealed plan (out of scope, as the spec says).
+- Callers moved: builtins-compiler's `bound_from_plan` attaches with the `Option`
+  (`PreparedBuiltinsGraphBound`'s default plan type is now `GraphBoundPlan<ProgramAttached>`);
+  `prepare_or_project` destructures the attach; console-workload joins on `bound.plan` before
+  its seal. Test fixtures that armed after the seal now arm before it: graph `rt9`,
+  graph-compiler `bank_levels`, `silent_bank_skip::bind_unsealed`, `console_banking::{arm,
+  join, seal_forced}`, the lib tests' `bind_queued_eq(.., mono_collapse)` and the production
+  console test, and builtins-compiler's `mono_armed` over the new
+  `prepared_live_graph_fixture_bound`. Doc references to the engine join now name the graph one.
+- control-plane keeps its `host.jump_lengths.attach` code for a handle set without a jump-length
+  writer; only its comment changed (the attach no longer refuses).
+
+**Left on the sealed plan, with the reason.**
+- **The source donation.** The donor is a withdrawn plan: render owned it and handed it back
+  through retirement, so it is a sealed `PreparedRenderPlan` by construction and cannot be a
+  bound plan. The successor is the host's prepared plan, sealed at `prepare_or_project`'s end,
+  and the donation runs after the protocol commit (`crates/control-plane/src/control.rs:6743`).
+  The check-to-apply hand-off is already typed (`check_donation` returns the `DonationPlan`
+  `apply_donation` consumes). Its run-time re-check is deliberate: it is the acked-batch guard
+  against a caller that breaks the contract between check and apply (`source.rs:1214-1227`), so
+  `donate_sources`'s `false` is that guard's answer, not a forgotten refusal. Its refusals keep
+  their tests: `withdrawn_successor`'s `a_refused_or_mismatched_donation_moves_nothing`,
+  `a_donation_never_separates_an_acked_ring_from_its_producer` and
+  `a_successor_fed_between_the_check_and_the_apply_moves_nothing`.
+- **The engine-level gate steps** are not dropped; they are the successor below.
+
+**Mutation evidence: the run-time rules the types replace are compile errors.** A scratch test
+file (`crates/graph/tests/zz_scratch_2401.rs`, never committed) against the head API; `rustc`,
+trimmed:
+```
+second_program            E0599 no method named `attach_automation_program` found for struct `GraphBoundPlan<ProgramAttached>`
+second_jump_cell          E0599 the method `attach_jump_lengths` exists for struct `GraphBoundPlan<JumpLengthsAttached>`, but its trait bounds were not satisfied
+program_after_jump_cell   E0599 no method named `attach_automation_program` found for struct `GraphBoundPlan<JumpLengthsAttached>`
+jump_cell_after_tables    E0599 the method `attach_jump_lengths` exists for struct `GraphBoundPlan<TablesTaken>`, but its trait bounds were not satisfied
+jump_cell_after_fade      E0599 the method `attach_jump_lengths` exists for struct `GraphBoundPlan<FadeTable>`, but its trait bounds were not satisfied
+jump_cell_after_seal      E0599 no method named `attach_jump_lengths` found for struct `PreparedRenderPlan`
+program_after_seal        E0599 no method named `attach_automation_program` found for struct `PreparedRenderPlan`
+join_after_seal           E0599 no method named `arm_mono_collapse` found for struct `PreparedRenderPlan`
+join_after_carry_seal     E0599 no method named `arm_mono_collapse` found for struct `PreparedRenderPlan`
+identity_after_seal       E0599 no method named `plan_identity` found for struct `PreparedRenderPlan`
+old_refusals              E0433 cannot find type `GraphJumpLengthError` / `GraphAutomationProgramError`
+forged_state              E0277 the trait bound `Forged: graph::bound_state::Sealed` is not satisfied
+```
+The rows cover a second attach of each kind, an attach out of order, and the join, the attaches
+and the identity on a sealed plan. The committed evidence is one `compile_fail,E0599` doctest
+pair on `GraphBoundPlan::arm_mono_collapse`: a sealed plan has no join, its plain twin joins the
+bound plan (#1422 D2). Test value: red if `PreparedRenderPlan` offers the join again, so a plan
+that has rendered could be armed and break the rack's agreement invariant; no other test sees a
+type-level change.
+
+**Tests.**
+- Deleted, because the rule it held is now a compile error (`second_jump_cell` above): the
+  `AlreadyAttached` assertion in `graph/tests/jump_lengths.rs`'s
+  `the_block_entry_holds_the_newest_published_lengths`. The rest of that test is unchanged.
+- New: the doctest pair above.
+
+**Mutations of the change (head).** The tree was restored after each.
+
+| Mutation | Run | Result |
+|---|---|---|
+| `attach_jump_lengths` builds the reader but does not install it | `graph --test jump_lengths` | red at the retained-row assertion (line 220) |
+| `attach_automation_program` drops the program | `capi --test resource_lifecycle` | red: `capi_retained_bytes_charge_every_byte_the_compile_retains` |
+| `GraphBoundPlan::arm_mono_collapse` arms nothing | `host-core --test collapse_arming` | red, 5 of 8 |
+| `GraphBoundPlan::plan_identity` returns the identity plus one | `host-core --test successor_swap` (control-provider) | red, 102 of 128 |
+| the engine's `PreparedRenderPlan::arm_mono_collapse` restored (base `plan.rs`) | `graph --doc` | red: the new `compile_fail` doctest |
+| `impl NoJumpLengths for JumpLengthsAttached` | scratch file | `second_jump_cell` compiles (no committed test; the scratch rows are the evidence) |
+
+**No bit moved.** #2375's scratch instrumentation, never committed, applied identically to the
+base files (`9d9bec3e7`) and the head files in this worktree: `PreparedRenderPlan::render_block`
+FNV-1a folds every rendered output block into a thread-local accumulator, and its destructor
+appends `<test binary> <test thread> <blocks> <hash>` to a file. Suites, with each crate's
+test-support features:
+- `graph`, `graph-compiler` and `builtins-compiler`, every target;
+- `source` lib;
+- `host-core` lib and `successor_swap`, `warm_successor`, `withdrawn_successor`, `live_routes`,
+  `browser_successor`, `swap_block_realtime`, `timeline`, `collapse_arming` and `randomized`
+  (`control-provider` on). The last two are added to #2388's set because they arm through
+  `prepare_or_project`.
+
+781 tests passed on each tree, 319 rows each. The first runs' destructors wrote a row in several
+writes, so concurrent test threads interleaved 4 rows on each tree. The three binaries those rows
+came from (graph lib, source lib, host-core `live_routes`) were re-run on both trees with one
+write per row, and their rows replace the first runs'. Two base rows of graph-compiler's
+`live_routes` stayed interleaved; they read, by hand, `a_bus_whose_every_send_goes_inactive_is_refilled_with_positive_zero 6 f3638f875fbc9952`
+and `a_new_cell_value_ramps_from_the_coefficients_the_route_is_at 5 90695e68fc2aaaf4`, the same as
+head. Excluded, as #2388 did: `live_routes_render_without_allocating` and
+`live_sends_render_without_allocating`, which publish from a concurrent producer thread, so their
+hashes are timing (they differ between runs of one tree too). The other 317 rows (60 082 blocks)
+are identical on base and head; the 315 machine-compared rows are equal line for line, and the
+head listing of all 317 has sha256 `50760397edb47202fa30e0752c6b8ba394594f78dfb95a70693a2a6686df6f97`.
+`graph_fixture --check` passes at head, so the fixture bytes are unchanged. No render-path body,
+executor field or plan word changed: the `GraphExecutor` trait impl lost a control-side hook, and
+the realtime policy tool reports the same 298 marked regions.
+
+**Gates (head).**
+- `cargo test --locked -p graph --all-targets --features graph/test-support`: 148 passed. Graph
+  doctests: 4 passed (the new `compile_fail` pair included).
+- `-p graph-compiler --all-targets` (graph, builtins-compiler, effect-compiler and session
+  test-support): 195 passed, 2 ignored.
+- `-p builtins-compiler --all-targets` (test-support): 58 passed, 2 ignored.
+- `-p source --all-targets --features graph/test-support`: 84 passed.
+- `-p host-core --all-targets` (host-core, graph, builtins-compiler and engine test-support): 473
+  passed, 8 ignored; with `host-core/control-provider`: 618 passed, 8 ignored.
+- `-p engine --all-targets --features engine/test-support,engine/realtime-audit`: 95 passed.
+  Engine doctests: 2 passed.
+- `-p control-plane --all-targets --features control-plane/test-support`: 102 passed.
+- `-p capi --all-targets`: 238 passed. `-p rack --all-targets`: 75 passed.
+- `cargo test --locked --release -p audit -p console-workload`: 84 passed.
+- `cargo clippy --locked --all-targets -- -D warnings` on engine, graph, graph-compiler,
+  builtins-compiler, host-core, control-plane, rack, effect-contract and console-workload, with
+  and without the test-support features (and `host-core/control-provider`): ok.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps` on the same crates but
+  console-workload: ok.
+- #2388's lesson, the builds without test-support features: `cargo check --locked --workspace`
+  and `cargo build --locked --release -p bench -p realtime-policy -p wasm-gates`: ok.
+- `cargo fmt --check`, `bash scripts/check-workspace-policy.sh` and `graph_fixture --check`: ok.
+- `./target/release/realtime_policy`: ok (298 marked regions in 48 files).
+
+**Proposed successor (not filed): "Engine: a plan's revision gate and source-read offset are set
+before its seal".**
+- `take_revision_gate` becomes a by-value hand-out, so a second take is not representable, and
+  `stamp_held_gate` becomes a step of the plan before that hand-out, so its `None` arm goes. One
+  shape: the engine plan is built with its handle held in a bound-side wrapper, and the seal (or a
+  `take` that consumes that wrapper) returns `(PreparedRenderPlan, PlanRevisionGate)`. Another:
+  `stamp_held_gate` moves onto `GraphBoundPlan` before the seal, and the gate comes out of the
+  seal. Either way `prepare_or_project`'s post-seal stamp moves before the seal, and the gate
+  travels in `PreparedHost` to control-plane's and `limiter_linked_session`'s takes.
+- `set_source_read_offset` moves before the seal. Only engine can write the plan's field, so it
+  needs an engine-side bound surface too (or a seal argument); host-core's
+  `test_only_set_source_read_offset`, which writes a sealed host's plan, would then need a
+  test-support path.
+- Size: 79 `take_revision_gate` call sites in 41 files (engine, graph, graph-compiler,
+  builtins-compiler, host-core, control-plane, capi, bench, bench-support, console-workload), so
+  it does not fit this half day, and its design needs a brief with a declared file set.

@@ -2055,40 +2055,22 @@ impl GraphJumpLengthProducer {
     }
 }
 
-/// Why [`GraphBoundPlan::attach_automation_program`] refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GraphAutomationProgramError {
-    /// The plan holds its program already.
-    AlreadyAttached,
-}
-
-impl<S> GraphBoundPlan<S> {
+impl GraphBoundPlan {
     /// Give a bound graph plan a handle on the stored-automation program its stages and routes
     /// read (#1074), so [`PreparedRenderPlan::retained_bytes`] charges that one shared allocation
-    /// once, at the plan: no per-stage or per-route clone charges it. Off the render thread, before
-    /// publication; render never reads the handle.
+    /// once, at the plan: no per-stage or per-route clone charges it. `None`, for a session with
+    /// no stored automation, attaches nothing. Off the render thread, before publication; render
+    /// never reads the handle.
     ///
-    /// # Errors
-    ///
-    /// [`GraphAutomationProgramError::AlreadyAttached`] for a second call on one plan.
+    /// Once (#2401): only a plan straight from bind takes it, and the plan comes back as a
+    /// [`ProgramAttached`] plan, which has no program attach.
     pub fn attach_automation_program(
-        &mut self,
-        program: std::sync::Arc<automation::Program>,
-    ) -> Result<(), GraphAutomationProgramError> {
-        let executor = self.executor();
-        if executor.automation_program.is_some() {
-            return Err(GraphAutomationProgramError::AlreadyAttached);
-        }
-        executor.automation_program = Some(program);
-        Ok(())
+        mut self,
+        program: Option<std::sync::Arc<automation::Program>>,
+    ) -> GraphBoundPlan<ProgramAttached> {
+        self.executor().automation_program = program;
+        self.with_state(ProgramAttached)
     }
-}
-
-/// Why [`GraphBoundPlan::attach_jump_lengths`] refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GraphJumpLengthError {
-    /// The plan has its jump-length cell already.
-    AlreadyAttached,
 }
 
 /// The bytes one plan's jump-length cell retains (#1639 D1): the shared allocation of the cell
@@ -2109,7 +2091,7 @@ pub fn jump_length_largest_allocation_bytes() -> u64 {
     u64::try_from(shared.max(reader)).unwrap_or(u64::MAX)
 }
 
-impl<S> GraphBoundPlan<S> {
+impl<S: NoJumpLengths> GraphBoundPlan<S> {
     /// Give a bound graph plan its jump-length cell (#1639 D1), holding `lengths` from its first
     /// block, and return the cell's one writer. Every write a later one replaces before render
     /// reads it is added to `superseded`, the session's count. Off the render thread, before
@@ -2119,33 +2101,32 @@ impl<S> GraphBoundPlan<S> {
     /// `begin_block`, and holds the three values for that block (D2). No stage reads the cell
     /// itself.
     ///
-    /// # Errors
-    ///
-    /// [`GraphJumpLengthError::AlreadyAttached`] for a second call on one plan.
+    /// Once (#2401): the plan comes back as a [`JumpLengthsAttached`] plan, which has no attach,
+    /// so a second reader of the cell, which would leave the first writer's lengths unread, is a
+    /// missing method.
     pub fn attach_jump_lengths(
-        &mut self,
+        mut self,
         lengths: GraphJumpLengths,
         superseded: &engine::realtime::LiveValuesSuperseded,
-    ) -> Result<GraphJumpLengthProducer, GraphJumpLengthError> {
-        let executor = self.executor();
-        if executor.jump_lengths.is_some() {
-            return Err(GraphJumpLengthError::AlreadyAttached);
-        }
+    ) -> (GraphBoundPlan<JumpLengthsAttached>, GraphJumpLengthProducer) {
         let lane = std::sync::Arc::new(JumpLengthLane {
             cell: engine::realtime::LatestCell::new(),
             dirty: engine::realtime::DirtyWord::new(),
         });
-        executor.jump_lengths = Some(Box::new(JumpLengthReader {
+        self.executor().jump_lengths = Some(Box::new(JumpLengthReader {
             lane: std::sync::Arc::clone(&lane),
             reader: engine::realtime::CellReader::new(),
             dirty: engine::realtime::DirtyReader::new(),
             superseded: superseded.clone(),
             held: lengths,
         }));
-        Ok(GraphJumpLengthProducer {
-            lane,
-            writer: engine::realtime::CellWriter::new(),
-        })
+        (
+            self.with_state(JumpLengthsAttached),
+            GraphJumpLengthProducer {
+                lane,
+                writer: engine::realtime::CellWriter::new(),
+            },
+        )
     }
 }
 
@@ -5128,7 +5109,9 @@ pub fn fade_arm_unresolved_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
         .map(|executor| executor.fade_arms_unresolved)
 }
 
-/// The process-unique identity of a graph plan, taken at bind; `None` for any other plan.
+/// The process-unique identity of a graph plan, taken at bind; `None` for any other plan. A
+/// preparation reads its own plan's from the bound plan ([`GraphBoundPlan::plan_identity`]), which
+/// is always a graph plan's; this reads a sealed one, such as a predecessor.
 pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
     plan.executor_any_mut()?
         .downcast_mut::<GraphExecutor>()
@@ -5144,14 +5127,23 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
 /// names the one-shot steps it has left:
 ///
 /// - [`BindTables`], from bind: it still holds its bind identity tables, which
-///   [`Self::take_bind_tables`] hands out once, by value.
+///   [`Self::take_bind_tables`] hands out once, by value, and has every attach left.
+/// - [`ProgramAttached`]: [`Self::attach_automation_program`] gave it its stored-automation
+///   program (#2401).
+/// - [`JumpLengthsAttached`]: [`Self::attach_jump_lengths`] gave it its jump-length cell (#2401).
 /// - [`TablesTaken`]: the tables are handed out.
 /// - [`FadeTable`]: [`GraphBoundPlan::install_fade_arms`] installed its fade table,
 ///   once; only a builder started in this state stages fade-arm pairs
 ///   ([`GraphCarryBuilder::fade_arms`]).
 ///
-/// Each step consumes the plan and returns it in the next state, so a second take, a second fade
-/// table or a pair staged before its table is a missing method, never a run-time refusal.
+/// The steps run in that order, and any may be skipped. Each consumes the plan and returns it in
+/// its own state, which offers only the steps after it, so a second attach, a second take, a
+/// second fade table or a pair staged before its table is a missing method, never a run-time
+/// refusal.
+///
+/// The bind-time steps that are not one-shot, the mono collapse's join
+/// ([`Self::arm_mono_collapse`]), the identity ([`Self::plan_identity`]) and the bind reads, are
+/// methods of every state. A sealed plan, which may have rendered, offers none of them.
 ///
 /// A bound plan renders only once it is sealed (E0599, no `render` on a bound plan):
 ///
@@ -5184,8 +5176,18 @@ pub struct GraphBoundPlan<S = BindTables> {
 #[derive(Debug)]
 pub struct BindTables;
 
+/// [`GraphBoundPlan`] state once [`GraphBoundPlan::attach_automation_program`] gave the plan its
+/// program (#2401): it still holds its bind tables, and may still take its jump-length cell.
+#[derive(Debug)]
+pub struct ProgramAttached;
+
+/// [`GraphBoundPlan`] state once [`GraphBoundPlan::attach_jump_lengths`] gave the plan its cell
+/// (#2401): it still holds its bind tables, and has no attach left.
+#[derive(Debug)]
+pub struct JumpLengthsAttached;
+
 /// [`GraphBoundPlan`] state once [`GraphBoundPlan::take_bind_tables`] handed its tables out: no
-/// fade table yet.
+/// attach left, and no fade table yet.
 #[derive(Debug)]
 pub struct TablesTaken;
 
@@ -5196,17 +5198,38 @@ pub struct FadeTable {
     entries: usize,
 }
 
-/// The [`GraphBoundPlan`] states with no fade table yet, [`BindTables`] and [`TablesTaken`]: the
-/// states [`GraphBoundPlan::install_fade_arms`] takes. Sealed: no other type implements it.
+/// The [`GraphBoundPlan`] states with no jump-length cell yet, [`BindTables`] and
+/// [`ProgramAttached`]: the states [`GraphBoundPlan::attach_jump_lengths`] takes (#2401). Sealed:
+/// no other type implements it.
+pub trait NoJumpLengths: bound_state::Sealed {}
+
+impl NoJumpLengths for BindTables {}
+impl NoJumpLengths for ProgramAttached {}
+
+/// The [`GraphBoundPlan`] states that still hold their bind tables, [`BindTables`],
+/// [`ProgramAttached`] and [`JumpLengthsAttached`]: the states
+/// [`GraphBoundPlan::take_bind_tables`] takes (#2401). Sealed: no other type implements it.
+pub trait HoldsBindTables: bound_state::Sealed {}
+
+impl HoldsBindTables for BindTables {}
+impl HoldsBindTables for ProgramAttached {}
+impl HoldsBindTables for JumpLengthsAttached {}
+
+/// The [`GraphBoundPlan`] states with no fade table yet, every state but [`FadeTable`]: the states
+/// [`GraphBoundPlan::install_fade_arms`] takes. Sealed: no other type implements it.
 pub trait NoFadeTable: bound_state::Sealed {}
 
 impl NoFadeTable for BindTables {}
+impl NoFadeTable for ProgramAttached {}
+impl NoFadeTable for JumpLengthsAttached {}
 impl NoFadeTable for TablesTaken {}
 
-/// Seals [`NoFadeTable`].
+/// Seals [`NoJumpLengths`], [`HoldsBindTables`] and [`NoFadeTable`].
 mod bound_state {
     pub trait Sealed {}
     impl Sealed for super::BindTables {}
+    impl Sealed for super::ProgramAttached {}
+    impl Sealed for super::JumpLengthsAttached {}
     impl Sealed for super::TablesTaken {}
 }
 
@@ -5244,7 +5267,9 @@ impl GraphBoundPlan {
             state: BindTables,
         }
     }
+}
 
+impl<S: HoldsBindTables> GraphBoundPlan<S> {
     /// Hand out the plan's bind identity tables, once (#1283 D1, #1284 D1, D2): a successor's
     /// preparation joins its own tables with its predecessor's (recorded when that plan was
     /// prepared), and the plan retains none of the identities it handed out.
@@ -5271,6 +5296,56 @@ impl<S> GraphBoundPlan<S> {
     /// The bound graph executor, which bind built.
     fn executor(&mut self) -> &mut GraphExecutor {
         carry_executor(&mut self.plan)
+    }
+
+    /// The plan's process-unique graph identity, taken at bind: what a successor's carry program
+    /// names as its predecessor ([`GraphCarryProgram::predecessor`]). A bound plan is always a
+    /// graph plan, so it always has one, and its seal keeps it (#2401).
+    #[must_use]
+    pub fn plan_identity(&self) -> u64 {
+        self.plan
+            .executor_any()
+            .and_then(|any| any.downcast_ref::<GraphExecutor>())
+            .expect("a bound plan is a graph plan")
+            .identity
+    }
+
+    /// Perform the mono collapse's structural join and arm the cohorts it admits (mono-collapse
+    /// M2, #970, #987).
+    ///
+    /// `eligible(track_id)` is the **structural** half of the channel-symmetry witness, the
+    /// `SOURCE` term, decided from the compiled session by `session_structural_symmetry`. Every
+    /// chain is unarmed until this is called, and an unarmed chain never collapses: the runtime
+    /// half a chain carries is source agnostic and would admit a track whose two channels read two
+    /// different source channels. So a plan nobody joins renders dual, a missed optimisation and
+    /// never wrong audio.
+    ///
+    /// A chain is armed before it renders its first block (`BankChain::arm_mono_collapse`), and a
+    /// bound plan cannot render: a sealed plan, which may have rendered, has no join (#2401, E0599):
+    ///
+    /// ```compile_fail,E0599
+    /// fn join_sealed(plan: graph::GraphBoundPlan) {
+    ///     plan.seal().arm_mono_collapse(&|_| true);
+    /// }
+    /// ```
+    ///
+    /// The bound plan takes it. This twin differs from the doctest above only in joining before
+    /// the seal, so a renamed item or a typo in the shared code turns it red (issue #1422 D2):
+    ///
+    /// ```
+    /// fn join_bound(mut plan: graph::GraphBoundPlan) {
+    ///     plan.arm_mono_collapse(&|_| true);
+    /// }
+    /// ```
+    ///
+    /// Each call answers every chain afresh from `eligible`, so a later call before the seal
+    /// replaces an earlier one.
+    pub fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
+        assert!(
+            !engine::realtime::audit::is_render_scope_active(),
+            "the mono collapse join is sealed while the render audit is armed"
+        );
+        self.executor().runtime.arm_mono_collapse(eligible);
     }
 
     /// The same plan in its next state.
@@ -7627,10 +7702,6 @@ impl PreparedPlanExecutor for GraphExecutor {
 
     fn force_mono_collapse_off(&mut self, forced: bool) {
         self.runtime.force_mono_collapse_off(forced);
-    }
-
-    fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
-        self.runtime.arm_mono_collapse(eligible);
     }
 
     fn bank_shape(&self) -> [u64; 2] {

@@ -2433,6 +2433,16 @@ mod tests {
         input: impl Fn(&GraphNodeId) -> Box<dyn GraphRuntimeProcessor>,
         observers: Vec<GraphNodeObserverBinding>,
     ) -> PreparedRenderPlan {
+        bind_session_builtins_unsealed(artifact, input, observers).seal()
+    }
+
+    /// [`bind_session_builtins`] before its seal: the bound plan, for a test that joins its mono
+    /// collapse, which only a bound plan takes (#2401).
+    fn bind_session_builtins_unsealed(
+        artifact: PreparedGraphBuiltinsArtifact,
+        input: impl Fn(&GraphNodeId) -> Box<dyn GraphRuntimeProcessor>,
+        observers: Vec<GraphNodeObserverBinding>,
+    ) -> graph::GraphBoundPlan<graph::ProgramAttached> {
         let envelope = artifact.envelope();
         let nodes = artifact
             .external_binding_nodes()
@@ -2445,7 +2455,6 @@ mod tests {
                 observers,
             })
             .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
-            .seal()
             .plan
     }
 
@@ -7011,12 +7020,17 @@ mod tests {
         }
     }
 
-    fn bind_queued_eq(queued: QueuedEqArtifact) -> BoundQueuedEq {
-        let mut plan = bind_session_builtins(
+    /// Bind `queued`, its mono collapse joined on every track when `mono_collapse` is set.
+    fn bind_queued_eq(queued: QueuedEqArtifact, mono_collapse: bool) -> BoundQueuedEq {
+        let mut bound = bind_session_builtins_unsealed(
             queued.artifact,
             equal_parametric_eq_input_binding,
             Vec::new(),
         );
+        if mono_collapse {
+            bound.arm_mono_collapse(&|_| true);
+        }
+        let mut plan = bound.seal();
         let gate = plan.take_revision_gate().expect("the plan's gate handle");
         BoundQueuedEq {
             plan,
@@ -7226,18 +7240,19 @@ mod tests {
             "the eight EQ tracks fill the actual bank width"
         );
 
-        let mut untouched =
-            bind_queued_eq(compile_queued_eq(&model, registry, 8_076, host_dispatch()));
+        let mut untouched = bind_queued_eq(
+            compile_queued_eq(&model, registry, 8_076, host_dispatch()),
+            false,
+        );
         let dry_first = render_queued_eq(&mut untouched, 0);
         assert!(
             dry_first
                 .iter()
                 .all(|sample| sample.to_bits() == 1.125_f32.to_bits())
         );
-        let mut candidate = bind_queued_eq(candidate);
-        let mut oracle = bind_queued_eq(oracle);
-        let mut scalar = bind_queued_eq(scalar);
-        candidate.plan.arm_mono_collapse(&|_| true);
+        let mut candidate = bind_queued_eq(candidate, true);
+        let mut oracle = bind_queued_eq(oracle, false);
+        let mut scalar = bind_queued_eq(scalar, false);
         oracle.plan.force_mono_collapse_off(true);
         scalar.plan.force_mono_collapse_off(true);
 
@@ -7350,9 +7365,8 @@ mod tests {
             candidate.artifact.graph().prepared_bank_count(),
             width.map_or(0, |width| 8 / width.lanes() as usize)
         );
-        let mut candidate = bind_queued_eq(candidate);
-        let mut oracle = bind_queued_eq(oracle);
-        candidate.plan.arm_mono_collapse(&|_| true);
+        let mut candidate = bind_queued_eq(candidate, true);
+        let mut oracle = bind_queued_eq(oracle, false);
         oracle.plan.force_mono_collapse_off(true);
 
         let enabled = EqEdit {
@@ -8623,16 +8637,18 @@ mod tests {
                 GraphNodeBinding::new(node.clone(), binding)
             })
             .collect();
-        let bound = artifact
+        let mut bound = artifact
             .into_bound(GraphRuntimeBindings {
                 envelope,
                 nodes,
                 observers: Vec::new(),
             })
-            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code))
-            .seal();
+            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
+        bound
+            .plan
+            .arm_mono_collapse(&|track: &str| armed.contains(track));
+        let bound = bound.seal();
         let mut plan = bound.plan;
-        plan.arm_mono_collapse(&|track: &str| armed.contains(track));
         let pcm = (0..blocks)
             .map(|block| {
                 let mut pcm = vec![0.0_f32; frames * 2];
