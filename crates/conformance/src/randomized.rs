@@ -207,6 +207,8 @@ pub struct DifferentialCoverage {
     pub bounded_blocks: u64,
     /// Blocks that failed the D7 bound, and whose whole-bank recovery was checked.
     pub recoveries: u64,
+    /// Own snapshots restored from the state a hostile block left (issue #2377 T7).
+    pub hostile_own_restores: u64,
     /// Scenarios run twin against twin, because no width bound a bank.
     pub scalar_scenarios: u64,
 }
@@ -248,6 +250,7 @@ impl DifferentialCoverage {
         self.state_comparisons += other.state_comparisons;
         self.bounded_blocks += other.bounded_blocks;
         self.recoveries += other.recoveries;
+        self.hostile_own_restores += other.hostile_own_restores;
         self.scalar_scenarios += other.scalar_scenarios;
     }
 }
@@ -713,6 +716,18 @@ fn run_scalar(
             }
         }
         if terminal {
+            for (lane, (oracle, twin)) in pairs.iter_mut().enumerate() {
+                for (who, effect) in [("oracle", oracle), ("twin", twin)] {
+                    own_snapshot_restores_after_hostile(
+                        effect.as_mut(),
+                        sizes,
+                        version,
+                        audited_calls,
+                        &format!("{context}: lane {lane}'s {who}"),
+                    );
+                    coverage.hostile_own_restores += 1;
+                }
+            }
             coverage.recoveries += 1;
             return;
         }
@@ -1350,6 +1365,42 @@ fn run_width(
                         "{context}: the {who} wrote a word outside the D7 bound"
                     );
                 }
+            }
+            // Issue #2377 T7: the render differential cannot continue past this block (the bank
+            // and its scalar instances may have parted, by design), but the own-snapshot rule
+            // holds of any state an effect reaches, so it is checked here, on the state the
+            // hostile words left: a non-finite input word still in a delay line the check has
+            // not reached (#2324) included.
+            for (lane, scalar) in scalars.iter_mut().enumerate() {
+                own_snapshot_restores_after_hostile(
+                    scalar.as_mut(),
+                    sizes,
+                    version,
+                    audited_calls,
+                    &format!("{context}: lane {lane}'s scalar instance"),
+                );
+                let payload = snapshot_lane(bank.as_ref(), lane, sizes, audited_calls);
+                let input =
+                    StatePayloadInput::new(&payload.common, &payload.left, &payload.right, sizes)
+                        .expect("the prepared sizes");
+                if let Err(error) = audited(audited_calls, "restore_track_state_payload", || {
+                    bank.restore_track_state_payload(lane as u32, version, input)
+                }) {
+                    panic!(
+                        "{context}: bank lane {lane}'s own snapshot after the hostile block \
+                         refused ({})",
+                        error.code
+                    );
+                }
+                assert!(
+                    same_payload(
+                        &snapshot_lane(bank.as_ref(), lane, sizes, audited_calls),
+                        &payload
+                    ),
+                    "{context}: bank lane {lane}'s snapshot after the hostile block does not \
+                     survive its own restore"
+                );
+                coverage.hostile_own_restores += 2;
             }
             coverage.recoveries += 1;
             return;
@@ -2097,6 +2148,33 @@ fn snapshot_lane(
     })
     .expect("a bank lane snapshots");
     payload
+}
+
+/// The own-snapshot rule (#1279 D6) on the state a hostile block left (issue #2377 T7): `effect`'s
+/// snapshot restores into `effect` and writes itself back word for word. A scenario ends at its
+/// hostile block, so the restores at block boundaries never meet that state.
+fn own_snapshot_restores_after_hostile(
+    effect: &mut dyn PreparedNativeEffect,
+    sizes: StatePayloadSizes,
+    version: u32,
+    armed: bool,
+    context: &str,
+) {
+    let payload = snapshot_scalar(effect, sizes, armed);
+    let input = StatePayloadInput::new(&payload.common, &payload.left, &payload.right, sizes)
+        .expect("the prepared sizes");
+    if let Err(error) = audited(armed, "restore_state_payload", || {
+        effect.restore_state_payload(version, input)
+    }) {
+        panic!(
+            "{context}: its own snapshot after the hostile block refused ({})",
+            error.code
+        );
+    }
+    assert!(
+        same_payload(&snapshot_scalar(effect, sizes, armed), &payload),
+        "{context}: its snapshot after the hostile block does not survive its own restore"
+    );
 }
 
 /// Whether two payloads carry the same words, where a restore may write a signed zero back as
