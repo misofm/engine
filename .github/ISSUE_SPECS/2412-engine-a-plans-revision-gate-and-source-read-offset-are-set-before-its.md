@@ -7,7 +7,7 @@ Successor of #2401. #2388 and #2401 made a bound graph plan a builder: bind retu
 - **The source-read offset.** `PreparedRenderPlan::set_source_read_offset` is set on the sealed plan before the inventory (`prepare.rs` ~5789). Its doc says it is set once, before publication. Nothing stops a later call on an unpublished plan that has already rendered. Such a plan exists on a synchronous host, or in a test.
 
 **Narrowed at attempt 2 (Sol's attempt-1 verdict).** #2412 closes on the source-read offset. The
-gate take and the held-gate stamp move to the successor #SUCCESSOR, which carries their design,
+gate take and the held-gate stamp move to the successor #2417, which carries their design,
 counts and split; the first two bullets above are its problem statement, kept here for the record.
 
 ## Contract
@@ -37,7 +37,7 @@ Low priority: no defect is open.
 ### Attempt 1 (Terra), base `origin/main` @ `00a9b9dcf`
 
 **Slice.** The source-read offset only. The gate take and the held-gate stamp are left, with the
-reason and a design under "Left for a successor" below; at attempt 2 they move to #SUCCESSOR.
+reason and a design under "Left for a successor" below; at attempt 2 they move to #2417.
 
 **Claims re-verified at base** (`00a9b9dcf`).
 - `PreparedRenderPlan::take_revision_gate` (`crates/engine/src/realtime/plan.rs:1007`) returns
@@ -155,7 +155,7 @@ test-support plus `engine/realtime-audit`.
 time: the stamp's `None` arm exists because the take can come first, and no take on the sealed
 plan can be one-shot. The handle has to leave the plan by value where the plan is built, which
 touches every plan construction (about 22 `prepare` calls, 93 `.seal()` calls) besides the 79
-takes. Past half a day with its gates; the design, counts and split are #SUCCESSOR's spec.
+takes. Past half a day with its gates; the design, counts and split are #2417's spec.
 
 ### Sol verdict on attempt 1 (`20b7c92cc`): FAIL, one BLOCKER; the slice's design is sound
 
@@ -168,7 +168,7 @@ takes. Past half a day with its gates; the design, counts and split are #SUCCESS
    so an early refusal can't leave it for a later preparation; reword its doc to match.
 4. MINOR: narrow the contract to the offset slice, which #2412 closes on.
 5. Write the gate-take and stamp work as a stateless low-priority successor spec, with its own
-   half-day split, and put a `#SUCCESSOR` placeholder here.
+   half-day split, and put a `#2417` placeholder here.
 
 ### Attempt 2 (Terra), on attempt 1 merged with `origin/main` @ `3bf66dd46`
 
@@ -184,7 +184,7 @@ takes. Past half a day with its gates; the design, counts and split are #SUCCESS
   `Prepare` (a projection leaves it), and uses it where it sets the offset. A preparation refused
   anywhere has already taken it. The setter's doc says so.
 - **4.** Contract, scope and gates now cover the offset only; the narrowing note under the
-  problem statement points at #SUCCESSOR.
+  problem statement points at #2417.
 - **5.** The successor spec is written, ready to file (design, counts at `00a9b9dcf`, a two-part
   split: engine and graph first, then host-core's test sites).
 - Merge: `origin/main` merged without conflict. #2392's lane-swap pairing changed rack and the
