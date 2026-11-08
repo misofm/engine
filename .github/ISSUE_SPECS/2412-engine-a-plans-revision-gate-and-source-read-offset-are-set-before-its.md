@@ -205,3 +205,27 @@ takes. Past half a day with its gates; the design, counts and split are #2417's 
 - `cargo fmt --check`, `scripts/check-workspace-policy.sh`, `scripts/test-workspace-policy.sh`,
   `scripts/check-rack-policy.sh`, `graph_fixture --check` and `realtime_policy` (312 marked
   regions in 48 files at the merged tree): pass.
+
+### Sol verdict on attempt 2 (`5630bd969`): PASS, with two minors to fold
+
+1. Take control-plane's scheduled offset as the first line of `prepare_runtime`, and clear any
+   host-core leftover after `preparer.prepare` returns, so a test preparer that never reaches
+   `prepare_or_project` cannot leak it; correct `test_set_next_source_read_offset`'s doc.
+2. Put `PreparedRenderPlan::source_read_offset` and `PlanClocks::of` in `REALTIME_POLICY` regions.
+
+### Fold (Terra), merged with `origin/main` @ `fe332ff80`
+
+- **1.** `prepare_runtime` (`crates/control-plane/src/compile.rs`) takes control-plane's cell
+  before `check_output_meter_caps`. It hands the offset to host-core just before
+  `preparer.prepare`, and calls the new `host_core::test_only_clear_next_source_read_offset()`
+  right after the call returns, before its result is mapped, so a refusal or a preparer that
+  never reached `prepare_or_project` leaves nothing behind. The doc of
+  `SessionState::test_set_next_source_read_offset` says it is taken at the start of the next
+  runtime preparation, whether it succeeds or is refused.
+- **2.** Both readers are now in their own `REALTIME_POLICY` regions; `realtime_policy` reports
+  314 marked regions in 48 files at the merged tree.
+- **Gates.** `cargo test --locked` engine and graph (all targets) 243 passed, doc 12;
+  host-core (all targets, `control-provider`) 618 passed, 8 ignored; control-plane (all targets,
+  `test-support`) 102 passed. `cargo check --locked --workspace`, clippy `-D warnings` for engine,
+  graph, host-core and control-plane with and without the test-support features, `cargo fmt
+  --check`, `scripts/check-workspace-policy.sh` and `realtime_policy`: pass.

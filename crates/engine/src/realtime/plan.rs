@@ -1069,6 +1069,7 @@ impl PreparedRenderPlan {
     pub(crate) const fn adopt_absolute_sample(&mut self, absolute_sample: u64) {
         self.next_absolute_sample = absolute_sample;
     }
+    // REALTIME_POLICY_BEGIN
     /// How far this plan reads its sources ahead of its render clock, `ΣP` (#1396 D1): a block
     /// that renders from absolute sample `r` reads source time from `r + ΣP`, the plan's
     /// source-read clock, on which every anchored seek is compared. 0 (the default) reads sources
@@ -1084,6 +1085,7 @@ impl PreparedRenderPlan {
             .as_deref()
             .map_or(0, PreparedPlanExecutor::source_read_offset)
     }
+    // REALTIME_POLICY_END
     /// Immutable structural program.
     #[must_use]
     pub const fn program(&self) -> &PreparedProgram {

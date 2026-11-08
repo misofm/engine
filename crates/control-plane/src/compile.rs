@@ -2244,6 +2244,10 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     observation_slots_high_water: usize,
     capture_owners_high_water: usize,
 ) -> Result<PreparedRuntime, CompileFailure> {
+    // #1396 deliverable 3: a test's scheduled source-read offset belongs to this preparation
+    // alone, so it is taken before anything can refuse it (#2412).
+    #[cfg(feature = "test-support")]
+    let test_source_read_offset = crate::control::take_test_next_source_read_offset();
     check_output_meter_caps(limits)?;
     let caps = prepare_caps(limits);
     // Shape still runs before host/runtime allocation. The exact provider catalog exists only
@@ -2257,15 +2261,17 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // With a `successor` base (issue #1273 D1) the same lanes attach, and every source the
     // transaction left unchanged is prepared vacant to carry its predecessor's ring.
     let lanes: HostLiveLanes = controls::live_lanes(compiled.normalized_model()).into();
-    // #1396 deliverable 3: a test gives the next plan a source-read offset, which its preparation
-    // sets before the seal (#2412).
+    // #1396 deliverable 3: the host preparation sets it before the seal (#2412). A preparer that
+    // never reaches host-core's preparation leaves nothing for a later one: the cell is cleared
+    // after the call, whatever it returned.
     #[cfg(feature = "test-support")]
-    if let Some(offset) = crate::control::take_test_next_source_read_offset() {
+    if let Some(offset) = test_source_read_offset {
         host_core::test_only_set_next_source_read_offset(offset);
     }
-    let (prepared, handles, spectrum) = preparer
-        .prepare(compiled, &caps, lanes, spectrum, successor, superseded)
-        .map_err(prepare_failure)?;
+    let prepared = preparer.prepare(compiled, &caps, lanes, spectrum, successor, superseded);
+    #[cfg(feature = "test-support")]
+    host_core::test_only_clear_next_source_read_offset();
+    let (prepared, handles, spectrum) = prepared.map_err(prepare_failure)?;
     // #1256 D2: keep only the producers. The strip ID list and the vectors this selection leaves
     // empty drop here, on the control thread; each producer keeps its own `track_id`. The
     // producer vector is built at exactly one entry per strip, so the boxed slice does not

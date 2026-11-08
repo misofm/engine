@@ -943,6 +943,13 @@ pub fn test_only_set_next_source_read_offset(offset: u64) {
     TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(Some(offset)));
 }
 
+/// Drop an offset [`test_only_set_next_source_read_offset`] scheduled and no preparation took, so
+/// a caller whose preparation may stop before host-core's leaves nothing for a later one.
+#[cfg(feature = "test-support")]
+pub fn test_only_clear_next_source_read_offset() {
+    TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(None));
+}
+
 /// Takes the offset [`test_only_set_next_source_read_offset`] scheduled, once.
 #[cfg(feature = "test-support")]
 fn take_test_next_source_read_offset() -> Option<u64> {
