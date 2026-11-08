@@ -743,7 +743,8 @@ fn prepare_graph_plan(
             nodes,
             observers: Vec::new(),
         })
-        .unwrap_or_else(|_| panic!("graph bind"));
+        .unwrap_or_else(|_| panic!("graph bind"))
+        .seal();
     (bound.plan, bound.meter_consumers)
 }
 

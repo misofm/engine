@@ -341,7 +341,8 @@ fn prepared(
             nodes: bindings,
             observers: vec![],
         })
-        .unwrap_or_else(|failure| panic!("bind {}", failure.code));
+        .unwrap_or_else(|failure| panic!("bind {}", failure.code))
+        .seal();
     (plan, recorder, producers.remove(0))
 }
 
@@ -755,7 +756,8 @@ mod effect_bank {
                 nodes: bindings,
                 observers: vec![],
             })
-            .unwrap_or_else(|failure| panic!("bind {}", failure.code));
+            .unwrap_or_else(|failure| panic!("bind {}", failure.code))
+            .seal();
         (plan, writer)
     }
 

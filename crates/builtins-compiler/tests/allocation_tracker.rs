@@ -160,7 +160,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 }
 
 fn audit_graph_render(
-    bound: &mut builtins_compiler::PreparedBuiltinsGraphBound,
+    bound: &mut builtins_compiler::PreparedBuiltinsGraphSealed,
     output: &mut [f32],
     absolute_sample: u64,
 ) -> builtins_compiler::TestOnlyFaderMatrixWitness {

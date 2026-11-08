@@ -172,7 +172,7 @@ fn re_equalising_the_words_does_not_re_arm_the_live_term() {
 #[cfg(feature = "test-support")]
 #[test]
 fn a_block_applies_the_last_of_many_input_edits() {
-    use builtins_compiler::{PreparedBuiltinsGraphBound, test_only_prepared_unpaired_graph};
+    use builtins_compiler::{PreparedBuiltinsGraphSealed, test_only_prepared_unpaired_graph};
     use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 
     /// Far past the 16 records the input queue held.
@@ -186,7 +186,7 @@ fn a_block_applies_the_last_of_many_input_edits() {
         }
     }
 
-    fn render(bound: &mut PreparedBuiltinsGraphBound, block: u64) -> Vec<u32> {
+    fn render(bound: &mut PreparedBuiltinsGraphSealed, block: u64) -> Vec<u32> {
         let mut output = [0.0_f32; 128];
         bound
             .plan
@@ -203,7 +203,7 @@ fn a_block_applies_the_last_of_many_input_edits() {
     }
 
     /// Writes one transaction per edit of a walk of trims ending on `last` dB, on every track.
-    fn walk(bound: &mut PreparedBuiltinsGraphBound, last: f32) {
+    fn walk(bound: &mut PreparedBuiltinsGraphSealed, last: f32) {
         for index in 1..WALK {
             bound.test_only_write(|controls, stamp| {
                 for control in controls {
@@ -226,7 +226,7 @@ fn a_block_applies_the_last_of_many_input_edits() {
         });
     }
 
-    type Build = fn() -> PreparedBuiltinsGraphBound;
+    type Build = fn() -> PreparedBuiltinsGraphSealed;
     let arms: [(&str, Build); 1] = [("banked", test_only_prepared_unpaired_graph)];
     for (arm, build) in arms {
         let mut walked = build();

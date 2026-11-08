@@ -567,7 +567,8 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
             nodes: bindings,
             observers: Vec::new(),
         })
-        .unwrap_or_else(|_| panic!("bind graph"));
+        .unwrap_or_else(|_| panic!("bind graph"))
+        .seal();
     let mut plan = bound.plan;
     let frames = envelope.quantum.0 as usize;
     let mut pcm = vec![0.0_f32; frames * 2];

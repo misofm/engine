@@ -3399,9 +3399,9 @@ impl<L: Lane> FaderRampStage<L> {
     fn arm_fade_in(&mut self, lane: usize) -> bool {
         for channel in 0..2 {
             let phase = self.phase[channel][lane];
-            // Defensive, and unreachable from a plan: `graph::install_fade_arms` arms each lane
-            // once per plan and refuses a repeated target, so no lane is armed twice. Were one,
-            // its arm (and the fire target its records set) would stand.
+            // Defensive, and unreachable from a plan: `graph::GraphBoundPlan::install_fade_arms`
+            // arms each lane once per plan and refuses a repeated target, so no lane is armed
+            // twice. Were one, its arm (and the fire target its records set) would stand.
             if matches!(phase, FaderPhase::Armed { .. }) {
                 continue;
             }

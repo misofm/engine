@@ -211,6 +211,7 @@ fn render(model: &SessionModel) -> Rendered {
             observers,
         })
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+        .seal()
         .plan;
     let mut pcm = vec![0.0_f32; frames * 2];
     for block in 0..BLOCKS {

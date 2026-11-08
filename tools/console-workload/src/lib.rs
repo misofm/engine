@@ -908,7 +908,7 @@ pub fn bank_counters(workload: Workload, blocks: u64) -> [u64; 7] {
             .unwrap_or_else(|_| panic!("{}: block {block} rendered", workload.kind()));
     }
     let utilisation = runtime.utilisation;
-    let track_units: BTreeSet<u32> = graph::bank_effect_lanes(&mut runtime.plan)
+    let track_units: BTreeSet<u32> = graph::test_only_bank_effect_lanes(&mut runtime.plan)
         .unwrap_or_default()
         .into_iter()
         .filter(|(strip, _)| tracks.contains(strip.as_ref()))
@@ -1595,7 +1595,7 @@ fn ideal_bank_slot_runs(
             .unwrap_or(false)
     };
     let key_class = key_class_ideal(report, model, &active);
-    let lanes = graph::bank_effect_lanes(plan).unwrap_or_default();
+    let lanes = graph::test_only_bank_effect_lanes(plan).unwrap_or_default();
     let groups = graph::test_only_bank_slot_runs(plan)
         .into_iter()
         .map(|group| {
@@ -2374,7 +2374,8 @@ impl SessionRuntime {
                     workload.kind(),
                     failure.code
                 )
-            });
+            })
+            .seal();
         let (plan, meter_consumers, strip_controls) =
             (bound.plan, bound.meter_consumers, bound.track_controls);
         assert_eq!(
@@ -3899,7 +3900,7 @@ mod tests {
             .map(|entry| entry.track_id.as_str())
             .collect();
         assert_eq!(reverbs, ["aux.b"], "the strips that carry a reverb");
-        let banked = graph::bank_effect_lanes(&mut runtime.plan)
+        let banked = graph::test_only_bank_effect_lanes(&mut runtime.plan)
             .unwrap_or_default()
             .into_iter()
             .any(|(_, lane)| lane.effect_id.as_ref() == "reverb");

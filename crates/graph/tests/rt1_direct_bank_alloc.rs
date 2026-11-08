@@ -288,6 +288,7 @@ fn prepared_plan(folded: bool) -> engine::realtime::PreparedRenderPlan {
             observers: Vec::new(),
         })
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+        .seal()
 }
 
 #[test]

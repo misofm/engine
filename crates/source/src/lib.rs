@@ -6119,7 +6119,7 @@ mod tests {
         }
 
         /// Bind a graph plan over `source`, observing the output's source facts into `validity`.
-        fn bind(source: SourceGraphSource, validity: &Arc<AtomicU8>) -> PreparedRenderPlan {
+        fn bind(source: SourceGraphSource, validity: &Arc<AtomicU8>) -> graph::GraphBoundPlan {
             bind_with(vec![source], mappings(), validity)
         }
 
@@ -6128,7 +6128,7 @@ mod tests {
             sources: Vec<SourceGraphSource>,
             mappings: Vec<SourceGraphTrackMapping>,
             validity: &Arc<AtomicU8>,
-        ) -> PreparedRenderPlan {
+        ) -> graph::GraphBoundPlan {
             let set = session_source_set(envelope(), sources, test_timeline(FRAMES), mappings)
                 .expect("source set");
             let bindings = GraphRuntimeBindings {
@@ -6201,7 +6201,7 @@ mod tests {
         fn reference() -> Vec<Block> {
             let validity = Arc::new(AtomicU8::new(0));
             let (_host, source) = filled_source();
-            let mut plan = bind(source, &validity);
+            let mut plan = bind(source, &validity).seal();
             let blocks: Vec<Block> = (0..BLOCKS).map(|_| plan_block(&mut plan)).collect();
             assert!(
                 blocks
@@ -6234,7 +6234,7 @@ mod tests {
         fn swap(program: impl FnOnce(u64) -> Option<GraphCarryProgram>) -> SwapRun {
             let validity = Arc::new(AtomicU8::new(0));
             let (host, source) = filled_source();
-            let mut predecessor = bind(source, &validity);
+            let mut predecessor = bind(source, &validity).seal();
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
             let (mut publisher, mut owner, _retirer) =
                 plan_exchange(predecessor, exchange_config()).expect("exchange");
@@ -6246,10 +6246,13 @@ mod tests {
             let mut program = Some(program);
             for block in 0..BLOCKS {
                 if block == SWAP_BLOCK {
-                    let mut plan = successor.take().expect("successor");
-                    if let Some(program) = (program.take().expect("program"))(identity) {
-                        plan = graph::carry_builder(plan, program).expect("install").seal();
-                    }
+                    let plan = successor.take().expect("successor");
+                    let plan = match (program.take().expect("program"))(identity) {
+                        Some(program) => {
+                            graph::carry_builder(plan, program).expect("install").seal()
+                        }
+                        None => plan.seal(),
+                    };
                     assert!(publisher.publish(plan, 0).is_ok());
                 }
                 let mut output = [f32::NAN; 2 * FRAMES as usize];
@@ -6364,7 +6367,7 @@ mod tests {
             host.submit(chunk(1, 0, &[&first[0], &first[1]], FRAMES, false))
                 .expect("first block");
             let mut predecessor =
-                bind(SourceGraphSource::new(consumer, resources, 0, 0), &validity);
+                bind(SourceGraphSource::new(consumer, resources, 0, 0), &validity).seal();
             plan_block(&mut predecessor);
             assert_eq!(take_validity(&validity), (false, false));
 
@@ -6428,21 +6431,20 @@ mod tests {
             };
             let (error, vacant) = refuse(vacant, &[(1, 0)]);
             assert_eq!(error, GraphCarryInstallError::SourceIndexOutOfRange);
-            let (error, mut occupied) = refuse(occupied, &[(0, 0)]);
+            let (error, occupied) = refuse(occupied, &[(0, 0)]);
             assert_eq!(error, GraphCarryInstallError::SourceNotVacant);
-            let (error, mut vacant) = refuse(vacant, &[(0, 0), (0, 1)]);
+            let (error, vacant) = refuse(vacant, &[(0, 0), (0, 1)]);
             assert_eq!(error, GraphCarryInstallError::DuplicateSourceIndex);
-            let plain = PreparedRenderPlan::prepare(engine::realtime::PrepareRenderPlan {
+            let mut plain = PreparedRenderPlan::prepare(engine::realtime::PrepareRenderPlan {
                 plan_id: 1,
                 envelope: envelope(),
                 scratch: &[],
             })
             .expect("plain plan");
-            let (error, mut plain) = refuse(plain, &[(0, 0)]);
-            assert_eq!(error, GraphCarryInstallError::NotAGraphPlan);
             assert_eq!(graph::plan_identity(&mut plain), None);
             // A refused install charges nothing; an accepted one charges its move table.
-            assert_eq!(graph::carry_program_retained_bytes(&mut vacant), 0);
+            let mut occupied = occupied.seal();
+            assert_eq!(graph::carry_program_retained_bytes(&mut occupied), 0);
             let mut vacant = graph::carry_builder(vacant, program(&[(0, 0)]))
                 .expect("install")
                 .seal();
@@ -6533,7 +6535,8 @@ mod tests {
             let validity = Arc::new(AtomicU8::new(0));
             let (_first, first) = filled_source();
             let (_second, second) = filled_source();
-            let mut predecessor = bind_with(vec![first, second], two_source_mappings(), &validity);
+            let mut predecessor =
+                bind_with(vec![first, second], two_source_mappings(), &validity).seal();
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
             let successor = bind_with(
                 vec![SourceGraphSource::vacant(2), SourceGraphSource::vacant(2)],
@@ -6656,7 +6659,8 @@ mod tests {
                 vec![SourceGraphSource::new(consumer, resources, 0, 0)],
                 vec![mono(a.clone(), 0), mono(b.clone(), 0)],
                 &validity,
-            );
+            )
+            .seal();
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
             let successor = bind_with(
                 vec![SourceGraphSource::vacant(2)],
