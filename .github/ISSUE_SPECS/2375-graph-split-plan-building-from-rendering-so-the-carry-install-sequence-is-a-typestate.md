@@ -25,7 +25,7 @@ This touches `GraphExecutor`'s carry fields, every install and take function, `p
 **Slice.** The issue's own split: this attempt lands the builder and moves every install caller
 onto it (`prepare_or_project` and the direct test callers in `graph`, `graph-compiler`,
 `host-core` and `source`). The bind-time reads and one-shot takes, and the fade table, stay as
-they are; the bound-plan typestate that would subsume them is filed as a successor (attempt 2, item 5).
+they are; the bound-plan typestate that would subsume them is filed as successor #2388 (attempt 2, item 5).
 
 **Claims re-verified at base.**
 - `GraphExecutor` holds the build-time carry fields beside the render state
