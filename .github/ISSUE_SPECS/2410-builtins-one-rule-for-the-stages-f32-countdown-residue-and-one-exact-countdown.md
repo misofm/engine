@@ -123,3 +123,17 @@ No new test was written: this is a refactor, and the mutation rows above are its
 **Follow-ups (not filed).**
 1. The matrix and the input trim still *store* their residue word: `Matrix2x2Ramp::remaining` and `InputTrimRamp::remaining`. The fader no longer does. The matrix's word could become a local the way the fader's did. It is reported only as `matrix_bank_lane_words` and `scalar_matrix_words` word 12. The input's word cannot become a local without first giving P3-M2 another observable, such as a ramp-dispatch counter. Neither is a defect.
 2. `lane::kernels::trailing_count` spells `1 << 24` for the silence counter's saturation. That is a separate claim from the countdown bound, so it was left alone.
+3. **Known coverage gap, not filed.** The G5 cross-target corpus (`wasm-gates`) has no case with a ramping `FaderRampStage`, so `gain_mute_ramp_block` has no wasm or W4 digest. Its W4 and W8 bits are covered on native by `builtins`' randomized differential and `fader_ramp`. Adding a G5 case would move pinned digests, so it needs its own issue.
+
+### Attempt 1 verdict: PASS (minor findings folded)
+
+Sol passed `ef248c5bd`. The four minor findings were folded in after merging `origin/main`:
+1. `effect_contract::LINK_GLIDE_MAX_SAMPLES` was a fifth spelling of `1 << 24`. It is now defined as `lane::kernels::EXACT_COUNTDOWN`, and `EXACT_COUNTDOWN`'s doc names it.
+2. Two doc lines wider than 100 columns are rewrapped: `InputTrimRamp`'s shape note in `crates/lane/src/kernels/builtins.rs` and `EXACT_COUNTDOWN`'s doc in `crates/lane/src/kernels.rs`.
+3. The docs of `test_support::matrix_bank_lane_words` and `scalar_matrix_words` now say that word 12 is the lane position's own residue, not the strip's.
+4. The G5 coverage gap is recorded above (follow-up 3).
+
+After the fold, these pass:
+- `cargo test --locked` for builtins (with test-support), lane, effect-runtime, effect-contract and graph-compiler;
+- `graph_fixture --check`;
+- clippy `-D warnings`, rustdoc `-D warnings` and `cargo fmt --check`.

@@ -831,8 +831,8 @@ fn input_chain_block_body<L: Lane>(
 /// channel's per-lane trim applied to the frame being rendered. The shape is
 /// [`GainMuteRamp`]'s, minus the mute mask -- the trim has no mute endpoint -- plus the kernel's
 /// `f32` countdown word, which the stage keeps here and rebuilds before every ramp kernel. The
-/// arithmetic is the same D11 form, which is what makes a trim ramp obey the same smoother law the fader and
-/// the matrix already obey.
+/// arithmetic is the same D11 form, which is what makes a trim ramp obey the same smoother law
+/// the fader and the matrix already obey.
 #[derive(Clone, Copy)]
 pub struct InputTrimRamp<L: Lane> {
     /// The trim applied to the current frame, `[channel]`.

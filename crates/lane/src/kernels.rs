@@ -38,12 +38,13 @@ pub use builtins::ramp_toward;
 /// `u32::MAX` updates -- but the countdown word a ramp kernel reads (the trim, fader/mute and
 /// matrix kernels in [`builtins`], `effect_runtime`'s `RampLanes`) is an `f32` integer. So the
 /// builtins stages clamp it to this bound each time they build the word from their `u32`, before
-/// every ramp kernel, and `RampLanes::gather` asserts it in debug builds (no effect ramp is longer).
+/// every ramp kernel, and `RampLanes::gather` asserts it in debug builds (no effect ramp is
+/// longer; `effect_contract::LINK_GLIDE_MAX_SAMPLES`, the longest link glide, is this bound).
 /// The bound is exact because every integer up to it converts both ways exactly, so the kernel's
-/// compares are integer compares. The clamp is invisible because a lane reaches zero inside a block
-/// only when its countdown is at most the block length, and a render block is far shorter than
-/// `2^24` frames: a clamped lane ramps through the whole block as the unclamped one would, and the
-/// next block's word is built afresh from the authoritative countdown.
+/// compares are integer compares. The clamp is invisible because a lane reaches zero inside a
+/// block only when its countdown is at most the block length, and a render block is far shorter
+/// than `2^24` frames: a clamped lane ramps through the whole block as the unclamped one would,
+/// and the next block's word is built afresh from the authoritative countdown.
 pub const EXACT_COUNTDOWN: u32 = 1 << 24;
 
 use crate::{Lane, flush, flush_pair, silence_step};

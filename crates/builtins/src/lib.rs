@@ -7526,6 +7526,10 @@ pub mod test_support {
     }
 
     /// Exact retained words for the live scalar matrix owner.
+    ///
+    /// Word 12 is the kernel's `f32` countdown residue: the stage's own word, rebuilt from the
+    /// `u32` countdown (word 13) before every ramp kernel and carried by no lane record (issue
+    /// #2410). It tells what the last ramping block counted down to, not the ramp's state.
     #[must_use]
     pub fn scalar_matrix_words(matrix: &MatrixBuiltins) -> [u32; 15] {
         let stage = &matrix.stage;
@@ -7575,6 +7579,11 @@ pub mod test_support {
     }
 
     /// Exact current/target/step/ramp/countdown words for one matrix-bank lane.
+    ///
+    /// Word 12 is the kernel's `f32` countdown residue of the lane **position**, not of the strip
+    /// now in it: no lane record carries it (issue #2410), so a lane swap or a plan-swap carry
+    /// leaves it where it was, and it tells what that position's last ramping block counted down
+    /// to. The strip's countdown is word 13.
     #[must_use]
     pub fn matrix_bank_lane_words(bank: &BuiltinMatrixBank, lane: usize) -> [u32; 15] {
         fn words<L: crate::Lane>(stage: &crate::MatrixStage<L>, lane: usize) -> [u32; 15] {
