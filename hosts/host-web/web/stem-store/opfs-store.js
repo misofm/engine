@@ -1253,7 +1253,7 @@ export class StemSessionLease {
   #store
   #pin
   #stems
-  #closed = false
+  #closing
 
   constructor(store, sessionId, pin, stems, releasePinLock) {
     this.#store = store
@@ -1268,7 +1268,9 @@ export class StemSessionLease {
   }
 
   async read(identity) {
-    if (this.#closed) throw new StemStoreError("stem.session.closed", "Session is closed")
+    if (this.#closing !== undefined) {
+      throw new StemStoreError("stem.session.closed", "Session is closed")
+    }
     if (!this.#stems.some((stem) => stem.identity === identity)) {
       throw new StemStoreError(
         "stem.session.unreferenced",
@@ -1279,9 +1281,13 @@ export class StemSessionLease {
     return this.#store.read(identity)
   }
 
-  async close() {
-    if (this.#closed) return
-    this.#closed = true
+  // Every call returns the first call's promise, so no close() resolves before the pin is released.
+  close() {
+    this.#closing ??= this.#release()
+    return this.#closing
+  }
+
+  async #release() {
     try {
       await this.#store.releaseSessionPin(this.#pin, this.#stems)
     } finally {

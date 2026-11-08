@@ -933,6 +933,74 @@ async function closeReachesTheNewestOpen() {
   await holder.close()
 }
 
+// Holds the store's index lock, which every pin release rewrites under, until `unstall()`.
+async function holdTheIndex(locks) {
+  const held = {}
+  held.done = locks.request(`${LOCKS}:index`, {}, () => new Promise((resolve) => (held.unstall = resolve)))
+  await until(() => held.unstall !== undefined, "the held index")
+  return held
+}
+
+// Issue #2372: a resolved lease close() means its pin is released. A second close() made while the
+// first is still releasing must not resolve before it.
+async function everyLeaseCloseWaitsForThePinRelease() {
+  const env = abortFixture()
+  const lease = await env.store.openSession({ sessionId: "same", stems: env.stems, resolver: env.resolver })
+  const index = await holdTheIndex(env.locks)
+  const first = lease.close()
+  let pinsAtSecond
+  const second = lease.close().then(() => (pinsAtSecond = env.pins()))
+  await untilPending(env.locks, `${LOCKS}:index`)
+  await tick()
+  index.unstall()
+  await index.done
+  await Promise.all([first, second])
+  assert.deepEqual(pinsAtSecond, [], "a second close() resolved while the first still held the pin")
+}
+
+// Issue #2372: a resolved gate.close() means every lease the gate's opens were granted is released,
+// including the lease of an open that close() aborted and of one a newer open superseded earlier.
+async function gateCloseWaitsForEveryAbortedOpensLease() {
+  for (const leg of ["aborted by close()", "superseded, then close()"]) {
+    const env = abortFixture()
+    let ready = false
+    const first = settledWithin(
+      env.gate.open({
+        sessionId: "same",
+        stems: env.stems,
+        resume: () => new Promise(() => {}),
+        onProgress(event) {
+          if (event.stage === "ready") ready = true
+        },
+      }),
+      500
+    )
+    await until(() => ready, `the first lease (${leg})`)
+    const index = await holdTheIndex(env.locks)
+    const newer =
+      leg === "aborted by close()"
+        ? undefined
+        : settledWithin(
+            env.gate.open({ sessionId: "other", stems: env.stems, resume: () => new Promise(() => {}) }),
+            500
+          )
+    let pinsAtClose
+    const closing = env.gate.close().then(() => (pinsAtClose = env.pins()))
+    await untilPending(env.locks, `${LOCKS}:index`)
+    await tick()
+    index.unstall()
+    await index.done
+    await closing
+    assert.equal((await first).error?.name, "AbortError", leg)
+    if (newer !== undefined) assert.equal((await newer).error?.name, "AbortError", leg)
+    assert.deepEqual(
+      pinsAtClose,
+      [],
+      `gate.close() resolved while an aborted open's lease still held its pin (${leg})`
+    )
+  }
+}
+
 async function refusedGateNeverBecomesInteractive() {
   const events = []
   let resumed = false
@@ -1485,6 +1553,8 @@ await abortAsResumeSettlesNeverCommits()
 await throwingResumeLeavesATerminalState()
 await closeNeverOverwritesALaterOpen()
 await closeReachesTheNewestOpen()
+await everyLeaseCloseWaitsForThePinRelease()
+await gateCloseWaitsForEveryAbortedOpensLease()
 await refusedGateNeverBecomesInteractive()
 await rejectedResumeDoesNotLeakPins()
 await selfDrivingFillsWithoutPumpMessages()

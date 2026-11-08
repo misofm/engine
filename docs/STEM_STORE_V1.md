@@ -154,7 +154,11 @@ rejects with the abort reason. Its waits for `resume()` and for the session pin
 lock end at the same abort, so an aborted open never keeps its lease for a
 resume that does not settle, nor waits on another holder of that pin. `close()`
 reports `idle` at once, and an open started while the old lease closes owns the
-state from then on (#2266).
+state from then on (#2266). A resolved close means a released pin: every
+`StemSessionLease.close()` call shares the first call's release, and
+`StemSessionGate.close()` resolves only after every open it found in flight,
+including one a newer open had already superseded, has closed the leases it
+held (#2372).
 
 The PCM pump is a dedicated module Worker. MSB1 ring descriptors cross the
 Worker port after construction; they are never processor options. The Worker

@@ -13,6 +13,11 @@ import { StemStoreError } from "./opfs-store.js"
  * closed on the way out instead of blocking a newer open of the same session.
  * The wait for `resume()` ends at that abort too, and the store open takes the
  * same signal; only the bounded lease closes are awaited to completion.
+ *
+ * `close()` resolves only once every open in flight when it was called has
+ * settled, and an open settles only after it has closed every lease it took
+ * out of the gate or was granted, so a resolved `close()` has released every
+ * pin those opens held (#2372).
  */
 export class StemSessionGate {
   #store
@@ -20,6 +25,7 @@ export class StemSessionGate {
   #opening
   #lease
   #state = "idle"
+  #settling = new Set()
 
   constructor(store, resolver) {
     if (typeof store?.openSession !== "function") {
@@ -39,7 +45,15 @@ export class StemSessionGate {
   /**
    * @param {{sessionId: string, stems: Array<{identity: string, bytes: number}>, resume: () => unknown, onProgress?: (event: object) => void, signal?: AbortSignal}} options
    */
-  async open(options) {
+  open(options) {
+    const opened = this.#open(options)
+    const settled = opened.catch(() => {})
+    this.#settling.add(settled)
+    void settled.then(() => this.#settling.delete(settled))
+    return opened
+  }
+
+  async #open(options) {
     if (typeof options.resume !== "function") {
       throw new TypeError("Session open needs a user-gesture resume callback")
     }
@@ -125,14 +139,17 @@ export class StemSessionGate {
   }
 
   // Every write happens before the await, so an open started while the lease
-  // closes owns the state from then on.
+  // closes owns the state from then on. Every open in flight is aborted by now
+  // (the newest one just above), and each closes its own leases on the way out.
   async close() {
     this.#opening?.abort(new DOMException("Session gate closed", "AbortError"))
     this.#opening = undefined
     const lease = this.#lease
     this.#lease = undefined
     this.#state = "idle"
-    await lease?.close()
+    const closing = lease?.close()
+    await Promise.allSettled([closing, ...this.#settling])
+    await closing
   }
 }
 

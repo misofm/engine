@@ -305,8 +305,8 @@ async function runMutationLedger() {
     {
       name: "let close() write idle after its await",
       file: "web/stem-store/session-gate.js",
-      search: '    this.#state = "idle"\n    await lease?.close()\n',
-      replace: '    this.#state = "idle"\n    await lease?.close()\n    this.#state = "idle"\n',
+      search: "    await closing\n  }\n",
+      replace: '    await closing\n    this.#state = "idle"\n  }\n',
       test: "stem-pump-v1.mjs",
       expectedFailure: "close() reported idle while a later open was loading",
     },
@@ -344,6 +344,33 @@ async function runMutationLedger() {
       replace: '      if (this.#lease === undefined) this.#state = "refused"\n',
       test: "stem-pump-v1.mjs",
       expectedFailure: "a refused open left the gate loading behind a current lease",
+    },
+    // Issue #2372: a resolved close() means a released pin, for a lease closed twice and for a gate
+    // whose opens were aborted (by close() itself, or superseded earlier) while holding a lease.
+    {
+      name: "let a second lease close() resolve before the first releases the pin",
+      file: "web/stem-store/opfs-store.js",
+      search: "  close() {\n    this.#closing ??= this.#release()\n",
+      replace:
+        "  close() {\n    if (this.#closing !== undefined) return Promise.resolve()\n    this.#closing ??= this.#release()\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "a second close() resolved while the first still held the pin",
+    },
+    {
+      name: "let gate.close() skip the opens it aborted",
+      file: "web/stem-store/session-gate.js",
+      search: "    await Promise.allSettled([closing, ...this.#settling])\n",
+      replace: "    await Promise.allSettled([closing])\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "an aborted open's lease still held its pin (aborted by close())",
+    },
+    {
+      name: "let gate.close() wait only for the newest open",
+      file: "web/stem-store/session-gate.js",
+      search: "    this.#settling.add(settled)\n",
+      replace: "    this.#settling.clear()\n    this.#settling.add(settled)\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "an aborted open's lease still held its pin (superseded, then close())",
     },
     {
       name: "omit AbortSignal from the session pin lock wait",
