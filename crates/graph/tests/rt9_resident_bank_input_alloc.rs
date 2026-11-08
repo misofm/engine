@@ -517,7 +517,8 @@ fn prepared(
     };
     let mut plan = graph
         .bind(runtime_bindings)
-        .unwrap_or_else(|failure| panic!("bind {}", failure.code));
+        .unwrap_or_else(|failure| panic!("bind {}", failure.code))
+        .seal();
     plan.arm_mono_collapse(&|_| mono != 0);
     (plan, probe)
 }

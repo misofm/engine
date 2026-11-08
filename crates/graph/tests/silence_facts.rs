@@ -220,7 +220,8 @@ fn prepared(silent: [u32; 2]) -> (realtime::PreparedRenderPlan, Vec<GraphRouteCo
             nodes: bindings,
             observers: vec![],
         })
-        .unwrap_or_else(|failure| panic!("bind {}", failure.code));
+        .unwrap_or_else(|failure| panic!("bind {}", failure.code))
+        .seal();
     (plan, producers)
 }
 

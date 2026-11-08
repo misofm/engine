@@ -216,6 +216,8 @@ pub enum FlushFloor {
 /// ```
 pub type PreparedGraphBuiltinsArtifact = PreparedBuiltinsGraphArtifact<GraphCompileReport>;
 pub type PreparedGraphBuiltinsBound = PreparedBuiltinsGraphBound;
+/// A [`PreparedGraphBuiltinsBound`] whose plan is sealed.
+pub type PreparedGraphBuiltinsSealed = builtins_compiler::PreparedBuiltinsGraphSealed;
 pub type GraphBuiltinsBindFailure = PreparedBuiltinsGraphBindFailure<GraphCompileReport>;
 pub struct GraphBuiltinsCompileFailure {
     pub effects: EffectPreparedSession,
@@ -2443,6 +2445,7 @@ mod tests {
                 observers,
             })
             .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .seal()
             .plan
     }
 
@@ -2725,6 +2728,7 @@ mod tests {
         let mut plan = artifact
             .into_bound(bindings)
             .unwrap_or_else(|failure| panic!("reverse-route bind: {}", failure.code))
+            .seal()
             .plan;
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
@@ -4379,7 +4383,8 @@ mod tests {
                     nodes,
                     observers: Vec::new(),
                 })
-                .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+                .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+                .seal();
             (0..4)
                 .map(|block| {
                     let mut pcm = vec![0.0; frames * 2];
@@ -5284,6 +5289,7 @@ mod tests {
                 ],
             })
             .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .seal()
             .plan;
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
@@ -5619,7 +5625,8 @@ mod tests {
                 nodes,
                 observers: Vec::new(),
             })
-            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .seal();
         let mut plan = bound.plan;
         let mut meter_consumers = bound.meter_consumers;
         let mut pcm = vec![0.0_f32; frames * 2];
@@ -5711,7 +5718,8 @@ mod tests {
                 nodes,
                 observers: Vec::new(),
             })
-            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .seal();
         let mut plan = bound.plan;
         let mut meter_consumers = bound.meter_consumers;
         let mut pcm = vec![0.0_f32; frames * 2];
@@ -8621,7 +8629,8 @@ mod tests {
                 nodes,
                 observers: Vec::new(),
             })
-            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code))
+            .seal();
         let mut plan = bound.plan;
         plan.arm_mono_collapse(&|track: &str| armed.contains(track));
         let pcm = (0..blocks)
@@ -11023,7 +11032,8 @@ mod tests {
                             }),
                         )],
                     })
-                    .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+                    .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+                    .seal();
                 let mut plan = bound.plan;
                 let mut meter_consumers = bound.meter_consumers;
                 graph::test_only_set_bank_meter_declined(declined);
@@ -11477,7 +11487,8 @@ mod tests {
                 nodes,
                 observers: Vec::new(),
             })
-            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code))
+            .seal();
         let mut plan = bound.plan;
         let mut controls = bound.track_controls;
         let mut gate = plan
@@ -11890,7 +11901,8 @@ mod tests {
                 nodes,
                 observers,
             })
-            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code))
+            .seal();
         render_bound_console_blocks(bound, frames, blocks)
     }
 
@@ -11909,7 +11921,7 @@ mod tests {
 
     /// [`render_console_builtins_blocks`] for a plan the caller bound.
     fn render_bound_console_blocks(
-        bound: PreparedGraphBuiltinsBound,
+        bound: PreparedGraphBuiltinsSealed,
         frames: usize,
         blocks: u64,
     ) -> (Vec<Vec<f32>>, u64, u64, u64, Vec<MeterSnapshot>, u64, u64) {
@@ -12759,7 +12771,7 @@ mod tests {
             Ok(bound) => bound,
             Err(_) => panic!("sealed builtin bank bind"),
         };
-        let mut plan = bound.plan;
+        let mut plan = bound.plan.seal();
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0; frames * 2 * 3];
         for block in 0..3 {
@@ -13136,7 +13148,7 @@ mod tests {
                 nodes,
                 observers: tap_observers,
             }) {
-                Ok(bound) => bound.plan,
+                Ok(bound) => bound.plan.seal(),
                 Err(_) => panic!("seeded bind"),
             };
             let frames = envelope.quantum.0 as usize;
@@ -13952,7 +13964,7 @@ mod tests {
             nodes,
             observers: Vec::new(),
         }) {
-            Ok(bound) => bound.plan,
+            Ok(bound) => bound.plan.seal(),
             Err(failure) => panic!("bind: {}", failure.code),
         };
         let frames = envelope.quantum.0 as usize;

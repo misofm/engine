@@ -377,5 +377,6 @@ fn prepared_graph(
             observers: Vec::new(),
         })
         .unwrap_or_else(|failure| panic!("graph bind: {}", failure.code))
+        .seal()
         .plan
 }

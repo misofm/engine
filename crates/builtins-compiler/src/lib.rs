@@ -6600,19 +6600,49 @@ pub struct PreparedBuiltinsGraphArtifact<R> {
 
 /// The one-way result of consuming and binding a sealed builtin graph artifact.
 ///
+/// `plan` is the [`graph::GraphBoundPlan`] bind returned, which cannot render or be published
+/// until it is sealed (#2388): [`Self::seal`] seals it in place, as
+/// [`PreparedBuiltinsGraphSealed`], for a caller with no hand-over to assemble.
+///
 /// Field order is drop order: `track_controls` producers are released before the `plan` that owns
 /// their consumer endpoints, and `meter_consumers` outlive the plan that owns their producers.
-pub struct PreparedBuiltinsGraphBound {
+pub struct PreparedBuiltinsGraphBound<P = graph::GraphBoundPlan> {
     pub track_controls: Vec<TrackControlProducer>,
-    pub plan: PreparedRenderPlan,
+    pub plan: P,
     pub meter_consumers: Vec<MeterConsumer>,
-    /// The plan's gate handle, taken by the first [`Self::test_only_write`].
+    /// The plan's gate handle, taken by the first [`PreparedBuiltinsGraphSealed::test_only_write`].
     #[cfg(any(test, feature = "test-support"))]
     test_gate: Option<engine::realtime::PlanRevisionGate>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+/// A [`PreparedBuiltinsGraphBound`] whose plan is sealed ([`PreparedBuiltinsGraphBound::seal`]),
+/// ready to render or be published.
+pub type PreparedBuiltinsGraphSealed = PreparedBuiltinsGraphBound<PreparedRenderPlan>;
+
 impl PreparedBuiltinsGraphBound {
+    /// Seal the bound plan with no hand-over ([`graph::GraphBoundPlan::seal`]), keeping its
+    /// control halves.
+    #[must_use = "the sealed plan is the one that renders"]
+    pub fn seal(self) -> PreparedBuiltinsGraphSealed {
+        let Self {
+            track_controls,
+            plan,
+            meter_consumers,
+            #[cfg(any(test, feature = "test-support"))]
+            test_gate,
+        } = self;
+        PreparedBuiltinsGraphBound {
+            track_controls,
+            plan: plan.seal(),
+            meter_consumers,
+            #[cfg(any(test, feature = "test-support"))]
+            test_gate,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl PreparedBuiltinsGraphSealed {
     /// Test-only: write the strips' cells as one transaction, stamped from the plan's own gate,
     /// then publish its revision on that gate, as a commit does (#1312 D7). The plan's next block
     /// takes a snapshot that covers it.
@@ -8121,17 +8151,16 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
     }
 
     fn bound_from_plan(
-        mut plan: PreparedRenderPlan,
+        mut plan: graph::GraphBoundPlan,
         track_controls: Vec<TrackControlProducer>,
         meter_consumers: Vec<MeterConsumer>,
         automation_program: Option<Arc<automation::Program>>,
     ) -> PreparedBuiltinsGraphBound {
-        // No error path is left here: `bind` has consumed the artifact. Neither refusal can occur:
-        // `plan` is the graph plan `bind` just built (not `NotAGraphPlan`) and nothing has attached
-        // a program to it yet (not `AlreadyAttached`).
+        // No error path is left here: `bind` has consumed the artifact. The refusal cannot occur:
+        // nothing has attached a program to the plan `bind` just built (not `AlreadyAttached`).
         if let Some(program) = automation_program {
-            graph::attach_automation_program(&mut plan, program)
-                .expect("a freshly bound graph plan is a graph plan with no program attached");
+            plan.attach_automation_program(program)
+                .expect("a freshly bound graph plan has no program attached");
         }
         PreparedBuiltinsGraphBound {
             track_controls,
@@ -10448,7 +10477,8 @@ mod tests {
         } = fixture;
         let bound = artifact
             .into_bound_with_source_set(bindings, source_set)
-            .unwrap_or_else(|failure| panic!("source-set bind rejected: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("source-set bind rejected: {}", failure.code))
+            .seal();
         assert!(bound.meter_consumers.is_empty());
         assert_eq!(builtin_drops.load(Ordering::SeqCst), 0);
         assert_eq!(external_drops.load(Ordering::SeqCst), 0);
@@ -11295,7 +11325,7 @@ mod tests {
             Ok(bound) => bound,
             Err(failure) => panic!("harness bind: {}", failure.code),
         };
-        let mut plan = bound.plan;
+        let mut plan = bound.plan.seal();
         if matches!(variant, BoundaryVariant::AliasObserved) {
             ALIAS_CAPTURE.with(|capture| capture.borrow_mut().clear());
         }
@@ -11362,7 +11392,7 @@ mod tests {
     /// render.
     #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn test_only_prepared_unpaired_graph() -> PreparedBuiltinsGraphBound {
+    pub fn test_only_prepared_unpaired_graph() -> PreparedBuiltinsGraphSealed {
         prepared_live_graph_fixture(
             false,
             false,
@@ -11377,7 +11407,7 @@ mod tests {
     /// existing isolated full-render allocation owner (issue #951).
     #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn test_only_prepared_unpaired_graph_with_held_meter() -> PreparedBuiltinsGraphBound {
+    pub fn test_only_prepared_unpaired_graph_with_held_meter() -> PreparedBuiltinsGraphSealed {
         prepared_live_graph_fixture_with_ballistics(
             Some(TEST_ONLY_PAIR_GRAPH_TRACKS - 1),
             false,
@@ -11399,7 +11429,7 @@ mod tests {
         post_matrix_capture: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
         backend: Backend,
         n: usize,
-    ) -> PreparedBuiltinsGraphBound {
+    ) -> PreparedBuiltinsGraphSealed {
         prepared_live_graph_fixture_with_ballistics(
             post_fader_observed.then_some(0),
             symmetric_input,
@@ -11419,7 +11449,7 @@ mod tests {
         backend: Backend,
         n: usize,
         ballistics: (u32, f32),
-    ) -> PreparedBuiltinsGraphBound {
+    ) -> PreparedBuiltinsGraphSealed {
         let compiled = n_track_session_with_symmetry(n, symmetric_input);
         let controls = (0..n)
             .map(|index| TrackControlRequest {
@@ -11512,16 +11542,17 @@ mod tests {
                 observers: Vec::new(),
             })
             .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code))
+            .seal()
     }
 
-    fn render_bound(bound: &mut PreparedBuiltinsGraphBound, sample: u64) -> Vec<u32> {
+    fn render_bound(bound: &mut PreparedBuiltinsGraphSealed, sample: u64) -> Vec<u32> {
         let mut pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
         render_bound_result(bound, sample, &mut pcm).expect("fixture render");
         pcm.into_iter().map(f32::to_bits).collect()
     }
 
     fn render_bound_result(
-        bound: &mut PreparedBuiltinsGraphBound,
+        bound: &mut PreparedBuiltinsGraphSealed,
         sample: u64,
         pcm: &mut [f32],
     ) -> Result<(), RenderError> {
@@ -11546,7 +11577,7 @@ mod tests {
 
     /// A two-track graph whose strips carry fader-and-matrix channels only (`input_lane: false`,
     /// #1254 D1), prepared, lowered and bound at `backend`.
-    fn input_free_pair_graph(backend: Backend) -> PreparedBuiltinsGraphBound {
+    fn input_free_pair_graph(backend: Backend) -> PreparedBuiltinsGraphSealed {
         let n = 2;
         let compiled = n_track_session_with_symmetry(n, false);
         let controls = (0..n)
@@ -11613,6 +11644,7 @@ mod tests {
                 observers: Vec::new(),
             })
             .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code))
+            .seal()
     }
 
     /// Issue #1254 gate 1(d): a fader-and-matrix strip prepares under the scalar oracle (which
@@ -12541,7 +12573,8 @@ mod tests {
                     nodes,
                     observers: Vec::new(),
                 })
-                .unwrap_or_else(|error| panic!("resident meter bind: {}", error.code));
+                .unwrap_or_else(|error| panic!("resident meter bind: {}", error.code))
+                .seal();
             graph::test_only_meter_input_reset(disabled);
             let mut pcm = Vec::new();
             let mut snapshots = Vec::new();
