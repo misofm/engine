@@ -5313,12 +5313,15 @@ impl BankChain {
                 self.disengage_for_carry();
                 let slots = self.slots.len();
                 for index in 0..slots {
+                    // The tripwire's only reader is the `debug_assert!` below.
+                    #[cfg(debug_assertions)]
                     let stranded = self.slots[index].stage.lane_swap_stranded();
                     if !self.slots[index].stage.swap_lanes(
                         lane,
                         LanePeerMut::Same(other_lane),
                         scratch,
                     ) {
+                        #[cfg(debug_assertions)]
                         debug_assert!(
                             self.slots[index].stage.lane_swap_stranded() != stranded,
                             "a checked slot swaps its lanes, or strands and counts it"
@@ -5348,12 +5351,14 @@ impl BankChain {
                 let slots = self.slots.len();
                 for index in 0..slots {
                     let (own, theirs) = (&mut self.slots[index], &mut other.slots[index]);
+                    #[cfg(debug_assertions)]
                     let stranded = own.stage.lane_swap_stranded();
                     if !own.stage.swap_lanes(
                         lane,
                         LanePeerMut::Other(&mut *theirs.stage, other_lane),
                         scratch,
                     ) {
+                        #[cfg(debug_assertions)]
                         debug_assert!(
                             own.stage.lane_swap_stranded() != stranded,
                             "a checked slot swaps its lanes, or strands and counts it"

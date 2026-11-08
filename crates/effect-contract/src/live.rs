@@ -4238,8 +4238,9 @@ mod lane_swap_tests {
     /// one lane holding the spare's bytes, or both keeping their own defaults under traded
     /// payloads), skips or misorders the undo of the exchanges that took, undoes the second
     /// lane's exchange in the wrong bank, carries on past a refused unwind exchange, leaves a
-    /// state word an exchange rested after an unwind, or reports a refused undo or revert as
-    /// `Restore`.
+    /// state word an exchange rested after an unwind, reports a refused undo or revert as
+    /// `Restore`, or ignores the result of an own-payload restore after an undo (it reports
+    /// `Exchange` or `Restore` for lanes it could not put back).
     #[test]
     fn a_refused_exchange_or_undo_is_never_reported_as_unmoved() {
         /// The lanes after the call, as a function of the lanes before.
@@ -4275,7 +4276,7 @@ mod lane_swap_tests {
         use LaneSwapRefusal::{Exchange, Stranded};
         // One bank: exchanges 1 to 3 are step 1's, 4 to 6 the undo's; restores 1 and 2 are steps
         // 2 and 3, restore 3 the revert.
-        let cases: [Case; 12] = [
+        let cases: [Case; 17] = [
             (
                 "step-1 exchange 1",
                 [Some(1), None],
@@ -4374,6 +4375,59 @@ mod lane_swap_tests {
                 [Some(2), Some(3)],
                 Stranded,
                 FirstHoldsSecond,
+            ),
+            // An own-payload restore after a completed undo refuses (restores counted from 1):
+            // the swap strands. A refused restore changes nothing, so each leaves both lanes
+            // with their own defaults and payloads.
+            // Unwound (exchange 2 refuses, its unwind takes); the first lane's own restore, call
+            // 1, refuses.
+            (
+                "unwind, first own restore",
+                [Some(2), None],
+                None,
+                [Some(1), None],
+                Stranded,
+                Unchanged,
+            ),
+            // Unwound; the first lane's own restore (call 1) takes, the second's (call 2)
+            // refuses.
+            (
+                "unwind, second own restore",
+                [Some(2), None],
+                None,
+                [Some(2), None],
+                Stranded,
+                Unchanged,
+            ),
+            // Step 2 (call 1) refuses and the rotation undoes; the first lane's own restore
+            // (call 2) refuses.
+            (
+                "step 2, first own restore",
+                [None; 2],
+                None,
+                [Some(1), Some(2)],
+                Stranded,
+                Unchanged,
+            ),
+            // Step 2 (call 1) refuses; the first lane's own restore (call 2) takes, the second's
+            // (call 3) refuses.
+            (
+                "step 2, second own restore",
+                [None; 2],
+                None,
+                [Some(1), Some(3)],
+                Stranded,
+                Unchanged,
+            ),
+            // Step 2 (call 1) takes, step 3 (call 2) refuses; the first lane's own restore (call
+            // 3) puts its payload back, the second's (call 4) refuses.
+            (
+                "step 3, second own restore",
+                [None; 2],
+                None,
+                [Some(2), Some(4)],
+                Stranded,
+                Unchanged,
             ),
         ];
         for (case, [exchange, exchange_again], second_exchange, [restore, again], refusal, after) in

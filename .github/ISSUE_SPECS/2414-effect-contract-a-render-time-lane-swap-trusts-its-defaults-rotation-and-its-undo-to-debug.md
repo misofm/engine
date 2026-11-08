@@ -150,7 +150,7 @@ Every row is the spec's prediction. The same probe on the branch: rows 1-3 `Err(
 - **Item 1.** `a_stranded_slot_resets_its_two_lanes_and_the_chain_reports_a_defect` now runs four cases: the effect slot and the live slot, each in a cross-chain and an in-chain swap. Every arm of both stages' stranded branch is therefore exercised.
   - Before the swap, it asserts that both lanes hold `ChannelSymmetryWitness::RESTORED`, through `BankChain::lane_symmetry`.
   - After the `Defect`, it asserts that both stranded lanes withhold `RESTORED`.
-  - Red on mutation: deleting each of the four refresh blocks alone turns the test red at the `RESTORED` assertion. This holds for the effect stage in the same chain and across chains, and for the live stage in both.
+  - Red on mutation: deleting each of the four refresh blocks alone turns the test red at the `RESTORED` assertion. This holds for the effect stage in the same chain and across chains, and for the live stage in both. What turns red is the `RESTORED` half of each block: the effect stage's witness, and the live stage's `unrestored` bit. The live stage's `designed` refresh (`crates/rack/src/lib.rs` about 2591 and 2644-2647) is defensive. No test observes it while `RESTORED` is withheld, because the withheld term already declines the lane's collapse (corrected in attempt 3).
 - **Item 2.** Words gains `refuse_exchange_again`. New case: "step-1 exchange 2 and its unwind" (exchanges 2 and 3 refuse). It returns `Err(Stranded)`, the first lane holds the spare's bytes as its defaults, and the payloads are unchanged.
   - Red on mutation: changing the unwind's `return Rotation::Stranded` to `continue` makes this case return `Err(Exchange)` instead of `Err(Stranded)`.
 - **Item 3 (restore, which is bounded).** `OwnPayloads::restore` runs after every undo that completes:
@@ -169,7 +169,7 @@ Every row is the spec's prediction. The same probe on the branch: rows 1-3 `Err(
 - **Item 4.** `BankStage` gains `lane_swap_stranded()`, with default `0`. It replaces the two inherent accessors, so there is one source. `BankChain::swap_lanes` reads it before each slot's swap and, on a refusal, asserts `debug_assert!(stranded count moved, "a checked slot swaps its lanes, or strands and counts it")` in both arms.
   - A counted strand passes in debug.
   - Dropping the effect stage's count, or the live stage's, trips the assertion (`lib.rs` 5356 and 5321 under the mutation).
-- **Item 5.** The successor spec is written, ready to file. This spec names it as #2419. It covers:
+- **Item 5.** The successor spec was filed as #2419. It covers:
   - the checked chain and graph swap-backs, reported as a split strip;
   - the graph's `debug_assert!(false)`;
   - a host-facing `lane_swap_stranded` total, and a #2135 pin on `Chain(Defect)`;
@@ -187,7 +187,7 @@ Every row is the spec's prediction. The same probe on the branch: rows 1-3 `Err(
     - no reset;
     - the peer reset in the wrong bank;
     - each stage's count dropped (the tripwire fires);
-    - each of the four symmetry refreshes deleted;
+    - each of the four symmetry refreshes deleted (red through `RESTORED`; the live stage's `designed` refresh alone is unobserved, see item 1);
     - the chain's swap-back skipped.
 - **No bit moved.** `silent_bank_skip` gate-3 digest on the branch: `inserts=false 7d31fea2b6652670`, `inserts=true 8e4dfb8b8dc1d599`, identical to base `3bf66dd46` and to attempt 1. The healthy path is unchanged.
 - **Gates.** Debug and release runs of the effect-contract lane-swap tests, plus the crates below, one crate at a time with `-j 4`:
@@ -203,3 +203,38 @@ Every row is the spec's prediction. The same probe on the branch: rows 1-3 `Err(
   - `check-workspace-policy.sh`: ok.
   - `realtime_policy`: ok (312 regions).
   - `check-web-audioworklet.sh --without-metadata-regeneration` on a rebuilt artifact and named twin: passed (`miso_engine_web_v1_render` closure=38, atomic_waits=0).
+
+**Sol's verdict on attempt 2 (`abd7b47f5`): FAIL**, with one MAJOR finding on tests only. The production code was judged correct.
+1. MAJOR: three restore-result checks survived mutation in release:
+   - M1: `OwnPayloads::restore` ignores the second lane's result.
+   - M2: the step-1 unwind returns `Exchange` whatever `own.restore` returns.
+   - M3: the step-2 branch ignores `own.restore`.
+2. MINOR: the record overstated the live stage's `designed` refresh as observed.
+3. MINOR: the chain's `lane_swap_stranded()` read should be compiled only with `debug_assertions`.
+4. MINOR: the spec should name the successor as filed (#2419).
+
+### Attempt 3 (Sol's attempt-2 findings folded), same branch, from `abd7b47f5`
+
+- **Item 1.** `a_refused_exchange_or_undo_is_never_reported_as_unmoved` gains the five cases Sol probed. Each case expects `Err(Stranded)` and lanes `Unchanged`: a refused restore changes nothing in `Words`, so each lane keeps its own defaults and payload. Restores are counted from 1.
+  - "unwind, first own restore": exchange 2 refuses and its unwind takes; restore 1 (the first lane's own) refuses.
+  - "unwind, second own restore": exchange 2 refuses; restore 1 takes; restore 2 (the second lane's own) refuses.
+  - "step 2, first own restore": restore 1 (step 2) refuses; the rotation undoes; restore 2 (the first lane's own) refuses.
+  - "step 2, second own restore": restore 1 refuses; restore 2 takes; restore 3 (the second lane's own) refuses.
+  - "step 3, second own restore": restore 1 (step 2) takes; restore 2 (step 3) refuses; the rotation undoes; restore 3 puts the first lane's own payload back; restore 4 (the second lane's own) refuses.
+- **Mutation evidence, release.** Each of M1, M2 and M3 now turns the test red, and the file was restored after each.
+  - M1 (`restore` returns `true` whatever the second lane's restore returned): red at "unwind, second own restore", `Err(Exchange)` vs `Err(Stranded)`.
+  - M2 (the unwind branch's guard always true): red at "unwind, first own restore", `Err(Exchange)` vs `Err(Stranded)`.
+  - M3 (the step-2 branch ignores `own.restore`): red at "step 2, first own restore", `Err(Restore)` vs `Err(Stranded)`.
+- **Item 2.** The attempt-2 record is corrected above. Of the four refresh blocks, the `RESTORED` halves are observed; the live stage's `designed` refresh is defensive.
+- **Item 3.** In both arms of `BankChain::swap_lanes`, the chain's read of `lane_swap_stranded()` and its tripwire `debug_assert!` are both `#[cfg(debug_assertions)]`, so a release build makes no extra call.
+- **Item 4.** The item-5 line now names #2419 as filed.
+- **Gates.** Debug and release runs of the effect-contract lane-swap tests, plus the crates below, one crate at a time with `-j 4` and a private target dir:
+  - `cargo test --locked`: every run below passed, with none failing.
+    - `effect-contract`, debug;
+    - `effect-contract --release --lib lane_swap`;
+    - `rack`, debug;
+    - `rack --release --test lane_swap`.
+  - Clippy `-D warnings` on `effect-contract` and `rack` (all targets), and on `rack` in release (where the tripwire is compiled out): clean. Clippy prints two pre-existing `clippy.toml` notices that `math::fast_db::*` is "not a reachable function". They are configuration warnings, not lints; they do not fail `-D warnings`, and they also appear on origin/main `fe332ff80`.
+  - `cargo fmt --all --check`: clean.
+  - `realtime_policy`: ok (312 marked regions in 48 files).
+  - The render path changed only by two `#[cfg(debug_assertions)]` statements in the chain, which a release build drops, so the web gate was not re-run. It passed on attempt 2.
