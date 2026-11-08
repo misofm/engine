@@ -102,11 +102,14 @@ struct PlanClocks {
 }
 
 impl PlanClocks {
+    // REALTIME_POLICY_BEGIN
     /// The clocks of `plan` as it stands: its next render sample and its source-read sample.
+    /// Render calls it after each block (#1396 D4).
     fn of(plan: &PreparedRenderPlan) -> (u64, u64) {
         let render = plan.next_absolute_sample();
         (render, render.saturating_add(plan.source_read_offset()))
     }
+    // REALTIME_POLICY_END
 }
 
 #[repr(C)]

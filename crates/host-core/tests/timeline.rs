@@ -30,8 +30,8 @@ use engine::realtime::{CarryOutcome, PlanarBufferMut, PreparedRenderPlan, Render
 use graph_compiler::Backend;
 use host_core::{
     PlanStateInventory, PreparedHost, SourceControlError, SourceControlSet, SourceSubmission,
-    SuccessorBase, test_only_prepare_host_runtime_successor_on, test_only_set_source_read_offset,
-    test_only_timeline_at,
+    SuccessorBase, test_only_prepare_host_runtime_successor_on,
+    test_only_set_next_source_read_offset, test_only_timeline_at,
 };
 use session::{
     Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, ParameterChannel, ParameterUnit,
@@ -770,8 +770,8 @@ fn a_latent_successor_keeps_the_newest_entries_in_a_history_of_its_own_size() {
 fn a_discontinuity_keeps_the_sources_and_the_timeline_in_step() {
     const OFFSET: u64 = 3 * Q;
     let a = Session::compile(one_track());
+    test_only_set_next_source_read_offset(OFFSET);
     let mut predecessor = a.prepare(Backend::current());
-    test_only_set_source_read_offset(&mut predecessor, OFFSET);
     let mut fed = 0;
     submit(&mut predecessor.sources, 1, 0..2 * Q);
     fed += 2 * Q;

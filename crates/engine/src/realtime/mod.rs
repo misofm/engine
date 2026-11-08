@@ -227,18 +227,17 @@ mod tests {
         assert_eq!(plan.next_absolute_sample(), 8);
     }
 
-    /// A silent executor that records the source-read offset its plan hands it.
+    /// A silent executor that reads its sources `offset` samples ahead, fixed when it is built.
     struct OffsetExecutor {
-        offset: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        offset: u64,
     }
 
     impl PreparedPlanExecutor for OffsetExecutor {
         fn retained_bytes(&self) -> u64 {
-            crate::realtime::retained::arc(&self.offset)
+            0
         }
-        fn set_source_read_offset(&mut self, offset: u64) {
+        fn source_read_offset(&self) -> u64 {
             self.offset
-                .store(offset, std::sync::atomic::Ordering::Relaxed);
         }
 
         fn render(
@@ -257,14 +256,13 @@ mod tests {
     /// plus the active plan's offset; before the first block both read the initial plan's.
     ///
     /// Test value: red if render stores the outgoing plan's offset after a swap, stores the clocks
-    /// before the block renders, or never stores them; or if a plan does not forward its offset
-    /// to its executor.
+    /// before the block renders, or never stores them; or if a plan does not report its
+    /// executor's offset (#2412).
     #[test]
     fn the_publisher_reads_both_clocks_of_the_active_plan_after_each_block() {
         const QUANTUM: u64 = 128;
         let offset_plan = |id: u64, offset: u64| {
-            let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
-            let mut plan = PreparedRenderPlan::prepare_with_executor(
+            let plan = PreparedRenderPlan::prepare_with_executor(
                 PrepareRenderPlan {
                     plan_id: id,
                     envelope: RenderEnvelope {
@@ -274,18 +272,13 @@ mod tests {
                     },
                     scratch: &[],
                 },
-                Box::new(OffsetExecutor {
-                    offset: std::sync::Arc::clone(&seen),
-                }),
+                Box::new(OffsetExecutor { offset }),
             )
             .expect("plan");
-            plan.set_source_read_offset(offset);
             assert_eq!(plan.source_read_offset(), offset);
-            assert_eq!(seen.load(std::sync::atomic::Ordering::Relaxed), offset);
             plan
         };
-        let mut initial = offset_plan(1, 0);
-        initial.set_source_read_offset(QUANTUM);
+        let initial = offset_plan(1, QUANTUM);
         let (mut publisher, mut realtime, mut retirer) = plan_exchange(
             initial,
             PlanExchangeConfig {

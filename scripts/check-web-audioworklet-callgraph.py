@@ -223,6 +223,14 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
             "#1577: the response capture copies the plan's snapshot through the executor trait "
             "object (`Box<dyn PreparedPlanExecutor>`), once per armed job; no allocation, no drop",
         ),
+        # Issue #2412: a plan's source-read offset is its executor's, fixed before the seal.
+        "_RNvMNtNtCs_6engine8realtime13plan_exchangeNtB_17RealtimePlanOwner13render_active": (
+            1,
+            "`PlanClocks::of` reads the active plan's `PreparedPlanExecutor::source_read_offset` "
+            "once per rendered block (#2412), through the plan's `Box<dyn PreparedPlanExecutor>`: "
+            "a getter returning a field, with no allocation or drop; the runtime render-locked "
+            "count covers it",
+        ),
         "_RNvMNtNtCs_6engine8realtime4planNtB_18PreparedRenderPlan12render_inner": (
             2,
             "`executor.begin_live_block(snapshot)` (#1502 D2: hands the block's live snapshot to "

@@ -24,7 +24,7 @@ use engine::realtime::{PlanAdoption, SwapOutcome};
 use graph_compiler::Backend;
 use host_core::{
     PreparedHost, SourceControlSet, SourceSubmission, SuccessorBase,
-    test_only_prepare_host_runtime_successor_on, test_only_set_source_read_offset,
+    test_only_prepare_host_runtime_successor_on, test_only_set_next_source_read_offset,
 };
 use session::{RouteSource, SessionModel, StableId, parse_session_json};
 use successor::{QUANTUM, SUCCESSOR_REVISION, Session, caps, exchange, render};
@@ -85,8 +85,8 @@ fn session(muted_db: f32) -> Session {
 
 /// `session` prepared fresh with source-read offset `offset`.
 fn prepared(session: &Session, offset: u64) -> PreparedHost {
-    let mut prepared = session.prepare(Backend::current());
-    test_only_set_source_read_offset(&mut prepared, offset);
+    test_only_set_next_source_read_offset(offset);
+    let prepared = session.prepare(Backend::current());
     assert_eq!(prepared.plan.source_read_offset(), offset);
     assert_eq!(prepared.inventory.source_read_offset(), offset);
     prepared

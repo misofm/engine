@@ -3786,8 +3786,10 @@ where
     }
 
     /// Gives the next plan this thread prepares the source-read offset `offset` (#1396
-    /// deliverable 3): [`host_core::test_only_set_source_read_offset`] on that plan and its
-    /// inventory row, before it is published. Taken once, by the next preparation on this thread.
+    /// deliverable 3): [`host_core::test_only_set_next_source_read_offset`] for that plan's
+    /// preparation, which sets it on the plan and its inventory row before the seal. Taken once,
+    /// at the start of the next runtime preparation on this thread, whether that preparation then
+    /// succeeds or is refused (#2412).
     #[cfg(feature = "test-support")]
     pub fn test_set_next_source_read_offset(&mut self, offset: u64) {
         let _ = self;
