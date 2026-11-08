@@ -4714,12 +4714,20 @@ mod tests {
     /// Red if a render transition is still an unconditional store (the cancelled window comes
     /// back, or the re-arm is `Busy`), if a cancel leaves no generation a stale record can be
     /// told by, or if a stale record fails the re-armed window.
+    ///
+    /// The render thread is scoped and released by a `StopOnDrop` bound right after its spawn,
+    /// and each wait on it checks that it still runs and has a named deadline (issue #2377 T6,
+    /// #2296), so a panic on either thread ends the test instead of spinning it.
     #[test]
     fn a_cancel_racing_completion_never_returns_the_cancelled_window_over_1000_seeds() {
+        use bench_support::producer::StopOnDrop;
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
         const SEEDS: u64 = 1_000;
         const NEVER: u64 = u64::MAX;
-        let started = std::time::Instant::now();
+        /// How long the control thread waits on the render thread's progress.
+        const PROGRESS_DEADLINE: Duration = Duration::from_secs(30);
+        let started = Instant::now();
         for seed in 0..SEEDS {
             let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
             let mut next = move || {
@@ -4734,111 +4742,121 @@ mod tests {
             let spin_after_cancel = next() % (1 << (next() % 9));
             let read_before_cancel = next() % 4 == 0;
             let (mut observer, mut capture) = one_shot_pair(SpectrumChannels::Left);
-            let stop = std::sync::Arc::new(AtomicBool::new(false));
-            let progress = std::sync::Arc::new(AtomicU64::new(0));
-            let begun: std::sync::Arc<[AtomicU64; 4]> =
-                std::sync::Arc::new([NEVER; 4].map(AtomicU64::new));
-            let render = {
-                let (stop, progress, begun) = (stop.clone(), progress.clone(), begun.clone());
-                std::thread::spawn(move || {
-                    let left = vec![0.25_f32; SPECTRUM_WINDOW_FRAMES];
-                    let right = vec![-0.5_f32; SPECTRUM_WINDOW_FRAMES];
-                    let mut first_sample = 0_u64;
-                    let mut last_latched = 0_u64;
-                    while !stop.load(Ordering::Acquire) {
-                        observer.capture(
-                            &left,
-                            &right,
-                            first_sample,
-                            super::GraphObservationValidity::CLEAR,
-                        );
-                        if let Some((latched, first)) = observer.one_shot.window_start()
-                            && latched != last_latched
-                        {
-                            last_latched = latched;
-                            begun[super::word_generation(latched) as usize]
-                                .store(first, Ordering::Release);
+            let stop = AtomicBool::new(false);
+            let progress = AtomicU64::new(0);
+            let begun: [AtomicU64; 4] = [NEVER; 4].map(AtomicU64::new);
+            std::thread::scope(|scope| {
+                let render = {
+                    let (stop, progress, begun) = (&stop, &progress, &begun);
+                    scope.spawn(move || {
+                        let left = vec![0.25_f32; SPECTRUM_WINDOW_FRAMES];
+                        let right = vec![-0.5_f32; SPECTRUM_WINDOW_FRAMES];
+                        let mut first_sample = 0_u64;
+                        let mut last_latched = 0_u64;
+                        while !stop.load(Ordering::Acquire) {
+                            observer.capture(
+                                &left,
+                                &right,
+                                first_sample,
+                                super::GraphObservationValidity::CLEAR,
+                            );
+                            if let Some((latched, first)) = observer.one_shot.window_start()
+                                && latched != last_latched
+                            {
+                                last_latched = latched;
+                                begun[super::word_generation(latched) as usize]
+                                    .store(first, Ordering::Release);
+                            }
+                            observer.block_end();
+                            first_sample += SPECTRUM_WINDOW_FRAMES as u64;
+                            progress.fetch_add(1, Ordering::Release);
                         }
-                        observer.block_end();
-                        first_sample += SPECTRUM_WINDOW_FRAMES as u64;
-                        progress.fetch_add(1, Ordering::Release);
-                    }
-                })
-            };
-            let generation = |capture: &SpectrumCapture| {
-                super::word_generation(capture.state.load(Ordering::Acquire)) as usize
-            };
+                    })
+                };
+                let release = StopOnDrop(&stop);
+                let check_render = |since: Instant, waiting: &str| {
+                    assert!(
+                        !render.is_finished(),
+                        "seed {seed}: the render thread ended before it was released, while {waiting}"
+                    );
+                    assert!(
+                        since.elapsed() < PROGRESS_DEADLINE,
+                        "seed {seed}: {waiting}: no progress within {PROGRESS_DEADLINE:?}"
+                    );
+                };
+                let generation = |capture: &SpectrumCapture| {
+                    super::word_generation(capture.state.load(Ordering::Acquire)) as usize
+                };
 
-            // Let the render thread run before the race starts, so its blocks overlap the arm.
-            while progress.load(Ordering::Acquire) < 2 {
-                std::hint::spin_loop();
-            }
-            capture.arm().expect("first arm");
-            let cancelled = generation(&capture);
-            for _ in 0..spin_before_cancel {
-                std::hint::spin_loop();
-            }
-            // A read before the cancel may legitimately return the first window.
-            if let Some(window) = read_before_cancel
-                .then(|| capture.try_read().ok())
-                .flatten()
-            {
+                // Let the render thread run before the race starts, so its blocks overlap the arm.
+                let since = Instant::now();
+                while progress.load(Ordering::Acquire) < 2 {
+                    check_render(since, "its first two blocks");
+                    std::hint::spin_loop();
+                }
+                capture.arm().expect("first arm");
+                let cancelled = generation(&capture);
+                for _ in 0..spin_before_cancel {
+                    std::hint::spin_loop();
+                }
+                // A read before the cancel may legitimately return the first window.
+                if let Some(window) = read_before_cancel
+                    .then(|| capture.try_read().ok())
+                    .flatten()
+                {
+                    assert_eq!(
+                        window.first_sample,
+                        begun[cancelled].load(Ordering::Acquire),
+                        "seed {seed}: a read before the cancel returns the armed window"
+                    );
+                }
+                capture.cancel();
+                for _ in 0..spin_after_cancel {
+                    // No read after a cancel returns the cancelled arm's window.
+                    assert!(
+                        matches!(capture.try_read(), Err(SpectrumCaptureReadError::NotArmed)),
+                        "seed {seed}: a read after the cancel must find nothing armed"
+                    );
+                }
+                capture.arm().unwrap_or_else(|error| {
+                    panic!("seed {seed}: the re-arm was refused: {error:?}")
+                });
+                // Read after the arm: a thread preempted between a read and the arm would let any
+                // number of blocks pass, but never fewer than the blocks done when the arm landed.
+                let blocks_after_rearm = progress.load(Ordering::Acquire);
+                let rearmed = generation(&capture);
+                assert_eq!(rearmed, cancelled + 1);
+                let since = Instant::now();
+                let window = loop {
+                    match capture.try_read() {
+                        Ok(window) => break window,
+                        Err(SpectrumCaptureReadError::Pending) => {
+                            check_render(since, "the re-armed window");
+                            std::hint::spin_loop();
+                        }
+                        Err(error) => panic!("seed {seed}: the re-armed read was {error:?}"),
+                    }
+                };
                 assert_eq!(
                     window.first_sample,
+                    begun[rearmed].load(Ordering::Acquire),
+                    "seed {seed}: the result is the re-armed window"
+                );
+                assert_ne!(
+                    window.first_sample,
                     begun[cancelled].load(Ordering::Acquire),
-                    "seed {seed}: a read before the cancel returns the armed window"
+                    "seed {seed}: the result is not the cancelled window"
                 );
-            }
-            capture.cancel();
-            for _ in 0..spin_after_cancel {
-                // No read after a cancel returns the cancelled arm's window.
+                // The window begins in the block in progress at the re-arm or the next one, so no
+                // later than one block past the count read after the arm.
+                let began_block = window.first_sample / SPECTRUM_WINDOW_FRAMES as u64;
                 assert!(
-                    matches!(capture.try_read(), Err(SpectrumCaptureReadError::NotArmed)),
-                    "seed {seed}: a read after the cancel must find nothing armed"
+                    began_block <= blocks_after_rearm + 1,
+                    "seed {seed}: the re-armed window began in block {began_block}, past block {blocks_after_rearm} + 1"
                 );
-            }
-            capture
-                .arm()
-                .unwrap_or_else(|error| panic!("seed {seed}: the re-arm was refused: {error:?}"));
-            // Read after the arm: a thread preempted between a read and the arm would let any
-            // number of blocks pass, but never fewer than the blocks done when the arm landed.
-            let blocks_after_rearm = progress.load(Ordering::Acquire);
-            let rearmed = generation(&capture);
-            assert_eq!(rearmed, cancelled + 1);
-            let mut spins = 0_u64;
-            let window = loop {
-                match capture.try_read() {
-                    Ok(window) => break window,
-                    Err(SpectrumCaptureReadError::Pending) => {
-                        spins += 1;
-                        assert!(
-                            spins < 200_000_000,
-                            "seed {seed}: the re-armed window never arrived"
-                        );
-                        std::hint::spin_loop();
-                    }
-                    Err(error) => panic!("seed {seed}: the re-armed read was {error:?}"),
-                }
-            };
-            assert_eq!(
-                window.first_sample,
-                begun[rearmed].load(Ordering::Acquire),
-                "seed {seed}: the result is the re-armed window"
-            );
-            assert_ne!(
-                window.first_sample,
-                begun[cancelled].load(Ordering::Acquire),
-                "seed {seed}: the result is not the cancelled window"
-            );
-            // The window begins in the block in progress at the re-arm or the next one, so no
-            // later than one block past the count read after the arm.
-            let began_block = window.first_sample / SPECTRUM_WINDOW_FRAMES as u64;
-            assert!(
-                began_block <= blocks_after_rearm + 1,
-                "seed {seed}: the re-armed window began in block {began_block}, past block {blocks_after_rearm} + 1"
-            );
-            stop.store(true, Ordering::Release);
-            render.join().expect("render thread");
+                drop(release);
+                render.join().expect("render thread");
+            });
         }
         eprintln!("cancel-race seeds {SEEDS}: {:?}", started.elapsed());
     }
