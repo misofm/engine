@@ -175,9 +175,9 @@ async function runMutationLedger() {
       name: "content-key -> per-session store directory",
       file: "web/stem-store/opfs-store.js",
       search:
-        '    await abortable(this.open(), options.signal)\n    const sessionId = nonemptyText(options.sessionId, "sessionId")',
+        '    await this.open()\n    const sessionId = nonemptyText(options.sessionId, "sessionId")',
       replace:
-        '    await abortable(this.open(), options.signal)\n    this.__mutationRoot ??= this.#directory\n    const mutationSession = encodeURIComponent(String(options.sessionId))\n    this.#directory = await this.__mutationRoot.getDirectoryHandle(`session-${mutationSession}`, { create: true })\n    this.#staging = await this.#directory.getDirectoryHandle("staging", { create: true })\n    const sessionId = nonemptyText(options.sessionId, "sessionId")',
+        '    await this.open()\n    this.__mutationRoot ??= this.#directory\n    const mutationSession = encodeURIComponent(String(options.sessionId))\n    this.#directory = await this.__mutationRoot.getDirectoryHandle(`session-${mutationSession}`, { create: true })\n    this.#staging = await this.#directory.getDirectoryHandle("staging", { create: true })\n    const sessionId = nonemptyText(options.sessionId, "sessionId")',
       test: "stem-store-core-v1.mjs",
       expectedFailure: "mix B fetches only its two misses",
     },
@@ -313,8 +313,8 @@ async function runMutationLedger() {
     {
       name: "stop forwarding the caller's signal once the lease is granted",
       file: "web/stem-store/session-gate.js",
-      search: "        onProgress: options.onProgress,\n      })\n",
-      replace: "        onProgress: options.onProgress,\n      })\n      removeParentAbort()\n",
+      search: "        onPinning,\n      })\n",
+      replace: "        onPinning,\n      })\n      removeParentAbort()\n",
       test: "stem-pump-v1.mjs",
       expectedFailure: "the aborted open never settled (caller signal, resume wait)",
     },
@@ -345,10 +345,10 @@ async function runMutationLedger() {
       test: "stem-pump-v1.mjs",
       expectedFailure: "a refused open left the gate loading behind a current lease",
     },
-    // Issue #2372: a resolved close() means a released pin, for a lease closed twice and for a gate
-    // whose opens were aborted (by close() itself, or superseded earlier) while holding a lease. Since
-    // gate.close() waits for those opens, an aborted open stops waiting at its abort for the three
-    // waits that hold no lease and have no overall deadline, and a failed release still rejects.
+    // Issue #2372: a resolved close() means a released pin. A lease closed twice shares one release;
+    // gate.close() waits for the current lease, a replaced predecessor still closing, and every open
+    // from the store's pin phase on (and only from then: before it an aborted open never takes a pin);
+    // and a failed release still rejects the close.
     {
       name: "let a second lease close() resolve before the first releases the pin",
       file: "web/stem-store/opfs-store.js",
@@ -359,50 +359,58 @@ async function runMutationLedger() {
       expectedFailure: "a second close() resolved while the first still held the pin",
     },
     {
-      name: "let gate.close() skip the opens it aborted",
+      name: "let gate.close() wait only for the current lease",
       file: "web/stem-store/session-gate.js",
-      search: "    await Promise.allSettled([closing, ...this.#settling])\n",
+      search: "    await Promise.allSettled([closing, ...this.#releasing])\n",
       replace: "    await Promise.allSettled([closing])\n",
       test: "stem-pump-v1.mjs",
       expectedFailure: "an aborted open's lease still held its pin (aborted by close())",
     },
     {
-      name: "let gate.close() wait only for the newest open",
-      file: "web/stem-store/session-gate.js",
-      search: "    this.#settling.add(settled)\n",
-      replace: "    this.#settling.clear()\n    this.#settling.add(settled)\n",
+      name: "never report a session open's pin phase",
+      file: "web/stem-store/opfs-store.js",
+      search: "    throwIfAborted(options.signal)\n    options.onPinning?.()\n",
+      replace: "    throwIfAborted(options.signal)\n",
       test: "stem-pump-v1.mjs",
-      expectedFailure: "an aborted open's lease still held its pin (superseded, then close())",
+      expectedFailure: "an aborted open's lease still held its pin (aborted by close())",
     },
     {
-      name: "let an aborted session open wait out the store open",
+      name: "report a session open's pin phase only once the pin is written",
       file: "web/stem-store/opfs-store.js",
-      search: "    await abortable(this.open(), options.signal)\n",
-      replace: "    await this.open()\n",
+      edits: [
+        {
+          search: "    throwIfAborted(options.signal)\n    options.onPinning?.()\n",
+          replace: "    throwIfAborted(options.signal)\n",
+        },
+        {
+          search: '    options.onProgress?.({ stage: "ready", stems: stems.length })\n',
+          replace: '    options.onPinning?.()\n    options.onProgress?.({ stage: "ready", stems: stems.length })\n',
+        },
+      ],
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "gate.close() resolved while an open in its pin write held the pin lock",
+    },
+    {
+      name: "close a replaced predecessor without gate.close() waiting for it",
+      file: "web/stem-store/session-gate.js",
+      search: "        await this.#track(replaced.close())\n",
+      replace: "        await replaced.close()\n",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "gate.close() resolved while a replaced predecessor still held its pin",
+    },
+    {
+      name: "let gate.close() wait for every open from its start",
+      file: "web/stem-store/session-gate.js",
+      search: "      return await this.#open(options, () => this.#track(settled))\n",
+      replace: "      this.#track(settled)\n      return await this.#open(options, () => {})\n",
       test: "stem-pump-v1.mjs",
       expectedFailure: "gate.close() waited on an aborted open's wedged getDirectory",
     },
     {
-      name: "let an aborted session open wait out the quota estimate",
-      file: "web/stem-store/opfs-store.js",
-      search: "      estimate = await abortable(this.#storage.estimate(), signal)\n",
-      replace: "      estimate = await this.#storage.estimate()\n",
-      test: "stem-pump-v1.mjs",
-      expectedFailure: "gate.close() waited on an aborted open's wedged estimate",
-    },
-    {
-      name: "let an aborted session open wait out an ingest it joined",
-      file: "web/stem-store/opfs-store.js",
-      search: "    if (existing !== undefined) return abortable(existing, options.signal)\n",
-      replace: "    if (existing !== undefined) return existing\n",
-      test: "stem-pump-v1.mjs",
-      expectedFailure: "gate.close() waited on an aborted open's joined ingest",
-    },
-    {
       name: "let gate.close() hide a failed release of the current lease",
       file: "web/stem-store/session-gate.js",
-      search: "    await Promise.allSettled([closing, ...this.#settling])\n    await closing\n",
-      replace: "    await Promise.allSettled([closing, ...this.#settling])\n",
+      search: "    await Promise.allSettled([closing, ...this.#releasing])\n    await closing\n",
+      replace: "    await Promise.allSettled([closing, ...this.#releasing])\n",
       test: "stem-pump-v1.mjs",
       expectedFailure: "gate.close() hid a failed pin release",
     },

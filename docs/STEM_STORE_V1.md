@@ -160,16 +160,25 @@ A resolved close means a released pin (#2372). Every `StemSessionLease.close()`
 call shares the first call's release, so a release that fails rejects that
 call and every later one: a lease never reports a release that did not happen,
 and `StemSessionGate.close()` rejects with the same error when the current
-lease's release fails. `StemSessionGate.close()` waits for every open it finds
-in flight to settle, including one a newer open had already superseded, and an
-open settles only after it has closed every lease it held. That wait is
-bounded, because every such open is aborted by then. An aborted open stops
-waiting at the abort for everything except the store's own index work (index
-reads, pin writes, eviction and lease closes), whose index reads and writes are
-deadlined. In particular it stops waiting for the store's first open, the quota
-estimate, and another caller's ingest that it had joined. None of these holds a
-lease; the first two have no deadline, and a joined ingest can run for a whole
-download.
+lease's release fails.
+
+`StemSessionGate.close()` waits only for what holds a pin or can still take
+one:
+- the current lease's close;
+- a same-session predecessor that an open took out of the gate and is closing;
+- every open that has reached the store's pin phase, including one a newer open
+  had already superseded.
+
+An open reaches the pin phase when `openSession` passes its last signal check
+before the session pin lock. From then on it may hold that lock or write its
+pin, and it settles only after closing every lease it was granted or displaced.
+Every wait it has from then on either ends at its abort or is the store's
+index work, which a lease close waits for too. An open aborted before the pin
+phase holds no pin and never takes one, because that signal check refuses it.
+`close()` therefore does not wait for it, whatever store work it is still in:
+the store's first open, the quota estimate, an ingest it joined, its own
+staging cleanup, or an eviction. Those can be long or have no deadline. The
+aborted open rejects whenever that work ends.
 
 The PCM pump is a dedicated module Worker. MSB1 ring descriptors cross the
 Worker port after construction; they are never processor options. The Worker

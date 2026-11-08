@@ -147,12 +147,15 @@ export class OpfsStemStore {
    * Verify every referenced stem at this open, self-heal misses/corruption,
    * and pin the complete set only after the hard gate is green.
    *
-   * @param {{sessionId: string, stems: Array<{identity: string, bytes: number}>, resolver: {resolve: Function}, signal?: AbortSignal, onProgress?: (event: object) => void}} options
+   * `onPinning` is StemSessionGate's internal hook, outside the typed
+   * contract: it runs once, synchronously, when this call passes its last
+   * signal check before taking the session pin. Before that point the call
+   * holds no pin and, once aborted, never takes one.
+   *
+   * @param {{sessionId: string, stems: Array<{identity: string, bytes: number}>, resolver: {resolve: Function}, signal?: AbortSignal, onProgress?: (event: object) => void, onPinning?: () => void}} options
    */
   async openSession(options) {
-    // The store open is shared and has no deadline of its own, so an aborted
-    // session open stops waiting for it (the open itself runs on).
-    await abortable(this.open(), options.signal)
+    await this.open()
     const sessionId = nonemptyText(options.sessionId, "sessionId")
     if (typeof options.resolver?.resolve !== "function") {
       throw new TypeError("openSession needs a StemResolver")
@@ -169,7 +172,7 @@ export class OpfsStemStore {
       if (!present) missing.push(stem)
     }
 
-    await this.#preflight(missing, protectedIdentities, options.signal)
+    await this.#preflight(missing, protectedIdentities)
 
     const ingestAbort = new AbortController()
     const removeParentAbort = forwardAbort(options.signal, ingestAbort)
@@ -191,6 +194,7 @@ export class OpfsStemStore {
     }
 
     throwIfAborted(options.signal)
+    options.onPinning?.()
     const pin = `session:${this.#tabId}:${sessionId}`
     const releasePinLock = await this.#acquireSessionPinLock(pin, options.signal)
     try {
@@ -305,9 +309,7 @@ export class OpfsStemStore {
 
   async #ensureIngested(stem, resolver, options) {
     const existing = this.#inFlight.get(stem.identity)
-    // A joined ingest belongs to another caller and runs on its signal, so a
-    // joiner stops waiting for it at its own abort.
-    if (existing !== undefined) return abortable(existing, options.signal)
+    if (existing !== undefined) return existing
     const promise = this.#withStemLock(stem.identity, options.signal, async () => {
       if (await this.#verifyIndexed(stem, options.onProgress, options.signal)) return
       let lastError
@@ -774,7 +776,7 @@ export class OpfsStemStore {
     })
   }
 
-  async #preflight(missing, protectedIdentities, signal) {
+  async #preflight(missing, protectedIdentities) {
     if (missing.length === 0 || typeof this.#storage?.estimate !== "function") return
     const requiredBytes = checkedByteSum(
       missing.map((stem) => stem.bytes),
@@ -782,10 +784,8 @@ export class OpfsStemStore {
     )
     let estimate
     try {
-      // No deadline of its own either, so an aborted open stops waiting.
-      estimate = await abortable(this.#storage.estimate(), signal)
+      estimate = await this.#storage.estimate()
     } catch {
-      // An abort lands here too; the ingest's own signal check refuses it next.
       return
     }
     if (!finiteNonnegative(estimate.quota) || !finiteNonnegative(estimate.usage)) return
@@ -1491,19 +1491,6 @@ function throwIfAborted(signal) {
   if (signal?.aborted) {
     throw signal.reason ?? new DOMException("Stem operation aborted", "AbortError")
   }
-}
-
-/** Settles as `promise` does, or rejects once `signal` aborts; `promise` itself runs on. */
-function abortable(promise, signal) {
-  if (signal === undefined) return promise
-  let abort
-  return new Promise((resolve, reject) => {
-    abort = () =>
-      reject(signal.reason ?? new DOMException("Stem operation aborted", "AbortError"))
-    promise.then(resolve, reject)
-    if (signal.aborted) abort()
-    else signal.addEventListener("abort", abort, { once: true })
-  }).finally(() => signal.removeEventListener("abort", abort))
 }
 
 function monotonicNow() {

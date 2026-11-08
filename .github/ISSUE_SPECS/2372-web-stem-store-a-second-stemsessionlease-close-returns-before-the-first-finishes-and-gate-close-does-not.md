@@ -115,3 +115,76 @@ The two-browser gate is not applicable: the stem-store suite runs only in Node a
 - `bash scripts/test-web-audioworklet.sh`: exit 0.
 - `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
 - No Rust and no render path changed. The two-browser gate is not applicable, per the attempt-1 verdict.
+
+**Verdict: FAIL** (Sol, one MAJOR, the same class as attempt 1's). `gate.close()` still hung, where base resolved, on two waits of an aborted open that hold no lease. Probe P1: the open's own ingest-cleanup `removeEntry` of staging or final has no deadline. Probe P2: under quota pressure, `#evictUnpinned` waits on a stem lock another holder keeps, through `#withStemLock(identity, undefined, ...)`, which has no signal. `#quotaError`'s `estimate?.()` is unsignalled too. The reviewer asked which model is right before patching wait by wait: should `close()` wait only for leases that are granted or still grantable? MINORs:
+- `session-gate.js` keeps its own `abortable`.
+- `#preflight`'s catch-all swallows an abort.
+
+### Attempt 3 (Terra, 2026-11-08)
+**Model: `close()` waits for pins, not for opens.** A session open can take the session pin only after it passes `openSession`'s last signal check (`throwIfAborted(options.signal)`, right before the pin lock request, with no await between them). An open aborted before that check never takes a pin. So `close()` waits for exactly what holds a pin or can still take one:
+- the current lease's close;
+- a same-session predecessor an open took out of the gate and is closing (`replaced`, closed before that open's pin phase);
+- every open that reached the pin phase.
+
+The store reports the pin phase through an internal option, `onPinning`. It is called once, synchronously, right after that signal check. It is documented in `openSession`'s JSDoc as StemSessionGate's internal hook, outside the typed contract, so the `.d.ts` is unchanged. The gate keeps one `#releasing` set:
+- `#track(promise)` adds a lease close, or an open's private settle deferred once that open reports the pin phase.
+- `close()` waits for `Promise.allSettled([currentLeaseClose, ...#releasing])` and then rethrows the current lease's failure.
+
+This removes the whole class, not one wait at a time. Whatever lease-free work an aborted open is still in, `close()` never waits on it: the store open, the estimate, a joined ingest, its own staging cleanup, or an eviction and its stem lock. Those waits behave as they do on base, and the aborted open rejects when the work ends.
+
+**Why each wait `close()` still has is bounded.**
+- An open in the pin phase:
+  - pin lock acquisition: signalled; an abort while queued rejects it;
+  - pin write: `#mutateIndex`, index work;
+  - the `resume()` wait: `abortable`;
+  - the displaced predecessor's close and its own lease's close: index work.
+- A replaced predecessor's close: index work.
+- The current lease's close: index work, which base `close()` already waited for.
+- Index work means an unsignalled index-lock acquisition plus deadlined index reads and writes. Per the verdict this is pre-existing and bounded.
+
+**Attempt 2's store changes are reverted.** `abortable` around the store open, the joined ingest and the estimate, and the `#preflight` signal are all gone. The model makes them unnecessary for `close()`, and each would be an unguarded line, because no test can tell it apart under the model. Both MINORs go away with them. Only `session-gate.js` uses an `abortable`, so there is no second copy to share, and `#preflight` again takes no signal, so its catch cannot swallow an abort.
+
+**Tests** (`stem-pump-v1.mjs`)
+- `gateCloseNeverWaitsOnWorkThatHoldsNoLease` now has five legs:
+  - wedged `getDirectory`;
+  - wedged estimate;
+  - joined ingest;
+  - P1: the open's own staging-cleanup `removeEntry` wedged, the second staging removal;
+  - P2: an eviction under quota pressure queued on a held stem lock.
+
+  Each leg asserts that `close()` resolves within 500 ms. It then releases the wedge and asserts that the aborted open rejects and that the index holds no pin for it.
+- New `gateCloseWaitsForAnOpenInItsPinWrite`: the open holds the session pin lock, and its pin write is queued behind a held index. `close()` must not resolve while that lock is held.
+- New `gateCloseWaitsForAReplacedPredecessor`: a same-session open is closing the lease it took out of the gate. `close()` must not resolve while that lease's pin is in the index.
+
+**Red.**
+- On attempt 2 (`acf3287dd`), each leg run alone:
+  - P1: `gate.close() waited on an aborted open's wedged staging cleanup`.
+  - P2: `gate.close() waited on an aborted open's eviction behind a held stem lock`.
+  - The other three legs pass on attempt 2, which fixed them wait by wait. Attempt 1 fails them, as recorded above.
+- The two new tests pass on attempts 1 and 2, whose settle model waited for everything. They guard the pin-phase boundary of the new model and are red under its mutations, below.
+
+**Mutation ledger** (`--self-test --budgets`; all entries `RED` at their targets):
+- `let gate.close() wait only for the current lease`: `... still held its pin (aborted by close())`.
+- `never report a session open's pin phase`: same target.
+- `report a session open's pin phase only once the pin is written`: `gate.close() resolved while an open in its pin write held the pin lock`.
+- `close a replaced predecessor without gate.close() waiting for it`: `gate.close() resolved while a replaced predecessor still held its pin`.
+- `let gate.close() wait for every open from its start`, the attempt-2 model: `gate.close() waited on an aborted open's wedged getDirectory`.
+- `let gate.close() hide a failed release of the current lease` and `let a second lease close() resolve ...` are kept and retargeted to the new code.
+- Two existing anchors that matched the old text were updated: `content-key -> per-session store directory` and `stop forwarding the caller's signal ...`. Both are still `RED` at their targets.
+- The five no-lease legs share one ledger entry, not one each. Attempt 2's per-leg entries mutated per-wait store fixes that this model removes; here one mechanism holds all five legs. Each leg's red on the old code is recorded above, by hand.
+- Equivalent: dropping the `#releasing.delete` only keeps settled promises around, a leak with no visible effect.
+
+**Green.**
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `--self-test --budgets`: PASS.
+- `stem-pump-v1.mjs`: 5 serial runs and 8 parallel runs, all PASS.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- No Rust and no render path changed. The two-browser gate is not applicable.
+
+**Docs.** `docs/STEM_STORE_V1.md` and the `session-gate.js` class comment state the model, list what `close()` waits for, and say why it is bounded.
+
+**Follow-ups (not filed).**
+- The undeadlined `removeEntry` inside `#evictUnpinned`'s `#mutateIndex` holds the index lock, so a wedge there blocks every lease close, base's included.
+- `#readIndex`'s `getFileHandle(INDEX_FILE)` has no deadline.
+- An aborted open's eviction still runs once its stem lock frees, because `#evictUnpinned` takes no signal. That evicts an unpinned stem for an open that no longer needs the space; it holds no pin.
