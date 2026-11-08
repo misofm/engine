@@ -544,7 +544,10 @@ async function testMainRealm() {
       // refusing their record: a foreign prototype (`capturePlainRecord`), an optional field held
       // by a hidden accessor, which reads as absent without the accessor check, a typed array
       // that is not a `Uint8Array` (`snapshotDocument`), and a hidden boot option
-      // (`snapshotBootOptions`'s enumerable shape).
+      // (`snapshotBootOptions`'s enumerable shape). Beside an enumerable optional field whose value
+      // is `undefined` (counted as enumerable, not as present), a hidden required field
+      // (`snapshotFactory`'s required-field check) and a hidden defined optional field (its
+      // enumerable check) are each the only refusal: the counts agree.
       const guardRefusals = [
         ["foreign prototype", () => Object.assign(Object.create({ inherited: true }), makeFactory())],
         ["hidden accessor prepared module", () => {
@@ -559,6 +562,18 @@ async function testMainRealm() {
           const options = { ...limits };
           Object.defineProperty(options, "reserved2", { enumerable: false });
           return makeFactory({ options });
+        }],
+        ["hidden required document beside an undefined optional", () => {
+          const factory = makeFactory({ bootCommand: undefined });
+          Object.defineProperty(factory, "document", { enumerable: false });
+          return factory;
+        }],
+        ["hidden defined prepared module beside an undefined optional", () => {
+          const factory = makeFactory({ bootCommand: undefined });
+          Object.defineProperty(factory, "preparedModule", {
+            configurable: true, value: unsupportedPreparationModule,
+          });
+          return factory;
         }],
       ];
       for (const [label, makeCase] of guardRefusals) {
