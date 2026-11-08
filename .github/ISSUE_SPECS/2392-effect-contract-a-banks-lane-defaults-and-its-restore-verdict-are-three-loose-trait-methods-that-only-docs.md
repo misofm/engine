@@ -123,4 +123,10 @@ The coordinator syncs #2410's GitHub body to that file.
   Test value: red when the effect's `LaneSwap` exchange leaves a prepared default or the link mode behind, or its verdict refuses its own lane's payload. Neither effect had an end-to-end swap test before, only `glide_tests`' single direct exchange of a link word, a different claim that stays. Mutation, each crate: the exchange returns `true` and moves nothing. Result: red, the de-esser `strip 1's payload differs from its twin's`, the dynamic EQ `left frame 0 differs from its twin`.
 - **M5** is recorded as equivalent (above), and the follow-up line is dropped.
 - **Successor (out of scope here).** `swap_bank_lanes` checks the step-1 rotation, both undo rotations and the step-3 payload revert only with `debug_assert!` (`live.rs` ~3489, ~3497, ~3509, ~3518). So in a release build, an exchange that refuses partway leaves the defaults half-rotated and still returns `Ok`. Filed as #SUCCESSOR.
-- **Attempt-2 gates.** GATES2
+- **Attempt-2 gates.** `origin/main` was still `231494259`, so the merge was a no-op. All green:
+  - `cargo test --locked -j 4`, one crate at a time: `effect-contract` 84, `rack` 75, `conformance` 18, `de-esser` 22, `dynamic-eq` 19, `gate-expander` 71, `soft-clip` 42, `transient-shaper` 46, and `effect-compiler --test restore_verdict` 1.
+  - Clippy `--all-targets -D warnings` over those crates.
+  - `cargo fmt --check`.
+  - `realtime_policy`: `ok (312 marked regions in 48 files)`.
+  - `scripts/check-workspace-policy.sh`: `ok`.
+  - No render code changed after attempt 1's call-graph run, apart from comment markers.
