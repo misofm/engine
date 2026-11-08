@@ -5129,6 +5129,19 @@ pub fn carry_refusal_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
     )
 }
 
+/// The render-time lane swaps a bank's defect made this plan recover (issues #2414, #2419): every
+/// bank stage's stranded swaps, which reset two lanes, and every split strip a swap or a row
+/// trade could not swap back, which reset its lanes and pinned both strips. Saturating. `None`
+/// for any other plan.
+///
+/// Read after render, by whoever holds the plan, beside [`carry_refusal_count`]: a bank that
+/// keeps its lane-swap contract never strands, so a nonzero count is a defect, and a plan
+/// rebuild prepares the lanes fresh.
+pub fn lane_swap_defect_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
+    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
+    Some(executor.runtime.lane_swap_defect_count())
+}
+
 /// The due fade-arm fires whose target resolved to no fader lane or live route (issue #2257),
 /// each of which left its arm unfired and unreported; saturating. `None` for any other plan.
 ///
