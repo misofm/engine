@@ -203,11 +203,15 @@ holder's call fails typed (`storage.read_stalled`, `storage.write_stalled` or
 the store and may still land after its deadline, so each is fenced into its
 hold like a removal: the stem lock stays held until the step settles, and a
 staging writable that opens after its wait ended is aborted before the lock is
-released. A stalled clearing of the staged file ends the ingest. A stalled or
-failed cleanup fails the ingest only after an integrity failure, whose retry
-would stage the same file under it; otherwise the attempt's own outcome stands,
-and a successful ingest swallows it (the next ingest of the stem clears the
-staged file first). A lookup lands nothing, so it is not fenced; a stalled or
+released. A stalled clearing of the staged file ends the ingest. An integrity
+failure is retried once in the same hold, and the retry's promote waits on
+every step that hold fenced. So when a retry would follow, a staging abort or
+cleanup that failed or stalled fails the attempt with its own error and stops
+the retry, which would otherwise stage the same file under it or wait on it
+with no deadline. Otherwise the attempt's own outcome stands: a last attempt
+keeps `stem.ingest.integrity`, any other failure keeps its error, and a
+successful ingest swallows a stalled cleanup (the next ingest of the stem
+clears the staged file first). A lookup lands nothing, so it is not fenced; a stalled or
 failed lookup is a stalled or failed read under the rule above.
 
 A wait for a stem lock, in this store or another tab, simply waits for the

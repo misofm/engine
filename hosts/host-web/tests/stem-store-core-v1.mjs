@@ -1591,7 +1591,8 @@ async function theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks() {
 // settles typed while the step is wedged. A step that changes the store (a create, a move, a removal,
 // a writable's open, write, close or abort) may still land, so it keeps the stem lock until it
 // settles; a lookup lands nothing and does not. One leg per step; each wedges exactly that step.
-// A stalled staging cleanup fails the call only after an integrity failure, whose retry it stops.
+// A failed or stalled staging abort or cleanup fails the call only when an integrity retry would
+// follow, which it stops; the retry's promote would wait on it.
 async function aStemLockStepNeverOutlastsItsDeadline() {
   const quota = () => Object.assign(new Error("fake quota exhausted"), { name: "QuotaExceededError" })
   const legs = [
@@ -1603,9 +1604,11 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     { leg: "staging write", code: "storage.write_stalled", fenced: true },
     { leg: "staging close", code: "storage.write_stalled", fenced: true },
     { leg: "staging abort", code: "stem.resolve.failed", fenced: true },
+    { leg: "staging abort (integrity)", code: "storage.write_stalled", fenced: true },
     { leg: "staging cleanup (integrity)", code: "storage.remove_stalled", fenced: true },
     { leg: "staging cleanup (quota)", code: "storage.insufficient", fenced: true },
     { leg: "staging cleanup (success)", code: undefined, fenced: true },
+    { leg: "staging cleanup (last integrity)", code: "stem.ingest.integrity", fenced: true },
     { leg: "move", code: "storage.write_stalled", fenced: true },
     { leg: "fallback final create", moveSupported: false, code: "storage.write_stalled", fenced: true },
     { leg: "fallback write", moveSupported: false, code: "storage.write_stalled", fenced: true },
@@ -1643,6 +1646,7 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     }
     const on = (target) => ({ fileName }) => (fileName === target && !reached ? wedge() : undefined)
     let stagingRemovals = 0
+    let lateAbort = false
     if (call !== undefined) {
       backend.getFileHandleBlocker = ({ name, create }) =>
         name === final && !create && !reached ? wedge() : undefined
@@ -1650,9 +1654,10 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
       backend.removeEntryBlocker = ({ name }) => {
         if (name !== staged) return undefined
         stagingRemovals += 1
-        return stagingRemovals === (leg === "staging clear" ? 1 : 2) ? wedge() : undefined
+        const wedged = leg === "staging clear" ? 1 : leg === "staging cleanup (last integrity)" ? 4 : 2
+        return stagingRemovals === wedged ? wedge() : undefined
       }
-      if (leg === "staging cleanup (integrity)") {
+      if (leg === "staging cleanup (integrity)" || leg === "staging cleanup (last integrity)") {
         resolver = new MemoryStemResolver({ [stem.identity]: stem.pcm.map((byte) => byte ^ 1) })
       } else if (leg === "staging cleanup (quota)") {
         backend.writeBlocker = ({ fileName }) => {
@@ -1665,6 +1670,9 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
         name === target && create && !reached ? wedge() : undefined
     } else if (leg === "staging writable open") {
       backend.createWritableBlocker = on(staged)
+      backend.abortBlocker = ({ fileName }) => {
+        if (fileName === staged) lateAbort = true
+      }
     } else if (leg === "staging write" || leg === "fallback write") {
       backend.writeBlocker = on(leg === "staging write" ? staged : final)
     } else if (leg === "staging close" || leg === "fallback close") {
@@ -1673,6 +1681,17 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
       resolver = {
         async resolve() {
           throw new Error("offline")
+        },
+      }
+      backend.abortBlocker = on(staged)
+    } else if (leg === "staging abort (integrity)") {
+      // The first delivery overruns the declaration; a retry would get the right bytes.
+      let resolves = 0
+      resolver = {
+        async resolve() {
+          resolves += 1
+          const bytes = resolves === 1 ? new Uint8Array(stem.bytes * 2) : stem.pcm
+          return { stream: new ReadableStream({ start: (controller) => (controller.enqueue(bytes), controller.close()) }) }
         },
       }
       backend.abortBlocker = on(staged)
@@ -1706,6 +1725,9 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
       unwedge()
     }
     await until(async () => !(await isHeld()), `the stem lock's release after the ${leg}`)
+    if (leg === "staging writable open") {
+      assert.ok(lateAbort, "a staging writable that opened late was never aborted")
+    }
     if (pinned !== undefined) {
       backend.getFileHandleBlocker = undefined
       unwedge()
@@ -2201,11 +2223,13 @@ await anAbortedOpenEvictsNothing()
 await aStalledLockQueryNeverHoldsTheIndex()
 await anUnknownLockStateSweepsNothingStaged()
 await theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks()
-await aStemLockStepNeverOutlastsItsDeadline()
 await tabCloseMidStaging()
 await abortCleansStaging()
 await wedgedDecoderObeysAbortAndDeadline()
 await lyingDeclarationIsRefused()
+// After lyingDeclarationIsRefused: the staging abort (integrity) leg needs the over-length check,
+// whose own gate must be the one that goes red when it is mutated away.
+await aStemLockStepNeverOutlastsItsDeadline()
 // After lyingDeclarationIsRefused: with both verify-on-open length arms
 // mutated away, the lying-declaration gate must be the one that goes red.
 await corruptionSelfHeals()

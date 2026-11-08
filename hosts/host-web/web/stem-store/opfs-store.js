@@ -340,7 +340,7 @@ export class OpfsStemStore {
       let lastError
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          await this.#ingestAttempt(stem, resolver, options, hold)
+          await this.#ingestAttempt(stem, resolver, options, hold, attempt === 1)
           return
         } catch (error) {
           lastError = error
@@ -361,8 +361,13 @@ export class OpfsStemStore {
     }
   }
 
-  async #ingestAttempt(stem, resolver, options, hold) {
+  // `lastAttempt`: no integrity retry follows this attempt.
+  async #ingestAttempt(stem, resolver, options, hold, lastAttempt) {
     throwIfAborted(options.signal)
+    // An integrity failure is retried in this hold, and the retry's promote waits on every fence of
+    // it. So a cleanup step of a retried attempt that failed or stalled fails the attempt instead:
+    // a retry would stage the same file under it, or wait on it with no deadline (#2397).
+    const retried = (error) => !lastAttempt && error?.code === "stem.ingest.integrity"
     const digest = stemDigest(stem.identity)
     const stagingName = `${this.#tabId}-${digest}`
     // A late removal could delete the staged file a later hold of this tab writes, and a late
@@ -485,14 +490,18 @@ export class OpfsStemStore {
           options.signal
         )
       } catch (error) {
+        let abortFailure
         await this.#fencedStep(
           hold,
           writable.abort(error),
           "storage.write_stalled",
           `Aborting staging for ${stem.identity} made no progress`
-        ).catch(() => {})
+        ).catch((failed) => {
+          abortFailure = failed
+        })
         void reader?.cancel(error).catch(() => {})
         if (error?.leaveStaging === true) leaveDebris = true
+        if (abortFailure !== undefined && retried(error)) throw abortFailure
         throw error
       } finally {
         if (reader !== undefined) releaseReader(reader)
@@ -571,10 +580,10 @@ export class OpfsStemStore {
           "storage.remove_stalled",
           `Removing staging for ${stem.identity} made no progress`
         ).catch((cleanupError) => {
-          // A failed or stalled cleanup stops an integrity retry, which would stage the same file
-          // under this removal; otherwise the attempt's own outcome stands, and a success swallows
-          // it (a later ingest clears the staged file first). The removal stays fenced either way.
-          if (failure?.code === "stem.ingest.integrity") throw cleanupError
+          // Only a retried attempt fails on its cleanup; otherwise the attempt's own outcome stands,
+          // and a success swallows it (a later ingest clears the staged file first). The removal
+          // stays fenced either way.
+          if (retried(failure)) throw cleanupError
         })
       }
     }

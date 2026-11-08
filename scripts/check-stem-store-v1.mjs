@@ -1167,7 +1167,8 @@ async function runMutationLedger() {
     // Issue #2397: every OPFS step a stem-lock hold awaits is deadlined; a step that changes the
     // store is fenced into the hold, so the stem lock outlives it, and a lookup is not. One deadline
     // entry and one fence entry per new deadline, a fence entry per writable step that was already
-    // deadlined, and one entry per clause of the staging cleanup's failure policy.
+    // deadlined, and one entry per clause of the rule that a retried attempt fails on a failed or
+    // stalled staging abort or cleanup.
     {
       name: "look up a final in a stem-lock hold with no deadline (verify() lookup)",
       file: "web/stem-store/opfs-store.js",
@@ -1356,7 +1357,7 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "          if (failure?.code === \"stem.ingest.integrity\") throw cleanupError\n",
+            "          if (retried(failure)) throw cleanupError\n",
           replace: "          throw cleanupError\n",
         },
       ],
@@ -1369,7 +1370,7 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "          if (failure?.code === \"stem.ingest.integrity\") throw cleanupError\n",
+            "          if (retried(failure)) throw cleanupError\n",
           replace: "",
         },
       ],
@@ -1388,6 +1389,45 @@ async function runMutationLedger() {
       ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a wedged staging cleanup (integrity) failed with the wrong error",
+    },
+    {
+      name: "fail the last attempt on its stalled staging cleanup",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    const retried = (error) => !lastAttempt && error?.code === \"stem.ingest.integrity\"\n",
+          replace: "    const retried = (error) => error?.code === \"stem.ingest.integrity\"\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a wedged staging cleanup (last integrity) failed with the wrong error",
+    },
+    {
+      name: "swallow a stalled staging abort before an integrity retry",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        if (abortFailure !== undefined && retried(error)) throw abortFailure\n",
+          replace: "",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stem-lock hold waited on a wedged staging abort (integrity) past its deadline",
+    },
+    {
+      name: "fence a late staging writable without aborting it",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      this.#fence(hold, Promise.resolve(opening).then((late) => late?.abort(error)))\n",
+          replace: "      this.#fence(hold, opening)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a staging writable that opened late was never aborted",
     },
     {
       name: "leave a staging writable that opens late unfenced",
