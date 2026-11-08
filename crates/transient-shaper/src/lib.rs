@@ -55,14 +55,14 @@
 
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
-    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
-    LinkMode, LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LaneSwap,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect,
+    PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
@@ -2072,8 +2072,39 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
         let track = checked_track(track_index, W)?;
         self.shaper.restore(track, state_layout_version, input)
     }
+    // REALTIME_POLICY_END
 
-    fn validate_track_state_payload(
+    // REALTIME_POLICY_BEGIN: #2392, the lane swap hook runs at a render block boundary.
+    fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+        Some(self)
+    }
+
+    fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+        Some(self)
+    }
+    // REALTIME_POLICY_END
+
+    /// Issue #1370: [`Shaper::retarget_link`]; a padded lane takes no glide.
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
+        self.shaper.retarget_link(track, mode, samples)
+    }
+}
+
+impl<L: Lane, const W: usize> LaneSwap for PreparedTransientShaperBank<L, W> {
+    // REALTIME_POLICY_BEGIN: #2392, the lane swap runs at a render block boundary.
+    fn lane_default_bytes(&self) -> usize {
+        LANE_DEFAULT_BYTES
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.shaper);
+        self.exchange_defaults(lane, bytes)
+    }
+
+    fn validate_lane_payload(
         &self,
         track_index: u32,
         state_layout_version: u32,
@@ -2084,23 +2115,6 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
         Ok(())
     }
     // REALTIME_POLICY_END
-
-    fn lane_default_bytes(&self) -> Option<usize> {
-        Some(LANE_DEFAULT_BYTES)
-    }
-
-    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
-        // A per-channel write lands on live state (#2352).
-        MonoCollapse::enter::<false>(&mut self.shaper);
-        self.exchange_defaults(lane, bytes)
-    }
-
-    /// Issue #1370: [`Shaper::retarget_link`]; a padded lane takes no glide.
-    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
-        // A per-channel write lands on live state (#2352).
-        MonoCollapse::enter::<false>(&mut self.shaper);
-        self.shaper.retarget_link(track, mode, samples)
-    }
 }
 
 impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
@@ -2159,7 +2173,7 @@ const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4 + 4;
 
 // REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
 impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
-    /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s left
+    /// [`LaneSwap::exchange_lane_defaults`]: lane `lane`'s left
     /// `Ramps::defaults` row then its right one, each parameter in descriptor order as
     /// little-endian `f32` bits, then the lane's link mode as one word (issue #1368,
     /// `effect_contract::exchange_lane_link_word`). They are the shaper's only prepared per-lane

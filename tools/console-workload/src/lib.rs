@@ -2381,6 +2381,20 @@ impl SessionRuntime {
             });
         // #2388: the effect lanes are a bind read of the bound plan, read before its seal.
         let effect_lanes = bound.plan.bank_effect_lanes();
+        // The collapse's structural join, performed exactly where the M1 plumbing said it would
+        // be: `session_structural_symmetry` is keyed by track id, the plan's rows are keyed by
+        // anonymous lanes, and this is the one call site that holds both. A plan nobody joins
+        // never collapses, so this is not an optimisation switch -- it is the arming. It takes
+        // the bound plan, before its seal (#2401).
+        let structural = builtins_compiler::session_structural_symmetry(&session);
+        let eligible: BTreeSet<&str> = structural
+            .iter()
+            .filter(|(_, witness)| witness.eligible())
+            .map(|(track, _)| track.as_ref())
+            .collect();
+        bound
+            .plan
+            .arm_mono_collapse(&|track: &str| eligible.contains(track));
         let bound = bound.seal();
         let (plan, meter_consumers, strip_controls) =
             (bound.plan, bound.meter_consumers, bound.track_controls);
@@ -2414,17 +2428,6 @@ impl SessionRuntime {
             workload.kind()
         );
         let mut plan = plan;
-        // The collapse's structural join, performed exactly where the M1 plumbing said it would
-        // be: `session_structural_symmetry` is keyed by track id, the plan's rows are keyed by
-        // anonymous lanes, and this is the one call site that holds both. A plan nobody joins
-        // never collapses, so this is not an optimisation switch -- it is the arming.
-        let structural = builtins_compiler::session_structural_symmetry(&session);
-        let eligible: BTreeSet<&str> = structural
-            .iter()
-            .filter(|(_, witness)| witness.eligible())
-            .map(|(track, _)| track.as_ref())
-            .collect();
-        plan.arm_mono_collapse(&|track: &str| eligible.contains(track));
         // The mono measurement's second arm. Both arms compile the *same* fixture -- that is what
         // makes the paired delta the collapse and nothing else -- so the difference between them
         // has to be this switch and cannot be a fixture edit.

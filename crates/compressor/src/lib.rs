@@ -46,16 +46,17 @@ pub mod corpus;
 
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
-    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
-    LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
-    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
-    ObservationTapId, ParameterAccessError, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedParameterState,
-    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LaneSwap,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationSample, ObservationTapId, ParameterAccessError, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect,
+    PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    PreparedParameterState, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata,
 };
 use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
@@ -1742,17 +1743,6 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         self.instance.restore(state_layout_version, input, track)
     }
 
-    fn validate_track_state_payload(
-        &self,
-        track_index: u32,
-        state_layout_version: u32,
-        input: &StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        checked_track(track_index, L::WIDTH, self.active)?;
-        self.instance.validate(state_layout_version, input)?;
-        Ok(())
-    }
-
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         Some(self)
     }
@@ -1819,14 +1809,37 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         }
     }
 
-    fn lane_default_bytes(&self) -> Option<usize> {
-        Some(LANE_DEFAULT_BYTES)
+    fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+        Some(self)
+    }
+
+    fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+        Some(self)
+    }
+    // REALTIME_POLICY_END
+}
+
+impl<L: Lane> LaneSwap for PreparedCompressorBank<L> {
+    // REALTIME_POLICY_BEGIN: #2392, the lane swap runs at a render block boundary.
+    fn lane_default_bytes(&self) -> usize {
+        LANE_DEFAULT_BYTES
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         // A per-channel write lands on live state (#2352).
         MonoCollapse::enter::<false>(&mut self.instance);
         self.instance.exchange_lane_defaults(lane, bytes)
+    }
+
+    fn validate_lane_payload(
+        &self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        checked_track(track_index, L::WIDTH, self.active)?;
+        self.instance.validate(state_layout_version, input)?;
+        Ok(())
     }
     // REALTIME_POLICY_END
 }

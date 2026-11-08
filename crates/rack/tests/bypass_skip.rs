@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use effect_contract::{
     BankProcessReport, BankWidth, BypassSwitch, EffectBankProcessBlock, EffectCellWriter,
     EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec,
-    EffectProgramKey, EffectQuality, EffectTargetError, LatencySamples, LinkMode,
+    EffectProgramKey, EffectQuality, EffectTargetError, LaneSwap, LatencySamples, LinkMode,
     ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
     ObservationFold, ObservationKind, ObservationLane, ObservationSample, ObservationTapId,
     PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
@@ -99,13 +99,12 @@ impl PreparedNativeEffectBank for Recorder {
         Ok(())
     }
 
-    /// No per-lane defaults, so a lane swap may move a lane (issue #1747).
-    fn lane_default_bytes(&self) -> Option<usize> {
-        Some(0)
+    fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+        Some(self)
     }
 
-    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
-        lane < LANES && bytes.is_empty()
+    fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+        Some(self)
     }
 
     fn observe_resident_bank(&self, _tap_index: u32, out: &mut [ObservationSample]) -> bool {
@@ -134,9 +133,20 @@ impl PreparedNativeEffectBank for Recorder {
     ) -> Result<(), StatePayloadError> {
         Ok(())
     }
+}
+
+impl LaneSwap for Recorder {
+    /// No per-lane defaults, so a lane swap may move a lane (issue #1747).
+    fn lane_default_bytes(&self) -> usize {
+        0
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        lane < LANES && bytes.is_empty()
+    }
 
     /// The restore above, which takes every payload (issue #2350).
-    fn validate_track_state_payload(
+    fn validate_lane_payload(
         &self,
         _track_index: u32,
         _state_layout_version: u32,

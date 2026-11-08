@@ -325,7 +325,7 @@ fn render_arm(
     let frames = artifact.envelope().quantum.0 as usize;
     let blocks = blocks.max(artifact.report().output_latency.0.div_ceil(frames as u64) + 4);
     let (plan, sinks) = bind_arm(artifact, tracks);
-    let mut plan = arm(plan.seal(), tracks, forced_off);
+    let mut plan = arm(plan, tracks, forced_off);
     let mut output = Vec::new();
     let mut pcm = vec![0.0_f32; frames * 2];
     for block in 0..blocks {
@@ -370,12 +370,12 @@ fn index_of(track_id: &str) -> usize {
         .expect("chNN")
 }
 
-/// Bind `artifact` as [`render_arm`] does, not yet sealed ([`arm`]) or rendered: the bound plan
-/// and each track's post-matrix recorder.
+/// Bind `artifact` as [`render_arm`] does, not yet joined and sealed ([`arm`]) or rendered: the
+/// bound plan and each track's post-matrix recorder.
 fn bind_arm(
     artifact: PreparedGraphBuiltinsArtifact,
     tracks: &[TrackShape],
-) -> (graph::GraphBoundPlan, Vec<BitSink>) {
+) -> (graph::GraphBoundPlan<graph::ProgramAttached>, Vec<BitSink>) {
     let envelope = artifact.envelope();
     let nodes = artifact
         .external_binding_nodes()
@@ -419,13 +419,24 @@ fn bind_arm(
     (plan, sinks)
 }
 
-/// Arm the sealed `plan`'s mono collapse for `tracks`, or force it off.
-fn arm(
-    mut plan: PreparedRenderPlan,
+/// Join the bound `plan`'s mono collapse for `tracks` (#2401: only a bound plan takes the join),
+/// then seal it, with the collapse forced off when `forced_off`.
+fn arm<S>(
+    mut plan: graph::GraphBoundPlan<S>,
     tracks: &[TrackShape],
     forced_off: bool,
 ) -> PreparedRenderPlan {
+    join(&mut plan, tracks);
+    seal_forced(plan.seal(), forced_off)
+}
+
+/// Join the bound `plan`'s mono collapse for `tracks`.
+fn join<S>(plan: &mut graph::GraphBoundPlan<S>, tracks: &[TrackShape]) {
     plan.arm_mono_collapse(&|track: &str| !tracks[index_of(track)].feed.stereo);
+}
+
+/// The sealed `plan`, with its collapse forced off when `forced_off`.
+fn seal_forced(mut plan: PreparedRenderPlan, forced_off: bool) -> PreparedRenderPlan {
     plan.force_mono_collapse_off(forced_off);
     plan
 }
@@ -2007,14 +2018,15 @@ fn a_swap_carries_a_per_node_effects_agreement_with_its_state() {
             bind_arm(compile_with_live_delays(&model, &registry), &tracks);
         let (mut after, after_sinks) =
             bind_arm(compile_with_live_delays(&model, &registry), &tracks);
-        let lanes = |plan: &mut graph::GraphBoundPlan| {
+        let lanes = |plan: &mut graph::GraphBoundPlan<graph::ProgramAttached>| {
             plan.bank_effect_lanes()
                 .into_iter()
                 .filter(|(_, lane)| matches!(lane.location, graph::GraphEffectSite::Node(_)))
                 .collect::<BTreeMap<_, _>>()
         };
         let predecessor = lanes(&mut before);
-        let mut before = arm(before.seal(), &tracks, forced_off);
+        let mut before = arm(before, &tracks, forced_off);
+        join(&mut after, &tracks);
         let moves: Vec<_> = lanes(&mut after)
             .into_iter()
             .map(|(key, lane)| graph::GraphEffectMove {
@@ -2033,7 +2045,7 @@ fn a_swap_carries_a_per_node_effects_agreement_with_its_state() {
         )
         .expect("carry program");
         carry.effects(moves, 0).expect("effect carry");
-        let mut after = arm(carry.seal(), &tracks, forced_off);
+        let mut after = seal_forced(carry.seal(), forced_off);
         let frames = after.envelope().quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         let mut block = |plan: &mut PreparedRenderPlan, index: u64| {

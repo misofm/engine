@@ -808,8 +808,8 @@ impl LanePeerMut<'_> {
 
 /// The scratch a lane swap of `processor`'s lanes under `layout` needs
 /// ([`effect_contract::swap_bank_lanes_scratch_bytes`]: two payloads and one lane's prepared
-/// defaults), or `None` -- the stage cannot swap -- when the bank has not declared its defaults or
-/// the size overflows.
+/// defaults), or `None` -- the stage cannot swap -- when the bank does not swap lanes
+/// ([`PreparedNativeEffectBank::lane_swap`]) or the size overflows.
 fn lane_swap_scratch(
     processor: &dyn PreparedNativeEffectBank,
     layout: &EffectLaneLayout,
@@ -818,7 +818,7 @@ fn lane_swap_scratch(
 }
 
 /// Whether `processor` can swap a lane with `peer`'s with a scratch of `scratch_bytes`: it
-/// declares its defaults, `peer` declares the same size, and the scratch holds
+/// swaps lanes, `peer` declares the same defaults size, and the scratch holds
 /// [`lane_swap_scratch`]. The check [`effect_contract::swap_bank_lanes`] would refuse
 /// ([`effect_contract::LaneSwapRefusal::Defaults`] or `Scratch`), made before any write.
 fn lane_swap_scratch_fits(
@@ -827,7 +827,10 @@ fn lane_swap_scratch_fits(
     layout: &EffectLaneLayout,
     scratch_bytes: usize,
 ) -> bool {
-    processor.lane_default_bytes() == peer.lane_default_bytes()
+    let defaults = |bank: &dyn PreparedNativeEffectBank| {
+        bank.lane_swap().map(|swap| swap.lane_default_bytes())
+    };
+    defaults(processor) == defaults(peer)
         && lane_swap_scratch(processor, layout).is_some_and(|needed| scratch_bytes >= needed)
 }
 
@@ -3865,8 +3868,9 @@ pub struct BankChain {
     /// eligible.
     ///
     /// So a chain that nobody has performed the join for must decline, and does. The caller that
-    /// holds both halves -- `PreparedRenderPlan::arm_mono_collapse`, which has the session's
-    /// structural witnesses and the plan's per-lane track names -- is the only one that can arm it.
+    /// holds both halves -- the graph crate's `GraphBoundPlan::arm_mono_collapse`, which has the
+    /// session's structural witnesses and the plan's per-lane track names -- is the only one that
+    /// can arm it.
     collapse_source: bool,
     /// The **per-block** input term (issue #987): this block's input planes carry the same samples
     /// on every active lane, as far as the caller can prove it without reading them.
@@ -4892,14 +4896,16 @@ impl BankChain {
     /// # The obligation, which M3's invariant rests on
     ///
     /// Bind-time: off the render thread, once, before this chain renders its first block.
-    /// `PreparedRenderPlan::arm_mono_collapse` enforces the render-scope half with an assertion.
-    /// The block-order half is a caller obligation because the chain cannot check it, and it is
-    /// what lets [`run`](Self::run) leave `SOURCE` out of the agreement invariant: a chain armed
-    /// before it renders has one answer to "do the two planes carry the same samples" for its whole
-    /// life, so that term cannot be the cause of a *transient* divergence; a later chain's
-    /// transient divergence is the per-block input term's, which does enter the invariant. Arming a chain that has
-    /// already rendered blocks fed by two different source channels would break that reading, and
-    /// nothing in the engine does it -- the join runs once, from the compiled session, at bind.
+    /// The graph crate's `GraphBoundPlan::arm_mono_collapse` enforces the render-scope half with
+    /// an assertion, and the block-order half by its type: a bound plan cannot render (#2401). A
+    /// caller that arms a chain directly owns the block-order half, because the chain cannot check
+    /// it. That half is what lets [`run`](Self::run) leave `SOURCE` out of the agreement
+    /// invariant: a chain armed before it renders has one answer to "do the two planes carry the
+    /// same samples" for its whole life, so that term cannot be the cause of a *transient*
+    /// divergence; a later chain's transient divergence is the per-block input term's, which does
+    /// enter the invariant. Arming a chain that has already rendered blocks fed by two different
+    /// source channels would break that reading, and nothing in the engine does it -- the join
+    /// runs once, from the compiled session, at bind.
     pub const fn arm_mono_collapse(&mut self, structural: bool) {
         self.collapse_source = structural;
     }

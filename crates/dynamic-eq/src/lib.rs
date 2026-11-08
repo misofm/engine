@@ -39,15 +39,15 @@ pub mod kernel;
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
     EffectPrepareError, EffectProcessBlock, EffectQuality, EnumChoice, InitialParameterValue,
-    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, NodeTailBound, ObservationCadence,
-    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
-    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort,
-    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, expected_prepared_metadata,
+    LaneSwap, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, NodeTailBound,
+    ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+    ObservationFold, ObservationKind, ObservationSample, ObservationTapId, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect,
+    PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    PreparedSidechainPort, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, expected_prepared_metadata,
 };
 use effect_runtime::bank::{
     block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
@@ -1901,17 +1901,6 @@ macro_rules! bank_impl {
                 let track = checked_track(track_index, <$lane as Lane>::WIDTH)?;
                 self.restore_lane(track, state_layout_version, &input)
             }
-
-            fn validate_track_state_payload(
-                &self,
-                track_index: u32,
-                state_layout_version: u32,
-                input: &StatePayloadInput<'_>,
-            ) -> Result<(), StatePayloadError> {
-                checked_track(track_index, <$lane as Lane>::WIDTH)?;
-                self.parse_payload(state_layout_version, input)?;
-                Ok(())
-            }
             // REALTIME_POLICY_END
 
             // REALTIME_POLICY_BEGIN: #1747, the clock advance of a skipped block.
@@ -1923,8 +1912,21 @@ macro_rules! bank_impl {
             }
             // REALTIME_POLICY_END
 
-            fn lane_default_bytes(&self) -> Option<usize> {
-                Some(LANE_DEFAULT_BYTES)
+            // REALTIME_POLICY_BEGIN: #2392, the lane swap hook runs at a render block boundary.
+            fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+                Some(self)
+            }
+
+            fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+                Some(self)
+            }
+            // REALTIME_POLICY_END
+        }
+
+        impl LaneSwap for DynamicEq<$lane, false> {
+            // REALTIME_POLICY_BEGIN: #2392, the lane swap runs at a render block boundary.
+            fn lane_default_bytes(&self) -> usize {
+                LANE_DEFAULT_BYTES
             }
 
             fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
@@ -1932,6 +1934,18 @@ macro_rules! bank_impl {
                 MonoCollapse::enter::<false>(self);
                 self.exchange_defaults(lane, bytes)
             }
+
+            fn validate_lane_payload(
+                &self,
+                track_index: u32,
+                state_layout_version: u32,
+                input: &StatePayloadInput<'_>,
+            ) -> Result<(), StatePayloadError> {
+                checked_track(track_index, <$lane as Lane>::WIDTH)?;
+                self.parse_payload(state_layout_version, input)?;
+                Ok(())
+            }
+            // REALTIME_POLICY_END
         }
     };
 }
@@ -2107,3 +2121,5 @@ fn bind_bank<const NATIVE_ONLY: bool>(
 mod glide_tests;
 #[cfg(test)]
 mod ramp_tests;
+#[cfg(test)]
+mod swap_tests;

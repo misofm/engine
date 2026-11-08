@@ -24,8 +24,8 @@
 
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
-    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
-    LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LaneSwap,
+    LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
     PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
     PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
@@ -1913,8 +1913,36 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
             input,
         )
     }
+    // REALTIME_POLICY_END
 
-    fn validate_track_state_payload(
+    fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        self.advance_skipped_clocks(lanes_mask, frames);
+    }
+
+    // REALTIME_POLICY_BEGIN: #2392, the lane swap hook runs at a render block boundary.
+    fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+        Some(self)
+    }
+
+    fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+        Some(self)
+    }
+    // REALTIME_POLICY_END
+}
+
+impl<L: Lane> LaneSwap for PreparedSoftClipBank<L> {
+    // REALTIME_POLICY_BEGIN: #2392, the lane swap runs at a render block boundary.
+    fn lane_default_bytes(&self) -> usize {
+        LANE_DEFAULT_BYTES
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.inner);
+        self.exchange_defaults(lane, bytes)
+    }
+
+    fn validate_lane_payload(
         &self,
         track_index: u32,
         state_layout_version: u32,
@@ -1925,20 +1953,6 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         Ok(())
     }
     // REALTIME_POLICY_END
-
-    fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
-        self.advance_skipped_clocks(lanes_mask, frames);
-    }
-
-    fn lane_default_bytes(&self) -> Option<usize> {
-        Some(LANE_DEFAULT_BYTES)
-    }
-
-    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
-        // A per-channel write lands on live state (#2352).
-        MonoCollapse::enter::<false>(&mut self.inner);
-        self.exchange_defaults(lane, bytes)
-    }
 }
 
 impl<L: Lane> PreparedSoftClipBank<L> {
@@ -2007,7 +2021,7 @@ const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
 
 // REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
 impl<L: Lane> PreparedSoftClipBank<L> {
-    /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s `left_defaults` row
+    /// [`LaneSwap::exchange_lane_defaults`]: lane `lane`'s `left_defaults` row
     /// then its `right_defaults` row, each parameter in descriptor order as little-endian `f32`
     /// bits. They are the soft clip's only prepared per-lane values: a full reset re-seeds the
     /// lane's ramps and state words from them. The D7 recovery snaps ramps and reads no default.

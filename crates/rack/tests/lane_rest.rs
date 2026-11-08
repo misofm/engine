@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use effect_contract::{
     BankProcessReport, BankWidth, BypassSwitch, EffectBankProcessBlock, EffectCellWriter,
     EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec,
-    EffectProgramKey, EffectQuality, EffectTargetError, LatencySamples, LinkMode,
+    EffectProgramKey, EffectQuality, EffectTargetError, LaneSwap, LatencySamples, LinkMode,
     ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
     ObservationFold, ObservationKind, ObservationLane, ObservationSample, ObservationTapId,
     PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
@@ -195,23 +195,33 @@ impl PreparedNativeEffectBank for MockBank {
         Ok(())
     }
 
+    fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+        Some(self)
+    }
+
+    fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+        Some(self)
+    }
+}
+
+impl LaneSwap for MockBank {
+    /// No prepared per-lane defaults, so a lane swap moves only the stage's per-lane parts.
+    fn lane_default_bytes(&self) -> usize {
+        0
+    }
+
+    fn exchange_lane_defaults(&mut self, _lane: usize, _bytes: &mut [u8]) -> bool {
+        true
+    }
+
     /// The restore above, which takes every payload.
-    fn validate_track_state_payload(
+    fn validate_lane_payload(
         &self,
         _track_index: u32,
         _state_layout_version: u32,
         _input: &StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
         Ok(())
-    }
-
-    /// No prepared per-lane defaults, so a lane swap moves only the stage's per-lane parts.
-    fn lane_default_bytes(&self) -> Option<usize> {
-        Some(0)
-    }
-
-    fn exchange_lane_defaults(&mut self, _lane: usize, _bytes: &mut [u8]) -> bool {
-        true
     }
 }
 
