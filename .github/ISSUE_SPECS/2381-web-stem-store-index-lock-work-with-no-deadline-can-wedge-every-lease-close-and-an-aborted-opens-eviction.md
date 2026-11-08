@@ -77,7 +77,7 @@ Base `dfc3ac325`; branch `codex/issue-2381-index-lock-deadlines`.
 **Follow-ups.**
 - A timed-out removal that lands late, after its stem lock is released, can remove a final that a concurrent verify of the same identity has just passed. The pinned session then fails typed at read. The same is true of `#demote`'s and the promote cleanup's unawaited removals. A fence would hold the stem lock until the removal settles, as `#stalledIndexWrite` does for the index. Fixed in attempt 2.
 - A rebuild still treats a stalled hash of a final as damage and removes that final, as base did. The final is good and gets re-downloaded; nothing is lost. Fixed in attempt 2.
-- `#liveLockNames`'s `locks.query()` runs under the index lock with no deadline. It is Web Locks, not OPFS, so it is outside this contract. Successor #SUCCESSOR.
+- `#liveLockNames`'s `locks.query()` runs under the index lock with no deadline. It is Web Locks, not OPFS, so it is outside this contract. Successor #2396.
 
 **Verdict: FAIL** (Sol, one BLOCKER and one MAJOR).
 - BLOCKER: this attempt introduces a new hazard. A timed-out eviction removal releases both locks while the raw `removeEntry` is still in flight. A concurrent open of the victim's own stem can then verify and pin the file before the removal lands, and its `lease.read` fails `stem.read.failed`. Base fenced this by holding both locks for the whole removal. The reviewer's reproducer shows it. Required:
@@ -181,7 +181,7 @@ Base `dfc3ac325`; branch `codex/issue-2381-index-lock-deadlines`.
 - that a stalled hash is not damage;
 - that every wait on a fenced lock ends at the waiting open's abort.
 
-**Successor.** #SUCCESSOR covers the `locks.query()` deadline, which the coordinator files.
+**Successor.** #2396 covers the `locks.query()` deadline, filed by the coordinator.
 
 **Verdict: FAIL** (Sol, one BLOCKER and one MAJOR). Both earlier reproducers are fixed. The two new hazards predate this branch, but both fall within the claim that a final is removed only under its stem lock.
 - BLOCKER: `#removeFinal` asked `#stemFences.has(identity)`. That means "some hold in this store is live", not "the caller is inside a hold". So `read()`'s failure demotion, the rebuild and the sweep removed at once during another same-store hold, and fenced into that hold. A late landing then deleted the final the other hold had just promoted (reproducer `same-store-bypass`).
@@ -191,7 +191,7 @@ Base `dfc3ac325`; branch `codex/issue-2381-index-lock-deadlines`.
   - deleting the local fallback's `ifAvailable` line left every suite green;
   - a same-store waiter on a draining lock waited silently;
   - a test comment still said the eviction removal runs under the index lock;
-  - keep the `#SUCCESSOR` placeholder.
+  - keep the successor placeholder (now #2396).
 
 ### Attempt 3 (Terra, 2026-11-08)
 **Explicit holds.**
@@ -288,7 +288,7 @@ Base `dfc3ac325`; branch `codex/issue-2381-index-lock-deadlines`.
   - (5) a waiter timer of 0 survives every test;
   - (6) `#verifyIndexed`'s try also covers the `lastUsedAt` mutation;
   - (7) OPFS awaits run under the stem lock with no deadline, which predates this branch (successor);
-  - (8) the `#SUCCESSOR` placeholder.
+  - (8) the successor placeholder (now #2396).
 - The coordinator rescoped attempt 4 to a simpler model that binds it. Its points are:
   - (A) the index-lock contract;
   - (B) one removal primitive with no deadline and no drains;
@@ -440,7 +440,85 @@ The rebuild's and the sweep's removals run under the index lock, so the caller's
 - the local queue.
 
 **Successors.**
-- #SUCCESSOR: the `locks.query()` deadline.
-- #SUCCESSOR2: OPFS awaits with no deadline inside a stem-lock hold (finding 7).
+- #2396: the `locks.query()` deadline.
+- #2397: OPFS awaits with no deadline inside a stem-lock hold (finding 7).
 
-The coordinator files both.
+Both are filed, and their specs are on this branch.
+
+**Verdict: FAIL** (Sol, one MAJOR, no BLOCKER). There is no data loss, no deadlock and no index wedge, and #2372's bound holds. The demotion-wait deviation is judged sound.
+- MAJOR, a regression against base: `#demoteUnreadable` refused whenever any pin other than `ownPin` existed. That included `offline:` keep-offline pins, and dead session pins without Web Locks, so a final whose reads always fail never healed (r7). Base healed it. The refusal also labelled a hard read error `storage.read_stalled`, "another session pins it".
+- MINORs:
+  - `#evictUnpinned`'s `if (evicted)` is an unguarded data-loss guard (r5);
+  - `#promote`'s fence wait ignored the abort (r6);
+  - three new lines survived their mutants: `verify()`'s abort check, `read()`'s `NotFoundError` arm and the `read_stalled` wrap;
+  - the successor placeholders.
+
+### Attempt 5 (Terra, 2026-11-08)
+Exactly the verdict's changes, with no new machinery.
+
+**Fixes** (`opfs-store.js`).
+- `#demoteUnreadable` protects only live session pins: `row?.pins.some((pin) => pin.startsWith("session:") && pin !== ownPin)`.
+  - A keep-offline pin no longer blocks the heal. It is lost with the row, as on base. Carrying it into the re-ingested row would need state that outlives the deleted row across tabs, which is not cheap, so the docs say it is lost.
+  - A dead session pin still blocks healing until a store open purges it. Without Web Locks nothing purges a crashed tab's pin. The docs say so, and r7's `nolocks-crashed` mode shows it (every open fails `stem.read.failed`).
+- A refused demotion now throws the read's own typed error through `classifyStorageError`: `storage.read_stalled` stays as it is, and a hard read error becomes `stem.read.failed`. The `read_stalled` "another session pins it" wrap is gone.
+- `#promote` waits with `await abortable(settled(hold.fences), options.signal)`.
+
+**Rows** (`stem-store-core-v1.mjs`).
+- `aStallingUnpinnedFinalHeals` gains a `keep-offline pin` leg (r7).
+- `aStalledVerifyKeepsAPinnedStem` gains a `read error` leg. A hard read error of a stem another session pins fails with `stem.read.failed` and keeps the row, the pin and the file. This guards the error-class change.
+- `aHoldNeverWritesAFinalItIsStillRemoving` gains an `aborted` leg (r6).
+- New `anAbortedReadNeverDemotes`, with `verify()` and open legs. It guards `verify()`'s new abort check, and the pre-existing one in verify-on-open.
+- New `aMissingFinalIsDemotedEvenWhenPinned`. It guards `read()`'s `NotFoundError` arm.
+- New `anEvictionSparesAVictimPinnedAfterItsPreflight`, the r5 shape. It guards `if (evicted)`.
+
+**Red.**
+- On the attempt-4 store `8cd7bc2f1`:
+  - the `keep-offline pin` leg: `a stalling unpinned final never healed (keep-offline pin)`;
+  - the `read error` leg: `a refused demotion misreported its read failure (read error)`;
+  - the `aborted` leg: `a hold's wait for its own removal ignored the open's abort`.
+- On base `dfc3ac325`:
+  - the `read error` leg: `a stalled verify demoted a pinned stem (read error)`;
+  - the `aborted` leg: `a hold wrote a final while its own removal of that final was unsettled`.
+  - The `keep-offline pin` leg is green on base, which healed. This is the regression row against attempt 4.
+- `anAbortedReadNeverDemotes`, `aMissingFinalIsDemotedEvenWhenPinned` and `anEvictionSparesAVictimPinnedAfterItsPreflight` guard behaviour that attempt 4 and base already had, so they are green on both. Their ledger mutations are red, below.
+
+**Mutation ledger** (`--self-test --budgets`: PASS, 94 `RED` lines). The #2381 block has 40 entries, all `RED` at their targets. New:
+- the promote wait ignoring the abort;
+- `if (evicted)` → `if (true)`, red at `an eviction removed a final that was pinned after its preflight`;
+- a keep-offline pin blocking the heal;
+- a refused hard read error reported as a stall;
+- `verify()`'s abort check dropped;
+- verify-on-open's abort check dropped;
+- `read()`'s `NotFoundError` arm dropped.
+
+Retargeted, all still `RED`:
+- the pin-rule entries, which now search the `session:` form;
+- "let a stalled verify-on-open keep an unpinned final", which now goes red first at the new `read error` leg.
+
+The two surviving mutants the verdict called pre-existing:
+- the verify-on-open abort check: now guarded by its own entry, above;
+- `#withStemLock`'s `throwIfAborted(signal)` after the grant: kept from base's `#withLock`. A signal that aborts between the grant and the work is checked again by every signalled wait inside the work, so it is recorded as pre-existing and not hardened here.
+
+**Reproducers on this attempt:**
+- r5: B reads OK, and the victim's final is kept.
+- r6: the aborted open settles at once.
+- r7 `offline`: every open succeeds, and `verify()` returns true.
+- r7 `nolocks-crashed`: `stem.read.failed` throughout. This is the documented limitation.
+- r1 to r4: unchanged from attempt 4.
+- `late-evict`, `rebuild-stall`, `same-store-bypass` and `recheck-stall`: unchanged from attempt 4.
+
+**Green:**
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS.
+- `stem-store-core-v1.mjs`: 8 parallel runs and 3 serial `--budgets` runs, all PASS.
+- `stem-pump-v1.mjs`: 4 parallel runs, PASS.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: ok.
+
+**Docs.** `docs/STEM_STORE_V1.md` now states:
+- that only another session's pin blocks a demotion;
+- that keep-offline pins are lost, as on base;
+- the dead-pin limitation without Web Locks;
+- that an abort never demotes;
+- the error each refused call reports;
+- that the promote wait ends at the open's abort.

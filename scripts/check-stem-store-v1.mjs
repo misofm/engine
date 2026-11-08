@@ -691,12 +691,38 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "    await settled(hold.fences)\n    if (typeof stagingHandle.move",
+            "    await abortable(settled(hold.fences), options.signal)\n    if (typeof stagingHandle.move",
           replace: "    if (typeof stagingHandle.move",
         },
       ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a hold wrote a final while its own removal of that final was unsettled",
+    },
+    {
+      name: "let a hold's wait for its own removal ignore the open's abort",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    await abortable(settled(hold.fences), options.signal)\n",
+          replace: "    await settled(hold.fences)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a hold's wait for its own removal ignored the open's abort",
+    },
+    {
+      name: "remove a victim's final even when the eviction kept its row",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      if (evicted) {\n        await this.#removeFinal(",
+          replace: "      if (true) {\n        await this.#removeFinal(",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "an eviction removed a final that was pinned after its preflight",
     },
     {
       name: "let the local stem lock wait ignore its signal",
@@ -756,12 +782,77 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "      if (row !== undefined && row.pins.some((pin) => pin !== ownPin)) return\n",
+            "      if (row?.pins.some((pin) => pin.startsWith(\"session:\") && pin !== ownPin)) return\n",
           replace: "",
         },
       ],
       test: "stem-store-core-v1.mjs",
-      expectedFailure: "a stalled verify demoted a pinned stem",
+      expectedFailure: "a stalled verify demoted a pinned stem (stall)",
+    },
+    {
+      name: "let a keep-offline pin block an unreadable stem's heal",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "pin.startsWith(\"session:\") && pin !== ownPin",
+          replace: "pin !== ownPin",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a stalling unpinned final never healed (keep-offline pin)",
+    },
+    {
+      name: "report a refused hard read error as a stall",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "    throw classifyStorageError(error, `reading ${identity}, which another session pins`, {\n      code: \"stem.read.failed\",\n      identity,\n    })\n",
+          replace: "    throw new StemStoreError(\"storage.read_stalled\", \"another session pins it\", { identity }, error)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a refused demotion misreported its read failure (read error)",
+    },
+    {
+      name: "let an aborted verify() demote its stem",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "        if (options.signal?.aborted || error?.name === \"AbortError\") throw error\n        await this.#demoteUnreadable(identity, hold, undefined, error)\n",
+          replace: "        await this.#demoteUnreadable(identity, hold, undefined, error)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "an aborted read demoted a stem (verify())",
+    },
+    {
+      name: "let an aborted verify-on-open demote its stem",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      if (signal?.aborted || error?.name === \"AbortError\") throw error\n      await this.#demoteUnreadable(stem.identity, hold, undefined, error)\n",
+          replace: "      await this.#demoteUnreadable(stem.identity, hold, undefined, error)\n",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "an aborted read demoted a stem (open)",
+    },
+    {
+      name: "treat a missing final in read() as a failed read",
+      file: "web/stem-store/opfs-store.js",
+      edits: [
+        {
+          search:
+            "      if (error?.name === \"NotFoundError\") await this.#demote(identity).catch(() => {})\n      else await",
+          replace: "      await",
+        },
+      ],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a missing final stayed indexed because another session pins it",
     },
     {
       name: "let a stalled verify-on-open keep an unpinned final",
@@ -774,7 +865,7 @@ async function runMutationLedger() {
         },
       ],
       test: "stem-store-core-v1.mjs",
-      expectedFailure: "a stalling unpinned final never healed (open)",
+      expectedFailure: "a refused demotion misreported its read failure (read error)",
     },
     {
       name: "let the reading session's own pin protect its unreadable stem",
@@ -782,8 +873,8 @@ async function runMutationLedger() {
       edits: [
         {
           search:
-            "row.pins.some((pin) => pin !== ownPin)",
-          replace: "row.pins.length !== 0",
+            "pin.startsWith(\"session:\") && pin !== ownPin",
+          replace: "pin.startsWith(\"session:\")",
         },
       ],
       test: "stem-store-core-v1.mjs",

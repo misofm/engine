@@ -148,13 +148,16 @@ never rebuilds.
 
 Outside the index lock, a read that stalls or fails is not proof of damage
 either. In verify-on-open, `verify()` and a session's `read()`, such a read
-demotes the stem only if, re-checked under the index lock, no pin other than
-the reading session's own holds it. Otherwise the call fails typed (verify-on-open
-and `verify()` with `storage.read_stalled`, `read()` with its usual typed error)
-and the row and file stay. An unpinned final whose reads keep stalling is
-therefore demoted and re-ingested, while a stem another session plays from is
-left alone. Corruption, a wrong length and a missing file still demote
-unconditionally.
+demotes the stem only if, re-checked under the index lock, no session other
+than the reading one pins it. Otherwise the call fails typed with the read's own
+error (`storage.read_stalled` for a stall, `stem.read.failed` for a read error)
+and the row and file stay. A final whose reads keep failing is therefore demoted
+and re-ingested unless another session plays from it. A keep-offline pin does
+not block that demotion and is lost with the row, as on base. A dead session pin
+does block it until the pin is purged at a store open; without Web Locks nothing
+purges a crashed tab's pin, so that stem stays unhealed. An
+abort is not a failed read and never demotes. Corruption, a wrong length and a
+missing file still demote unconditionally.
 
 A final is removed only inside a hold of its stem lock, and the hold is released
 only when the removal settles; a removal has no deadline. A caller that already
@@ -168,7 +171,8 @@ best-effort), and a rebuild or sweep under the index lock waits at most its
 deadline and then fails typed. Eviction and demotion drop the row first, under
 the index lock, so no removal runs under it. A failed fallback copy's unawaited
 removals hold the stem lock the same way, and within one hold no final is
-written until every removal that hold started has settled.
+written until every removal that hold started has settled; that wait ends at
+the open's abort.
 
 A wait for a stem lock, in this store or another tab, simply waits for the
 holder; it ends when the lock is released or at the waiter's own abort. A

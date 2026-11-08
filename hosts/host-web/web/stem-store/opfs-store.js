@@ -575,8 +575,8 @@ export class OpfsStemStore {
   async #promote(stem, stagingHandle, stagingName, options, hold) {
     const finalName = stemFileName(stem.identity)
     // A removal this hold started (a demotion in its recheck) could land after the write and delete
-    // the new final, so no final is written until it settles.
-    await settled(hold.fences)
+    // the new final, so no final is written until it settles. The wait ends at the open's abort.
+    await abortable(settled(hold.fences), options.signal)
     if (typeof stagingHandle.move === "function") {
       try {
         await stagingHandle.move(this.#directory, finalName)
@@ -919,14 +919,15 @@ export class OpfsStemStore {
   }
 
   // A read that stalled or failed is not proof of damage. Its stem is demoted only when, re-checked
-  // under the index lock, no pin other than the caller's own holds it; otherwise the caller fails
-  // typed and the row and file stay. A stalled read stays `storage.read_stalled`; any other failure
-  // is wrapped in it.
+  // under the index lock, no session other than the caller's own pins it: a session may be playing
+  // from the file. Keep-offline pins do not block it, and are lost with the row, as on base. A dead
+  // session pin does, until it is purged; without Web Locks nothing purges it. When another session
+  // pins the stem the caller fails typed with the read's own error, and the row and file stay.
   async #demoteUnreadable(identity, hold, ownPin, error) {
     let demoted = false
     await this.#mutateIndex((index) => {
       const row = index.stems[identity]
-      if (row !== undefined && row.pins.some((pin) => pin !== ownPin)) return
+      if (row?.pins.some((pin) => pin.startsWith("session:") && pin !== ownPin)) return
       delete index.stems[identity]
       demoted = true
     })
@@ -934,13 +935,10 @@ export class OpfsStemStore {
       await this.#removeDemoted(identity, hold)
       return
     }
-    if (error instanceof StemStoreError && error.code === "storage.read_stalled") throw error
-    throw new StemStoreError(
-      "storage.read_stalled",
-      `Reading ${identity} failed, and another session pins it`,
-      { identity },
-      error
-    )
+    throw classifyStorageError(error, `reading ${identity}, which another session pins`, {
+      code: "stem.read.failed",
+      identity,
+    })
   }
 
   // `hold` is the caller's hold of this stem's lock, if it has one.
