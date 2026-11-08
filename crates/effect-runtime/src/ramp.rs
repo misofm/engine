@@ -39,7 +39,9 @@
 //! gathers the lanes' ramps into a [`RampLanes`], advances that by the same law lane-wide inside
 //! the loop, and scatters it back once through [`LinearRamp::record_advance`]. This is the one
 //! lane-vector walk of the law; the compressor, the transient shaper and the true-peak limiter
-//! use it (`tests/ramp_lanes.rs`).
+//! use it (`tests/ramp_lanes.rs`), and so do the de-esser's and the dynamic EQ's live words,
+//! which stay lane words across blocks ([`crate::dynamic_band::advance_word_ramps`], issue
+//! #2390).
 
 use lane::Lane;
 use lane::kernels::{RampSegment, ramp_toward};
@@ -413,6 +415,28 @@ impl<L: Lane> RampLanes<L> {
         for (lane, ramp) in ramps.into_iter().take(L::WIDTH).enumerate() {
             ramp.record_advance(words[0][lane], words[1][lane], words[2][lane] as u32);
         }
+    }
+
+    /// Four lane words as they are, for a lane-word owner that keeps them across blocks rather
+    /// than gathering them from [`LinearRamp`]s: the dynamic band's
+    /// [`crate::dynamic_band::WordRamp`] (issue #2390). The caller vouches for the phase
+    /// invariant its restores check with [`LinearRamp::from_words`]; the walk itself never
+    /// reaches a settled lane's words.
+    #[inline(always)]
+    pub(crate) const fn from_lane_words(current: L, target: L, step: L, remaining: L) -> Self {
+        Self {
+            current,
+            target,
+            step,
+            remaining,
+        }
+    }
+
+    /// The four lane words, `[current, target, step, remaining]`: the inverse of
+    /// [`RampLanes::from_lane_words`].
+    #[inline(always)]
+    pub(crate) const fn into_lane_words(self) -> [L; 4] {
+        [self.current, self.target, self.step, self.remaining]
     }
 
     /// The value each lane has reached: the value the previous frame used.

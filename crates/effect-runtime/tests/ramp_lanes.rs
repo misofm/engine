@@ -5,9 +5,11 @@
 //! every frame's value, every lane's in-flight bit, and every word a scatter writes back must be
 //! the words [`LinearRamp::next_value`] leaves, bit for bit, at every width this build has, for a
 //! walk split at any frame. The compressor, the transient shaper and the true-peak limiter render
-//! through it, so this file is where their lane walk is tested; mutation evidence is in the
-//! issue's attempt record.
+//! through it, and so do the de-esser's and the dynamic EQ's live words (`WordRamp`, issue
+//! #2390), so this file is where their lane walk is tested; mutation evidence is in the issues'
+//! attempt records.
 
+use effect_runtime::dynamic_band::{WordRamp, advance_word_ramps};
 use effect_runtime::ramp::{LinearRamp, RampLanes};
 use lane::Lane;
 
@@ -207,4 +209,58 @@ fn a_lane_at_rest_advances_to_itself() {
     for offset in 0..RESTING.len() {
         lane::each_lane!(|L| check::<L>(offset));
     }
+}
+
+/// Test value: red if the dynamic band's live words leave the scalar law while they stay lane
+/// words: `advance_word_ramps` gated on the wrong lanes, a word dropped or swapped on its way
+/// through the shared walk, or a later ramp of the slice skipped. The de-esser and the dynamic EQ
+/// keep these words across blocks and never scatter them, so the lane-vector test above cannot
+/// see this path.
+#[test]
+fn a_word_ramp_walks_the_scalar_law_word_for_word() {
+    const RAMPS: usize = 3;
+    fn check<L: Lane>(rng: &mut Rng) {
+        for trial in 0..500 {
+            let mut expected: [[LinearRamp; LANES]; RAMPS] =
+                core::array::from_fn(|_| core::array::from_fn(|_| draw(rng)));
+            let load = |ramps: &[LinearRamp; LANES], word: fn(&LinearRamp) -> f32| {
+                L::load(&ramps.each_ref().map(word))
+            };
+            let mut words: [WordRamp<L>; RAMPS] = core::array::from_fn(|ramp| WordRamp {
+                current: load(&expected[ramp], LinearRamp::current),
+                target: load(&expected[ramp], LinearRamp::target),
+                step: load(&expected[ramp], LinearRamp::step),
+                remaining: load(&expected[ramp], |ramp| ramp.remaining() as f32),
+            });
+            for frame in 0..rng.below(90) {
+                advance_word_ramps(&mut words);
+                for (ramp, (words, expected)) in words.iter().zip(&mut expected).enumerate() {
+                    let got =
+                        [words.current, words.target, words.step, words.remaining].map(bits::<L>);
+                    for (lane, expected) in expected.iter_mut().enumerate().take(L::WIDTH) {
+                        let _ = expected.next_value();
+                        let want = words_of(expected);
+                        let got = got.map(|word| word[lane]);
+                        assert_eq!(
+                            got,
+                            want,
+                            "W{} trial {trial} frame {frame} ramp {ramp} lane {lane}",
+                            L::WIDTH
+                        );
+                    }
+                }
+            }
+        }
+    }
+    /// The four words as a `WordRamp` holds them: the countdown as an `f32` integer.
+    fn words_of(ramp: &LinearRamp) -> [u32; 4] {
+        [
+            ramp.current().to_bits(),
+            ramp.target().to_bits(),
+            ramp.step().to_bits(),
+            (ramp.remaining() as f32).to_bits(),
+        ]
+    }
+    let mut rng = Rng(0x2390_0001);
+    lane::each_lane!(|L| check::<L>(&mut rng));
 }
