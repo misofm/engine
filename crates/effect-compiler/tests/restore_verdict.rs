@@ -158,7 +158,10 @@ fn payload(bank: &dyn PreparedNativeEffectBank, lane: usize, sizes: StatePayload
     payload
 }
 
-/// Validates `payload` for `track`, then restores it: both verdicts.
+/// Validates `payload` for `track`, then restores it: both verdicts. A bank that swaps lanes
+/// answers the validation once more through its capability
+/// ([`LaneSwap::validate_lane_payload`](effect_contract::LaneSwap::validate_lane_payload)),
+/// which must agree (issue #2392).
 fn offer(
     bank: &mut dyn PreparedNativeEffectBank,
     track: u32,
@@ -170,6 +173,13 @@ fn offer(
     let (left, right) = rest.split_at(sizes.left_bytes as usize);
     let input = || StatePayloadInput::new(common, left, right, sizes).expect("the prepared sizes");
     let validated = bank.validate_track_state_payload(track, version, &input());
+    if let Some(swap) = bank.lane_swap() {
+        assert_eq!(
+            swap.validate_lane_payload(track, version, &input()),
+            validated,
+            "track {track}: the capability's verdict is the bank's"
+        );
+    }
     let restored = bank.restore_track_state_payload(track, version, input());
     [validated, restored]
 }
@@ -298,7 +308,9 @@ fn check(factory: &dyn NativeEffectFactory, seed: u64) {
 
 /// Test value: an effect whose `validate_track_state_payload` skips one of its restore's checks
 /// (a word range, a ramp path, the link mode agreement, a padded or out-of-range lane), refuses
-/// what its restore takes, or is left at the trait's declining default.
+/// what its restore takes, or is left at the trait's declining default; or a bank that swaps
+/// lanes whose capability's verdict is not its `validate_track_state_payload` (issue #2392: an
+/// override beside the capability, the drift the type pairing leaves open).
 #[test]
 fn every_banking_effect_validates_what_it_restores() {
     let registry = launch_native_effect_registry().expect("launch registry");

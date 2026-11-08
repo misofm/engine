@@ -39,7 +39,7 @@
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
     EffectPrepareError, EffectProcessBlock, EffectQuality as Quality, EffectTargetError,
-    EnumChoice, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
+    EnumChoice, InitialParameterValue, LaneSwap, LatencySamples, LinkModeSet, NativeEffectFactory,
     NativeEffectResponseFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
     ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
     PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedBankMetadata,
@@ -4600,22 +4600,6 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         result
     }
 
-    fn validate_track_state_payload(
-        &self,
-        track_index: u32,
-        version: u32,
-        input: &StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        let track = bank_track_index(track_index, W)?;
-        if !self.active[track] {
-            return Err(StatePayloadError {
-                code: "effect.bank.track",
-            });
-        }
-        self.parse_track(track, version, input)?;
-        Ok(())
-    }
-
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         Some(self)
     }
@@ -4722,14 +4706,42 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         true
     }
 
-    fn lane_default_bytes(&self) -> Option<usize> {
-        Some(LANE_DEFAULT_BYTES)
+    fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+        Some(self)
+    }
+
+    fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+        Some(self)
+    }
+    // REALTIME_POLICY_END
+}
+
+impl<L: Lane, const W: usize> LaneSwap for PreparedParametricEq<L, W> {
+    // REALTIME_POLICY_BEGIN: #2392, the lane swap runs at a render block boundary.
+    fn lane_default_bytes(&self) -> usize {
+        LANE_DEFAULT_BYTES
     }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         // A per-channel write lands on live state (#2352).
         MonoCollapse::enter::<false>(self);
         PreparedParametricEq::exchange_lane_defaults(self, lane, bytes)
+    }
+
+    fn validate_lane_payload(
+        &self,
+        track_index: u32,
+        version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = bank_track_index(track_index, W)?;
+        if !self.active[track] {
+            return Err(StatePayloadError {
+                code: "effect.bank.track",
+            });
+        }
+        self.parse_track(track, version, input)?;
+        Ok(())
     }
     // REALTIME_POLICY_END
 }
