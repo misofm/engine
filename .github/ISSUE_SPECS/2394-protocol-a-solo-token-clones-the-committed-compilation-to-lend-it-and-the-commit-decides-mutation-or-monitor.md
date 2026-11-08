@@ -132,7 +132,7 @@ attachment (attach length, response bytes, both event frames, revision); and a o
 **Dropped claims.** None.
 
 **Follow-ups.**
-- #SUCCESSOR: a whole-path solo still clones the committed *model* as its candidate (857 B on the
+- #2403: a whole-path solo still clones the committed *model* as its candidate (857 B on the
   fixture; it grows with the session). It is freed when preparation ends; the token does not hold it.
   No edit of a monitor-only transaction writes the candidate, so the edits could borrow the committed
   model instead (low priority, for the performance pass).
@@ -155,4 +155,4 @@ Folded on the same branch:
    - No production caller can meet a moved store. The controller refuses a stale token before any
      reader runs, and control-plane reads under the same `&mut` borrow.
 2. **The candidate-model clone gets a successor.** A stateless successor spec was written, and the
-   follow-up above names it as `#SUCCESSOR`.
+   follow-up above names it as `#2403`.
