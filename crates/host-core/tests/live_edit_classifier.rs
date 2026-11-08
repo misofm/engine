@@ -35,7 +35,7 @@ fn prepare(
     let change = committed.after(
         prepared.monitor_edits(),
         prepared
-            .compiled()
+            .compiled(store)
             .expect("a compiled transaction")
             .normalized_model(),
     );
@@ -59,7 +59,7 @@ fn judge(
 ) -> Verdict {
     let current = store.compiled().normalized_model();
     let next = prepared
-        .compiled()
+        .compiled(store)
         .expect("a compiled transaction")
         .normalized_model();
     let monitor = MonitorBase {
@@ -258,7 +258,7 @@ fn allocations(
     let (prepared, overlay, ramp) = prepare(store, edits, committed).expect("the edit applies");
     let current = store.compiled().normalized_model();
     let next = prepared
-        .compiled()
+        .compiled(store)
         .expect("a compiled transaction")
         .normalized_model();
     let monitor = MonitorBase {

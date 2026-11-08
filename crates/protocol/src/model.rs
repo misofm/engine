@@ -1119,9 +1119,9 @@ enum TransactionForm {
     /// the commit installs the owners in it.
     InPlace(InPlaceEdit),
     /// A transaction of monitor writes only, prepared whole: the model, the revision and the
-    /// compilation stay as they are (#1559 D4). It holds the committed compilation, at the committed
-    /// revision, for [`PreparedSessionTransaction::compiled`].
-    MonitorWhole(CompiledSession),
+    /// compilation stay as they are (#1559 D4). It holds nothing of them: its compilation is the
+    /// committed one, which [`PreparedSessionTransaction::compiled`] lends from the store (#2394).
+    MonitorWhole,
     /// A transaction of monitor writes only, prepared in place: the model, the revision and the
     /// compilation stay as they are (#1559 D4), and nothing of them is cloned. It keeps its edits,
     /// for [`SessionStore::materialize`].
@@ -1145,18 +1145,43 @@ struct InPlaceEdit {
 }
 
 impl PreparedSessionTransaction {
-    /// Borrow the prospective immutable compilation without making it authoritative.
+    /// Borrow the prospective immutable compilation without making it authoritative. `store` is
+    /// the store that prepared the transaction, at the revision it was prepared against.
+    ///
+    /// A transaction of monitor writes only prepared whole lends `store`'s committed compilation:
+    /// it changes no model and no revision, so its compilation is the committed one, and it holds
+    /// no copy of it (#2394). Every other transaction prepared whole lends its own.
     ///
     /// `None` for a transaction prepared in place ([`SessionStore::prepare_transaction_in_place`]
     /// and [`Self::is_in_place`]): it has no compilation of its own. A host that prepares in place
     /// reads [`Self::edited_owners`] and the committed compilation instead.
     #[must_use]
-    pub fn compiled(&self) -> Option<&CompiledSession> {
+    pub fn compiled<'a>(&'a self, store: &'a SessionStore) -> Option<&'a CompiledSession> {
         match &self.form {
-            TransactionForm::Compiled(compiled) | TransactionForm::MonitorWhole(compiled) => {
-                Some(compiled)
+            TransactionForm::Compiled(compiled) => Some(compiled),
+            TransactionForm::MonitorWhole => {
+                debug_assert_eq!(
+                    store.revision(),
+                    self.base_revision,
+                    "a solo lends the compilation of the store it was prepared against"
+                );
+                Some(store.compiled())
             }
             TransactionForm::InPlace(_) | TransactionForm::MonitorInPlace(_) => None,
+        }
+    }
+
+    /// The compilation the transaction holds of its own: `Some` exactly for a session mutation
+    /// prepared whole. A transaction of monitor writes only holds none (#2394), nor does one
+    /// prepared in place. A host reads this where only a session mutation arrives (a rebuild);
+    /// where a transaction of monitor writes may arrive, it reads [`Self::compiled`].
+    #[must_use]
+    pub const fn own_compiled(&self) -> Option<&CompiledSession> {
+        match &self.form {
+            TransactionForm::Compiled(compiled) => Some(compiled),
+            TransactionForm::InPlace(_)
+            | TransactionForm::MonitorWhole
+            | TransactionForm::MonitorInPlace(_) => None,
         }
     }
 
@@ -1179,7 +1204,7 @@ impl PreparedSessionTransaction {
         match &self.form {
             TransactionForm::InPlace(edit) => Some(&edit.owners),
             TransactionForm::Compiled(_)
-            | TransactionForm::MonitorWhole(_)
+            | TransactionForm::MonitorWhole
             | TransactionForm::MonitorInPlace(_) => None,
         }
     }
@@ -1193,7 +1218,7 @@ impl PreparedSessionTransaction {
         match &self.form {
             TransactionForm::InPlace(edit) => Some(edit.estimate),
             TransactionForm::Compiled(_)
-            | TransactionForm::MonitorWhole(_)
+            | TransactionForm::MonitorWhole
             | TransactionForm::MonitorInPlace(_) => None,
         }
     }
@@ -1220,7 +1245,7 @@ impl PreparedSessionTransaction {
             }
             TransactionForm::InPlace(edit) => SessionRevision(edit.revision),
             // Not a mutation: the committed revision.
-            TransactionForm::MonitorWhole(_) | TransactionForm::MonitorInPlace(_) => {
+            TransactionForm::MonitorWhole | TransactionForm::MonitorInPlace(_) => {
                 self.base_revision
             }
         }
@@ -1252,7 +1277,7 @@ impl PreparedSessionTransaction {
     pub const fn is_monitor_only(&self) -> bool {
         matches!(
             self.form,
-            TransactionForm::MonitorWhole(_) | TransactionForm::MonitorInPlace(_)
+            TransactionForm::MonitorWhole | TransactionForm::MonitorInPlace(_)
         )
     }
 
@@ -1564,7 +1589,7 @@ impl SessionStore {
         prepared: &mut PreparedSessionTransaction,
     ) -> Result<(), SessionStoreError> {
         let edits = match &prepared.form {
-            TransactionForm::Compiled(_) | TransactionForm::MonitorWhole(_) => return Ok(()),
+            TransactionForm::Compiled(_) | TransactionForm::MonitorWhole => return Ok(()),
             TransactionForm::InPlace(edit) => &edit.edits,
             TransactionForm::MonitorInPlace(edits) => edits,
         };
@@ -1728,21 +1753,25 @@ impl SessionStore {
             candidate.control_smoothing = control_smoothing;
             set_control_rows = None;
         }
+        // Not a mutation: the committed compilation, at the committed revision, which the store
+        // holds and the transaction does not copy (#2394).
         let compiled = if monitor_only {
-            // Not a mutation: the committed compilation, at the committed revision.
-            self.compiled.clone()
+            None
         } else {
             candidate.revision = next_revision;
-            compile_session(&candidate, self.caps).map_err(|diagnostics| {
-                SessionStoreError::Validation {
-                    operation_index: edits.len(),
-                    diagnostics,
-                }
-            })?
+            Some(
+                compile_session(&candidate, self.caps).map_err(|diagnostics| {
+                    SessionStoreError::Validation {
+                        operation_index: edits.len(),
+                        diagnostics,
+                    }
+                })?,
+            )
         };
+        let prospective = compiled.as_ref().unwrap_or(&self.compiled);
         // #1394 D4: every length is bounded by one second at the rate the transaction commits,
         // so the check follows the compile that validated that rate and precedes any commit.
-        let maximum_ramp = compiled.normalized_model().sample_rate_hz;
+        let maximum_ramp = prospective.normalized_model().sample_rate_hz;
         if let Some(operation_index) = edits
             .iter()
             .position(|edit| edit.ramp_samples().is_some_and(|ramp| ramp > maximum_ramp))
@@ -1756,7 +1785,7 @@ impl SessionStore {
             Some((bindings, touched, kept)) => Some(
                 tag_observe_records(
                     observe,
-                    compiled.normalized_model(),
+                    prospective.normalized_model(),
                     bindings,
                     &touched,
                     &kept,
@@ -1765,11 +1794,7 @@ impl SessionStore {
             ),
             None => None,
         };
-        let form = if monitor_only {
-            TransactionForm::MonitorWhole(compiled)
-        } else {
-            TransactionForm::Compiled(compiled)
-        };
+        let form = compiled.map_or(TransactionForm::MonitorWhole, TransactionForm::Compiled);
         Ok(PreparedSessionTransaction {
             base_revision: current,
             form,
@@ -1816,7 +1841,7 @@ impl SessionStore {
                 None
             }
             // Not a mutation (#1559 D4): the store stays as it is, at the committed revision.
-            TransactionForm::MonitorWhole(_) | TransactionForm::MonitorInPlace(_) => None,
+            TransactionForm::MonitorWhole | TransactionForm::MonitorInPlace(_) => None,
         };
         (
             SessionCommit {
@@ -2303,10 +2328,10 @@ mod tests {
         assert_eq!(materialized.revision(), oracle.revision());
         assert_eq!(
             materialized
-                .compiled()
+                .compiled(&fast)
                 .expect("materialized")
                 .normalized_model(),
-            oracle.compiled().expect("compiled").normalized_model()
+            oracle.compiled(&full).expect("compiled").normalized_model()
         );
         assert_eq!(
             fast.apply_transaction_in_place(revision, &edits),
