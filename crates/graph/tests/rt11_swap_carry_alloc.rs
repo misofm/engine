@@ -239,9 +239,8 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
 
     let mut predecessor = bound(Some(vec![0.75; 64].into_boxed_slice()));
     let identity = plan_identity(&mut predecessor).expect("graph plan");
-    let mut successor = bound(None);
-    carry_builder(
-        &mut successor,
+    let successor = carry_builder(
+        bound(None),
         GraphCarryProgram {
             predecessor: identity,
             sources: vec![(0, 0)].into_boxed_slice(),

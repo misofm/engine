@@ -616,6 +616,43 @@ fn a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline() {
     }
 }
 
+/// #2375: a successor at another rate has no join program, so it carries nothing and is charged
+/// for nothing, even where a compensation line would join. Every track's fader and pan and the
+/// limiter's lookahead differ in a prepared value and the source changes length, so no owner the
+/// program counts carries; the edit keeps `eq0`'s limiter line, which the line join takes.
+///
+/// Test value: red if preparation installs a program for the line (the carry counts or retained
+/// bytes move) or charges the line it does not install (the admission's retained-bytes
+/// assertion trips). Neither could ever run: the plan's envelope differs, so the hand-over is
+/// refused before it starts.
+#[test]
+fn a_successor_at_another_rate_carries_and_charges_nothing() {
+    let predecessor_model = with_limiter(with_added_track(one_track()), "eq0", 4.0);
+    let a = Session::compile(predecessor_model);
+    let mut predecessor = a.prepare(Backend::current());
+    let mut model = with_limiter(with_added_track(one_track()), "eq0", 6.0);
+    model.sample_rate_hz = 44_100;
+    for source in &mut model.sources {
+        source.frames += 1;
+    }
+    for track in &mut model.tracks {
+        track.fader.left_db += 1.0;
+        track.fader.right_db += 1.0;
+        if let session::MatrixOrPan::Pan { left, .. } = &mut track.matrix_or_pan {
+            *left = 0.5;
+        }
+    }
+    let b = Session::compile(model);
+    let mut successor = successor_of(&b, &a, &predecessor.inventory, false);
+    assert_eq!(graph::test_only_carry_counts(&mut successor.plan), [0; 5]);
+    assert_eq!(graph::carry_program_retained_bytes(&mut successor.plan), 0);
+    render(&mut predecessor.plan);
+    assert_eq!(
+        hand_over(&mut successor, &mut predecessor),
+        CarryOutcome::PredecessorMismatch
+    );
+}
+
 /// Gate 2, a successor with a larger `A_max`: its history is its own, of its own `K`.
 ///
 /// Test value: red if the successor sizes its history from the predecessor's `K` (a seek its

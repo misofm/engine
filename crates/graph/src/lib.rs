@@ -4469,7 +4469,7 @@ impl GraphCarryProgram {
 pub enum GraphCarryInstallError {
     /// The plan was not bound by this crate.
     NotAGraphPlan,
-    /// The plan has no source set to carry sources into.
+    /// The plan has no source set to carry sources, the timeline or a prime's fills into.
     NoSourceSet,
     /// A successor source index is beyond the plan's source set.
     SourceIndexOutOfRange,
@@ -4506,7 +4506,7 @@ pub enum GraphCarryInstallError {
     RouteOutOfRange,
     /// A successor or predecessor live route appears twice.
     DuplicateRoute,
-    /// A prime with no lead block, or on a plan with no source set (#1355 D5).
+    /// A prime with no lead block (#1355 D5).
     NoPrimeLead,
     /// A fill names a line that is not one of the plan's, a node that is not a source claim of
     /// the plan, or no lane (#1355 D5).
@@ -5182,59 +5182,77 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
 
 /// Start the hand-over this graph plan runs when it displaces its predecessor (#2375): `program`
 /// names that predecessor, and the returned builder takes every other section of the hand-over,
-/// each validated for it, until [`GraphCarryBuilder::seal`] installs them all at once.
+/// each validated for it, until [`GraphCarryBuilder::seal`] installs them all at once and hands
+/// the plan back.
 ///
-/// The builder holds the plan mutably from here to its seal, so the plan cannot render, be
-/// published or take another builder while its hand-over is half assembled, and no section can be
-/// installed on a plan without the program it was validated for: the install order is a type, not
-/// a refusal. A builder dropped unsealed leaves the plan as it was. Call it before publication,
-/// once per plan (#2302).
+/// The builder owns the plan from here to its seal, so the plan cannot render, be published or
+/// take another builder while its hand-over is half assembled, and no section can be installed on
+/// a plan without the program it was validated for: the install order is a type, not a refusal. A
+/// builder dropped unsealed drops its plan with it, so a forgotten seal leaves no plan to use.
+/// Call it before publication, once per plan (#2302).
 ///
-/// Refused, leaving the plan as it was, when the plan is not a graph plan, already holds a program
+/// Refused, handing the plan back as it was ([`GraphCarryRefusal`]), when the plan is not a graph
+/// plan, already holds a program
 /// (#2302: every section was validated for that program's predecessor, so a plan names one
 /// predecessor for its life), has no source set for a program that moves a source or the
 /// timeline, or a successor index is out of range, not vacant or repeated, or a predecessor index
 /// is repeated. Predecessor indices are checked against the predecessor at the swap block, where
 /// an out-of-range index refuses the whole move.
 pub fn carry_builder(
-    plan: &mut PreparedRenderPlan,
+    mut plan: PreparedRenderPlan,
     program: GraphCarryProgram,
-) -> Result<GraphCarryBuilder<'_>, GraphCarryInstallError> {
-    let executor = plan
+) -> Result<GraphCarryBuilder, GraphCarryRefusal> {
+    match carry_program_refusal(&mut plan, &program) {
+        None => Ok(GraphCarryBuilder {
+            plan,
+            program,
+            sections: CarrySections::default(),
+        }),
+        Some(error) => Err(GraphCarryRefusal {
+            plan: Box::new(plan),
+            error,
+        }),
+    }
+}
+
+/// Why [`carry_builder`] refuses `program` on `plan`, or `None` when it starts.
+fn carry_program_refusal(
+    plan: &mut PreparedRenderPlan,
+    program: &GraphCarryProgram,
+) -> Option<GraphCarryInstallError> {
+    let Some(executor) = plan
         .executor_any_mut()
         .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
+    else {
+        return Some(GraphCarryInstallError::NotAGraphPlan);
+    };
     if executor.carry.is_some() {
-        return Err(GraphCarryInstallError::CarryProgramInstalled);
+        return Some(GraphCarryInstallError::CarryProgramInstalled);
     }
     // A program that moves no source and no timeline needs no source set (issue #1276: a plan
     // may carry only strip state). The timeline lives in the source set (#1641 D1).
     let set = match executor.source_set.as_ref() {
         Some(set) => Some(set),
         None if program.sources.is_empty() && !program.timeline => None,
-        None => return Err(GraphCarryInstallError::NoSourceSet),
+        None => return Some(GraphCarryInstallError::NoSourceSet),
     };
     for (index, &(successor, predecessor)) in program.sources.iter().enumerate() {
         let Some(set) = set else {
-            return Err(GraphCarryInstallError::NoSourceSet);
+            return Some(GraphCarryInstallError::NoSourceSet);
         };
         match set.driver.source_vacancy(successor as usize) {
-            None => return Err(GraphCarryInstallError::SourceIndexOutOfRange),
-            Some(false) => return Err(GraphCarryInstallError::SourceNotVacant),
+            None => return Some(GraphCarryInstallError::SourceIndexOutOfRange),
+            Some(false) => return Some(GraphCarryInstallError::SourceNotVacant),
             Some(true) => {}
         }
         if program.sources[..index]
             .iter()
             .any(|&(s, p)| s == successor || p == predecessor)
         {
-            return Err(GraphCarryInstallError::DuplicateSourceIndex);
+            return Some(GraphCarryInstallError::DuplicateSourceIndex);
         }
     }
-    Ok(GraphCarryBuilder {
-        executor,
-        program,
-        sections: CarrySections::default(),
-    })
+    None
 }
 
 /// The hand-over of one successor graph plan while it is assembled (#2375), off the render
@@ -5245,38 +5263,83 @@ pub fn carry_builder(
 /// A section method that refuses leaves every section staged earlier in place. Calling one again
 /// replaces the section it staged before, under the same program.
 ///
-/// A plan renders only once its hand-over is whole: while the builder holds it, rustc refuses the
-/// render (E0499, a second mutable borrow of the plan):
+/// A plan renders only once its hand-over is whole: the builder owns it, so a render before the
+/// seal, or after a forgotten one, uses a plan the builder took (E0382):
 ///
-/// ```compile_fail,E0499
+/// ```compile_fail,E0382
 /// use engine::realtime::{PreparedRenderPlan, RenderIo, RenderTime};
 /// use graph::GraphCarryProgram;
 ///
-/// fn hand_over(plan: &mut PreparedRenderPlan, program: GraphCarryProgram, io: RenderIo<'_>) {
+/// fn hand_over(mut plan: PreparedRenderPlan, program: GraphCarryProgram, io: RenderIo<'_>) {
 ///     let carry = graph::carry_builder(plan, program).expect("a graph plan");
 ///     let _ = plan.render(io, RenderTime { absolute_sample: 0 });
-///     carry.seal();
+///     plan = carry.seal();
 /// }
 /// ```
 ///
-/// After the seal it renders. This twin differs from the doctest above in the order of the last
-/// two calls only, so a renamed item or a typo in the shared code turns it red (issue #1422 D2):
+/// The sealed plan renders. This twin differs from the doctest above in the order of the last two
+/// calls only, so a renamed item or a typo in the shared code turns it red (issue #1422 D2):
 ///
 /// ```
 /// use engine::realtime::{PreparedRenderPlan, RenderIo, RenderTime};
 /// use graph::GraphCarryProgram;
 ///
-/// fn hand_over(plan: &mut PreparedRenderPlan, program: GraphCarryProgram, io: RenderIo<'_>) {
+/// fn hand_over(mut plan: PreparedRenderPlan, program: GraphCarryProgram, io: RenderIo<'_>) {
 ///     let carry = graph::carry_builder(plan, program).expect("a graph plan");
-///     carry.seal();
+///     plan = carry.seal();
 ///     let _ = plan.render(io, RenderTime { absolute_sample: 0 });
 /// }
 /// ```
-#[must_use = "a carry builder installs nothing until it is sealed"]
-pub struct GraphCarryBuilder<'plan> {
-    executor: &'plan mut GraphExecutor,
+#[must_use = "a carry builder installs nothing until it is sealed, and drops its plan unsealed"]
+pub struct GraphCarryBuilder {
+    plan: PreparedRenderPlan,
     program: GraphCarryProgram,
     sections: CarrySections,
+}
+
+/// Shows the program; the plan and the staged sections have no `Debug` form.
+impl core::fmt::Debug for GraphCarryBuilder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphCarryBuilder")
+            .field("program", &self.program)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A [`carry_builder`] refusal: why, and the plan, handed back as it was.
+pub struct GraphCarryRefusal {
+    plan: Box<PreparedRenderPlan>,
+    error: GraphCarryInstallError,
+}
+
+impl GraphCarryRefusal {
+    /// Why the hand-over was refused.
+    #[must_use]
+    pub const fn error(&self) -> GraphCarryInstallError {
+        self.error
+    }
+
+    /// The plan, as it was before the refused [`carry_builder`].
+    #[must_use]
+    pub fn into_plan(self) -> PreparedRenderPlan {
+        *self.plan
+    }
+}
+
+/// Shows the refusal's error; the plan has no `Debug` form.
+impl core::fmt::Debug for GraphCarryRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphCarryRefusal")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The graph executor of a plan [`carry_builder`] took, which checked that it is one.
+fn carry_executor(plan: &mut PreparedRenderPlan) -> &mut GraphExecutor {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .expect("carry_builder takes only a graph plan")
 }
 
 /// The sections of one hand-over a [`GraphCarryBuilder`] stages until its seal; each is empty
@@ -5300,7 +5363,7 @@ struct CarrySections {
     prime_sidechains: Box<[SidechainFillRow]>,
 }
 
-impl GraphCarryBuilder<'_> {
+impl GraphCarryBuilder {
     /// Stage the builtin-input section (issue #1276 D6).
     ///
     /// Refused when a successor location is not a populated lane of a builtin bank whose input
@@ -5313,7 +5376,10 @@ impl GraphCarryBuilder<'_> {
         mut moves: Vec<GraphLaneMove>,
     ) -> Result<(), GraphCarryInstallError> {
         for (index, step) in moves.iter().enumerate() {
-            if !self.executor.runtime.has_input_lane(step.successor) {
+            if !carry_executor(&mut self.plan)
+                .runtime
+                .has_input_lane(step.successor)
+            {
                 return Err(GraphCarryInstallError::InputLaneOutOfRange);
             }
             if moves[..index].iter().any(|earlier| {
@@ -5339,8 +5405,7 @@ impl GraphCarryBuilder<'_> {
         mut moves: Vec<GraphStripMove>,
     ) -> Result<(), GraphCarryInstallError> {
         for (index, step) in moves.iter().enumerate() {
-            if !self
-                .executor
+            if !carry_executor(&mut self.plan)
                 .runtime
                 .has_strip_lane(step.owner, step.successor)
             {
@@ -5372,7 +5437,7 @@ impl GraphCarryBuilder<'_> {
         pairs: Vec<GraphFadeArmPair>,
     ) -> Result<(), GraphCarryInstallError> {
         for (index, pair) in pairs.iter().enumerate() {
-            if pair.successor as usize >= self.executor.fade_arms.len() {
+            if pair.successor as usize >= carry_executor(&mut self.plan).fade_arms.len() {
                 return Err(GraphCarryInstallError::StripLaneOutOfRange);
             }
             if pairs[..index].iter().any(|earlier| {
@@ -5403,7 +5468,7 @@ impl GraphCarryBuilder<'_> {
         mut moves: Vec<GraphEffectMove>,
         scratch_bytes: u64,
     ) -> Result<(), GraphCarryInstallError> {
-        let runtime = &mut self.executor.runtime;
+        let runtime = &mut carry_executor(&mut self.plan).runtime;
         let mut scratch = scratch_bytes;
         for (index, step) in moves.iter().enumerate() {
             if !runtime.has_effect_site(step.successor) {
@@ -5441,8 +5506,7 @@ impl GraphCarryBuilder<'_> {
         moves: Vec<GraphObserverMove>,
         joins: Vec<GraphObserverJoin>,
     ) -> Result<(), GraphCarryInstallError> {
-        let kinds: BTreeMap<GraphObserverLocation, ObserverKind> = self
-            .executor
+        let kinds: BTreeMap<GraphObserverLocation, ObserverKind> = carry_executor(&mut self.plan)
             .runtime
             .observer_rows()
             .into_iter()
@@ -5506,7 +5570,9 @@ impl GraphCarryBuilder<'_> {
                 return Err(GraphCarryInstallError::ObserverOutOfRange);
             };
             if effects[effect_move].successor != step.successor
-                || !self.executor.runtime.has_observation_lane(step.successor)
+                || !carry_executor(&mut self.plan)
+                    .runtime
+                    .has_observation_lane(step.successor)
             {
                 return Err(GraphCarryInstallError::ObserverOutOfRange);
             }
@@ -5537,7 +5603,7 @@ impl GraphCarryBuilder<'_> {
         let mut successors = BTreeSet::new();
         let mut predecessors = BTreeSet::new();
         for step in &moves {
-            if step.successor as usize >= self.executor.runtime.delays.len() {
+            if step.successor as usize >= carry_executor(&mut self.plan).runtime.delays.len() {
                 return Err(GraphCarryInstallError::DelayLineOutOfRange);
             }
             if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
@@ -5562,7 +5628,7 @@ impl GraphCarryBuilder<'_> {
         let mut successors = BTreeSet::new();
         let mut predecessors = BTreeSet::new();
         for step in &moves {
-            if step.successor as usize >= self.executor.runtime.track_delays.len()
+            if step.successor as usize >= carry_executor(&mut self.plan).runtime.track_delays.len()
                 || step.lanes == 0
                 || step.lanes & !(STRIP_DELAY_LEFT | STRIP_DELAY_RIGHT) != 0
             {
@@ -5586,7 +5652,10 @@ impl GraphCarryBuilder<'_> {
         let mut successors = BTreeSet::new();
         let mut predecessors = BTreeSet::new();
         for step in &moves {
-            if !self.executor.runtime.is_live_route(step.successor) {
+            if !carry_executor(&mut self.plan)
+                .runtime
+                .is_live_route(step.successor)
+            {
                 return Err(GraphCarryInstallError::RouteOutOfRange);
             }
             if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
@@ -5624,7 +5693,8 @@ impl GraphCarryBuilder<'_> {
     /// there is no adoption of it whose lines stay at rest. Its readiness is the publisher's to
     /// check: it is published `Primed { lead_blocks, .. }` (#1311), so the prime never underruns.
     ///
-    /// Refused when the plan has no source set, `lead_blocks` is 0, a fill names a line that is
+    /// Refused when the plan has no source set ([`GraphCarryInstallError::NoSourceSet`]),
+    /// `lead_blocks` is 0 ([`GraphCarryInstallError::NoPrimeLead`]), a fill names a line that is
     /// not the plan's, a node that is not one of its source claims, or no lane, or a line appears
     /// twice. Predecessor lines are checked against the predecessor at the swap block, where one
     /// that does not resolve refuses the whole hand-over.
@@ -5634,9 +5704,10 @@ impl GraphCarryBuilder<'_> {
         claims: Vec<GraphClaimFill>,
         sidechains: Vec<GraphSidechainFill>,
     ) -> Result<(), GraphCarryInstallError> {
-        let runtime = &self.executor.runtime;
-        let Some(set) = self.executor.source_set.as_ref() else {
-            return Err(GraphCarryInstallError::NoPrimeLead);
+        let executor = carry_executor(&mut self.plan);
+        let runtime = &executor.runtime;
+        let Some(set) = executor.source_set.as_ref() else {
+            return Err(GraphCarryInstallError::NoSourceSet);
         };
         if lead_blocks == 0 {
             return Err(GraphCarryInstallError::NoPrimeLead);
@@ -5696,16 +5767,18 @@ impl GraphCarryBuilder<'_> {
         Ok(())
     }
 
-    /// Install the program and every staged section in the plan at once, and release the plan:
+    /// Install the program and every staged section in the plan at once, and hand the plan back:
     /// from here it holds its whole hand-over, which nothing can change, and may be published.
     /// Allocates the effect section's carried slots and the observer section's carry record here,
     /// off the render thread.
-    pub fn seal(self) {
+    #[must_use = "the sealed plan is the one that renders"]
+    pub fn seal(self) -> PreparedRenderPlan {
         let Self {
-            executor,
+            mut plan,
             program,
             sections,
         } = self;
+        let executor = carry_executor(&mut plan);
         let CarrySections {
             inputs,
             strips,
@@ -5742,6 +5815,7 @@ impl GraphCarryBuilder<'_> {
         executor.prime_blocks = prime_blocks;
         executor.prime_claims = prime_claims;
         executor.prime_sidechains = prime_sidechains;
+        plan
     }
 }
 
@@ -11754,17 +11828,16 @@ mod tests {
     /// with no source set, which holds the timeline: the swap block would report a mismatch.
     #[test]
     fn install_refuses_a_timeline_carry_on_a_plan_with_no_source_set() {
-        let mut plan = sidechain_pdc_plan(false);
+        let plan = sidechain_pdc_plan(false);
         let program = |timeline| GraphCarryProgram {
             predecessor: 1,
             sources: Box::new([]),
             timeline,
         };
-        assert_eq!(
-            carry_builder(&mut plan, program(true)).err(),
-            Some(GraphCarryInstallError::NoSourceSet)
-        );
-        assert!(carry_builder(&mut plan, program(false)).is_ok());
+        let refused =
+            carry_builder(plan, program(true)).expect_err("a timeline with no source set");
+        assert_eq!(refused.error(), GraphCarryInstallError::NoSourceSet);
+        assert!(carry_builder(refused.into_plan(), program(false)).is_ok());
     }
 
     /// Issue #2302: a plan's carry program is installed once. A second program, naming another
@@ -11774,23 +11847,25 @@ mod tests {
     /// validated for its predecessor, and the swap block would run them against the other one.
     #[test]
     fn install_refuses_a_second_carry_program() {
-        let mut plan = sidechain_pdc_plan(false);
+        let plan = sidechain_pdc_plan(false);
         let program = |predecessor| GraphCarryProgram {
             predecessor,
             sources: Box::new([]),
             timeline: false,
         };
-        carry_builder(&mut plan, program(1))
+        let plan = carry_builder(plan, program(1))
             .expect("the first program")
             .seal();
-        let second = carry_builder(&mut plan, program(2)).err();
+        let second = carry_builder(plan, program(2)).expect_err("a second program");
+        let error = second.error();
+        let mut plan = second.into_plan();
         let installed = plan
             .executor_any_mut()
             .and_then(|any| any.downcast_mut::<GraphExecutor>())
             .and_then(|executor| executor.carry.as_ref())
             .map(|program| program.predecessor);
         assert_eq!(installed, Some(1), "the first program stays");
-        assert_eq!(second, Some(GraphCarryInstallError::CarryProgramInstalled));
+        assert_eq!(error, GraphCarryInstallError::CarryProgramInstalled);
     }
 
     #[test]

@@ -1292,7 +1292,7 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
         "every console effect carries"
     );
     let mut carry = graph::carry_builder(
-        &mut after.plan,
+        after.plan,
         graph::GraphCarryProgram {
             predecessor: graph::plan_identity(&mut before.plan).expect("a graph plan"),
             sources: Box::default(),
@@ -1303,7 +1303,7 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
     carry.builtin_inputs(input_moves).expect("input carry");
     carry.builtin_strips(strip_moves).expect("strip carry");
     carry.effects(effect_moves, 0).expect("effect carry");
-    carry.seal();
+    after.plan = carry.seal();
     Pair { before, after }
 }
 

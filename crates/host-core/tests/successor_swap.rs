@@ -2315,7 +2315,7 @@ fn a_bad_input_move_is_refused_whole() {
         .expect("eq0")
         .1;
     let mut carry = carry_builder(
-        &mut successor.plan,
+        successor.plan,
         GraphCarryProgram {
             predecessor: predecessor.inventory.plan_identity(),
             sources: Box::default(),
@@ -2356,7 +2356,7 @@ fn a_bad_input_move_is_refused_whole() {
     carry
         .builtin_inputs(vec![step(into, eq0), step(other, nowhere)])
         .expect("successor lanes resolve; predecessor lanes are checked at the swap block");
-    carry.seal();
+    successor.plan = carry.seal();
 
     // Render the predecessor so eq0's filters hold state, then hand over.
     let feed = Feed::new(SOURCE, 17);

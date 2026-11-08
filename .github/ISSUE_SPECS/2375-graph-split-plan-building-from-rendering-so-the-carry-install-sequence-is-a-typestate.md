@@ -25,7 +25,7 @@ This touches `GraphExecutor`'s carry fields, every install and take function, `p
 **Slice.** The issue's own split: this attempt lands the builder and moves every install caller
 onto it (`prepare_or_project` and the direct test callers in `graph`, `graph-compiler`,
 `host-core` and `source`). The bind-time reads and one-shot takes, and the fade table, stay as
-they are; the bound-plan typestate that would subsume them is proposed as a successor below.
+they are; the bound-plan typestate that would subsume them is filed as a successor (attempt 2, item 5).
 
 **Claims re-verified at base.**
 - `GraphExecutor` holds the build-time carry fields beside the render state
@@ -78,7 +78,7 @@ input, strip, fade-arm, effect, observer or observation section was refused by i
 (`host.carry.install`) before the late program could go in, so it still is; and a prime with no
 program at all is still refused. Not reachable from either host (both refuse a rate or quantum
 change, so every host successor has a join program); kept so the refactor moves no outcome.
-Behaviour change, internal faults only: an internal-fault `host.carry.install` from the input
+(Superseded by attempt 2, item 2.) Behaviour change, internal faults only: an internal-fault `host.carry.install` from the input
 section (never seen) is now reported after the resource admission rather than before it.
 
 **Mutation evidence: the refusals the typestate replaces are compile errors.** A scratch test
@@ -172,15 +172,151 @@ unchanged.
   `graph_fixture --check`: ok. `./target/release/realtime_policy`: ok (298 marked regions in 48
   files).
 
-**Proposed successor (not filed).** "Graph: a bound plan is a builder until it is sealed." `into_bound*` returns an unpublishable
-bound plan whose bind-time reads (`builtin_input_lanes`, `builtin_strip_lanes`,
-`bank_effect_lanes`, `observer_rows`, `effect_carry_slot_bytes`, `attach_jump_lengths`) are its
-methods, whose three one-shot takes (`take_compensation_lines`, `take_strip_delay_lines`,
-`take_live_routes`) are handed out once by value at bind (no "empty on a second call"), whose fade
-table install is its method, and whose `seal`, with or without a carry, is the only way to a
-`PreparedRenderPlan`. That retires the last two run-time refusals, `CarryProgramInstalled` and
-`FadeArmsInstalled` (a sealed plan offers no install). It touches graph-compiler's
-`into_bound_with_source_set` and every bind caller in the test suites of four crates, and
-`prepare_or_project`'s whole bind-to-publish span. The same issue should prove or test the two
-no-join-program branches of `prepare_or_project` named above (or show them unreachable and
-remove them).
+**Successor.** Superseded by attempt 2's paragraph below.
+
+**Verdict (attempt 1): FAIL** (Sol, `8a2f7867f`), one MAJOR and four MINORs. The builder itself
+was judged sound.
+1. MAJOR: the no-join-program branches in `prepare_or_project` (the `host.carry.install` refusal,
+   the late `lines_or_sends_carry` program, and a prime with no program) were new code, reachable
+   by preparing a successor at another rate by hand (as `tests/timeline.rs` does). Sol's
+   reproducer reached the late program (`test_only_carry_counts == [0,0,0,0,1]`), and they were
+   dead in effect: `adopt_predecessor_plan` refuses a different envelope before `carry_from`.
+2. MINOR: the error-precedence note understated the reordering.
+3. MINOR: a forgotten `seal()` still compiled, because the builder only borrowed the plan.
+4. MINOR: `NoPrimeLead` also covered "no source set".
+5. MINOR: the successor was to be written as a ready-to-file spec.
+
+### Attempt 2 (Terra), same branch, `origin/main` @ `3ac00de23` merged in
+
+**1. A successor with no join program carries nothing and is charged for nothing.** The proof is
+now a comment in `prepare_or_project`, where the rule applies. The join builds a program for every
+successor at its predecessor's rate and quantum, because the timeline carries (#1641 D3). So a
+successor without one runs at another rate or quantum, which means it was prepared by hand; both
+hosts refuse the change (#1290a). Such a plan never takes its predecessor's state. An exchange
+refuses a candidate of another envelope at publication (`PlanPublisher::reserve_replacement`, `Incompatible`), and
+`PreparedRenderPlan::adopt_predecessor_plan` (engine `realtime/plan.rs` 1445) returns
+`PredecessorMismatch` before `carry_from`.
+
+The fix: `fresh_timeline = successor.is_some() && carry_program.is_none()`. When it holds,
+preparation clears these sections before anything is charged: the compensation-line moves, the
+strip-delay moves and the prime's claim fills, the sends, and the carried entries of route fades
+and fading copies. It also gives the prime no lead and no sidechain fills. So the line, send,
+prime and fade-pair charges and the retained-bytes `debug_assert` terms are all zero, by
+construction.
+
+The other sections cannot be nonempty without a join program, because each needs an owner that
+the program's condition already counts:
+- inputs: `carried_inputs` is in the condition;
+- strip moves need a fader or matrix join that is not prepared (`StripJoin::may_carry`);
+- effect moves need an owner or surviving insert that is not prepared (`ChainJoin::may_carry`);
+- meter moves need `meters_may_carry`;
+- spectrum moves need the same rate and quantum;
+- observations follow the effect moves;
+- a strip's fade entry carries only with its fader move.
+
+A `debug_assert` before the builder checks all of this. The `host.carry.install` refusal arm, the
+late program and the prime-without-program refusal are deleted. The builder now starts only from
+the join's program.
+
+The route-fade-only case (a pending route-fade or copy entry with no join program) is handled the
+same way: its entry is dropped with the lines. It is not refused, so no route-fade fixture is
+needed to reach a refusal. Both hosts are unaffected: every host successor has a join program.
+
+`tests/timeline.rs::a_successor_at_another_rate_carries_and_charges_nothing` is new. It uses Sol's
+reproducer edit: a 44.1 kHz successor whose faders, pans and limiter lookahead change in a
+prepared value and whose source changes length, so no owner the program counts can carry. The
+line join still takes `eq0`'s limiter line. The test asserts:
+- `test_only_carry_counts == [0; 5]` and `carry_program_retained_bytes == 0`;
+- the hand-over is `PredecessorMismatch`.
+
+Mutations, each run against `--test timeline`:
+- Fresh-timeline rule off (lines charged, nothing installs them): red. The admission's
+  retained-bytes assertion trips, `left: 0, right: 8`.
+- Compensation lines kept (`delay_carry.clear()` deleted): red, the same assertion.
+- Rule off plus attempt 1's late program: red, `left: [0, 0, 0, 0, 1], right: [0, 0, 0, 0, 0]`.
+
+The existing test `a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline` keeps its own
+claim (a fresh timeline producer).
+
+**2. Error precedence, recorded accurately.** Three orderings moved, and only internal faults or
+hand-built preparations reach any of them:
+- `carry_builder`'s own validation (`NotAGraphPlan`, `CarryProgramInstalled`, `NoSourceSet`,
+  `SourceIndexOutOfRange`, `SourceNotVacant`, `DuplicateSourceIndex`) ran at base right after
+  bind (`prepare.rs` 4905). It now runs after every inventory read and join, the resource
+  admissions (`host.graph.resource.limit`, `host.resource.limit`, `host.resource.arithmetic`) and
+  `host.fade.install`.
+- The input section's validation moved from before the resource admission to after it.
+- The prime's quantum arithmetic (`host.resource.arithmetic`) now runs before every section's
+  install, not after the route section.
+
+The join only builds programs these validations accept, so no session reaches a different code
+than at base.
+
+**3. The builder owns the plan.** `carry_builder(plan: PreparedRenderPlan, program) ->
+Result<GraphCarryBuilder, GraphCarryRefusal>`, and `seal(self) -> PreparedRenderPlan` is
+`#[must_use]`.
+- A refusal hands the plan back (`GraphCarryRefusal::error`, `into_plan`); the plan is boxed so
+  the `Err` stays small.
+- A dropped builder drops its plan, so a forgotten seal leaves no plan to use.
+- The builder reaches its executor through one downcast helper (`carry_executor`, an `expect`
+  on the invariant `carry_builder` checked).
+- Callers moved:
+  - `prepare_or_project`: `plan = carry.seal()`;
+  - the graph lib tests, `rt11_swap_carry_alloc`, `console_banking`, `silent_bank_skip`,
+    `successor_swap` and the source tests: refusals now take the plan back from the refusal.
+- Scratch compile errors against the head API (never committed):
+```
+section_without_a_program  E0425 cannot find function `install_builtin_input_carry` in this scope
+forgotten_seal             E0382 use of moved value: `plan` (the builder took it)
+render_mid_build           E0382 borrow of moved value: `plan`
+second_builder_mid_build   E0382 use of moved value: `plan`
+fade_table_mid_build       E0382 borrow of moved value: `plan`
+section_after_seal         E0382 borrow of moved value: `carry` (moved by `seal`)
+publish_mid_build          E0382 use of moved value: `plan`
+builder_without_a_program  E0451 fields `plan`, `program` and `sections` of struct `GraphCarryBuilder` are private
+sealed_plan_discarded      error: unused return value of `GraphCarryBuilder::seal` that must be used
+```
+In order:
+- a section on a bare plan;
+- a forgotten seal, then a render of the plan;
+- a render mid-build;
+- a second builder mid-build;
+- a fade table mid-build;
+- a section after the seal;
+- publishing mid-build;
+- a builder built by hand;
+- a sealed plan discarded (`unused_must_use`, which the workspace denies).
+
+The committed `compile_fail` doctest is now `E0382` (a render of the plan the builder took),
+with its plain twin.
+
+**4. `NoPrimeLead` split.** A prime on a plan with no source set is now refused `NoSourceSet`
+(whose doc now covers sources, the timeline and a prime's fills). `NoPrimeLead` means only a
+zero lead.
+
+**5. Successor filed by the coordinator.** "Graph: a bound plan is a builder until it is sealed,
+so bind reads, takes and the fade table are typed too": the spec body is at the coordinator's
+scratchpad `succ/l.md`. The bound plan returned by bind is not a `PreparedRenderPlan`. The three
+one-shot takes are handed out once by value. The bind reads and the fade table become its
+methods, and the fade table install gives a token that the builder's `fade_arms` takes. Only
+`seal` yields a `PreparedRenderPlan`, which retires `CarryProgramInstalled` and
+`FadeArmsInstalled`.
+
+**No bit moved (attempt 2).** The same scratch instrumentation as attempt 1, on the attempt-2 tree: the 360 rows (66 869
+blocks, the two producer-thread tests excluded as before) are identical to the base listing,
+sha256 `daf12f21e71fca57e3fbf4bdd02f9b3490de828bfaa9e727ac2695103fc0b1d5`. The merged `main`
+commits touch only `hosts/host-web`, outside these suites. The render path and the executor's
+fields are untouched; the fresh-timeline rule changes only plans that cannot adopt their
+predecessor. `graph_fixture --check` passes.
+
+**Gates (attempt 2 head).**
+- `cargo test --locked -p graph --all-targets --features graph/test-support`: 150 passed.
+- `-p graph-compiler --all-targets` (test-support features): 194 passed, 2 ignored.
+- `-p source --all-targets --features graph/test-support`: 84 passed. `-p rack --all-targets`: 75.
+- `-p host-core --all-targets` with the workspace test-support features: 472 passed, 8 ignored;
+  with `host-core/control-provider`: 617 passed, 8 ignored (the new timeline test included).
+- Doctests of the five crates: 23 passed (the `compile_fail,E0382` pair included).
+- Clippy `-D warnings` on the five crates, with and without the features: ok.
+  `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` (`host-core/control-provider`): ok.
+- `cargo fmt --check`, `scripts/check-workspace-policy.sh`, `graph_fixture --check`: ok.
+  `./target/release/realtime_policy`: ok (298 marked regions in 48 files).
