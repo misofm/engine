@@ -53,3 +53,17 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
   are `BuiltinFaderBank::reset` and `FaderMuteRampBuiltins::reset`, which `graph` never calls), so
   no rendered bit can move; the `builtins` suite (163 tests, `tests/randomized.rs` resetting banks
   against scalar references among them) is green.
+- **C13, done.** `MeterDelivery::gate_from` is gone: `output_gate_from()` derives
+  `if level { activation } else { INACTIVE }`, which is what `align` stored. The field had no
+  other reader, and between `set_level`'s `self.level = on` and its `align` it could hold
+  `level == false` with an open value (#2258 HC-7's "also"); now no state can disagree. `align`
+  makes the same `activate`/`deactivate` calls with the same words, so the gate render reads, and
+  every rendered or metered bit, is unchanged. `OutputPeakGate::activate`'s doc claimed "a new
+  activation discards a window the meter has open"; the meter reads the gate once per block and
+  compares it to the value its window was opened under, so `activate(X); deactivate();
+  activate(X)` between two blocks, or `activate` at the value it holds, keeps the window. The doc
+  now says that. Mutation: `output_gate_from` forced to `INACTIVE` turns
+  `tests/meters.rs::a_restart_begins_a_new_generation_on_the_next_grid_boundary` red at line 517;
+  forced to `activation` was green on every test (the level-off branch had no reader, nor did the
+  base's `gate_from = INACTIVE` write), so that test now also asserts the gate reads shut once the
+  level is off, and the mutant is red at line 525.

@@ -502,7 +502,8 @@ fn a_full_meter_frame_ring_drops_the_newest_frame_and_counts_it() {
 /// gate at the grid's first boundary at or after the restart; with the level off it does nothing.
 ///
 /// Test value: red if a restart keeps the generation (the batch fold would then join windows
-/// across one client's change of the shared level) or leaves the gate on the old activation.
+/// across one client's change of the shared level) or leaves the gate on the old activation, or
+/// if the gate a delivery reports stays open once the level is off (#2378 C13).
 #[test]
 fn a_restart_begins_a_new_generation_on_the_next_grid_boundary() {
     const WINDOW: u64 = 256;
@@ -520,4 +521,10 @@ fn a_restart_begins_a_new_generation_on_the_next_grid_boundary() {
     assert_eq!(delivery.generation(), 2);
     assert_eq!(delivery.frame().generation, 2);
     assert_eq!(delivery.output_gate_from(), 2 * WINDOW);
+    assert!(delivery.set_level(false, 600));
+    assert_eq!(
+        delivery.output_gate_from(),
+        u64::MAX,
+        "a level that is off shuts the gate"
+    );
 }
