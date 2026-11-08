@@ -124,8 +124,7 @@ fn assert_lanes<L: Lane>(
 /// instead of assigning the target, a step left in force after the snap that a later frame reads,
 /// a gated lane that moves (or an ungated in-flight lane missing from the returned mask), a
 /// countdown narrowed below the longest link glide, or a gather or scatter that drops a word. No
-/// other test sees the compressor's gated walk at all, and each effect's copy was tested only by
-/// its own effect, if at all.
+/// other test checks the gated walk against the scalar oracle across random block splits.
 #[test]
 fn a_lane_vector_walks_the_scalar_law_word_for_word() {
     fn check<L: Lane>(rng: &mut Rng) {
@@ -181,15 +180,16 @@ fn a_lane_vector_walks_the_scalar_law_word_for_word() {
 /// only because of this.
 #[test]
 fn a_lane_at_rest_advances_to_itself() {
-    fn check<L: Lane>() {
-        let values: [f32; LANES] = core::array::from_fn(|lane| RESTING[lane % RESTING.len()]);
+    fn check<L: Lane>(offset: usize) {
+        let values: [f32; LANES] =
+            core::array::from_fn(|lane| RESTING[(lane + offset) % RESTING.len()]);
         let fixed = values.map(LinearRamp::fixed);
         let gathered = RampLanes::<L>::gather(fixed.iter());
         let resting = RampLanes::<L>::resting(L::load(&values));
         for (name, mut lanes) in [("gathered", gathered), ("resting", resting)] {
             let all = L::zero().eq(L::zero());
             for frame in 0..4 {
-                let case = format!("W{} {name} frame {frame}", L::WIDTH);
+                let case = format!("W{} offset {offset} {name} frame {frame}", L::WIDTH);
                 let before = bits(lanes.current());
                 assert_eq!(bits(lanes.advance()), before, "{case}: advanced value");
                 assert!(
@@ -202,5 +202,9 @@ fn a_lane_at_rest_advances_to_itself() {
             }
         }
     }
-    lane::each_lane!(|L| check::<L>());
+    // Every offset, so every width, the scalar one included, meets each resting value (NaN and
+    // `-0.0` among them) on its lane 0.
+    for offset in 0..RESTING.len() {
+        lane::each_lane!(|L| check::<L>(offset));
+    }
 }

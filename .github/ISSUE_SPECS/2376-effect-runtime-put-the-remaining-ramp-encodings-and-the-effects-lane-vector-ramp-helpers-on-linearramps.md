@@ -12,18 +12,19 @@ There are still several encodings of one ramp law, each with its own settle and 
 Each copy is a place where a restore can admit a settled ramp off its target, which is the defect class #2368 fixed in three effects.
 
 ## Contract
-- One lane-vector helper in `effect-runtime`, next to `LinearRamp`, that gathers, advances by the law and scatters through `record_advance`. The compressor, transient shaper and limiter use it.
-- `WordRamp`, the builtins' countdown stages and `IndexedRamp` either share `LinearRamp`'s validation (`from_words`) or document why their encoding cannot. They are SIMD lane-word encodings: they stay branch-free, with no enums in lane words.
-- No rendered bit or state or payload word moves.
+Amended after attempt 1 to the helper slice. The other three encodings move to the successor, #SUCCESSOR.
+- One lane-vector helper in `effect-runtime`, next to `LinearRamp`. It gathers, advances by the law and scatters through `record_advance`. The compressor, transient shaper and limiter use it, and their own copies are deleted.
+- The helper is a SIMD lane-word encoding: branch-free, with no enums in lane words.
+- No rendered bit, state word or payload word moves.
+- Out of this issue, and moved to #SUCCESSOR: `WordRamp`, the builtins' countdown stages and `IndexedRamp`, which either share `LinearRamp`'s validation (`from_words`) or document why their encoding cannot.
 
 ## Non-goals
 - A stationary hoist for builtin gain retargets. It is cost-only; if it is wanted, it gets its own issue, and it must exclude mute moves, which would move signed-zero bits.
 
 ## Gates
-- Mutation evidence that each removed duplicate's settle and restore check is still caught by one test in `effect-runtime`.
-- No bit moved: per effect, rendered output and snapshot payloads are identical to base (PR evidence).
+- Mutation evidence that each removed duplicate's settle and scatter check is still caught by one test in `effect-runtime`.
+- No bit moved: for the compressor, transient shaper and limiter (and, as a control, every other launch effect), rendered output and snapshot payloads are identical to base (PR evidence).
 - Downstream: graph-compiler fixtures and host-core are green; struct-size changes regenerate `graph_fixture`.
-- Split by encoding if the brief cannot reach a closable slice in half a day.
 
 ## Evidence / attempt record
 
@@ -95,11 +96,17 @@ a successor below.
 | M13 `scatter`: `remaining` not written | RED | green |
 | M2 / M5 the step left in force after the settle (`advance` / `advance_where`) | green | green |
 | M8 `scatter`: the step not written | green | green |
+| M15 `advance`: `.max(zero)` dropped from the countdown | green | green |
 
 M2, M5 and M8 are equivalent mutants. A settled lane never reads its step again, because both walks
 select the target or the unchanged word there. Its scatter stores `+0.0` through `record_advance`.
 While a lane is in flight, the walk never changes its step. So no output word and no state word can
 see these mutations.
+
+M15 is equivalent too. Without the `max`, a settled lane's countdown goes negative, but every
+reader compares it `> 0`: `advance`'s `stepping`, `advance_where`'s `moving` and `in_flight`. So a
+negative countdown is at rest exactly as `0` is, and the lane selects its target and a `+0.0` step.
+The scatter's `as u32` saturates a negative `f32` to `0`, so the scalar ramp is written settled.
 
 **No bit moved** (one-time PR evidence, not committed). A scratch test in `effect-compiler`, run in
 a release build identically on base `f24da176c` and on the fix, reuses `tests/reset_lane.rs`'s
@@ -149,20 +156,23 @@ committed `ramp_lanes.rs` and by each effect's lane-identity tests, not by the d
 - `graph_fixture --check`, which exits 0: no plan struct changed, because `RampLanes` lives only
   in block-loop registers and `LinearRamp` is unchanged.
 
-**Proposed successor (not filed): the remaining encodings.**
-- `WordRamp` (`effect_runtime::dynamic_band`, ~153-191). The dynamic band of de-esser and
-  dynamic EQ stores its ramps as lane words across blocks; it does not gather them per block.
-  `advance_word_ramps` is a third spelling of `advance_where` with no gate.
-  - Option: store `RampLanes` there, which needs a crate-visible lane accessor for
-    `link_lane`/`set_link_lane`.
-  - Option: route `parse_lane`'s at-target and settled-step clauses (de-esser ~1306, dynamic EQ
-    ~1506) through `LinearRamp::from_words` per lane.
-- The builtins' fader, matrix and input stages (`crates/builtins/src/lib.rs`, `FaderRampStage`
-  ~3325, `MatrixStage` ~3845, `InputStage` ~1051). Their authority is a `u32` countdown, beside a
-  kernel `f32` countdown residue; their lane state enters through `import_lane` (~2975, ~3808,
-  ~4201). Share `from_words` there, or document why the residue form cannot.
-- `IndexedRamp` (`crates/lane/src/kernels.rs` ~1660). It is not D11: `c(k)` is a pure function of
-  the ramp index, and its doc already says why ("Why it is not D11"). Its owner is `crates/graph`
-  (`runtime.rs`) and the effect-contract live crossfade. Most likely it needs only a documented
-  "cannot share `from_words`" line, but that touches `crates/graph`, which another stream owns
-  at the time of this attempt.
+**Successor: the remaining encodings, #SUCCESSOR.**
+- `WordRamp`. Its restores already validate through `from_words` (de-esser and dynamic EQ
+  `parse_lane`). What remains is its walk, `advance_word_ramps`, an ungated copy of
+  `RampLanes::advance_where`.
+- The builtins' fader, matrix and input countdown stages. Their `import_lane` reads only
+  engine-produced words: the plan-swap carry's `export_lane` and the builtins' lane swaps.
+- `IndexedRamp`. It is not D11, so it is expected to record why it cannot share `from_words`. Its
+  users are in `crates/graph` (`runtime.rs`) and in the effect-contract live crossfade.
+
+### Attempt 1 verdict: PASS (minor findings folded)
+
+Sol passed `8c60fa71f`. The four minor findings were folded in after merging `origin/main` (#2375):
+1. The Contract and Gates above are amended to the helper slice. The successor is written as a
+   stateless spec, to be filed as #SUCCESSOR.
+2. M15 (`.max(zero)` dropped from `advance`) is added to the mutation table as an equivalent
+   mutant, with its reason.
+3. `a_lane_at_rest_advances_to_itself` now rotates the resting values by every offset, so every
+   width, the scalar and W4 included, meets NaN and `-0.0`.
+4. The walk test's doc no longer claims that no other test sees the gated walk. It now says that
+   no other test checks the gated walk against the scalar oracle across random block splits.
