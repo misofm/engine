@@ -137,3 +137,27 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
   key fail, and the shipped table is in key form. Mutations: keying by `unhashed` again fails
   "(h1e) a pinned site matches its member after an impl-index move"; dropping the shared-key
   check fails "(h1e) two members sharing a pin key fail". `--self-test` passes.
+- **C1, done.** The true-peak limiter's private `mod silent` goes; `LimiterCore::silent` is
+  `effect_runtime::silent::SilentClaim`, the compressor's, EQ's and multiband's type, and the
+  module's documentation moves to the field. Each restatement is exact:
+  `settle(quiet, scan, every)` is `SilentClaim::settled(quiet, || scan, every)` (the scan, a pure
+  read, now runs only for a quiet block, as the shared type promises); `quiet && proved()` beside
+  its hand-written `debug_assert_eq!` against the scan is `quiet && trusted(|| scan, every)` on
+  both the dual and the collapsed fast path (same value, same debug check). The one rule that
+  differed is `settle_skipped` on a partial mask: the limiter's withdrew a standing claim, the
+  shared type keeps it. The `advance_clocks` contract (`effect-contract` `lib.rs:3015`) says a
+  skipped bank is skipped whole, so no caller passes a partial mask, and keeping is sound anyway:
+  a standing claim says every lane rests, a lane outside the mask keeps its words, and
+  `lanes_at_silent_rest` does not read the van Herk `phase` the mask's lanes advance. The
+  `advance_clocks` doc says this, and `effect_runtime::silent`'s module and test docs no longer
+  call the limiter a separate copy.
+  - **No bit moved** (one-time, scratch, not committed): #2264's limiter harness (W4 and W8
+    banks, 48 seeds each, 900 steps of loud bursts, `+0.0` stretches, `-0.0` and tiny words, both
+    resets, lane resets, link retargets, restores from the bank's own and a donor's payloads,
+    in-bank and cross-bank lane swaps, collapsed runs, automation and whole-bank skips; FNV-1a
+    over every output bit, every state word including the claim, the rest mask and the
+    fast-path engagement count after every step) gives 96 identical digests on base `839c1db7c`
+    and on the change, in release, and again in a debug build, where every `trusted` check ran.
+  - Mutation: deleting `self.silent.withdraw()` from `restore_track` turns three limiter tests
+    red, `a_restore_withdraws_the_silence_claim` through the new `trusted` check on the dual fast
+    path (`lib.rs:4411`). `cargo test -p true-peak-limiter -p effect-runtime` (165) is green.

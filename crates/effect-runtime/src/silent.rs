@@ -18,8 +18,8 @@
 //! renders a quiet block after it. Release builds never scan there: the claim exists to save that
 //! scan.
 //!
-//! The compressor, the parametric EQ and the multiband compressor use it. The true-peak limiter
-//! keeps its own copy (#2264), whose skip withdraws the claim on a partial mask.
+//! The compressor, the parametric EQ, the multiband compressor and the true-peak limiter use it
+//! (#2378 C1 moved the limiter's own copy, #2264, onto it).
 
 /// Whether the previous block proved the bank is at its silent fixed point. See the
 /// [module documentation](self).
@@ -102,9 +102,9 @@ mod tests {
     /// does not earn it, and the scan never consulted for a loud block or without a claim.
     ///
     /// Test value: a `settled` that scanned a loud block (a scan per block of music, the cost the
-    /// claim exists to save) or a `settle_skipped` that withdrew on a partial mask (the limiter's
-    /// rule, which would make these three effects' skips slower) turns this red. Neither moves a
-    /// bit, so no effect's fast-versus-kernel gate sees either.
+    /// claim exists to save) or a `settle_skipped` that withdrew a standing claim on a partial mask
+    /// (the limiter's copy's rule before #2378 C1) turns this red. Neither moves a bit, so no
+    /// effect's fast-versus-kernel gate sees either.
     #[test]
     fn the_claim_moves_only_as_the_table_says() {
         let every = 0b1111;
