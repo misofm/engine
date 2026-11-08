@@ -14,6 +14,8 @@ export class FakeOpfsBackend {
     this.abortBlocker = options.abortBlocker
     this.removeEntryBlocker = options.removeEntryBlocker
     this.entriesBlocker = options.entriesBlocker
+    this.getFileHandleBlocker = options.getFileHandleBlocker
+    this.getFileBlocker = options.getFileBlocker
   }
 
   get usage() {
@@ -86,6 +88,10 @@ class FakeDirectoryHandle {
   }
 
   async getFileHandle(name, options = {}) {
+    // Awaited only when set, so a run without the hook keeps its microtask order.
+    if (this.backend.getFileHandleBlocker !== undefined) {
+      await this.backend.getFileHandleBlocker({ name, create: options.create === true })
+    }
     let child = this.node.entries.get(name)
     if (child === undefined && options.create) {
       child = fileNode()
@@ -131,6 +137,10 @@ class FakeFileHandle {
   }
 
   async getFile() {
+    // Awaited only when set, so a run without the hook keeps its microtask order.
+    if (this.backend.getFileBlocker !== undefined) {
+      await this.backend.getFileBlocker({ name: this.name })
+    }
     const blob = new Blob([this.node.bytes])
     Object.defineProperty(blob, "lastModified", { value: this.node.lastModified })
     return blob
@@ -206,10 +216,19 @@ export class FakeLockManager {
 
   // A request honours `signal` as the Web Locks API does: an already-aborted signal rejects
   // without queueing, and an abort while the request waits rejects it with the signal's reason
-  // and gives up its place in the queue. An abort after the grant changes nothing.
+  // and gives up its place in the queue. An abort after the grant changes nothing. With
+  // `ifAvailable` a lock that is held or queued for is not waited on: `work` runs with null, from a
+  // queued task. As in the Web Locks API, `signal` and `ifAvailable` together are refused.
   async request(name, options, work) {
     const signal = options?.signal
+    if (options?.ifAvailable && signal !== undefined) {
+      throw domError("NotSupportedError", "signal and ifAvailable cannot be combined")
+    }
     if (signal?.aborted) throw signal.reason
+    if (options?.ifAvailable && (this.#held.has(name) || this.#pending.has(name))) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return work(null)
+    }
     this.requests.push(name)
     const previous = this.#tails.get(name) ?? Promise.resolve()
     this.#pending.set(name, (this.#pending.get(name) ?? 0) + 1)

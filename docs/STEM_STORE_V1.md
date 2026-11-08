@@ -108,7 +108,10 @@ The index is crash-only metadata: if it is missing or structurally corrupt, the
 store scans final names, fully hashes each unlocked candidate, adopts an exact
 `hash(file) == filename` match with empty recovered pins, and removes candidates
 that cannot self-verify. With a structurally valid index, an absent row still
-means the unindexed final is promote debris and the sweep removes it.
+means the unindexed final is promote debris and the sweep removes it. A stalled
+index read is not damage: it fails typed `storage.read_stalled` and never
+rebuilds, because a rebuild resets every pin and would do more work against a
+store that just stalled (#2381).
 An environment without `navigator.storage.getDirectory` refuses typed
 `storage.unavailable`; there is deliberately no RAM-resident degraded mode.
 
@@ -132,6 +135,55 @@ start immediately but are not re-awaited: cleanup cannot turn the original
 typed cancellation or `storage.write_stalled` refusal into another wedge. A
 late writable settlement retries removal, and the unindexed-final sweep remains
 the crash backstop.
+
+Every OPFS step taken while holding the index lock has that local-store
+deadline (#2381): opening, reading and writing the index, and a rebuild's
+directory listing, hashing and removal of a final that cannot self-verify. On
+expiry the step fails typed (`storage.read_stalled`, `storage.write_stalled` or
+`storage.remove_stalled`) and the lock is released, so one wedged step cannot
+stall every later index mutation, every lease close's pin release among them.
+Under the index lock a stall is never treated as damage: a rebuild whose hash
+of a final stalls fails typed and keeps that final, and a stalled index read
+never rebuilds.
+
+Outside the index lock, a read that stalls or fails is not proof of damage
+either. In verify-on-open, `verify()` and a session's `read()`, such a read
+demotes the stem only if, re-checked under the index lock, no session other
+than the reading one pins it. Otherwise the call fails typed with the read's own
+error (`storage.read_stalled` for a stall, `stem.read.failed` for a read error)
+and the row and file stay. A final whose reads keep failing is therefore demoted
+and re-ingested unless another session plays from it. A keep-offline pin does
+not block that demotion and is lost with the row, as on base. A dead session pin
+does block it until the pin is purged at a store open; without Web Locks nothing
+purges a crashed tab's pin, so that stem stays unhealed. An
+abort is not a failed read and never demotes. Corruption, a wrong length and a
+missing file still demote unconditionally.
+
+A final is removed only inside a hold of its stem lock, and the hold is released
+only when the removal settles; a removal has no deadline. A caller that already
+holds the stem lock removes inside its own hold. Every other caller (a rebuild,
+the open-time sweep, a demotion after a read failure) takes the lock without
+waiting, and leaves the final alone when the lock is held, by another tab or by
+another hold in this store. How long a caller waits for its own removal is
+separate from the lock: an eviction's open waits until the removal settles or
+the open is aborted, a demotion waits at most the local-store deadline (it is
+best-effort), and a rebuild or sweep under the index lock waits at most its
+deadline and then fails typed. Eviction and demotion drop the row first, under
+the index lock, so no removal runs under it. A failed fallback copy's unawaited
+removals hold the stem lock the same way, and within one hold no final is
+written until every removal that hold started has settled; that wait ends at
+the open's abort.
+
+A wait for a stem lock, in this store or another tab, simply waits for the
+holder; it ends when the lock is released or at the waiter's own abort. A
+caller without a signal, such as `verify()` without one, can therefore wait as
+long as a wedged removal does. Without Web Locks the store serialises its stem
+locks with a local queue that honours the same signal and without-waiting
+rules.
+
+An eviction takes its open's signal on the victim's stem lock and on the index
+lock, and checks it again after the index read, so an aborted open evicts
+nothing once its abort is seen.
 
 ## Hash implementation and provenance
 
