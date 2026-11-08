@@ -1580,6 +1580,15 @@ pub enum PreparedCommandCommitError {
     StaleGeneration,
 }
 
+/// Why [`ProtocolController::materialize_prepared`] left a token as it was (#2378 C9).
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaterializePreparedError {
+    /// The token is not this controller's current one, or the session moved since it was made.
+    Token(PreparedCommandCommitError),
+    /// The store refused the full preparation of the token's edits.
+    Store(SessionStoreError),
+}
+
 /// Why [`ProtocolController::attach_observation_ended`] attached nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttachObservationEndedError {
@@ -2246,17 +2255,27 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// ([`SessionStore::materialize`]), so the host can go on with the compiled transaction as
     /// [`Self::prepare_command_frame`] gives it. A token that holds a compilation is left as it is.
     ///
+    /// The token is checked first, as [`Self::commit_prepared_structural`] checks it: only this
+    /// controller's current token, at the revision it was prepared at, is materialized, so a
+    /// token never carries another session's model into its commit (#2378 C9).
+    ///
     /// # Errors
     ///
-    /// The store's refusal, which cannot happen for a token the store prepared in place: an
-    /// in-place preparation accepts only what the full one accepts. A refused token keeps its
-    /// in-place session (#2378 C9).
+    /// [`MaterializePreparedError::Token`] for a token of another controller, or a stale one, with
+    /// the token untouched; [`MaterializePreparedError::Store`] for the store's refusal, which
+    /// cannot happen for a current token the store prepared in place (an in-place preparation
+    /// accepts only what the full one accepts) and leaves the token's session as it was.
     pub fn materialize_prepared(
         &self,
         prepared: &mut PreparedStructuralCommand,
-    ) -> Result<(), SessionStoreError> {
+    ) -> Result<(), MaterializePreparedError> {
+        self.check_prepared_structural(prepared)
+            .map_err(MaterializePreparedError::Token)?;
         match prepared.prospective_session.as_mut() {
-            Some(session) => self.session.materialize(session),
+            Some(session) => self
+                .session
+                .materialize(session)
+                .map_err(MaterializePreparedError::Store),
             None => Ok(()),
         }
     }
