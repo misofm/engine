@@ -2103,7 +2103,38 @@ impl<S: NoJumpLengths> GraphBoundPlan<S> {
     ///
     /// Once (#2401): the plan comes back as a [`JumpLengthsAttached`] plan, which has no attach,
     /// so a second reader of the cell, which would leave the first writer's lengths unread, is a
-    /// missing method.
+    /// missing method (E0599):
+    ///
+    /// ```compile_fail,E0599
+    /// use engine::realtime::LiveValuesSuperseded;
+    /// use graph::{GraphBoundPlan, GraphJumpLengths};
+    ///
+    /// fn attach_twice(
+    ///     plan: GraphBoundPlan,
+    ///     lengths: GraphJumpLengths,
+    ///     superseded: &LiveValuesSuperseded,
+    /// ) {
+    ///     let (plan, _first) = plan.attach_jump_lengths(lengths, superseded);
+    ///     let _ = plan.attach_jump_lengths(lengths, superseded);
+    /// }
+    /// ```
+    ///
+    /// One attach compiles. This twin differs from the doctest above only by the second attach, so
+    /// a renamed item or a typo in the shared code turns it red (issue #1422 D2):
+    ///
+    /// ```
+    /// use engine::realtime::LiveValuesSuperseded;
+    /// use graph::{GraphBoundPlan, GraphJumpLengths};
+    ///
+    /// fn attach_once(
+    ///     plan: GraphBoundPlan,
+    ///     lengths: GraphJumpLengths,
+    ///     superseded: &LiveValuesSuperseded,
+    /// ) {
+    ///     let (plan, _first) = plan.attach_jump_lengths(lengths, superseded);
+    ///     let _ = plan;
+    /// }
+    /// ```
     pub fn attach_jump_lengths(
         mut self,
         lengths: GraphJumpLengths,
@@ -5143,7 +5174,8 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
 ///
 /// The bind-time steps that are not one-shot, the mono collapse's join
 /// ([`Self::arm_mono_collapse`]), the identity ([`Self::plan_identity`]) and the bind reads, are
-/// methods of every state. A sealed plan, which may have rendered, offers none of them.
+/// methods of every state. A sealed plan, which may have rendered, has no join and no bind read
+/// outside test-support, and its identity is read through [`plan_identity`].
 ///
 /// A bound plan renders only once it is sealed (E0599, no `render` on a bound plan):
 ///

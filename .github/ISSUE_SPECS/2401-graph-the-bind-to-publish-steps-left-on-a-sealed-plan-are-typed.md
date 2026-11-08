@@ -218,19 +218,38 @@ the realtime policy tool reports the same 298 marked regions.
 - `cargo fmt --check`, `bash scripts/check-workspace-policy.sh` and `graph_fixture --check`: ok.
 - `./target/release/realtime_policy`: ok (298 marked regions in 48 files).
 
-**Proposed successor (not filed): "Engine: a plan's revision gate and source-read offset are set
-before its seal".**
-- `take_revision_gate` becomes a by-value hand-out, so a second take is not representable, and
-  `stamp_held_gate` becomes a step of the plan before that hand-out, so its `None` arm goes. One
-  shape: the engine plan is built with its handle held in a bound-side wrapper, and the seal (or a
-  `take` that consumes that wrapper) returns `(PreparedRenderPlan, PlanRevisionGate)`. Another:
-  `stamp_held_gate` moves onto `GraphBoundPlan` before the seal, and the gate comes out of the
-  seal. Either way `prepare_or_project`'s post-seal stamp moves before the seal, and the gate
-  travels in `PreparedHost` to control-plane's and `limiter_linked_session`'s takes.
-- `set_source_read_offset` moves before the seal. Only engine can write the plan's field, so it
-  needs an engine-side bound surface too (or a seal argument); host-core's
-  `test_only_set_source_read_offset`, which writes a sealed host's plan, would then need a
-  test-support path.
-- Size: 79 `take_revision_gate` call sites in 41 files (engine, graph, graph-compiler,
-  builtins-compiler, host-core, control-plane, capi, bench, bench-support, console-workload), so
-  it does not fit this half day, and its design needs a brief with a declared file set.
+**Successor.** #SUCCESSOR: the engine-level gate steps (`take_revision_gate`,
+`stamp_held_gate`, `set_source_read_offset`), low priority. Its ready-to-file spec is at the
+coordinator's scratchpad `succ/x.md`, written in the attempt 1 fold below.
+
+**Verdict (attempt 1): PASS** (Sol, `a729a1e7a`), minors only, folded below.
+
+### Attempt 1 fold (Terra), same branch, `origin/main` @ `231494259` merged in (clean)
+
+1. **The `GraphBoundPlan` doc, corrected.** It no longer says a sealed plan "offers none of"
+   the join, the identity and the bind reads. It now says a sealed plan has no join and no bind
+   read outside test-support, and that its identity is read through `graph::plan_identity`.
+2. **A committed `compile_fail,E0599` doctest pair on `attach_jump_lengths`.** A second attach on
+   a `JumpLengthsAttached` plan fails, and its plain twin, which attaches once, passes (#1422 D2).
+   Test value: red if a `JumpLengthsAttached` plan takes the attach again (for example
+   `impl NoJumpLengths for JumpLengthsAttached`). A second cell would replace the reader and leave
+   the first producer's acked writes unread, which is the acked-batch question; no other test
+   saw that mutant. Mutation: with that impl added, `graph --doc` goes red on the new
+   `compile_fail` doctest (2 passed, 1 failed); restored, all 6 graph doctests pass. The
+   mutation table's last row above is superseded: the mutant is now caught by a committed test.
+3. **`PlanStateInventory::plan_identity`'s doc** (`crates/host-core/src/prepare.rs`) now cites
+   `graph::GraphBoundPlan::plan_identity`, read before the seal.
+4. **The successor** is written as a ready-to-file stateless spec (`succ/x.md`, H1 title first).
+   It proposes a `(plan, gate)` helper per crate's test support to absorb most of the 79
+   `take_revision_gate()` sites, and the `#SUCCESSOR` placeholder above marks where its number
+   goes.
+
+**Gates (fold head, private target dir, `-j 4`).**
+- `cargo test --locked -p graph --all-targets --features graph/test-support`: 148 passed.
+- Graph doctests: 6 passed (three `compile_fail` pairs).
+- `cargo clippy --locked -p graph -p host-core --all-targets` (graph and host-core test-support,
+  `host-core/control-provider`) `-- -D warnings`: ok.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p graph -p host-core`: ok.
+- `cargo fmt --check`: ok.
+- The fold changes doc comments, one doctest pair and this record, so no render path or test
+  body moved.

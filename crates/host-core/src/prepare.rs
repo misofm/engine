@@ -1211,8 +1211,8 @@ pub(crate) struct InputSectionInventoryRow {
 }
 
 impl PlanStateInventory {
-    /// The plan's process-unique graph identity (`graph::plan_identity`), which the successor's
-    /// carry program names.
+    /// The plan's process-unique graph identity (`graph::GraphBoundPlan::plan_identity`, read
+    /// before the seal), which the successor's carry program names.
     #[must_use]
     pub const fn plan_identity(&self) -> u64 {
         self.plan_identity
