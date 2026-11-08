@@ -382,10 +382,11 @@ export class OpfsStemStore {
       options.signal
     )
     let leaveDebris = false
+    let failure
     try {
       // Prove the device writable before any network: an unwritable store
       // must refuse with a typed storage error, not after a full download.
-      const writable = await this.#openStagingWritable(handle, stem, options)
+      const writable = await this.#openStagingWritable(handle, stem, options, hold)
       const hash = new IncrementalBlake3()
       let reader
       let bytes = 0
@@ -456,9 +457,10 @@ export class OpfsStemStore {
             )
           }
           hash.update(result.value)
-          await withDeadline(
+          // The staging writable's steps may land late too: each is fenced into the hold (#2397).
+          await this.#fencedStep(
+            hold,
             writable.write(result.value),
-            this.#readDeadlineMs,
             "storage.write_stalled",
             `Writing staging for ${stem.identity} made no progress`,
             options.signal
@@ -475,17 +477,17 @@ export class OpfsStemStore {
             stagingName,
           })
         }
-        await withDeadline(
+        await this.#fencedStep(
+          hold,
           writable.close(),
-          this.#readDeadlineMs,
           "storage.write_stalled",
           `Closing staging for ${stem.identity} made no progress`,
           options.signal
         )
       } catch (error) {
-        await withDeadline(
+        await this.#fencedStep(
+          hold,
           writable.abort(error),
-          this.#readDeadlineMs,
           "storage.write_stalled",
           `Aborting staging for ${stem.identity} made no progress`
         ).catch(() => {})
@@ -546,6 +548,7 @@ export class OpfsStemStore {
         totalBytes: stem.bytes,
       })
     } catch (error) {
+      failure = error
       if (error?.leaveStaging === true) leaveDebris = true
       if (isQuotaError(error)) {
         // The failing identity is not a survivor: a quota error may have
@@ -561,28 +564,36 @@ export class OpfsStemStore {
       }
       throw error
     } finally {
-      // No retry follows a stall: the next attempt would stage the same file under this removal.
       if (!leaveDebris) {
         await this.#fencedStep(
           hold,
           removeEntry(this.#staging, stagingName),
           "storage.remove_stalled",
           `Removing staging for ${stem.identity} made no progress`
-        )
+        ).catch((cleanupError) => {
+          // A failed or stalled cleanup stops an integrity retry, which would stage the same file
+          // under this removal; otherwise the attempt's own outcome stands, and a success swallows
+          // it (a later ingest clears the staged file first). The removal stays fenced either way.
+          if (failure?.code === "stem.ingest.integrity") throw cleanupError
+        })
       }
     }
   }
 
-  async #openStagingWritable(handle, stem, options) {
+  async #openStagingWritable(handle, stem, options, hold) {
+    let opening
     try {
+      opening = handle.createWritable()
       return await withDeadline(
-        handle.createWritable(),
+        opening,
         this.#readDeadlineMs,
         "storage.write_stalled",
         `Opening staging for ${stem.identity} made no progress`,
         options.signal
       )
     } catch (error) {
+      // A writable that opens after its wait ended is aborted; the hold is kept until it is (#2397).
+      this.#fence(hold, Promise.resolve(opening).then((late) => late?.abort(error)))
       // Abort and quota errors keep their own handling; any other refusal is
       // the device saying it cannot store this stem.
       if (
@@ -658,17 +669,18 @@ export class OpfsStemStore {
           options.signal
         )
         if (result.done) break
-        await withDeadline(
+        // Fenced directly, not through the late abort: a write or close may still land (#2397).
+        await this.#fencedStep(
+          hold,
           writable.write(result.value),
-          this.#readDeadlineMs,
           "storage.write_stalled",
           `Writing fallback final for ${stem.identity} made no progress`,
           options.signal
         )
       }
-      await withDeadline(
+      await this.#fencedStep(
+        hold,
         writable.close(),
-        this.#readDeadlineMs,
         "storage.write_stalled",
         `Closing fallback final for ${stem.identity} made no progress`,
         options.signal

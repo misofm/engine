@@ -195,15 +195,20 @@ hold started has settled; that wait ends at the open's abort.
 
 The other OPFS steps a stem-lock hold awaits have the local-store deadline as
 well (#2397): the lookup of the final in verify-on-open and `verify()`, an
-ingest's clearing, creation and cleanup of its staged file, and the promote's
-`move()` and fallback-final creation. On expiry the holder's call fails typed
-(`storage.read_stalled`, `storage.write_stalled` or `storage.remove_stalled`).
-The staged-file and promote steps change the store and may still land after
-their deadline, so each is fenced into its hold like a removal: the stem lock
-stays held until the step settles. A stalled clearing or cleanup of the staged
-file ends the ingest rather than retrying it over the same file. A lookup lands
-nothing, so it is not fenced; a stalled lookup is a stalled read under the rule
-above.
+ingest's clearing, creation and cleanup of its staged file, the staging
+writable's open, writes, close and abort, and the promote's `move()`,
+fallback-final creation and fallback writable's writes and close. On expiry the
+holder's call fails typed (`storage.read_stalled`, `storage.write_stalled` or
+`storage.remove_stalled`). Every one of these steps except the lookup changes
+the store and may still land after its deadline, so each is fenced into its
+hold like a removal: the stem lock stays held until the step settles, and a
+staging writable that opens after its wait ended is aborted before the lock is
+released. A stalled clearing of the staged file ends the ingest. A stalled or
+failed cleanup fails the ingest only after an integrity failure, whose retry
+would stage the same file under it; otherwise the attempt's own outcome stands,
+and a successful ingest swallows it (the next ingest of the stem clears the
+staged file first). A lookup lands nothing, so it is not fenced; a stalled or
+failed lookup is a stalled or failed read under the rule above.
 
 A wait for a stem lock, in this store or another tab, simply waits for the
 holder; it ends when the lock is released or at the waiter's own abort. A

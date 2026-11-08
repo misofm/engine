@@ -105,3 +105,72 @@ Base `d060df5cd`; branch `codex/issue-2397-stem-lock-deadlines`.
 **Follow-ups (not filed).**
 - The staging writable's own steps (`createWritable` in `#openStagingWritable`, `write`, `close`, `abort`) were already deadlined, but they are not fenced. A `close()` that times out and lands after the lock is released could commit stale bytes to this tab's staged file. A later ingest of the same stem in this tab re-hashes the staged file before it promotes, so only a landing between that re-hash and the move gets through. Verify-on-open would then demote the result as corrupt. The fallback writable has the same shape: its fence awaits the writable's creation and its abort, not an in-flight `close()`.
 - `read()`'s `getFileHandle` (line 297 on base) has no deadline. It runs under no stem lock, so it is outside this contract, but a wedged lookup there hangs a lease read.
+
+**Verdict: FAIL** (Sol, one BLOCKER and three MINORs). Every step this attempt fenced was judged correct.
+- BLOCKER, in scope by Contract bullet 2 and the #2381 hazard. The staging writable's `write()`, `close()` and `abort()`, and `#openStagingWritable`'s `createWritable()`, are awaited in the hold but not fenced. With a wedged `closeBlocker`, the open fails `storage.write_stalled` and the stem lock is released. A second same-tab `openSession` then takes the lock and completes while the first `close()` is still in flight. The reviewer's reproducer is `close-repro.mjs`, in modes `staging` and `fallback`. Required:
+  - fence `write`, `close` and `abort` with `#fencedStep`, with `abort` keeping its no-signal form;
+  - fence `createWritable` with a cleanup that aborts a writable that arrives late, as `abortFallbackWritable` does;
+  - add a `closeBlocker` leg, and "unfenced close" and "unfenced abort" ledger entries.
+- MINOR: fence the fallback writable's `write` and `close` directly in `#promote`. Do not rely on Streams' abort waiting for a pending close, which the fake does not model; the `fallback` mode of the reproducer shows the gap. The follow-up note was wrong to say real browsers are exposed: they are covered, implicitly.
+- MINOR: a stalled staging cleanup in `#ingestAttempt`'s `finally` throws `storage.remove_stalled` and replaces the attempt's own error. That loses `storage.insufficient`, and it also fails an open that already succeeded. Rethrow only when the pending error is `stem.ingest.integrity`, which stops the retry. Keep the original error otherwise, and swallow the stall on success. The removal stays fenced either way. Add a row and a ledger entry.
+- MINOR: write the `read()` lookup follow-up as a successor spec, and fix the docs nit "a stalled or failed lookup".
+
+### Attempt 2 (Terra, 2026-11-08)
+Folded on the same branch, over `2dd630040`.
+
+**Fixes** (`opfs-store.js`).
+- Staging writable (BLOCKER):
+  - `write()`, `close()` and `abort()` go through `#fencedStep`. `abort()` keeps its no-signal, best-effort wait.
+  - `#openStagingWritable(handle, stem, options, hold)` keeps the `createWritable()` promise. If its wait fails (a deadline, an abort or an error), the hold fences `Promise.resolve(opening).then((late) => late?.abort(error))`, so a writable that opens late is aborted before the stem lock is released.
+- Fallback writable (MINOR 2): `write()` and `close()` go through `#fencedStep`. The existing fences on the late abort and the removals are unchanged.
+- Staging cleanup (MINOR 3): `#ingestAttempt` records its caught error as `failure`, and the `finally` removal is still fenced. A failed or stalled cleanup is rethrown only when `failure` is `stem.ingest.integrity`, whose retry would stage the same file under it. Otherwise the attempt's own outcome stands: its error, or on success the result, with the stall swallowed. A later ingest of the stem clears the staged file first.
+  - The verdict's "keep the original error" is read for hard cleanup errors as well as stalls. That makes one rule, and leaves no line no test can see. On base, a hard cleanup error replaced the attempt's outcome.
+
+**Tests** (`stem-store-core-v1.mjs`).
+- `aStemLockStepNeverOutlastsItsDeadline` now has 17 legs. New:
+  - `staging writable open`, `staging write`, `staging close` (the `closeBlocker` leg), `staging abort` (a failing resolver, then a wedged abort), `fallback write` and `fallback close`, each fenced;
+  - `staging cleanup (integrity)`: corrupted bytes, then `storage.remove_stalled` with no retry;
+  - `staging cleanup (quota)`: `storage.insufficient` is kept;
+  - `staging cleanup (success)`: the open succeeds, and the lock is still held until the removal settles.
+  - The attempt-1 `staging cleanup` leg is replaced by these three.
+- Test value of the new legs: red if a writable step of either writable, or a late-opening staging writable, releases the stem lock while it can still land; or if a stalled cleanup replaces a quota error or fails a successful open; or if it stops failing after an integrity failure, which lets the retry run over it. No other test wedges these steps with the lock observed.
+- `aFallbackCleanupHoldsTheStemLockUntilItsRemovalsSettle`, `immediate removal` leg: the fallback write is now fenced, so a write wedged forever kept that leg's lock held and broke its "exactly one step unsettled" premise. Its write now stalls past the deadline and fails 40 ms later, and the lock check runs at 60 ms, so the immediate removal is again the only step left unsettled.
+
+**Red.**
+- On the attempt-1 store `2dd630040`, each leg run alone:
+  - `staging writable open`, `staging write`, `staging close`, `staging abort`, `fallback write` and `fallback close` fail `a timed-out <leg> released the stem lock before it settled`;
+  - `staging cleanup (quota)` fails `failed with the wrong error`, with actual `storage.remove_stalled`, expected `storage.insufficient`;
+  - `staging cleanup (success)` fails the same way, with actual `storage.remove_stalled`, expected none;
+  - `staging cleanup (integrity)` is green on attempt 1, which rethrew every stall. It guards the integrity clause, and its ledger entries are red.
+- On base `d060df5cd`, every one of the 17 legs is red:
+  - the writable legs at the lock assertion;
+  - every other leg at `waited on a wedged <leg> past its deadline`.
+- The reviewer's reproducer, both modes: `stem lock held while the <mode> close() is still in flight: true`, and `second open waited`. Before this attempt it printed `false` and `second open completed`.
+
+**Mutation ledger.** The #2397 block now has 28 entries, each `RED` at its target. `--self-test --budgets` passes with 129 `RED` lines, 101 plus 28. New in this attempt:
+- unfenced: the late staging writable, staging write, staging close, staging abort, fallback write and fallback close;
+- the cleanup policy:
+  - always rethrow, red at the `quota` leg;
+  - never rethrow, red at the `integrity` leg, through the retry;
+  - drop `failure = error`, red at the `integrity` leg;
+- the cleanup's deadline and fence entries, now retargeted to the `integrity` leg.
+
+One existing anchor is retargeted and still `RED`: `restore the pre-successor direct fallback final write`, which now searches the `#fencedStep` form.
+
+**Green:**
+- `node scripts/check-stem-store-v1.mjs`: PASS.
+- `node scripts/check-stem-store-v1.mjs --self-test --budgets`: PASS.
+- `stem-store-core-v1.mjs --budgets`: 4 parallel runs, all PASS.
+- `stem-pump-v1.mjs`: PASS.
+- `bash scripts/test-web-audioworklet.sh`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: ok.
+
+**Docs.** `docs/STEM_STORE_V1.md`:
+- lists the writable steps and that they are fenced;
+- states the late-writable abort;
+- states the cleanup policy;
+- has the "stalled or failed lookup" wording.
+
+**Follow-ups.**
+- Attempt 1's first follow-up is fixed by this attempt. Its fallback-writable half was overstated: in real browsers a Streams `abort()` waits for a pending `close()`, so only the fake had that gap.
+- `read()`'s lookup with no deadline: successor #SUCCESSOR, spec drafted.

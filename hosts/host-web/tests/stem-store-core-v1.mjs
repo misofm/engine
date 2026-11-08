@@ -1013,8 +1013,12 @@ async function aFallbackCleanupHoldsTheStemLockUntilItsRemovalsSettle() {
       // The writable never opens until released, so its abort and second removal wait for it.
       createWritableBlocker: ({ fileName }) =>
         leg === "writable abort" && fileName === final ? wedge() : undefined,
+      // The copy's write stalls past its deadline and then fails, so only the removal stays unsettled
+      // (the write itself is fenced too, #2397).
       writeBlocker: ({ fileName }) =>
-        leg === "immediate removal" && fileName === final ? never() : undefined,
+        leg === "immediate removal" && fileName === final
+          ? new Promise((_resolve, reject) => setTimeout(() => reject(new Error("late write")), 40))
+          : undefined,
       // Only the first removal of the final, the immediate one, wedges.
       removeEntryBlocker: ({ name }) => {
         if (leg !== "immediate removal" || name !== final) return undefined
@@ -1034,7 +1038,7 @@ async function aFallbackCleanupHoldsTheStemLockUntilItsRemovalsSettle() {
     )
     const stemLock = `${STORE_LOCKS}:ingest:${stem.identity.slice("blake3:".length)}`
     const isHeld = async () => (await locks.query()).held.some((lock) => lock.name === stemLock)
-    for (let step = 0; step < 5; step += 1) await tick()
+    await new Promise((resolve) => setTimeout(resolve, 60))
     assert.ok(await isHeld(), `a fallback cleanup released the stem lock before its ${leg} settled`)
     unwedge()
     await until(async () => !(await isHeld()), `the stem lock's release after the ${leg}`)
@@ -1584,9 +1588,10 @@ async function theAgeCheckSweepsOnlyOldStagedFilesWithoutWebLocks() {
 }
 
 // Issue #2397: every OPFS step a stem-lock hold awaits is deadlined, so the call holding the lock
-// settles typed while the step is wedged. A step that changes the store (a create, a move, a removal)
-// may still land, so it keeps the stem lock until it settles; a lookup lands nothing and does not.
-// One leg per step; each wedges exactly that step.
+// settles typed while the step is wedged. A step that changes the store (a create, a move, a removal,
+// a writable's open, write, close or abort) may still land, so it keeps the stem lock until it
+// settles; a lookup lands nothing and does not. One leg per step; each wedges exactly that step.
+// A stalled staging cleanup fails the call only after an integrity failure, whose retry it stops.
 async function aStemLockStepNeverOutlastsItsDeadline() {
   const quota = () => Object.assign(new Error("fake quota exhausted"), { name: "QuotaExceededError" })
   const legs = [
@@ -1594,9 +1599,17 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     { leg: "verify-on-open lookup", call: "open", code: "storage.read_stalled", fenced: false },
     { leg: "staging clear", code: "storage.remove_stalled", fenced: true },
     { leg: "staging create", code: "storage.write_stalled", fenced: true },
-    { leg: "staging cleanup", code: "storage.remove_stalled", fenced: true },
+    { leg: "staging writable open", code: "storage.write_stalled", fenced: true },
+    { leg: "staging write", code: "storage.write_stalled", fenced: true },
+    { leg: "staging close", code: "storage.write_stalled", fenced: true },
+    { leg: "staging abort", code: "stem.resolve.failed", fenced: true },
+    { leg: "staging cleanup (integrity)", code: "storage.remove_stalled", fenced: true },
+    { leg: "staging cleanup (quota)", code: "storage.insufficient", fenced: true },
+    { leg: "staging cleanup (success)", code: undefined, fenced: true },
     { leg: "move", code: "storage.write_stalled", fenced: true },
     { leg: "fallback final create", moveSupported: false, code: "storage.write_stalled", fenced: true },
+    { leg: "fallback write", moveSupported: false, code: "storage.write_stalled", fenced: true },
+    { leg: "fallback close", moveSupported: false, code: "storage.write_stalled", fenced: true },
     { leg: "quota removal", code: "storage.insufficient", fenced: true },
     { leg: "integrity removal", moveSupported: false, code: "storage.remove_stalled", fenced: true },
   ]
@@ -1606,7 +1619,7 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     const staged = `stem-lock-step-${stem.identity.slice("blake3:".length)}`
     const backend = new FakeOpfsBackend({ moveSupported })
     const locks = new FakeLockManager()
-    const resolver = new MemoryStemResolver(stemMap([stem]))
+    let resolver = new MemoryStemResolver(stemMap([stem]))
     let corrupt = false
     const opfs = store(backend, locks, {
       tabId: "stem-lock-step",
@@ -1628,20 +1641,41 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
       reached = true
       return new Promise((resolve) => (unwedge = resolve))
     }
+    const on = (target) => ({ fileName }) => (fileName === target && !reached ? wedge() : undefined)
     let stagingRemovals = 0
     if (call !== undefined) {
       backend.getFileHandleBlocker = ({ name, create }) =>
         name === final && !create && !reached ? wedge() : undefined
-    } else if (leg === "staging clear" || leg === "staging cleanup") {
+    } else if (leg === "staging clear" || leg.startsWith("staging cleanup")) {
       backend.removeEntryBlocker = ({ name }) => {
         if (name !== staged) return undefined
         stagingRemovals += 1
         return stagingRemovals === (leg === "staging clear" ? 1 : 2) ? wedge() : undefined
       }
+      if (leg === "staging cleanup (integrity)") {
+        resolver = new MemoryStemResolver({ [stem.identity]: stem.pcm.map((byte) => byte ^ 1) })
+      } else if (leg === "staging cleanup (quota)") {
+        backend.writeBlocker = ({ fileName }) => {
+          if (fileName === staged) throw quota()
+        }
+      }
     } else if (leg === "staging create" || leg === "fallback final create") {
       const target = leg === "staging create" ? staged : final
       backend.getFileHandleBlocker = ({ name, create }) =>
         name === target && create && !reached ? wedge() : undefined
+    } else if (leg === "staging writable open") {
+      backend.createWritableBlocker = on(staged)
+    } else if (leg === "staging write" || leg === "fallback write") {
+      backend.writeBlocker = on(leg === "staging write" ? staged : final)
+    } else if (leg === "staging close" || leg === "fallback close") {
+      backend.closeBlocker = on(leg === "staging close" ? staged : final)
+    } else if (leg === "staging abort") {
+      resolver = {
+        async resolve() {
+          throw new Error("offline")
+        },
+      }
+      backend.abortBlocker = on(staged)
     } else if (leg === "move") {
       backend.moveBlocker = () => wedge()
     } else {
@@ -1663,6 +1697,7 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
     assert.ok(reached, `the ${leg} was never wedged`)
     assert.notEqual(outcome, "timed-out", `a stem-lock hold waited on a wedged ${leg} past its deadline`)
     assert.equal(outcome.error?.code, code, `a wedged ${leg} failed with the wrong error`)
+    if (code === undefined) assert.equal(outcome.error, undefined, `a wedged ${leg} failed the open`)
     const stemLock = `${STORE_LOCKS}:ingest:${stem.identity.slice("blake3:".length)}`
     const isHeld = async () => (await locks.query()).held.some((lock) => lock.name === stemLock)
     for (let step = 0; step < 5; step += 1) await tick()
@@ -1677,6 +1712,7 @@ async function aStemLockStepNeverOutlastsItsDeadline() {
       assert.equal((await pinned.read(stem.identity)).size, stem.bytes)
       await pinned.close()
     }
+    await outcome.value?.close?.()
   }
 }
 
