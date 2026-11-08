@@ -218,7 +218,7 @@ the realtime policy tool reports the same 298 marked regions.
 - `cargo fmt --check`, `bash scripts/check-workspace-policy.sh` and `graph_fixture --check`: ok.
 - `./target/release/realtime_policy`: ok (298 marked regions in 48 files).
 
-**Successor.** #SUCCESSOR: the engine-level gate steps (`take_revision_gate`,
+**Successor.** #2412: the engine-level gate steps (`take_revision_gate`,
 `stamp_held_gate`, `set_source_read_offset`), low priority. Its ready-to-file spec is at the
 coordinator's scratchpad `succ/x.md`, written in the attempt 1 fold below.
 
@@ -241,7 +241,7 @@ coordinator's scratchpad `succ/x.md`, written in the attempt 1 fold below.
    `graph::GraphBoundPlan::plan_identity`, read before the seal.
 4. **The successor** is written as a ready-to-file stateless spec (`succ/x.md`, H1 title first).
    It proposes a `(plan, gate)` helper per crate's test support to absorb most of the 79
-   `take_revision_gate()` sites, and the `#SUCCESSOR` placeholder above marks where its number
+   `take_revision_gate()` sites, and the `#2412` placeholder above marks where its number
    goes.
 
 **Gates (fold head, private target dir, `-j 4`).**
