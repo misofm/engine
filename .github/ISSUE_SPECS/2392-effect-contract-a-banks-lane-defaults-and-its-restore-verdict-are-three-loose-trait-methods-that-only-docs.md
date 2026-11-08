@@ -82,7 +82,11 @@ Moved: #2410's spec now carries this row explicitly as its fader contract item (
 - M2, `lane_swap_defaults` drops the `lane_swap_mut` read: red, `lane_swap_tests` panics `a checked lane's defaults exchange` (the new cases).
 - M3, the exchange helper reports `true` without exchanging: red, `lane_swap_tests` (the accepted swap's defaults).
 - M4, `swap_bank_lanes_scratch_bytes` adds `0` for the defaults: red, `lane_swap_tests` (`scratch_bytes == 24 + DEFAULTS`).
-- M5, `rack::lane_swap_scratch_fits` stops comparing the peer's size (`defaults(processor).is_some()`): **survives**, and the same mutation of the base line (`processor.lane_default_bytes().is_some()`) survives on base too. No `rack` test pairs banks of different defaults sizes; `swap_bank_lanes` still refuses `Defaults` itself. Pre-existing, recorded as a follow-up, not widened here.
+- M5, `rack::lane_swap_scratch_fits` stops comparing the peer's size (`defaults(processor).is_some()`): survives, and the same mutation of the base line survives on base too. **Equivalent** (attempt 2, per Sol): every call site pairs it with a program-key match:
+  - `can_swap_lanes` for `LanePeer::Same` passes the same processor twice;
+  - `LanePeer::Other` checks `other.program_key == self.program_key` (`crates/rack/src/lib.rs` ~1419);
+  - the live-control stage's `fits` runs `lane_swap_fits`, which checks the same (~3011).
+  A program key names the effect id, contract major, state layout, rate, quantum, quality and bypass. Each launch effect's defaults size is a per-effect constant (`LANE_DEFAULT_BYTES`), so two banks of one key always declare one size.
 
 **C15 (#2378, the `FaderRampStage` `f32` countdown word).** Not done here. Attempt 1 recorded it as "superseded by #2410", and that was wrong: #2410 as filed changed only the matrix and the input trim (its row 1 says the fader already follows the rule). Attempt 2 amends `.github/ISSUE_SPECS/2410-*.md` on this branch to carry C15 explicitly:
 - the problem row 1 now names the stored `ramp[c].remaining`;
@@ -97,5 +101,26 @@ The coordinator syncs #2410's GitHub body to that file.
 - Call-graph gate: rebuilt artifact (`scripts/build-web-audioworklet.sh --named-twin`, nightly-2026-08-20, shipped module `210298df2f5c...`), then `scripts/check-web-audioworklet.sh --without-metadata-regeneration` with wabt 1.0.34 (CI's apt version): passed; `miso_engine_web_v1_render` `indirect_sites=11` against the pinned table, every render-thread export clean. The hook adds no pinned site: the swap's dispatch was already through `&mut dyn PreparedNativeEffectBank`, behind the executor's indirect call.
 - Graph plan fixtures: no struct changed (a trait change only), so none regenerated.
 
-**Follow-ups (not filed).**
-- `rack`: no test pairs two banks of different defaults sizes, so `lane_swap_scratch_fits`'s peer comparison is unpinned (M5, survives on base too).
+**Sol's verdict on attempt 1 (`92df135a6`): FAIL**, on one MAJOR, a delivery-record error (the brief's, not the code's):
+- MAJOR: #2410 as filed did not own C15.
+- MINOR: the hooks of five banks sat outside `REALTIME_POLICY` regions.
+- MINOR: `restore_verdict` did not check a swapping bank's capability verdict.
+- MINOR: the de-esser and dynamic EQ had no end-to-end `swap_bank_lanes` test.
+- MINOR: M5 should be recorded as equivalent, not as a follow-up.
+- Out of scope: the rotation's `debug_assert!`.
+
+### Attempt 2 (Terra), same branch
+
+- **C15 (MAJOR).** `.github/ISSUE_SPECS/2410-*.md` now carries it explicitly (see the C15 paragraph above), and the C15 lines of this spec are corrected.
+- **Realtime regions.** The `lane_swap`/`lane_swap_mut` hook pair is now inside a `REALTIME_POLICY` region in the de-esser, dynamic EQ, gate/expander, soft clip and transient shaper. The compressor, EQ and limiter hooks were inside one already.
+- **`restore_verdict`.** `offer` also asserts, for a bank whose `lane_swap()` is `Some`, that `LaneSwap::validate_lane_payload` returns what `validate_track_state_payload` does. Test value: red when a swapping bank overrides `validate_track_state_payload` beside a capability whose verdict differs. The type pairing leaves that drift open, and nothing else reads the capability's verdict when the trait method is overridden.
+  - Mutation, compressor: add a correct trait override and make `validate_lane_payload` return `Ok(())`. Result: red, `track 0: the capability's verdict is the bank's`, `left: Ok(())`. Every other assertion and the swap read the correct trait override, so nothing else turns red.
+- **The de-esser and dynamic EQ under `conformance::swap_probe`.** New `crates/de-esser/src/swap_tests.rs` and `crates/dynamic-eq/src/swap_tests.rs`, on the gate/expander probe's model:
+  - random values on each parameter's lattice (so an enumeration or a switch takes a choice) and random link modes per lane;
+  - every parameter automated;
+  - `ramp_in_flight` reads each ramp's `remaining` after the signal words and the committed values (`snapshot_lane`'s order);
+  - both bank widths, four seeds.
+  Test value: red when the effect's `LaneSwap` exchange leaves a prepared default or the link mode behind, or its verdict refuses its own lane's payload. Neither effect had an end-to-end swap test before, only `glide_tests`' single direct exchange of a link word, a different claim that stays. Mutation, each crate: the exchange returns `true` and moves nothing. Result: red, the de-esser `strip 1's payload differs from its twin's`, the dynamic EQ `left frame 0 differs from its twin`.
+- **M5** is recorded as equivalent (above), and the follow-up line is dropped.
+- **Successor (out of scope here).** `swap_bank_lanes` checks the step-1 rotation, both undo rotations and the step-3 payload revert only with `debug_assert!` (`live.rs` ~3489, ~3497, ~3509, ~3518). So in a release build, an exchange that refuses partway leaves the defaults half-rotated and still returns `Ok`. Filed as #SUCCESSOR.
+- **Attempt-2 gates.** GATES2
