@@ -616,31 +616,69 @@ fn a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline() {
     }
 }
 
+/// [`with_added_track`] behind a true-peak limiter of `lookahead_ms` on `eq0`, every track sent
+/// into the submix `bus`, which declares its own input delay and forwards to the output.
+fn bus_session(lookahead_ms: f32) -> SessionModel {
+    let mut model = with_limiter(with_added_track(one_track()), "eq0", lookahead_ms);
+    let mut onward = model.routes[0].clone();
+    let RouteSource::Track { tap, .. } = onward.source else {
+        panic!("a track route");
+    };
+    onward.id = id("bus-main");
+    onward.source = RouteSource::Submix {
+        submix_id: id("bus"),
+        tap,
+    };
+    onward.follows_mute = false;
+    for route in &mut model.routes {
+        route.destination = session::RouteDestination::SubmixInput {
+            submix_id: id("bus"),
+        };
+    }
+    model.routes.push(onward);
+    let mut bus = session::Submix::unity(id("bus"), &model.console);
+    bus.builtins.left.delay_samples = 41;
+    bus.builtins.right.delay_samples = 29;
+    model.submixes.push(bus);
+    model
+}
+
 /// #2375: a successor at another rate has no join program, so it carries nothing and is charged
-/// for nothing, even where a compensation line would join. Every track's fader and pan and the
-/// limiter's lookahead differ in a prepared value and the source changes length, so no owner the
-/// program counts carries; the edit keeps `eq0`'s limiter line, which the line join takes.
+/// for nothing, though the line joins, which run without the program's condition, would take
+/// `eq0`'s limiter compensation line and `bus`'s alignment line. The edit moves to 44.1 kHz,
+/// changes every strip's fader and pan or matrix and the limiter's lookahead in a prepared value,
+/// and changes the source's length, so no owner the program counts carries. (A send or a route
+/// fade carries only between plans with live route lanes, where every shared strip's join may
+/// carry and so builds a program: this entry binds none.)
 ///
-/// Test value: red if preparation installs a program for the line (the carry counts or retained
-/// bytes move) or charges the line it does not install (the admission's retained-bytes
-/// assertion trips). Neither could ever run: the plan's envelope differs, so the hand-over is
-/// refused before it starts.
+/// Test value: red if preparation installs a program for either line (the carry counts or
+/// retained bytes move), or charges a line it does not install (preparation's retained-bytes
+/// `debug_assert_eq` trips: that half holds in a debug build only, as the test jobs run). Neither
+/// carry could ever run: the plan's envelope differs, so the hand-over is refused before it
+/// starts.
 #[test]
 fn a_successor_at_another_rate_carries_and_charges_nothing() {
-    let predecessor_model = with_limiter(with_added_track(one_track()), "eq0", 4.0);
-    let a = Session::compile(predecessor_model);
+    let a = Session::compile(bus_session(4.0));
     let mut predecessor = a.prepare(Backend::current());
-    let mut model = with_limiter(with_added_track(one_track()), "eq0", 6.0);
+    let mut model = bus_session(6.0);
     model.sample_rate_hz = 44_100;
     for source in &mut model.sources {
         source.frames += 1;
     }
+    let pan = |matrix: &mut session::MatrixOrPan| match matrix {
+        session::MatrixOrPan::Pan { left, .. } | session::MatrixOrPan::Matrix { ll: left, .. } => {
+            *left = 0.5;
+        }
+    };
     for track in &mut model.tracks {
         track.fader.left_db += 1.0;
         track.fader.right_db += 1.0;
-        if let session::MatrixOrPan::Pan { left, .. } = &mut track.matrix_or_pan {
-            *left = 0.5;
-        }
+        pan(&mut track.matrix_or_pan);
+    }
+    for submix in &mut model.submixes {
+        submix.fader.left_db += 1.0;
+        submix.fader.right_db += 1.0;
+        pan(&mut submix.matrix_or_pan);
     }
     let b = Session::compile(model);
     let mut successor = successor_of(&b, &a, &predecessor.inventory, false);

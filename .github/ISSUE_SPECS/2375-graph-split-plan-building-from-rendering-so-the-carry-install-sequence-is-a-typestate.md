@@ -238,19 +238,29 @@ Mutations, each run against `--test timeline`:
 The existing test `a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline` keeps its own
 claim (a fresh timeline producer).
 
-**2. Error precedence, recorded accurately.** Three orderings moved, and only internal faults or
-hand-built preparations reach any of them:
+**2. Error precedence, recorded accurately** (corrected in the attempt-2 fold). These orderings
+moved:
 - `carry_builder`'s own validation (`NotAGraphPlan`, `CarryProgramInstalled`, `NoSourceSet`,
   `SourceIndexOutOfRange`, `SourceNotVacant`, `DuplicateSourceIndex`) ran at base right after
   bind (`prepare.rs` 4905). It now runs after every inventory read and join, the resource
   admissions (`host.graph.resource.limit`, `host.resource.limit`, `host.resource.arithmetic`) and
   `host.fade.install`.
-- The input section's validation moved from before the resource admission to after it.
+- The input section's validation ran at base before the resource admission and before
+  `host.fade.install`. It now runs after both.
+- The strip section's validation (`install_builtin_strip_carry`) ran at base before
+  `host.fade.install`. It now runs after it.
 - The prime's quantum arithmetic (`host.resource.arithmetic`) now runs before every section's
   install, not after the route section.
 
-The join only builds programs these validations accept, so no session reaches a different code
-than at base.
+The join only builds programs and sections these validations accept, so no host session reaches
+a different code than at base. Outcomes changed only for hand-prepared successors with no join
+program, that is, successors at another rate or quantum:
+- One carrying only compensation lines, strip delays or sends got a source-less program and those
+  sections at base. It now gets no program and no carry.
+- One carrying only a fade pair, or only a prime, was refused `host.carry.install` at base. It now
+  prepares, with no carry.
+
+In both cases the base carry could never have run, because the envelope differs.
 
 **3. The builder owns the plan.** `carry_builder(plan: PreparedRenderPlan, program) ->
 Result<GraphCarryBuilder, GraphCarryRefusal>`, and `seal(self) -> PreparedRenderPlan` is
@@ -294,13 +304,18 @@ with its plain twin.
 (whose doc now covers sources, the timeline and a prime's fills). `NoPrimeLead` means only a
 zero lead.
 
-**5. Successor filed by the coordinator.** "Graph: a bound plan is a builder until it is sealed,
-so bind reads, takes and the fade table are typed too": the spec body is at the coordinator's
-scratchpad `succ/l.md`. The bound plan returned by bind is not a `PreparedRenderPlan`. The three
-one-shot takes are handed out once by value. The bind reads and the fade table become its
-methods, and the fade table install gives a token that the builder's `fade_arms` takes. Only
-`seal` yields a `PreparedRenderPlan`, which retires `CarryProgramInstalled` and
-`FadeArmsInstalled`.
+**5. Successor, filed by the coordinator.** "Graph: a bound plan is a builder until it is
+sealed, so bind attaches, takes and the fade table are typed too". Its spec body is at the
+coordinator's scratchpad `succ/l.md`.
+- The bound plan returned by bind (`PreparedBuiltinsGraphArtifact::into_bound` /
+  `into_bound_with_source_set` in `crates/builtins-compiler`) is not a `PreparedRenderPlan`.
+- The three one-shot takes are handed out once, by value.
+- The bind reads, the bind attach (`attach_jump_lengths`) and the fade table become its methods.
+  The fade table install gives a token that the builder's `fade_arms` takes, which replaces
+  today's run-time `StripLaneOutOfRange` ordering check.
+- Only `seal` yields a `PreparedRenderPlan`, which retires `CarryProgramInstalled` and
+  `FadeArmsInstalled`.
+- Its scope includes the audit and console-workload bind callers.
 
 **No bit moved (attempt 2).** The same scratch instrumentation as attempt 1, on the attempt-2 tree: the 360 rows (66 869
 blocks, the two producer-thread tests excluded as before) are identical to the base listing,
@@ -320,3 +335,74 @@ predecessor. `graph_fixture --check` passes.
   `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` (`host-core/control-provider`): ok.
 - `cargo fmt --check`, `scripts/check-workspace-policy.sh`, `graph_fixture --check`: ok.
   `./target/release/realtime_policy`: ok (298 marked regions in 48 files).
+
+**Verdict (attempt 2): PASS** (Sol, `f0048d467`), with five minors, folded below.
+
+### Attempt 2 fold (Terra), same branch, `origin/main` @ the #2377 merge merged in
+
+1. **The fresh-timeline rule clears `route_carry.retargets` too**, so no carried-send record is
+   stamped into a successor that carries no send.
+2. **The test reaches the clears that a fixture can reach.**
+   `a_successor_at_another_rate_carries_and_charges_nothing` now runs on `bus_session`:
+   - every track (`eq0` behind its limiter, and `added`) sends into a submix `bus`, which
+     declares a 41/29-sample input delay;
+   - the edit changes every strip's fader and pan or matrix, including `bus`'s.
+
+   (A first version made the predecessor itself a successor that adds a send, to leave a route
+   fade pending. Its entry binds no live route lanes, so no route fade armed, and that version
+   was dropped.)
+
+   Mutations against `--test timeline`, each deleting one clear:
+
+| Clear deleted | Result |
+|---|---|
+| `delay_carry.clear()` | red: retained-bytes assertion, `left: 0, right: 8` |
+| `strip_delay_carry.moves.clear()` | red: the same assertion, `left: 0, right: 12` (bus's alignment line) |
+| rule off plus attempt 1's late program | red: `[0, 0, 0, 0, 1]` vs `[0; 5]` |
+| `route_carry.moves`, `route_carry.retargets` | green: unreachable, see below |
+| route-fade and copy `carried` | green: unreachable, see below |
+| `strip_delay_carry.fills`, the `!fresh_timeline` sidechain gate | green: unreachable, see below |
+
+   Why the green rows are unreachable from a fixture:
+   - **Sends and route fades.** A send carries only between plans that bind live route lanes, and
+     a route fade arms only on a plan that attaches live lanes. This fixture's entry binds none
+     (`live_routes` is empty in both plans). Under live controls, every strip present in both
+     models joins with a fader and a matrix family that is `Same` or `Live`, so it may carry and
+     the join builds a program. A family is `Prepared` only for a value outside its setter's
+     domain, which compile refuses, or for a strip whose kind changed. So a fresh-timeline
+     successor with a carried send or route fade needs every shared strip to change kind, and
+     that is not a fixture worth building.
+   - **Fills and the sidechain gate.** They need a nonzero warm lead, and a `WarmLead` comes only
+     from `warm_lead`.
+   - **Why the clears stay.** Each is one line. Each keeps the rule "no join program, no carry,
+     no charge" true by construction, and preparation's no-section assertion and the
+     retained-bytes assertion would catch a stray section.
+3. **Error precedence corrected** (attempt 2, item 2, above): the input and strip sections now
+   validate after `host.fade.install`. The outcome changes against base are stated plainly
+   there.
+4. **The test's charge half is a debug-build claim.** Its red comes from preparation's internal
+   `debug_assert_eq` on the retained carry bytes, and from the no-section `debug_assert`. No
+   report field carries the admitted line, send or prime charge, so the test's doc says that this
+   half holds in a debug build only, as the CI test jobs run. The install half (`[0; 5]` counts,
+   zero retained bytes) holds in any build.
+5. **Successor spec corrected:**
+   - bind is `PreparedBuiltinsGraphArtifact::into_bound` / `into_bound_with_source_set` in
+     `crates/builtins-compiler`, returning `PreparedBuiltinsGraphBound { pub plan }`, and that
+     crate is in scope;
+   - the audit and console-workload bind callers are in scope and gates;
+   - the stale "builder's borrow" wording is gone: the fade table and its pairs are ordered only by
+     the run-time `StripLaneOutOfRange` check, and `install_fade_arms` still works on a sealed
+     plan;
+   - `attach_jump_lengths` is called a bind attach.
+
+**Gates (fold head).**
+- `cargo test --locked -p host-core --all-targets` with the workspace test-support features and
+  `host-core/control-provider`: 619 passed, 8 ignored.
+- `-p graph --all-targets --features graph/test-support`: 150 passed. `-p graph-compiler`: 194
+  passed, 2 ignored. `-p source`: 84 passed. Doctests of graph and host-core: 11 passed.
+- Clippy `-D warnings` on graph, graph-compiler, host-core, source and rack, with and without
+  the features: ok. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` on the same crates: ok.
+- `cargo fmt --check`, `scripts/check-workspace-policy.sh` and `graph_fixture --check`: ok.
+- No bit moved: not rerun. The fold changes only the fresh-timeline branch of preparation (one
+  more cleared table, on plans that cannot adopt) and a test, so no render path or adoptable
+  plan changed.

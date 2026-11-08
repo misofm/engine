@@ -5417,6 +5417,7 @@ fn prepare_or_project(
         strip_delay_carry.moves.clear();
         strip_delay_carry.fills.clear();
         route_carry.moves.clear();
+        route_carry.retargets.clear();
         for fade in &mut route_fades {
             fade.carried = None;
         }
