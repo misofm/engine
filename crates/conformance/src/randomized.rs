@@ -2211,14 +2211,21 @@ fn own_snapshot_restores_after_hostile(
     );
 }
 
-/// Frames a lane renders beside its restored twin after its hostile block: past the longest
-/// launch delay a hostile word can wait in before it reaches the output (the limiter's `B`, 966
-/// frames at 96 kHz), so its D7 recovery is met on both.
+/// The fewest frames a lane renders beside its restored twin after its hostile block.
 const POST_HOSTILE_FRAMES: usize = 2_048;
+
+/// Frames a lane renders beside its restored twin after its hostile block: at least
+/// [`POST_HOSTILE_FRAMES`], and twice the effect's prepared latency, so a hostile word held in a
+/// lookahead line (the limiter's `B`, its latency) reaches the output, and its D7 recovery is met
+/// on both, whatever the effect's latency at this quality and rate.
+fn post_hostile_frames(shape: Shape) -> usize {
+    let latency = usize::try_from(shape.quality.latency.0).unwrap_or(usize::MAX);
+    POST_HOSTILE_FRAMES.max(latency.saturating_mul(2))
+}
 
 /// Restored against continued past the hostile block (issue #2377 T7, attempt 2): a fresh
 /// instance takes `oracle`'s snapshot of the state the hostile words left, and both render the
-/// same legal blocks from `first` for [`POST_HOSTILE_FRAMES`], which must match bit for bit, with
+/// same legal blocks from `first` for [`post_hostile_frames`], which must match bit for bit, with
 /// the same reports, inside the D7 bound. Sound because both are one scalar code path; a bank and
 /// its scalar instances may part on the hostile block by design, so the bank is not continued.
 #[allow(clippy::too_many_arguments)]
@@ -2241,7 +2248,8 @@ fn continue_past_hostile(
         PreparedSidechainPort::Connected { .. }
     );
     let mut rendered = 0;
-    while rendered < POST_HOSTILE_FRAMES {
+    let total = post_hostile_frames(shape);
+    while rendered < total {
         let frames = draw.frames(shape.quantum as usize).max(1);
         let (profile, other, side_profile) = (
             legal_profile(draw),
