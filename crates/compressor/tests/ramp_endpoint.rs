@@ -1,6 +1,6 @@
 //! Issue #1409 gate 2: every ramped word of this effect stays inside its endpoints.
 //!
-//! The render site: sites 4 (`RampVec::advance_where`, the main detector's bank path) and 2
+//! The render site: sites 4 (`RampLanes::advance_where`, the main detector's bank path) and 2
 //! (`LinearRamp::next_value` and `advance_block`, through the connected sidechain's
 //! `Channel::advance_ramps`); every parameter word and the attack and release coefficient words.
 //! Each word has one in-domain move, found by #1409's scan, whose word the unclamped D11 law
