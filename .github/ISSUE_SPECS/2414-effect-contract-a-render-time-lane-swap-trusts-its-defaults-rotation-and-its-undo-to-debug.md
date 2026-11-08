@@ -62,4 +62,78 @@ So a release build turns a bank defect into a silent misplacement that the swap 
   - the call-graph gate (`scripts/check-web-audioworklet.sh`) on a rebuilt artifact.
 
 ## Evidence / attempt record
-(empty)
+### Attempt 1 (Terra), branch `codex/issue-2414-lane-swap-checked-undo`, base `3bf66dd46`
+
+**Claims re-verified at base `3bf66dd46`.** Every claim holds; none is dropped. `swap_bank_lanes` (`crates/effect-contract/src/live.rs` 3401-3522 at base) folds the three exchanges with a non-short-circuiting `taken &=` (3334, 3339) and checks the four results only with `debug_assert!` (3489, 3497, 3509, 3518). `rack`'s two stage `swap_lanes` (`crates/rack/src/lib.rs` 1435-1480, 2480-2600) map any `Err` to `false`; `BankChain::swap_lanes` (5198-5270) maps a `false` after the check to `Defect`, after a `debug_assert!(false, ..)` that made the defect path untestable in debug; the graph's `Runtime::swap_bank_lanes` (`crates/graph/src/runtime.rs` 11491-11590) trades back the rows already traded and returns the refusal, which the packer takes as a refused trade.
+
+**Red on base, both builds.** A one-time probe over the ten spec cases (one bank, lanes 1 and 2, a scratch prefilled with `0xA5` so the spare's prior bytes `A` are recognisable; `X`, `Y` the lanes' defaults, `P1`, `P2` their payloads), against base's `swap_bank_lanes` with the new test bank (`Words::refuse_exchange_call`, `refuse_restore_again`):
+
+| Case | Debug build | Release build |
+| --- | --- | --- |
+| step-1 exchange 1 | panic "a checked lane's defaults exchange" | `Ok(())`, defaults `(Y, A)`, payloads `(P2, P1)` |
+| step-1 exchange 2 | panic, same | `Ok(())`, defaults `(X, Y)`, payloads `(P2, P1)` |
+| step-1 exchange 3 | panic, same | `Ok(())`, defaults `(A, X)`, payloads `(P2, P1)` |
+| undo exchange 1 after step 2 | panic, same | `Err(Restore)`, defaults `(X, A)`, payloads `(P1, P2)` |
+| undo exchange 2 after step 2 | panic, same | `Err(Restore)`, defaults `(Y, X)` |
+| undo exchange 3 after step 2 | panic, same | `Err(Restore)`, defaults `(A, Y)` |
+| undo exchange 1 after step 3 | panic, same | `Err(Restore)`, defaults `(X, A)`, payloads `(P1, P2)` (revert ran) |
+| undo exchange 2 after step 3 | panic, same | `Err(Restore)`, defaults `(Y, X)` |
+| undo exchange 3 after step 3 | panic, same | `Err(Restore)`, defaults `(A, Y)` |
+| step-3 revert refuses | panic "a restore its own validation passed" | `Err(Restore)`, defaults `(X, Y)`, payloads `(P2, P2)` |
+
+Every row is the spec's prediction. The same probe on the branch: rows 1-3 `Err(Exchange)` with `(X, Y)`, `(P1, P2)`; rows 4-6 `Err(Stranded)` with `(Y, X)`, `(P1, P2)`; rows 7-9 `Err(Stranded)` with `(Y, X)`, `(P2, P2)`; row 10 `Err(Stranded)` with `(X, Y)`, `(P2, P2)`; identical in debug and release.
+
+**Fix.**
+- `effect-contract`: `rotate_lane_defaults` checks each exchange and returns a `Rotation` (`Rotated`, `Unwound`, `Stranded`). On a refusal it undoes the exchanges that took, last first; an exchange through the same spare is its own inverse on the lane, which gets back the bytes the bank wrote itself, exactly. Two new `LaneSwapRefusal` variants:
+  - `Exchange`: a step-1 exchange refused and was unwound, both lanes as they were.
+  - `Stranded`: the defect outcome. An unwind exchange, an undo rotation after a refused step 2 or 3, or the step-3 payload revert refused. The swap returns at once with no further write.
+
+  The four `debug_assert!`s are now checked branches; none remains. Every other variant still means "both lanes unchanged", and the enum doc says so. Cost: at most five exchanges per rotation, eight passes over one lane's defaults on a refusal; no allocation, lock or syscall, and all of it inside the existing `REALTIME_POLICY` region.
+- `rack` (the recovery): both stages' `swap_lanes` go through one helper, `swap_stage_bank_lanes`. On `Stranded` the helper resets both lanes with `reset_lane(lane, FullToDefaults)`, each in its own bank. This is the D7 lane recovery that every launch effect already takes for a non-finite lane. The stage then:
+  - refreshes the per-lane symmetry cache, with the `RESTORED` term withheld (`EffectBankStage::witness`; `LiveControlEffectBankStage::designed`/`unrestored`);
+  - counts the event in a new saturating `lane_swap_stranded()` on each stage;
+  - returns `false`, so `BankChain::swap_lanes` swaps back the slots it already swapped and returns `ChainLaneSwapRefusal::Defect`.
+
+  `Defect`'s docs now say it may have reset the two lanes of the refusing slot. The chain's two `debug_assert!(false, "a checked slot swaps its lanes")` are removed: the defect is now a recovered and counted outcome, and its test runs in debug.
+
+  *Why reset, not quarantine or carry re-seed.* A stranded swap cannot say whose defaults each lane holds: the other strip's, or the spare's bytes. A reset makes each lane's whole state a function of its defaults again, so the state agrees with them for the next reset, D7 recovery or restore validation, and the bank's rest claim is true. Quarantine would need a new per-lane mechanism that `EffectBankStage` lacks (its bypass is per bank). A carry re-seed needs a plan rebuild, which render cannot start. The defect stays visible through the counter, and a plan rebuild prepares fresh defaults.
+- `graph`: docs only (`BankLaneMoveRefusal`, `Runtime::swap_bank_lanes`). The existing mapping, trading back the rows already traded and refusing the trade, is correct now that the rack recovers the slot: both strips stay where they were and the map is untouched.
+
+**Tests.**
+- `effect-contract` `lane_swap_tests::a_refused_exchange_or_undo_is_never_reported_as_unmoved`: the ten cases plus a two-bank step-1 case (the second bank's exchange refuses, and the unwind must reach the first bank). It asserts each outcome and the exact lanes, in debug and release. Test value: a swap that folds its exchanges unchecked (`Ok` with a half-rotated pair), skips or misorders the unwind, unwinds in the wrong bank, or reports a refused undo or revert as `Restore`.
+- `rack` `lane_swap::a_stranded_slot_resets_its_two_lanes_and_the_chain_reports_a_defect`: an effect slot in a cross-chain swap and the live slot in an in-chain swap. Each bank's exchange refuses from its second call on. It asserts `Defect`, the stage's count of 1, a reset of exactly the two stranded lanes in their own banks, and the slots before the stranded one swapped back. Test value: a stage that takes a stranded swap for a clean refusal (no reset, no count), resets the peer's lane in the wrong bank, or a chain that does not swap back.
+- `StripBank` gains a `Fault`: an armable exchange refusal and per-lane `FullToDefaults` reset counters. Its other behaviour is unchanged, and the existing `every_lane_swap_refusal_leaves_both_lanes_unchanged` is kept: it covers the other refusals.
+
+**Mutation evidence** (each reverted, focused test red, restored):
+- `effect-contract`, release:
+  - step-1 check back to `debug_assert!`: `Ok(())` vs `Err(Exchange)`;
+  - step-2 undo check back to `debug_assert!`: `Err(Restore)` vs `Err(Stranded)`;
+  - step-3 undo check back to `debug_assert!`: `Err(Restore)` vs `Err(Stranded)`;
+  - revert check back to `debug_assert!`: `Err(Restore)` vs `Err(Stranded)`;
+  - unwind skipped: lane 1 left holding `A`;
+  - step 1 sent to the first bank: both tests red.
+- `rack`, debug:
+  - no reset: the reset counts `[0, ..]` vs `[0, 1, ..]`;
+  - the peer reset in the calling bank: `[0, 1, 1, ..]`;
+  - the effect stage's count dropped, and the live stage's count dropped: `0` vs `1` each;
+  - the chain's swap-back skipped: slot 0's defaults not swapped back;
+  - `debug_assert!(false)` restored: the debug run panics.
+
+**No bit moved.** The #2392 instrumentation: an FNV-1a digest over the moved plan's host PCM words for every block and both plans' observed words, in `graph-compiler`'s `silent_bank_skip::a_moved_strip_renders_the_bits_of_an_unmoved_one` (gate 3, 13 forced render-time lane swaps across a plan swap, the limiter on the payload path), `--release`. Base `3bf66dd46`: `inserts=false 7d31fea2b6652670`, `inserts=true 8e4dfb8b8dc1d599` (the values #2392 recorded); branch identical. PR evidence only; not committed.
+
+**Gates.** Debug and release runs of `effect-contract`'s lane-swap tests, plus the crates below, one at a time with `-j 4`, each in debug unless marked:
+- `cargo test --locked` passed in every crate, with none failing:
+  - `effect-contract`: debug, and `--release --lib lane_swap` (2);
+  - `rack`;
+  - `graph`, `graph-compiler` and `host-core`, for the struct-size change (91 result lines, all ok).
+- `cargo clippy --locked -p effect-contract -p rack -p graph --all-targets -- -D warnings`: clean.
+- `cargo fmt --all --check`: clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p effect-contract -p rack -p graph`: clean.
+- `scripts/check-workspace-policy.sh`: ok.
+- `realtime_policy`: ok (312 marked regions in 48 files).
+- `scripts/check-web-audioworklet.sh --without-metadata-regeneration`, on a rebuilt artifact and named twin with wabt 1.0.34: passed ("web AudioWorklet static/object checks passed"; `miso_engine_web_v1_render` closure=38, allocation-free, atomic_waits=0).
+
+**Follow-ups (not filed).**
+- The chain's `debug_assert!(undone, "a swapped slot swaps back")` (rack) and the graph's `debug_assert!(undone.is_ok(), "a traded row trades back")` and `debug_assert!(false, "a checked row trades its lanes")` are the same pattern one level up: an undo whose result is only asserted. A slot that refuses its swap-back leaves that slot traded under a `Defect` that says the others were swapped back.
+- The packer retries a strip whose trade hit `Defect` at the next episode, so a persistently broken bank would be reset at every episode. Pinning both strips on `Chain(Defect)` (the #2135 pin) would quarantine them for the plan's life; it is a graph change outside this issue's mapping.
+- `lane_swap_stranded` is read per stage only; no host-facing total such as `carry_refusal_count` sums it yet.
