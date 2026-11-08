@@ -83,13 +83,19 @@
 // fails -- the browser twin of the native x86-64-v3 boot attestation. A browser below the floor is
 // refused, never silently degraded.
 //
-// # Trap means processor death
+// # A trap ends the instance, never the page
 //
 // `wasm32-unknown-unknown` is `panic = abort`. A Rust panic inside the worklet aborts the Wasm
-// instance; there is nothing to catch inside Rust and no `catch_unwind` exists on this path.
-// `process()` converts a throw from the render export into sticky `RESULT_INTERNAL` (255) and
-// positive-zero output, and the user agent may also fire `processorerror`. Any other export that
-// throws settles the pending request as `miso.error.v1` with result 255.
+// instance; there is nothing to catch inside Rust and no `catch_unwind` exists on this path. The
+// worklet contains the throw wherever it calls an export, and records the instance as trapped:
+// sticky `RESULT_INTERNAL` (255), positive-zero output, no export called again, and a `dispose()`
+// answered without one.
+// - In `process()` (the render export, the meter frame's exports, and the SDK PCM feed's drain),
+//   which posts nothing: the page hears of it as `miso.error.v1` with result 255 and request ID 0,
+//   at the next service tick in `single` mode and at the control Worker's next render check in
+//   `worker` mode. The pending requests fail with it, and a later request is answered with it.
+// - In a message handler: the request in flight is settled as `miso.error.v1` with result 255, or
+//   the failure is posted as request ID 0 when no request is in flight.
 //
 // # A render failure never frees
 //

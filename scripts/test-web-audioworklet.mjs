@@ -5219,9 +5219,18 @@ async function testProcessor() {
       // answered 255 (final) without its export. Red if the throw escapes `process()` (the user
       // agent's `processorerror`, with the trap unrecorded: the dispose then calls the export the
       // trap left refusing, whose 1 the host retries for ever), or if the block's output stands.
+      // The trapped block is the telemetry window's last (the 128th), and it is not folded: red if
+      // a failed instance posts a telemetry frame, which a render trap never does. The next service
+      // tick, with no request pending, posts the failure to the page as request 0, once: red if the
+      // tick reports nothing (the page then hears of it only at its next request).
       const { processor, fake } = makeProcessor();
       processor.port.onmessage({ data: { tag: "miso.meters.v1", requestId: 1, enabled: true } });
       assert.equal(processor.port.posts.at(-1).message.result, 0, "the meter lease is held");
+      processor.port.onmessage({ data: { tag: "miso.telemetry.v1", requestId: 2, enabled: true } });
+      assert.equal(processor.port.posts.at(-1).message.result, 0, "the telemetry lease is held");
+      for (let block = 1; block < 128; block += 1) {
+        processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      }
       const after = [];
       fake.exports.miso_engine_web_v1_meter_poll = () => {
         for (const [name, value] of Object.entries(fake.exports)) {
@@ -5235,17 +5244,26 @@ async function testProcessor() {
       };
       const left = new Float32Array(64);
       const right = new Float32Array(64);
+      const postsBefore = processor.port.posts.length;
       let kept;
       assert.doesNotThrow(() => { kept = processor.process([], [[left, right]]); },
         "a meter_poll trap stays inside process()");
       assert.equal(kept, true, "a meter_poll trap keeps the node alive");
       assert(left.every((sample) => Object.is(sample, 0))
         && right.every((sample) => Object.is(sample, 0)), "a meter_poll trap silences its block");
+      assert.equal(processor.port.posts.length, postsBefore,
+        "a meter_poll trap: the trapped block posts no telemetry frame");
       assert.equal(processor.stickyResult, 255, "a meter_poll trap is sticky 255");
       processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
-      processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 2 } });
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(processor.port.posts.slice(postsBefore).map(({ message }) => message),
+        [{ tag: "miso.error.v1", requestId: 0, result: 255 }],
+        "a meter_poll trap is posted to the page at the next service tick");
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(processor.port.posts.length, postsBefore + 1, "and posted once");
+      processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 3 } });
       assert.deepEqual(processor.port.posts.at(-1).message,
-        { tag: "miso.ack.v1", requestId: 2, result: 255 }, "a meter_poll trap: the dispose is final");
+        { tag: "miso.ack.v1", requestId: 3, result: 255 }, "a meter_poll trap: the dispose is final");
       assert.deepEqual(after, [], "a meter_poll trap: no export runs after it");
       assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false,
         "a meter_poll trap: the instance ends");

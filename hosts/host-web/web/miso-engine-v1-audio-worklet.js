@@ -307,7 +307,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.receive(message);
         // A service tick is no request: an error it finds belongs to none, never to the last
         // request the page already saw answered.
-        requestId = message?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
+        const tick = message?.tag === "miso.service.v1";
+        requestId = tick ? 0 : this.lastRequestId;
+        // Issue #2370: a failure `process()` recorded (it posts nothing) reaches the page at the
+        // next tick, as request 0, as the control Worker's render check posts it in `worker` mode.
+        if (tick) this.reportRenderFailure();
         this.rebindMemoryViews();
         this.serviceControl(requestId);
         this.rebindMemoryViews();
@@ -689,8 +693,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   /// #1332 S8: a render failure is sticky in `process()`, which posts no fatal. On the control
-  /// Worker's render check, a failure the page has not heard of yet is posted to it once, as the
-  /// typed `miso.error.v1` with request ID 0; the page fails sticky with it.
+  /// Worker's render check (`worker` mode) or the page's service tick (`single` mode, #2370), a
+  /// failure the page has not heard of yet is posted to it once, as the typed `miso.error.v1`
+  /// with request ID 0; the page fails sticky with it.
   reportRenderFailure() {
     if (this.phase !== PHASE_FAILED || this.failurePosted) return;
     this.failurePosted = true;

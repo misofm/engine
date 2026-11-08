@@ -10,7 +10,8 @@ Two paths in `process()` meet a trapped Wasm instance without recording it:
 ## Contract
 - Any trap that `process()` observes, whether it is caught or not, sets the one failure record exactly once. That record is the same one #2291's handler containment writes.
 - After that, `process()` outputs silence and calls no export. The dispose settles without calling an export on the trapped instance, the same way #2291's trapped dispose does.
-- A non-trap exception from a feed, such as a malformed ring, keeps today's behaviour: it is counted in `CONTROL_ERRORS` and the render continues. The prelude must be able to tell a `WebAssembly.RuntimeError` apart from other exceptions.
+- A non-trap exception from a feed, such as a malformed ring, keeps today's behaviour: it is counted in `CONTROL_ERRORS` and the render continues. The prelude tells a trap from a fault by where the throw came from: a throw out of an export it calls is a trap, any other is a fault. The type cannot tell them apart, because V8 reports a Wasm stack overflow as a `RangeError`, the same type as an out-of-range copy in the drain's own code. (Amended at the attempt-1 review; the brief first asked for a `WebAssembly.RuntimeError` type test.)
+- In `single` mode, a failure `process()` records (it posts nothing) is posted to the page at the next `miso.service.v1` tick as `miso.error.v1` with request ID 0, once, with no request pending. `worker` mode already has this through the control Worker's render check. (Added at the attempt-1 review: the contained traps no longer fire `processorerror`, which had been their only prompt report.)
 
 ## Non-goals
 - `worker` mode's control handler calling `meter_header_ptr` or `control_allocation_count` on a trapped instance (#2291 already contains that throw; refusing the calls outright is separate hardening).
@@ -33,8 +34,8 @@ Base `9c391cb46`. The red rows are `90e95bb7f`; the fix is the commit after it, 
 **Fix.**
 - Worklet `process()`: `if (this.meterLease) this.postMeterFrame();` is wrapped in a `try`. Its catch does what the render trap does: `fail(RESULT_INTERNAL, true)`, `silence(outputs)`, `return true`. That is the one #2256 failure record, so the dispose (`receiveDispose`) and the release (`releaseRenderHalf`) run no export. The pinned spelling the source policy greps is kept, and the branch only assigns and fills.
 - Prelude: each drain export call (`source_submit` in `drainSharedRing`, `source_seek`/`source_prepare_seek` in `applySharedSeek`) has its own `try`. Its catch throws `EXPORT_TRAP`, a frozen object made once at load. The drain catch in `process()` compares the throw with that object. On a match it calls the engine's `fail(RESULT_INTERNAL, true)` and stops the loop, and the engine's `process()` then renders silence with no export call. Any other throw is counted in `CONTROL_ERRORS`, and the block renders as before. The attach port's `prepare-seek` reaches the same `applySharedSeek`. It already takes any throw for a trap (#2291), so the object changes nothing there.
-- **A deviation from the contract's wording.** The contract says the prelude must tell a `WebAssembly.RuntimeError` apart from other exceptions. The fix tells them apart by where the throw came from, not by its type. A `RuntimeError` comes only out of an export, so every one is a trap. Origin also catches the throws a type test would miss, the reason #2291 gave: V8 reports a Wasm stack overflow as a `RangeError`, the same type as the drain's own out-of-range copy. The test's own-fault row is exactly such a `RangeError`, and it stays counted.
-- After the change, the user agent no longer fires `processorerror` for these traps, because they no longer escape. The page learns of the failure the way it does for a render trap since #2256: in `worker` mode from the control Worker's render check (`reportRenderFailure`), and in `single` mode from the sticky 255 on its next request.
+- **A deviation from the contract's first wording, approved at review and folded into the Contract.** The brief said the prelude must tell a `WebAssembly.RuntimeError` apart from other exceptions. The fix tells them apart by where the throw came from, not by its type. A `RuntimeError` comes only out of an export, so every one is a trap. Origin also catches the throws a type test would miss, the reason #2291 gave: V8 reports a Wasm stack overflow as a `RangeError`, the same type as the drain's own out-of-range copy. The test's own-fault row is exactly such a `RangeError`, and it stays counted.
+- After the change, the user agent no longer fires `processorerror` for these traps, because they no longer escape. Attempt 1 left the `single`-mode page to learn of them only at its next request, as it did for a render trap since #2256. The review fold below adds the prompt report.
 
 **Red on base** (`90e95bb7f` over the base worklet and prelude):
 - `single`, meter poll (`node scripts/test-web-audioworklet.mjs`): `AssertionError [ERR_ASSERTION]: Got unwanted exception: a meter_poll trap stays inside process()` / `Actual message: "synthetic wasm trap from the meter_poll export"`.
@@ -51,7 +52,7 @@ Base `9c391cb46`. The red rows are `90e95bb7f`; the fix is the commit after it, 
 | W1 the `process()` meter-frame catch rethrows | `Got unwanted exception: a meter_poll trap stays inside process()` |
 | W2 the catch records no trap (`fail(.., false)`) | `a meter_poll trap: the dispose is final` |
 | W3 the catch does not silence the block | `a meter_poll trap silences its block` |
-| W4 the catch does not `return` | survives, as an equivalent mutant: it falls through to `recordRenderTime`, which calls no export, and then returns `true`. The `return` is kept so that a trapped block, like a render-trapped one, is not folded into telemetry |
+| W4 the catch does not `return` | survived attempt 1, as a mutant equivalent under the contract. The code falls through to `recordRenderTime`, which calls no export, but that folds a trapped block into the telemetry window and can post a telemetry frame from a failed instance, which the render-trap path never does. Red after the fold (below) |
 | W5 only the `single`-mode path is contained (`worker` mode rethrows) | `Got unwanted exception: worker mode: a meter_header_ptr trap stays inside process()` |
 | P1 the drain catch counts an export's trap | `a source_submit trap: no export after it, on any ring` |
 | P2 the submit's catch rethrows the export's own error | `a source_submit trap: no export after it, on any ring` |
@@ -90,5 +91,38 @@ Each run also passed `native-corpus-digest`, where the browser PCM equals the na
   - red if every drain throw is taken for a trap. No existing test reaches the drain catch, so the counted-fault behaviour had no test.
 - No existing test was made useless.
 
+**Verdict on attempt 1 (Sol): PASS, minors only.** The origin-based classification is approved. Four minors to fold:
+1. The `.d.ts` "Trap means processor death" text is stale.
+2. The prompt report that `processorerror` gave was lost, and `single` mode should post the unposted failure on its service tick.
+3. W4 should be called "equivalent under the contract", or better, killed with a telemetry case.
+4. The Contract should state the origin rule.
+
+The coordinator files the unguarded `receiveControlPlane` export calls on a trapped instance as a follow-up.
+
+### Attempt-1 review fold (Terra, 2026-11-08)
+**Changes.**
+- **Worklet, `single` mode:** the page port's handler calls the existing `reportRenderFailure()` on a `miso.service.v1` tick, right after `receive`. That is message-handler work, never `process()`. It posts a failure `process()` recorded and nobody posted (`failurePosted` false), once, as `miso.error.v1` with request ID 0. That gives render traps, render refusals and meter faults a prompt report too. Request-carrying messages already answer with the sticky code, and the worklet's doc comment on `reportRenderFailure` names both triggers. `worker` mode is unchanged: the control Worker's render check already does this.
+- **`.d.ts`:** "Trap means processor death" became "A trap ends the instance, never the page", in `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and its mirror `sdk/src/browser/shipped-host.d.ts`. The two stay byte-identical, which `check-sdk-generated.sh` pins. The text says that every export call is contained (render, the meter frame, the SDK drain, the message handlers), that no export runs after a trap and the dispose is answered without one, and how the page hears of it: request 0 at the next service tick (`single`) or the next render check (`worker`), or the in-flight request.
+- **Test, `single` meter-poll row:**
+  - It now holds the telemetry lease and traps on the window's 128th block, then asserts that the trapped block posts no telemetry frame. This kills W4.
+  - It sends a service tick and asserts the one post `{ tag: "miso.error.v1", requestId: 0, result: 255 }`. A second tick posts nothing.
+  - The row is red without the tick report: `AssertionError [ERR_ASSERTION]: a meter_poll trap is posted to the page at the next service tick`. That is mutant W6, and it was also run over the fold's tests before the fix line was added.
+- **Contract:** amended with the origin rule and the tick report (see above).
+
+**Mutations after the fold.** All 12 are red.
+- W1-W3, W5 and P1-P6 are red as in the table above.
+- W4 (no `return`) is red: `a meter_poll trap: the trapped block posts no telemetry frame`.
+- W6 (the tick reports nothing) is red: `a meter_poll trap is posted to the page at the next service tick`.
+
+**Gates after the fold.**
+- `bash scripts/test-web-audioworklet.sh`: exit 0. No existing row changed: no existing row both fails `process()` and sends a tick expecting silence.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- `bash scripts/check-sdk-generated.sh <artifact>`: current, which includes the shipped `.d.ts` mirror pin.
+- `bash scripts/check-sdk-types.sh`: passed. `bash scripts/sdk-package.sh check <artifact>`: passed.
+- SDK evals with the artifact: 716/716.
+- Chromium `single` and `worker` (`--check-matrix --self-test-mutations`): all qualification gates passed. The four render digests match base again.
+- The artifact for these runs is the attempt-1 build with this commit's `miso-engine-v1-audio-worklet.js` and `.d.ts` copied in. The builder only copies those files, and the Wasm module is unchanged.
+- WebKit is still left to CI, for the reason above.
+
 **Follow-ups (not filed).**
-- In `single` mode the page hears of a `process()` failure only at its next request. This is pre-existing for render traps since #2256, and the `processorerror` these two paths used to fire had been their only prompt report.
+- The `single`-mode main-realm host takes a `miso.error.v1` with request ID 0 as a malformed reply (`validRequestId(0)` is false). It fails with `webError(255, oldest pending or 0)` instead of the posted code. For a trap the result is 255 either way. For a non-trap render refusal (for example `RESULT_RENDER_REJECTED`, 8), the page sees 255, not 8. `worker` mode takes the typed code (#1332 S8). Accepting request 0 typed in `single` mode too is a change to the main-realm host, so it is left out of this issue.
