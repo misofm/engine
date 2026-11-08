@@ -69,4 +69,44 @@ Line numbers below are in `hosts/host-web/web/miso-engine-v1-audio-worklet-host.
 
 **Dropped claims.** None.
 
-**Follow-ups (not filed).** A typed error to a stray ID (an ID the host never sent) still fails with 255 and the *oldest pending* ID, while a stray `miso.ack.v1` fails with the stray's own ID (#2279). The two stray paths report different IDs. This is outside this issue's contract.
+**Verdict on attempt 1 (Sol): PASS, with three MINORs.** They are folded on the same branch, after `origin/main` was merged in. That merge brought in #2372, which touches only the stem store, and it applied without conflict.
+
+**The fold.**
+1. **The bound was the shared allocator.** In `worker` mode both peers draw IDs from one allocator, so `<= #lastRequestId` also admitted an ID the posting peer never received, such as a fence posted by the Worker. The host now keeps `#lastSent`, the highest request ID posted on each peer's port. `#request` writes it only after the post succeeds, and the clause is bounded by the posting peer's value.
+   - **Fences are not counted.** In `worker` mode the worklet answers a fence at once and reports nothing to it afterwards: a fault after an answer is request 0's there (`miso-engine-v1-audio-worklet.js`, `receiveWorkerMode`). So an error carrying a fence's ID is a stray from either peer. Counting fences would only admit IDs nobody reports to.
+   - **What a per-peer maximum can and cannot do.** It excludes an ID above the posting peer's highest. It does not exclude a lower ID that was sent only to the other peer, for example the worklet posting a control ID that is lower than a render-port request it was sent. Excluding that would need the set of IDs each peer was sent, which is unbounded state. No real peer posts such an error, so the bound stops at the maximum.
+2. **The trap section of both `.d.ts` copies** now covers a failure found after a reply. It is posted with that reply's request ID (by the worklet in `single` mode, by the Worker in `worker` mode), and the page fails with the error's own code. The two copies are still byte-identical.
+3. **Follow-ups** are recorded below.
+
+**New rows in the fold.** Each kills a fold mutant that no other row catches.
+- **A post that threw.** In `single` mode a control request's post throws, so the request rejects locally and the host stays live. A typed error to that ID still fails with 255. Defect it catches: the ID recorded before the post, so an ID the peer never received passes for an answered one.
+- **Crossed IDs in `worker` mode, three cases, each 255:**
+  - the Worker's error carrying the control reply's fence ID;
+  - the Worker's error carrying a render-port request's ID (`renderAllocationCount`, sent only to the worklet);
+  - the worklet's error carrying the fence ID it answered.
+  
+  Defects they catch: the clause bounded by the shared allocator, a request counted for both peers, or a fence counted. The first case goes red by itself under the shared-allocator mutant: the post-threw row's assertion was relaxed in a probe copy, and the run fails at "the Worker, to the fence".
+
+**Fold mutation.** 19 hand mutants: the 12 above, then 7 for the fold. All 19 are red. The fold's 7:
+- the per-peer bound replaced by the shared allocator;
+- the request post not recorded;
+- the post recorded for the wrong peer;
+- the post recorded for both peers;
+- a fence counted for the worklet;
+- a fence counted for the Worker;
+- the ID recorded before the post.
+
+Before the new rows, three of these were green: "both peers", "fence not counted" (the fence was counted then) and "recorded before the post". The rows above were added for them, and the fence record was removed for the reason in fold item 1.
+
+**Fold gates.**
+- `test-web-audioworklet.sh`: pass.
+- `check-workspace-policy.sh`: ok.
+- `check-sdk-generated.sh`: current, and the `.d.ts` copies are identical.
+- `check-sdk-types.sh`: pass.
+- `check-sdk-headless.sh`: 717 of 717 pass. The artifact was rebuilt from this tree, and its module is still `284cbdeb…`.
+- Chromium `single` and `worker`: all qualification gates passed.
+- WebKit: still left to CI.
+
+**Follow-ups (not filed).**
+- **The two kinds of stray report different IDs.** A typed error to a stray ID fails with 255 and the *oldest pending* ID. A stray `miso.ack.v1` fails with the stray's own ID (#2279). This is outside this issue's contract.
+- **Early frames are not counted.** The constructor replays the Worker's early messages before it applies `early.failed`. So a frame among them is handled before the host knows of a Worker failure, and it is not counted in `discardedFramesAfterFailure`. With no listener subscribed yet, a control event among them is counted in `discardedControlEvents` instead. No listener can exist yet, and boot is a non-goal here.

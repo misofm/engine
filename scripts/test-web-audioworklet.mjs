@@ -2845,6 +2845,58 @@ async function testMainRealm() {
           await errorResult(stray.status(), 255);
           await stray.dispose().catch(() => undefined);
         }
+        // In `worker` mode the two peers share the allocator but each is sent only some IDs, so
+        // the clause is bounded by the highest request ID sent to the peer that posts the error.
+        // Each case is a stray, 255: the Worker's error to the control reply's fence or to a
+        // render-port request, which only the worklet was sent, and the worklet's error to the
+        // fence it answered (no peer reports to a fence afterwards, so a fence is not counted).
+        // Test value: the clause bounded by the shared allocator, a request counted for both
+        // peers, or a fence counted, so an error to an ID its sender never had to report to
+        // passes for a typed failure.
+        // A request whose post threw never reached the peer: an error to its ID is a stray too.
+        // Test value: the ID counted before the post, so it passes for an answered request's.
+        {
+          const unsent = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js", instanceMode: "single",
+          });
+          const port = unsent.node.port;
+          const post = port.postMessage.bind(port);
+          port.postMessage = () => { throw new Error("port closed"); };
+          const refused = await errorResult(unsent.control(new Uint8Array([1])), 255);
+          port.postMessage = post;
+          port.onmessage({ data: { tag: "miso.error.v1", requestId: refused.requestId, result: 3 } });
+          await errorResult(unsent.status(), 255);
+          await unsent.dispose().catch(() => undefined);
+        }
+        const fenceId = () => events.findLast((event) => event[1] === "miso.fence.v1")[2];
+        for (const [label, act, poster] of [
+          ["the Worker, to the fence", async (host) => {
+            await host.control(new Uint8Array([1]));
+            return fenceId();
+          }, "worker"],
+          ["the Worker, to a render-port request", async (host) => {
+            await host.renderAllocationCount();
+            return events.findLast((event) => event[1] === "miso.renderallocations.v1")[2];
+          }, "worker"],
+          ["the worklet, to the fence", async (host) => {
+            await host.control(new Uint8Array([1]));
+            return fenceId();
+          }, "worklet"],
+        ]) {
+          const crossed = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js", instanceMode: "worker",
+          });
+          const worker = workers.at(-1);
+          const requestId = await act(crossed);
+          (poster === "worker" ? worker : crossed.node.port)
+            .onmessage({ data: { tag: "miso.error.v1", requestId, result: 3 } });
+          await errorResult(crossed.control(new Uint8Array([1])), 255).catch((error) => {
+            throw new Error(`${label}: ${error.message}`);
+          });
+          await crossed.dispose().catch(() => undefined);
+        }
 
         // Issue #2279 (WEB-6), the worker-mode row: a render failure posted while the
         // dispose is with the Worker fails the host, and the Worker's own reply still settles the

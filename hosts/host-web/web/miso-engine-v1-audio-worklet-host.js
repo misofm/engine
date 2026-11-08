@@ -536,6 +536,11 @@ class MisoAudioWorkletHost {
   /// Issue #1294a: the listeners of the applied-revision watermark, in subscription order.
   #watermarkListeners = new Set();
   #lastRequestId = 0;
+  /// Issue #2371: per peer, the highest ID of a request (`#request`) posted on that peer's port:
+  /// the allocator is shared, so in `worker` mode each peer sees only some of the IDs. A fence is
+  /// not counted: the worklet answers it at once and reports nothing to it afterwards (a fault
+  /// after an answer is request 0's in `worker` mode), so an error carrying a fence's ID is a stray.
+  #lastSent = { [PEER_WORKER]: 0, [PEER_WORKLET]: 0 };
   /// Issue #2279: the host's lifecycle (see `HOST_LIVE`). Only `#fail`, `dispose()`, `#teardown`
   /// and a single-mode dispose's retryable refusal write it.
   #phase = HOST_LIVE;
@@ -828,10 +833,12 @@ class MisoAudioWorkletHost {
     // Issue #2371: a sticky error the steps after a reply found (the service step, the watermark,
     // the event drain) carries that reply's request ID, which no longer names a pending request.
     // It is typed too, so the host fails with its code; it carries no planes, since the reply took
-    // them back. An ID this host never sent is a stray, below.
+    // them back. The ID must be at most the highest request ID this host sent to the peer that
+    // posts the error (`#lastSent`); a higher one -- sent only to the other peer, or never -- is a
+    // stray, below.
     if (message?.tag === "miso.error.v1" && pending === null
         && (message.requestId === 0
-          || (validRequestId(message.requestId) && message.requestId <= this.#lastRequestId))
+          || (validRequestId(message.requestId) && message.requestId <= this.#lastSent[peer]))
         && hasExactFields(message, ["tag", "requestId", "result"])
         && validResult(message.result) && message.result !== RESULT_OK) {
       this.#fail(Object.freeze(message), null, peer);
@@ -1127,8 +1134,9 @@ class MisoAudioWorkletHost {
       this.#pending.set(requestId, pending);
       this.#reserve(slot);
       try {
-        (RENDER_PORT_TAGS.has(stamped.tag) ? this.#renderPort : this.#port)
-          .postMessage(stamped, transfer);
+        const port = RENDER_PORT_TAGS.has(stamped.tag) ? this.#renderPort : this.#port;
+        port.postMessage(stamped, transfer);
+        this.#lastSent[port === this.#worker ? PEER_WORKER : PEER_WORKLET] = requestId;
       } catch (error) {
         this.#release(pending);
         reject(webError(255, requestId));
