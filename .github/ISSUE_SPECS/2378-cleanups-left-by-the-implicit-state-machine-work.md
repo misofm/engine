@@ -186,20 +186,20 @@ Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
     rest suites' restores and swaps among them) are green.
 
 **Rows not landed: successors and drops** (corrected in the attempt 2 fold, after Sol's verdict).
-- **C2(a), successor #SUCC-C2A.** Pair `lane_default_bytes` with `validate_track_state_payload`
+- **C2(a), successor #2392.** Pair `lane_default_bytes` with `validate_track_state_payload`
   and `exchange_lane_defaults` at the type level (one `LaneSwap` hook). Attempt 1's reason was
   wrong: `swap_bank_lanes` already dispatches through `&mut dyn PreparedNativeEffectBank`, and the
   call-graph closure stops at `executor.render`, so no new pinned `call_indirect` site appears.
   The real cost is a trait change across the eight banking effects, their test banks and the
   callers.
-- **C2(b), successor #SUCC-C2B.** Tie the limiter's `history[k]` bitwise to its main-ring word,
+- **C2(b), successor #2393.** Tie the limiter's `history[k]` bitwise to its main-ring word,
   once the relation is proven across every writer (resets, D7, the collapse disengage copy,
   restores, lookahead moves), so no live lane's own snapshot becomes unrestorable (the #2324
   failure shape).
-- **C7, successor #SUCC-C7.** Fold the whole-path solo's `MonitorWhole(CompiledSession)` clone
+- **C7, successor #2394.** Fold the whole-path solo's `MonitorWhole(CompiledSession)` clone
   (`crates/protocol/src/model.rs:1769`) and the controller's second commit decision, the
   `(monitor_only, session_committed)` match (`controller.rs:3369`), into the token's form.
-- **C15's follow-up, carried in #SUCC-C2A's spec.** With the reset's write gone, the fader's
+- **C15's follow-up, carried in #2392's spec.** With the reset's write gone, the fader's
   `ramp[c].remaining` is pure per-block scratch, rebuilt at the top of every ramping block in
   `process_plane` (`crates/builtins/src/lib.rs:3704-3710`); it should become a local there.
 - **C4, dropped.** `rack`'s `run_with_input`, the one render driver of a bank chain, already
