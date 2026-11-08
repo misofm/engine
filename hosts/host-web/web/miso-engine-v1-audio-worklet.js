@@ -278,6 +278,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.releaseAnswered = false;
     this.memoryWords = null;
     this.meterFramesSkipped = 0;
+    // Issue #2382, `worker` mode: this instance's control allocation count as last read, at boot
+    // and at each status read before a trap; a trapped instance's status reports it. The value is
+    // exact, not stale: after the boot read this instance runs only render-locked exports, so the
+    // count cannot move (the reads at a status are the measurement that it does not).
+    this.controlAllocations = 0;
     // Issue #1294a: the watermark `(revision, first_sample)` pair last posted (or read at boot).
     this.watermarkRevision = -1n;
     this.watermarkSample = -1n;
@@ -532,6 +537,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.metersAttached = init.metersAttached;
     if (this.metersAttached && !this.bindMeterSet()) return RESULT_INTERNAL;
     this.telemetryMessage = this.createTelemetryMessage();
+    this.controlAllocations = this.exports.miso_engine_web_v1_control_allocation_count();
     this.port.postMessage({
       tag: "miso.ready.v1",
       requestId: 0,
@@ -654,7 +660,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   receiveControlPlane(message) {
     if (message?.tag === "miso.meter-view.v1" && exactFields(message, ["tag", "header", "memoryBytes"])
         && u32(message.header) && Number.isSafeInteger(message.memoryBytes)) {
-      if (this.ended()) return;
+      // Issue #2382: a failed instance renders silence and posts no frame, so it needs no view, and
+      // a trapped one may call no export (the header read below).
+      if (this.phase !== PHASE_LIVE) return;
       this.rebindMemoryViews();
       // A set's identity is its four-part key (header, frame, track and submix counts): a freed
       // header address may be reused by a later plan, so a pointer alone names nothing. The cut
@@ -673,12 +681,17 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.syncWorkerMeterViews();
     } else if (message?.tag === "miso.render-status.v1"
         && exactFields(message, ["tag", "requestId"])) {
+      // Issue #2382: a trapped instance is answered from the failure record (`readStatus` takes
+      // its code, and reads memory, never an export) and the count last read before the trap.
+      if (!this.ended() && !this.failureTrapped) {
+        this.controlAllocations = this.exports.miso_engine_web_v1_control_allocation_count();
+      }
       this.controlPort.postMessage({
         tag: "miso.render-status.v1",
         requestId: message.requestId,
         status: this.ended() ? null : {
           ...this.readStatus(),
-          singleModeControlAllocations: this.exports.miso_engine_web_v1_control_allocation_count(),
+          singleModeControlAllocations: this.controlAllocations,
           staleViewQuanta: this.staleViewQuanta,
           meterFramesSkipped: this.meterFramesSkipped,
         },
@@ -1838,6 +1851,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       if (this.meterLease) this.postMeterFrame();
     } catch (_) {
       this.fail(RESULT_INTERNAL, true);
+    }
+    // Issue #2382: the meter frame can also fail the instance without a throw (a header replaced
+    // with no set cut for its successor). Either way the block fails as a render failure does: it
+    // is silenced and not folded into the telemetry window.
+    if (this.phase !== PHASE_LIVE) {
       this.silence(outputs);
       return true;
     }
