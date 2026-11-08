@@ -240,7 +240,7 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
     let mut predecessor = bound(Some(vec![0.75; 64].into_boxed_slice()));
     let identity = plan_identity(&mut predecessor).expect("graph plan");
     let mut successor = bound(None);
-    install_carry_program(
+    carry_builder(
         &mut successor,
         GraphCarryProgram {
             predecessor: identity,
@@ -248,7 +248,8 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
             timeline: false,
         },
     )
-    .expect("install");
+    .expect("install")
+    .seal();
     let (mut publisher, mut owner, _retirer) = plan_exchange(
         predecessor,
         PlanExchangeConfig {

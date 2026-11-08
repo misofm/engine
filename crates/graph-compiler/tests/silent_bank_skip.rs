@@ -1240,15 +1240,6 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
     let all_strips = tracks + model.submixes.len();
     let mut before = bind_with(model, schedules, true, setup);
     let mut after = bind_with(model, schedules, true, setup);
-    graph::install_carry_program(
-        &mut after.plan,
-        graph::GraphCarryProgram {
-            predecessor: graph::plan_identity(&mut before.plan).expect("a graph plan"),
-            sources: Box::default(),
-            timeline: false,
-        },
-    )
-    .expect("carry program");
     let inputs: BTreeMap<_, _> = graph::builtin_input_lanes(&mut before.plan)
         .expect("a graph plan")
         .into_iter()
@@ -1262,7 +1253,6 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
         })
         .collect();
     assert_eq!(input_moves.len(), all_strips, "every input section carries");
-    graph::install_builtin_input_carry(&mut after.plan, input_moves).expect("input carry");
     let strips: BTreeMap<_, _> = graph::builtin_strip_lanes(&mut before.plan)
         .expect("a graph plan")
         .into_iter()
@@ -1283,7 +1273,6 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
         2 * all_strips,
         "every fader and matrix carries"
     );
-    graph::install_builtin_strip_carry(&mut after.plan, strip_moves).expect("strip carry");
     let effects: BTreeMap<_, _> = graph::bank_effect_lanes(&mut before.plan)
         .expect("a graph plan")
         .into_iter()
@@ -1302,7 +1291,19 @@ fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Se
         effect_moves.len() >= 3 * tracks,
         "every console effect carries"
     );
-    graph::install_effect_carry(&mut after.plan, effect_moves, 0).expect("effect carry");
+    let mut carry = graph::carry_builder(
+        &mut after.plan,
+        graph::GraphCarryProgram {
+            predecessor: graph::plan_identity(&mut before.plan).expect("a graph plan"),
+            sources: Box::default(),
+            timeline: false,
+        },
+    )
+    .expect("carry program");
+    carry.builtin_inputs(input_moves).expect("input carry");
+    carry.builtin_strips(strip_moves).expect("strip carry");
+    carry.effects(effect_moves, 0).expect("effect carry");
+    carry.seal();
     Pair { before, after }
 }
 

@@ -2018,7 +2018,7 @@ fn a_swap_carries_a_per_node_effects_agreement_with_its_state() {
             })
             .collect();
         assert_eq!(moves.len(), tracks.len(), "every delay instance moves");
-        graph::install_carry_program(
+        let mut carry = graph::carry_builder(
             &mut after,
             graph::GraphCarryProgram {
                 predecessor: graph::plan_identity(&mut before).expect("a graph plan"),
@@ -2027,7 +2027,8 @@ fn a_swap_carries_a_per_node_effects_agreement_with_its_state() {
             },
         )
         .expect("carry program");
-        graph::install_effect_carry(&mut after, moves, 0).expect("effect carry");
+        carry.effects(moves, 0).expect("effect carry");
+        carry.seal();
         let frames = after.envelope().quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         let mut block = |plan: &mut PreparedRenderPlan, index: u64| {

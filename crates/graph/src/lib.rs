@@ -3685,7 +3685,7 @@ pub trait GraphPreparedSourceSetDriver: Send {
     }
     /// Whether source `source_index` is vacant (bound with no ring, waiting for a carried one),
     /// or `None` when the index is out of range or the driver has no vacancy concept (the
-    /// default). Read off the render thread, by [`install_carry_program`].
+    /// default). Read off the render thread, by [`carry_builder`].
     fn source_vacancy(&self, _source_index: usize) -> Option<bool> {
         None
     }
@@ -4459,7 +4459,12 @@ impl GraphCarryProgram {
     }
 }
 
-/// Refusal to install a [`GraphCarryProgram`], off the render thread.
+/// Refusal to start a hand-over ([`carry_builder`]), stage one of its sections
+/// ([`GraphCarryBuilder`]) or install a fade table ([`install_fade_arms`]), off the render thread.
+///
+/// No section can be installed before the [`GraphCarryProgram`] that names its predecessor: a
+/// section is only staged on the builder that program started (#2375), so that order needs no
+/// refusal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphCarryInstallError {
     /// The plan was not bound by this crate.
@@ -4472,53 +4477,37 @@ pub enum GraphCarryInstallError {
     SourceNotVacant,
     /// A successor or predecessor source index appears twice.
     DuplicateSourceIndex,
-    /// A builtin-input carry was installed before the plan's [`GraphCarryProgram`], which names
-    /// the predecessor.
-    NoCarryProgram,
     /// A successor location is not a populated lane of a builtin bank whose input lanes carry.
     InputLaneOutOfRange,
     /// A successor or predecessor input lane appears twice.
     DuplicateInputLane,
-    /// A strip carry was installed before the plan's [`GraphCarryProgram`].
-    NoStripCarryProgram,
     /// A successor location is not a populated lane of a builtin bank that holds the owner's
     /// state.
     StripLaneOutOfRange,
     /// A successor or predecessor strip lane appears twice for one owner.
     DuplicateStripLane,
-    /// An effect carry was installed before the plan's [`GraphCarryProgram`].
-    NoEffectCarryProgram,
     /// A successor location is not a populated lane of an effect bank whose lanes carry.
     EffectLaneOutOfRange,
     /// A successor or predecessor effect lane appears twice.
     DuplicateEffectLane,
-    /// An observer carry was installed before the plan's [`GraphCarryProgram`].
-    NoObserverCarryProgram,
     /// A successor location is not an observer of the kind the move or join names.
     ObserverOutOfRange,
     /// A successor or predecessor observer appears twice, or a join's fresh observer is carried.
     DuplicateObserver,
-    /// A compensation-line carry was installed before the plan's [`GraphCarryProgram`].
-    NoDelayCarryProgram,
     /// A successor line is not a compensation line of the plan.
     DelayLineOutOfRange,
     /// A successor or predecessor compensation line appears twice.
     DuplicateDelayLine,
-    /// A strip-delay carry was installed before the plan's [`GraphCarryProgram`].
-    NoStripDelayCarryProgram,
     /// A successor line is not a strip delay line of the plan, or names no lane.
     StripDelayLineOutOfRange,
     /// A successor or predecessor strip delay line appears twice.
     DuplicateStripDelayLine,
-    /// A live-send carry was installed before the plan's [`GraphCarryProgram`].
-    NoRouteCarryProgram,
     /// A successor unit is not a live route of the plan.
     RouteOutOfRange,
     /// A successor or predecessor live route appears twice.
     DuplicateRoute,
-    /// A prime was installed before the plan's [`GraphCarryProgram`], with no lead block, or on
-    /// a plan with no source set (#1355 D5).
-    NoPrimeCarryProgram,
+    /// A prime with no lead block, or on a plan with no source set (#1355 D5).
+    NoPrimeLead,
     /// A fill names a line that is not one of the plan's, a node that is not a source claim of
     /// the plan, or no lane (#1355 D5).
     PrimeFillOutOfRange,
@@ -4565,41 +4554,6 @@ pub fn builtin_input_lanes(
     Some(executor.runtime.builtin_input_lanes())
 }
 
-/// Install the builtin-input section of the hand-over this graph plan runs when it displaces its
-/// predecessor (issue #1276 D6), after its [`GraphCarryProgram`], which names that predecessor.
-///
-/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program, a successor location is not a populated lane of a builtin bank whose input lanes
-/// carry, or a successor or predecessor location repeats. Predecessor locations are checked
-/// against the predecessor at the swap block, where one that does not resolve refuses the whole
-/// hand-over. The moves are kept sorted by predecessor location, so the swap block drains each
-/// predecessor bank once.
-pub fn install_builtin_input_carry(
-    plan: &mut PreparedRenderPlan,
-    mut moves: Vec<GraphLaneMove>,
-) -> Result<(), GraphCarryInstallError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    if executor.carry.is_none() {
-        return Err(GraphCarryInstallError::NoCarryProgram);
-    }
-    for (index, step) in moves.iter().enumerate() {
-        if !executor.runtime.has_input_lane(step.successor) {
-            return Err(GraphCarryInstallError::InputLaneOutOfRange);
-        }
-        if moves[..index].iter().any(|earlier| {
-            earlier.successor == step.successor || earlier.predecessor == step.predecessor
-        }) {
-            return Err(GraphCarryInstallError::DuplicateInputLane);
-        }
-    }
-    moves.sort_unstable_by_key(|step| step.predecessor);
-    executor.carry_inputs = moves.into_boxed_slice();
-    Ok(())
-}
-
 /// One strip stage a successor takes from its predecessor at the swap block: `owner`'s lane
 /// state at `predecessor` in the displaced plan is copied into `successor` (issue #1277 D8).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4639,42 +4593,6 @@ pub fn builtin_strip_lanes(
 ) -> Option<Vec<(Box<str>, GraphStripLane)>> {
     let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
     Some(executor.runtime.builtin_strip_lanes())
-}
-
-/// Install the strip section of the hand-over this graph plan runs when it displaces its
-/// predecessor (issue #1277 D8), after its [`GraphCarryProgram`], which names that predecessor.
-///
-/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program, a successor location is not a populated lane of a bank that holds the move's owner,
-/// or a successor or predecessor location repeats for one owner. Predecessor locations are
-/// checked against the predecessor at the swap block, where one that does not resolve refuses the
-/// whole hand-over. The moves are kept sorted by predecessor location, so the swap block applies
-/// each predecessor bank's pending values once.
-pub fn install_builtin_strip_carry(
-    plan: &mut PreparedRenderPlan,
-    mut moves: Vec<GraphStripMove>,
-) -> Result<(), GraphCarryInstallError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    if executor.carry.is_none() {
-        return Err(GraphCarryInstallError::NoStripCarryProgram);
-    }
-    for (index, step) in moves.iter().enumerate() {
-        if !executor.runtime.has_strip_lane(step.owner, step.successor) {
-            return Err(GraphCarryInstallError::StripLaneOutOfRange);
-        }
-        if moves[..index].iter().any(|earlier| {
-            earlier.owner == step.owner
-                && (earlier.successor == step.successor || earlier.predecessor == step.predecessor)
-        }) {
-            return Err(GraphCarryInstallError::DuplicateStripLane);
-        }
-    }
-    moves.sort_unstable_by_key(|step| (step.predecessor, step.owner));
-    executor.carry_strips = moves.into_boxed_slice();
-    Ok(())
 }
 
 /// One strip a plan swap adds during playback, whose fader lane fades in from its first played
@@ -4793,7 +4711,7 @@ impl FadeFire {
     // REALTIME_POLICY_END
 }
 
-/// The bytes [`install_fade_arms`] and [`install_fade_arm_carry`] retain for a table of `arms`
+/// The bytes [`install_fade_arms`] and [`GraphCarryBuilder::fade_arms`] retain for a table of `arms`
 /// arms and `pairs` carried ones, for the plan's resource charge (issues #1288 D7, #1392 D8);
 /// `None` on overflow.
 #[must_use]
@@ -4818,7 +4736,9 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
 /// to its prepared mute and ramps nowhere unless a record before the fire unmutes it, as a
 /// muted route's (#2069). Returns, for each arm in order, the index of its entry in the table, or
 /// `None` when it armed nothing: the index a successor's [`GraphFadeArmPair::predecessor`] names
-/// (#1392); and the watch render sets each entry's flag in when it fires.
+/// (#1392), and this plan's own [`GraphCarryBuilder::fade_arms`] pairs, staged after this install
+/// (the builder holds the plan), as [`GraphFadeArmPair::successor`]; and the watch render sets
+/// each entry's flag in when it fires.
 ///
 /// A source node that is not one of the source set's claims, and every source of a driver that
 /// does not lend its played planes, waits for nothing: that fade fires at the first block.
@@ -4919,28 +4839,6 @@ impl GraphExecutor {
         self.fade_arms = table.into_boxed_slice();
         Ok((entries, self.fade_fired.clone()))
     }
-
-    /// [`install_fade_arm_carry`] on a bound executor.
-    fn install_fade_arm_carry(
-        &mut self,
-        pairs: Vec<GraphFadeArmPair>,
-    ) -> Result<(), GraphCarryInstallError> {
-        if self.carry.is_none() {
-            return Err(GraphCarryInstallError::NoStripCarryProgram);
-        }
-        for (index, pair) in pairs.iter().enumerate() {
-            if pair.successor as usize >= self.fade_arms.len() {
-                return Err(GraphCarryInstallError::StripLaneOutOfRange);
-            }
-            if pairs[..index].iter().any(|earlier| {
-                earlier.successor == pair.successor || earlier.predecessor == pair.predecessor
-            }) {
-                return Err(GraphCarryInstallError::DuplicateStripLane);
-            }
-        }
-        self.fade_arm_carry = pairs.into_boxed_slice();
-        Ok(())
-    }
 }
 
 /// Which entries of a plan's fade table have fired, and which have settled (issue #1392, root
@@ -5033,24 +4931,6 @@ pub struct GraphFadeArmPair {
     pub successor: u32,
     /// The entry in the displaced plan's table, as its own [`install_fade_arms`] returned it.
     pub predecessor: u32,
-}
-
-/// Install the fade-arm section of the hand-over (issue #1392 D3), after the plan's
-/// [`install_fade_arms`] and its [`GraphCarryProgram`]: at the swap block each pair's successor
-/// entry takes its predecessor entry's state, so a waiting fade keeps waiting with its
-/// predecessor's progress, a scheduled one keeps its sample, and a fired one stays fired.
-///
-/// Refused, installing nothing, when the plan is not a graph plan, has no carry program, a
-/// successor entry is past the table, or an entry repeats. A predecessor entry past that plan's
-/// table is skipped at the swap block (its successor entry waits afresh).
-pub fn install_fade_arm_carry(
-    plan: &mut PreparedRenderPlan,
-    pairs: Vec<GraphFadeArmPair>,
-) -> Result<(), GraphCarryInstallError> {
-    plan.executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?
-        .install_fade_arm_carry(pairs)
 }
 
 // REALTIME_POLICY_BEGIN
@@ -5231,61 +5111,7 @@ pub fn bank_effect_lanes(
     Some(executor.runtime.bank_effect_lanes())
 }
 
-/// Install the effect section of the hand-over this graph plan runs when it displaces its
-/// predecessor (issue #1279 D3), after its [`GraphCarryProgram`], which names that predecessor,
-/// and preallocate the payload scratch at the largest carried payload.
-///
-/// `scratch_bytes` is the largest payload of the layouts the caller joined: a bound plan knows the
-/// layout of a bank lane and not of a per-node instance, so the scratch is the larger of this and
-/// the bank layouts it can read.
-///
-/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program, a successor site is not a populated lane of an effect bank or a live-controlled
-/// per-node effect, or a successor or predecessor site repeats. Predecessor sites and layouts are
-/// checked against the predecessor at the swap block, where one that does not resolve refuses the
-/// whole hand-over. The moves are kept sorted by
-/// predecessor site, so the swap block disengages each predecessor chain once.
-pub fn install_effect_carry(
-    plan: &mut PreparedRenderPlan,
-    mut moves: Vec<GraphEffectMove>,
-    scratch_bytes: u64,
-) -> Result<(), GraphCarryInstallError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    if executor.carry.is_none() {
-        return Err(GraphCarryInstallError::NoEffectCarryProgram);
-    }
-    let mut scratch = scratch_bytes;
-    for (index, step) in moves.iter().enumerate() {
-        if !executor.runtime.has_effect_site(step.successor) {
-            return Err(GraphCarryInstallError::EffectLaneOutOfRange);
-        }
-        if let GraphEffectSite::Lane(at) = step.successor {
-            let Some(layout) = executor.runtime.effect_lane_layout(at) else {
-                return Err(GraphCarryInstallError::EffectLaneOutOfRange);
-            };
-            scratch = scratch.max(layout.payload_bytes());
-        }
-        if moves[..index].iter().any(|earlier| {
-            earlier.successor == step.successor || earlier.predecessor == step.predecessor
-        }) {
-            return Err(GraphCarryInstallError::DuplicateEffectLane);
-        }
-    }
-    moves.sort_unstable_by_key(|step| step.predecessor);
-    // #1633 D1: the carried slots of the successor lanes `moves` names, and no others.
-    for step in &moves {
-        executor.runtime.install_effect_carry_slots(step.successor);
-    }
-    executor.carry_scratch =
-        vec![0_u8; usize::try_from(scratch).unwrap_or(usize::MAX)].into_boxed_slice();
-    executor.carry_effects = moves.into_boxed_slice();
-    Ok(())
-}
-
-/// The bytes [`install_effect_carry`] allocates for the carried slots of the successor lanes
+/// The bytes [`GraphCarryBuilder::seal`] allocates for the carried slots of the successor lanes
 /// `moves` names (#1633 D1): the part of a carry's charge that depends on the lanes' cell tables.
 /// Read before the install, so preparation admits the carry before it allocates. `None` when the
 /// plan is not a graph plan, a successor site does not resolve, or the sum overflows.
@@ -5305,7 +5131,7 @@ pub fn effect_carry_slot_bytes(
 
 /// The effect-section bytes a carry of `moves` lanes with a largest payload of `scratch_bytes`
 /// and `slot_bytes` of carried slots ([`effect_carry_slot_bytes`]) retains in its plan: the move
-/// table, the payload scratch and the slots ([`install_effect_carry`]). Checked arithmetic: `None`
+/// table, the payload scratch and the slots ([`GraphCarryBuilder::effects`]). Checked arithmetic: `None`
 /// on overflow. The one place the charge is spelled, so preparation's admission and
 /// [`carry_program_retained_bytes`] cannot disagree.
 #[must_use]
@@ -5354,19 +5180,26 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
         .map(|executor| executor.identity)
 }
 
-/// Install the hand-over this graph plan runs when it displaces its predecessor.
+/// Start the hand-over this graph plan runs when it displaces its predecessor (#2375): `program`
+/// names that predecessor, and the returned builder takes every other section of the hand-over,
+/// each validated for it, until [`GraphCarryBuilder::seal`] installs them all at once.
 ///
-/// Call it before publication, once per plan (#2302). Refused, leaving the plan as it was, when the
-/// plan is not a graph plan, already holds a program (every section installed after it was
-/// validated for that program's predecessor), has no source set for a program that moves a source
-/// or the timeline, or a successor index is out of range, not vacant or repeated, or a predecessor
-/// index is repeated.
-/// Predecessor indices are checked against the predecessor at the swap block, where an
-/// out-of-range index refuses the whole move.
-pub fn install_carry_program(
+/// The builder holds the plan mutably from here to its seal, so the plan cannot render, be
+/// published or take another builder while its hand-over is half assembled, and no section can be
+/// installed on a plan without the program it was validated for: the install order is a type, not
+/// a refusal. A builder dropped unsealed leaves the plan as it was. Call it before publication,
+/// once per plan (#2302).
+///
+/// Refused, leaving the plan as it was, when the plan is not a graph plan, already holds a program
+/// (#2302: every section was validated for that program's predecessor, so a plan names one
+/// predecessor for its life), has no source set for a program that moves a source or the
+/// timeline, or a successor index is out of range, not vacant or repeated, or a predecessor index
+/// is repeated. Predecessor indices are checked against the predecessor at the swap block, where
+/// an out-of-range index refuses the whole move.
+pub fn carry_builder(
     plan: &mut PreparedRenderPlan,
     program: GraphCarryProgram,
-) -> Result<(), GraphCarryInstallError> {
+) -> Result<GraphCarryBuilder<'_>, GraphCarryInstallError> {
     let executor = plan
         .executor_any_mut()
         .and_then(|any| any.downcast_mut::<GraphExecutor>())
@@ -5397,8 +5230,519 @@ pub fn install_carry_program(
             return Err(GraphCarryInstallError::DuplicateSourceIndex);
         }
     }
-    executor.carry = Some(program);
-    Ok(())
+    Ok(GraphCarryBuilder {
+        executor,
+        program,
+        sections: CarrySections::default(),
+    })
+}
+
+/// The hand-over of one successor graph plan while it is assembled (#2375), off the render
+/// thread, before publication: its [`GraphCarryProgram`], taken by [`carry_builder`], and the
+/// sections its methods validate for that program, staged here and installed in the plan only by
+/// [`Self::seal`].
+///
+/// A section method that refuses leaves every section staged earlier in place. Calling one again
+/// replaces the section it staged before, under the same program.
+///
+/// A plan renders only once its hand-over is whole: while the builder holds it, rustc refuses the
+/// render (E0499, a second mutable borrow of the plan):
+///
+/// ```compile_fail,E0499
+/// use engine::realtime::{PreparedRenderPlan, RenderIo, RenderTime};
+/// use graph::GraphCarryProgram;
+///
+/// fn hand_over(plan: &mut PreparedRenderPlan, program: GraphCarryProgram, io: RenderIo<'_>) {
+///     let carry = graph::carry_builder(plan, program).expect("a graph plan");
+///     let _ = plan.render(io, RenderTime { absolute_sample: 0 });
+///     carry.seal();
+/// }
+/// ```
+///
+/// After the seal it renders. This twin differs from the doctest above in the order of the last
+/// two calls only, so a renamed item or a typo in the shared code turns it red (issue #1422 D2):
+///
+/// ```
+/// use engine::realtime::{PreparedRenderPlan, RenderIo, RenderTime};
+/// use graph::GraphCarryProgram;
+///
+/// fn hand_over(plan: &mut PreparedRenderPlan, program: GraphCarryProgram, io: RenderIo<'_>) {
+///     let carry = graph::carry_builder(plan, program).expect("a graph plan");
+///     carry.seal();
+///     let _ = plan.render(io, RenderTime { absolute_sample: 0 });
+/// }
+/// ```
+#[must_use = "a carry builder installs nothing until it is sealed"]
+pub struct GraphCarryBuilder<'plan> {
+    executor: &'plan mut GraphExecutor,
+    program: GraphCarryProgram,
+    sections: CarrySections,
+}
+
+/// The sections of one hand-over a [`GraphCarryBuilder`] stages until its seal; each is empty
+/// (and never allocated) until its method stages it.
+#[derive(Default)]
+struct CarrySections {
+    inputs: Box<[GraphLaneMove]>,
+    strips: Box<[GraphStripMove]>,
+    fade_arms: Box<[GraphFadeArmPair]>,
+    effects: Box<[GraphEffectMove]>,
+    scratch: Box<[u8]>,
+    observers: Box<[GraphObserverMove]>,
+    joins: Box<[GraphObserverJoin]>,
+    taps: Box<[ObserverTapMove]>,
+    delays: Box<[GraphDelayMove]>,
+    strip_delays: Box<[GraphStripDelayMove]>,
+    routes: Box<[runtime::RouteCarryStep]>,
+    route_checks: Option<Box<RouteCarryChecks>>,
+    prime_blocks: u32,
+    prime_claims: Box<[ClaimFillRow]>,
+    prime_sidechains: Box<[SidechainFillRow]>,
+}
+
+impl GraphCarryBuilder<'_> {
+    /// Stage the builtin-input section (issue #1276 D6).
+    ///
+    /// Refused when a successor location is not a populated lane of a builtin bank whose input
+    /// lanes carry, or a successor or predecessor location repeats. Predecessor locations are
+    /// checked against the predecessor at the swap block, where one that does not resolve refuses
+    /// the whole hand-over. The moves are kept sorted by predecessor location, so the swap block
+    /// drains each predecessor bank once.
+    pub fn builtin_inputs(
+        &mut self,
+        mut moves: Vec<GraphLaneMove>,
+    ) -> Result<(), GraphCarryInstallError> {
+        for (index, step) in moves.iter().enumerate() {
+            if !self.executor.runtime.has_input_lane(step.successor) {
+                return Err(GraphCarryInstallError::InputLaneOutOfRange);
+            }
+            if moves[..index].iter().any(|earlier| {
+                earlier.successor == step.successor || earlier.predecessor == step.predecessor
+            }) {
+                return Err(GraphCarryInstallError::DuplicateInputLane);
+            }
+        }
+        moves.sort_unstable_by_key(|step| step.predecessor);
+        self.sections.inputs = moves.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Stage the strip section (issue #1277 D8).
+    ///
+    /// Refused when a successor location is not a populated lane of a bank that holds the move's
+    /// owner, or a successor or predecessor location repeats for one owner. Predecessor locations
+    /// are checked against the predecessor at the swap block, where one that does not resolve
+    /// refuses the whole hand-over. The moves are kept sorted by predecessor location, so the swap
+    /// block applies each predecessor bank's pending values once.
+    pub fn builtin_strips(
+        &mut self,
+        mut moves: Vec<GraphStripMove>,
+    ) -> Result<(), GraphCarryInstallError> {
+        for (index, step) in moves.iter().enumerate() {
+            if !self
+                .executor
+                .runtime
+                .has_strip_lane(step.owner, step.successor)
+            {
+                return Err(GraphCarryInstallError::StripLaneOutOfRange);
+            }
+            if moves[..index].iter().any(|earlier| {
+                earlier.owner == step.owner
+                    && (earlier.successor == step.successor
+                        || earlier.predecessor == step.predecessor)
+            }) {
+                return Err(GraphCarryInstallError::DuplicateStripLane);
+            }
+        }
+        moves.sort_unstable_by_key(|step| (step.predecessor, step.owner));
+        self.sections.strips = moves.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Stage the fade-arm section (issue #1392 D3), whose pairs index the fade table the plan's
+    /// [`install_fade_arms`] installed before this builder took the plan: at the swap block each
+    /// pair's successor entry takes its predecessor entry's state, so a waiting fade keeps waiting
+    /// with its predecessor's progress, a scheduled one keeps its sample, and a fired one stays
+    /// fired.
+    ///
+    /// Refused when a successor entry is past the table or an entry repeats. A predecessor entry
+    /// past that plan's table is skipped at the swap block (its successor entry waits afresh).
+    pub fn fade_arms(
+        &mut self,
+        pairs: Vec<GraphFadeArmPair>,
+    ) -> Result<(), GraphCarryInstallError> {
+        for (index, pair) in pairs.iter().enumerate() {
+            if pair.successor as usize >= self.executor.fade_arms.len() {
+                return Err(GraphCarryInstallError::StripLaneOutOfRange);
+            }
+            if pairs[..index].iter().any(|earlier| {
+                earlier.successor == pair.successor || earlier.predecessor == pair.predecessor
+            }) {
+                return Err(GraphCarryInstallError::DuplicateStripLane);
+            }
+        }
+        self.sections.fade_arms = pairs.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Stage the console-effect section (issue #1279 D3) and preallocate the payload scratch at
+    /// the largest carried payload.
+    ///
+    /// `scratch_bytes` is the largest payload of the layouts the caller joined: a bound plan knows
+    /// the layout of a bank lane and not of a per-node instance, so the scratch is the larger of
+    /// this and the bank layouts it can read. The seal allocates the carried slots of the
+    /// successor lanes the moves name, and no others (#1633 D1).
+    ///
+    /// Refused when a successor site is not a populated lane of an effect bank or a
+    /// live-controlled per-node effect, or a successor or predecessor site repeats. Predecessor
+    /// sites and layouts are checked against the predecessor at the swap block, where one that
+    /// does not resolve refuses the whole hand-over. The moves are kept sorted by predecessor
+    /// site, so the swap block disengages each predecessor chain once.
+    pub fn effects(
+        &mut self,
+        mut moves: Vec<GraphEffectMove>,
+        scratch_bytes: u64,
+    ) -> Result<(), GraphCarryInstallError> {
+        let runtime = &mut self.executor.runtime;
+        let mut scratch = scratch_bytes;
+        for (index, step) in moves.iter().enumerate() {
+            if !runtime.has_effect_site(step.successor) {
+                return Err(GraphCarryInstallError::EffectLaneOutOfRange);
+            }
+            if let GraphEffectSite::Lane(at) = step.successor {
+                let Some(layout) = runtime.effect_lane_layout(at) else {
+                    return Err(GraphCarryInstallError::EffectLaneOutOfRange);
+                };
+                scratch = scratch.max(layout.payload_bytes());
+            }
+            if moves[..index].iter().any(|earlier| {
+                earlier.successor == step.successor || earlier.predecessor == step.predecessor
+            }) {
+                return Err(GraphCarryInstallError::DuplicateEffectLane);
+            }
+        }
+        moves.sort_unstable_by_key(|step| step.predecessor);
+        self.sections.scratch =
+            vec![0_u8; usize::try_from(scratch).unwrap_or(usize::MAX)].into_boxed_slice();
+        self.sections.effects = moves.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Stage the observer section (#1327 D2, D6); the tap moves [`Self::observations`] staged
+    /// stay.
+    ///
+    /// Refused when a successor location is not an observer of the move's kind, a successor or
+    /// predecessor location repeats, or a join's donor is not a moved successor observer of the
+    /// fresh observer's kind or its fresh observer is itself moved. Predecessor locations are
+    /// checked against the predecessor at the swap block, where one that does not resolve refuses
+    /// the whole hand-over. The seal allocates the carry record, off the render thread.
+    pub fn observers(
+        &mut self,
+        moves: Vec<GraphObserverMove>,
+        joins: Vec<GraphObserverJoin>,
+    ) -> Result<(), GraphCarryInstallError> {
+        let kinds: BTreeMap<GraphObserverLocation, ObserverKind> = self
+            .executor
+            .runtime
+            .observer_rows()
+            .into_iter()
+            .map(|row| (row.location, row.kind))
+            .collect();
+        let mut moved_successors = BTreeSet::new();
+        let mut moved_predecessors = BTreeSet::new();
+        let mut entries = BTreeSet::new();
+        for step in &moves {
+            if kinds.get(&step.successor) != Some(&step.kind) {
+                return Err(GraphCarryInstallError::ObserverOutOfRange);
+            }
+            if !moved_successors.insert(step.successor)
+                || !moved_predecessors.insert(step.predecessor)
+                || !entries.insert((step.kind as u8, true, step.successor_entry))
+                || !entries.insert((step.kind as u8, false, step.predecessor_entry))
+            {
+                return Err(GraphCarryInstallError::DuplicateObserver);
+            }
+        }
+        let mut joined = BTreeSet::new();
+        for join in &joins {
+            let Some(kind) = kinds.get(&join.fresh) else {
+                return Err(GraphCarryInstallError::ObserverOutOfRange);
+            };
+            if kinds.get(&join.donor) != Some(kind) || !moved_successors.contains(&join.donor) {
+                return Err(GraphCarryInstallError::ObserverOutOfRange);
+            }
+            if moved_successors.contains(&join.fresh) || !joined.insert(join.fresh) {
+                return Err(GraphCarryInstallError::DuplicateObserver);
+            }
+        }
+        self.sections.observers = moves.into_boxed_slice();
+        self.sections.joins = joins.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Stage the effect tap section (#1327 D1, D2), bound to the sorted move table
+    /// [`Self::effects`] staged: staging the effect section again afterwards invalidates them.
+    /// The observer moves and joins [`Self::observers`] staged stay.
+    ///
+    /// Each tap move is the observation lane of one effect move. At the swap block it applies
+    /// only if that effect move carried, after the predecessor's pending `Observe` records were
+    /// applied to its tap, and exchanges the two lanes' whole tap state
+    /// ([`effect_contract::ObservationLane::swap_state`]), publisher included. A lane pair with
+    /// different tap menus exchanges nothing.
+    ///
+    /// Refused when a tap move names no staged effect move (by both sites), its successor holds
+    /// no observation lane, or a successor or predecessor site or entry repeats. The seal
+    /// allocates the carry record, off the render thread.
+    pub fn observations(&mut self, taps: Vec<GraphTapMove>) -> Result<(), GraphCarryInstallError> {
+        let effects = &self.sections.effects;
+        let mut bound = Vec::with_capacity(taps.len());
+        let mut successors = BTreeSet::new();
+        let mut predecessors = BTreeSet::new();
+        let mut entries = BTreeSet::new();
+        for step in taps {
+            let Ok(effect_move) =
+                effects.binary_search_by_key(&step.predecessor, |effect| effect.predecessor)
+            else {
+                return Err(GraphCarryInstallError::ObserverOutOfRange);
+            };
+            if effects[effect_move].successor != step.successor
+                || !self.executor.runtime.has_observation_lane(step.successor)
+            {
+                return Err(GraphCarryInstallError::ObserverOutOfRange);
+            }
+            if !successors.insert(step.successor)
+                || !predecessors.insert(step.predecessor)
+                || !entries.insert((true, step.successor_entry))
+                || !entries.insert((false, step.predecessor_entry))
+            {
+                return Err(GraphCarryInstallError::DuplicateObserver);
+            }
+            bound.push(ObserverTapMove {
+                step,
+                effect_move,
+                taken: false,
+            });
+        }
+        bound.sort_unstable_by_key(|tap| tap.effect_move);
+        self.sections.taps = bound.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Stage the compensation-line section (#1283 D1).
+    ///
+    /// Refused when a successor line is not a compensation line of the plan, or a successor or
+    /// predecessor line repeats. Predecessor lines are checked against the predecessor at the swap
+    /// block, where one that does not resolve refuses the whole hand-over.
+    pub fn delays(&mut self, mut moves: Vec<GraphDelayMove>) -> Result<(), GraphCarryInstallError> {
+        let mut successors = BTreeSet::new();
+        let mut predecessors = BTreeSet::new();
+        for step in &moves {
+            if step.successor as usize >= self.executor.runtime.delays.len() {
+                return Err(GraphCarryInstallError::DelayLineOutOfRange);
+            }
+            if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
+                return Err(GraphCarryInstallError::DuplicateDelayLine);
+            }
+        }
+        moves.sort_unstable_by_key(|step| step.predecessor);
+        self.sections.delays = moves.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Stage the strip-delay section (#1284 D1).
+    ///
+    /// Refused when a successor line is not a strip delay line of the plan, a move names no lane
+    /// or a lane beyond the right one, or a successor or predecessor line repeats. Predecessor
+    /// lines, and the lengths of the lanes, are checked against the predecessor at the swap block,
+    /// where one that does not resolve refuses the whole hand-over.
+    pub fn strip_delays(
+        &mut self,
+        mut moves: Vec<GraphStripDelayMove>,
+    ) -> Result<(), GraphCarryInstallError> {
+        let mut successors = BTreeSet::new();
+        let mut predecessors = BTreeSet::new();
+        for step in &moves {
+            if step.successor as usize >= self.executor.runtime.track_delays.len()
+                || step.lanes == 0
+                || step.lanes & !(STRIP_DELAY_LEFT | STRIP_DELAY_RIGHT) != 0
+            {
+                return Err(GraphCarryInstallError::StripDelayLineOutOfRange);
+            }
+            if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
+                return Err(GraphCarryInstallError::DuplicateStripDelayLine);
+            }
+        }
+        moves.sort_unstable_by_key(|step| step.predecessor);
+        self.sections.strip_delays = moves.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Stage the live-send section (#1284 D2).
+    ///
+    /// Refused when a successor unit is not a live route of the plan, or a successor or
+    /// predecessor unit repeats. Predecessor units are checked against the predecessor at the
+    /// swap block, where one that does not resolve refuses the whole hand-over.
+    pub fn routes(&mut self, mut moves: Vec<GraphRouteMove>) -> Result<(), GraphCarryInstallError> {
+        let mut successors = BTreeSet::new();
+        let mut predecessors = BTreeSet::new();
+        for step in &moves {
+            if !self.executor.runtime.is_live_route(step.successor) {
+                return Err(GraphCarryInstallError::RouteOutOfRange);
+            }
+            if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
+                return Err(GraphCarryInstallError::DuplicateRoute);
+            }
+        }
+        moves.sort_unstable_by_key(|step| step.predecessor);
+        let slots: Box<[runtime::RouteCarryCheck]> = moves
+            .iter()
+            .zip(0_u32..)
+            .filter(|(step, _)| step.predecessor_follows)
+            .map(|(_, index)| runtime::RouteCarryCheck::new(index))
+            .collect();
+        self.sections.route_checks = (!slots.is_empty()).then(|| {
+            Box::new(RouteCarryChecks {
+                slots,
+                pending: false,
+            })
+        });
+        self.sections.routes = moves
+            .into_iter()
+            .map(runtime::RouteCarryStep::new)
+            .collect();
+        Ok(())
+    }
+
+    /// Stage the prime section a warm successor runs at its adoption block (#1355 D5). In the
+    /// first block after a carried hand-over the plan replays `lead_blocks` blocks of every source
+    /// the program moves, and of the timeline, from the source-read sample the predecessor would
+    /// have read, and pushes them into `claims` and `sidechains` behind the predecessor's pending
+    /// words (pushed at the carry). The plan's own sources then read `lead_blocks` quanta further
+    /// ahead, its source-read offset.
+    ///
+    /// A plan with this section installed fills its lines whenever it is adopted with a carry:
+    /// there is no adoption of it whose lines stay at rest. Its readiness is the publisher's to
+    /// check: it is published `Primed { lead_blocks, .. }` (#1311), so the prime never underruns.
+    ///
+    /// Refused when the plan has no source set, `lead_blocks` is 0, a fill names a line that is
+    /// not the plan's, a node that is not one of its source claims, or no lane, or a line appears
+    /// twice. Predecessor lines are checked against the predecessor at the swap block, where one
+    /// that does not resolve refuses the whole hand-over.
+    pub fn prime(
+        &mut self,
+        lead_blocks: u32,
+        claims: Vec<GraphClaimFill>,
+        sidechains: Vec<GraphSidechainFill>,
+    ) -> Result<(), GraphCarryInstallError> {
+        let runtime = &self.executor.runtime;
+        let Some(set) = self.executor.source_set.as_ref() else {
+            return Err(GraphCarryInstallError::NoPrimeLead);
+        };
+        if lead_blocks == 0 {
+            return Err(GraphCarryInstallError::NoPrimeLead);
+        }
+        let claim_index = |node: &GraphNodeId| {
+            set.claims
+                .binary_search_by(|claim| claim.node.cmp(node))
+                .ok()
+                .and_then(|index| u32::try_from(index).ok())
+        };
+        let both = STRIP_DELAY_LEFT | STRIP_DELAY_RIGHT;
+        let mut lines = BTreeSet::new();
+        let mut claim_rows = Vec::with_capacity(claims.len());
+        for fill in &claims {
+            let claim =
+                claim_index(&fill.claim).ok_or(GraphCarryInstallError::PrimeFillOutOfRange)?;
+            if fill.line as usize >= runtime.track_delays.len()
+                || fill.lanes == 0
+                || fill.lanes & !both != 0
+                || fill.pending_lanes & !fill.lanes != 0
+            {
+                return Err(GraphCarryInstallError::PrimeFillOutOfRange);
+            }
+            if !lines.insert(fill.line) {
+                return Err(GraphCarryInstallError::DuplicatePrimeFill);
+            }
+            claim_rows.push(ClaimFillRow {
+                line: fill.line,
+                claim,
+                predecessor: fill.predecessor,
+                pending_lanes: fill.pending_lanes,
+                lanes: fill.lanes,
+            });
+        }
+        let mut lines = BTreeSet::new();
+        let mut sidechain_rows = Vec::with_capacity(sidechains.len());
+        for fill in &sidechains {
+            let claim =
+                claim_index(&fill.claim).ok_or(GraphCarryInstallError::PrimeFillOutOfRange)?;
+            if fill.line as usize >= runtime.delays.len() {
+                return Err(GraphCarryInstallError::PrimeFillOutOfRange);
+            }
+            if !lines.insert(fill.line) {
+                return Err(GraphCarryInstallError::DuplicatePrimeFill);
+            }
+            sidechain_rows.push(SidechainFillRow {
+                line: fill.line,
+                claim,
+                predecessor: fill.predecessor,
+                claim_line: fill.claim_line,
+                written: [0; 2],
+            });
+        }
+        self.sections.prime_blocks = lead_blocks;
+        self.sections.prime_claims = claim_rows.into_boxed_slice();
+        self.sections.prime_sidechains = sidechain_rows.into_boxed_slice();
+        Ok(())
+    }
+
+    /// Install the program and every staged section in the plan at once, and release the plan:
+    /// from here it holds its whole hand-over, which nothing can change, and may be published.
+    /// Allocates the effect section's carried slots and the observer section's carry record here,
+    /// off the render thread.
+    pub fn seal(self) {
+        let Self {
+            executor,
+            program,
+            sections,
+        } = self;
+        let CarrySections {
+            inputs,
+            strips,
+            fade_arms,
+            effects,
+            scratch,
+            observers,
+            joins,
+            taps,
+            delays,
+            strip_delays,
+            routes,
+            route_checks,
+            prime_blocks,
+            prime_claims,
+            prime_sidechains,
+        } = sections;
+        // #1633 D1: the carried slots of the successor lanes the effect moves name, and no
+        // others.
+        for step in &effects {
+            executor.runtime.install_effect_carry_slots(step.successor);
+        }
+        executor.carry = Some(program);
+        executor.carry_inputs = inputs;
+        executor.carry_strips = strips;
+        executor.fade_arm_carry = fade_arms;
+        executor.carry_effects = effects;
+        executor.carry_scratch = scratch;
+        executor.observer_carry = ObserverCarryProgram::assemble(observers, joins, taps);
+        executor.carry_delays = delays;
+        executor.carry_strip_delays = strip_delays;
+        executor.carry_routes = routes;
+        executor.route_checks = route_checks;
+        executor.prime_blocks = prime_blocks;
+        executor.prime_claims = prime_claims;
+        executor.prime_sidechains = prime_sidechains;
+    }
 }
 
 /// Where one observer sits in a bound graph plan: its runtime unit, its member op within a bank
@@ -5560,134 +5904,6 @@ pub fn observer_rows(plan: &mut PreparedRenderPlan) -> Option<Vec<GraphObserverR
     Some(executor.runtime.observer_rows())
 }
 
-/// Install the observer section of the hand-over this graph plan runs when it displaces its
-/// predecessor (#1327 D2, D6), after its [`GraphCarryProgram`], which names that predecessor.
-///
-/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program, a successor location is not an observer of the move's kind, a successor or
-/// predecessor location repeats, or a join's donor is not a moved successor observer of the
-/// fresh observer's kind or its fresh observer is itself moved. Predecessor locations are checked
-/// against the predecessor at the swap block, where one that does not resolve refuses the whole
-/// hand-over. Allocates the carry record here, off the render thread.
-pub fn install_observer_carry(
-    plan: &mut PreparedRenderPlan,
-    moves: Vec<GraphObserverMove>,
-    joins: Vec<GraphObserverJoin>,
-) -> Result<(), GraphCarryInstallError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    if executor.carry.is_none() {
-        return Err(GraphCarryInstallError::NoObserverCarryProgram);
-    }
-    let kinds: BTreeMap<GraphObserverLocation, ObserverKind> = executor
-        .runtime
-        .observer_rows()
-        .into_iter()
-        .map(|row| (row.location, row.kind))
-        .collect();
-    let mut moved_successors = BTreeSet::new();
-    let mut moved_predecessors = BTreeSet::new();
-    let mut entries = BTreeSet::new();
-    for step in &moves {
-        if kinds.get(&step.successor) != Some(&step.kind) {
-            return Err(GraphCarryInstallError::ObserverOutOfRange);
-        }
-        if !moved_successors.insert(step.successor)
-            || !moved_predecessors.insert(step.predecessor)
-            || !entries.insert((step.kind as u8, true, step.successor_entry))
-            || !entries.insert((step.kind as u8, false, step.predecessor_entry))
-        {
-            return Err(GraphCarryInstallError::DuplicateObserver);
-        }
-    }
-    let mut joined = BTreeSet::new();
-    for join in &joins {
-        let Some(kind) = kinds.get(&join.fresh) else {
-            return Err(GraphCarryInstallError::ObserverOutOfRange);
-        };
-        if kinds.get(&join.donor) != Some(kind) || !moved_successors.contains(&join.donor) {
-            return Err(GraphCarryInstallError::ObserverOutOfRange);
-        }
-        if moved_successors.contains(&join.fresh) || !joined.insert(join.fresh) {
-            return Err(GraphCarryInstallError::DuplicateObserver);
-        }
-    }
-    // The tap moves of an earlier `install_observation_carry` stay.
-    let taps = executor
-        .observer_carry
-        .take()
-        .map_or_else(Box::default, |program| program.taps);
-    executor.observer_carry =
-        ObserverCarryProgram::assemble(moves.into_boxed_slice(), joins.into_boxed_slice(), taps);
-    Ok(())
-}
-
-/// Install the effect tap section of the hand-over this graph plan runs when it displaces its
-/// predecessor (#1327 D1, D2), after its [`GraphCarryProgram`] and [`install_effect_carry`], whose
-/// sorted move table the tap moves bind to: calling `install_effect_carry` again afterwards
-/// invalidates them.
-///
-/// Each tap move is the observation lane of one effect move. At the swap block it applies only if
-/// that effect move carried, after the predecessor's pending `Observe` records were applied to its
-/// tap, and exchanges the two lanes' whole tap state ([`effect_contract::ObservationLane::swap_state`]),
-/// publisher included. A lane pair with different tap menus exchanges nothing.
-///
-/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program, a tap move names no effect move of the plan (by both sites), its successor holds no
-/// observation lane, or a successor or predecessor site or entry repeats. Allocates the record
-/// here, off the render thread.
-pub fn install_observation_carry(
-    plan: &mut PreparedRenderPlan,
-    taps: Vec<GraphTapMove>,
-) -> Result<(), GraphCarryInstallError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    if executor.carry.is_none() {
-        return Err(GraphCarryInstallError::NoObserverCarryProgram);
-    }
-    let mut bound = Vec::with_capacity(taps.len());
-    let mut successors = BTreeSet::new();
-    let mut predecessors = BTreeSet::new();
-    let mut entries = BTreeSet::new();
-    for step in taps {
-        let Ok(effect_move) = executor
-            .carry_effects
-            .binary_search_by_key(&step.predecessor, |effect| effect.predecessor)
-        else {
-            return Err(GraphCarryInstallError::ObserverOutOfRange);
-        };
-        if executor.carry_effects[effect_move].successor != step.successor
-            || !executor.runtime.has_observation_lane(step.successor)
-        {
-            return Err(GraphCarryInstallError::ObserverOutOfRange);
-        }
-        if !successors.insert(step.successor)
-            || !predecessors.insert(step.predecessor)
-            || !entries.insert((true, step.successor_entry))
-            || !entries.insert((false, step.predecessor_entry))
-        {
-            return Err(GraphCarryInstallError::DuplicateObserver);
-        }
-        bound.push(ObserverTapMove {
-            step,
-            effect_move,
-            taken: false,
-        });
-    }
-    bound.sort_unstable_by_key(|tap| tap.effect_move);
-    let (moves, joins) = executor.observer_carry.take().map_or_else(
-        || (Box::default(), Box::default()),
-        |program| (program.moves, program.joins),
-    );
-    executor.observer_carry =
-        ObserverCarryProgram::assemble(moves, joins, bound.into_boxed_slice());
-    Ok(())
-}
-
 /// One compensation line of a bound graph plan, named by the edge it delays (#1283 D1): what a
 /// successor's preparation joins with its own lines, by edge ID and endpoints, never by `line`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5801,39 +6017,6 @@ pub fn take_compensation_lines(plan: &mut PreparedRenderPlan) -> Option<Vec<Grap
     Some(core::mem::take(&mut executor.compensation_lines))
 }
 
-/// Install the compensation-line section of the hand-over this graph plan runs when it displaces
-/// its predecessor (#1283 D1), after its [`GraphCarryProgram`], which names that predecessor.
-///
-/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program, a successor line is not a compensation line of the plan, or a successor or
-/// predecessor line repeats. Predecessor lines are checked against the predecessor at the swap
-/// block, where one that does not resolve refuses the whole hand-over.
-pub fn install_delay_carry(
-    plan: &mut PreparedRenderPlan,
-    mut moves: Vec<GraphDelayMove>,
-) -> Result<(), GraphCarryInstallError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    if executor.carry.is_none() {
-        return Err(GraphCarryInstallError::NoDelayCarryProgram);
-    }
-    let mut successors = BTreeSet::new();
-    let mut predecessors = BTreeSet::new();
-    for step in &moves {
-        if step.successor as usize >= executor.runtime.delays.len() {
-            return Err(GraphCarryInstallError::DelayLineOutOfRange);
-        }
-        if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
-            return Err(GraphCarryInstallError::DuplicateDelayLine);
-        }
-    }
-    moves.sort_unstable_by_key(|step| step.predecessor);
-    executor.carry_delays = moves.into_boxed_slice();
-    Ok(())
-}
-
 /// The bytes a compensation-line section of `moves` lines retains in its plan (#1283): its move
 /// table. `None` on overflow. The one place the charge is spelled, so preparation's admission and
 /// [`carry_program_retained_bytes`] cannot disagree.
@@ -5939,43 +6122,6 @@ pub fn take_live_routes(plan: &mut PreparedRenderPlan) -> Option<Vec<GraphLiveRo
     Some(core::mem::take(&mut executor.bind_identities.live_routes))
 }
 
-/// Install the strip-delay section of the hand-over this graph plan runs when it displaces its
-/// predecessor (#1284 D1), after its [`GraphCarryProgram`], which names that predecessor.
-///
-/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program, a successor line is not a strip delay line of the plan, a move names no lane or a lane
-/// beyond the right one, or a successor or predecessor line repeats. Predecessor lines, and the
-/// lengths of the lanes, are checked against the predecessor at the swap block, where one that does
-/// not resolve refuses the whole hand-over.
-pub fn install_strip_delay_carry(
-    plan: &mut PreparedRenderPlan,
-    mut moves: Vec<GraphStripDelayMove>,
-) -> Result<(), GraphCarryInstallError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    if executor.carry.is_none() {
-        return Err(GraphCarryInstallError::NoStripDelayCarryProgram);
-    }
-    let mut successors = BTreeSet::new();
-    let mut predecessors = BTreeSet::new();
-    for step in &moves {
-        if step.successor as usize >= executor.runtime.track_delays.len()
-            || step.lanes == 0
-            || step.lanes & !(STRIP_DELAY_LEFT | STRIP_DELAY_RIGHT) != 0
-        {
-            return Err(GraphCarryInstallError::StripDelayLineOutOfRange);
-        }
-        if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
-            return Err(GraphCarryInstallError::DuplicateStripDelayLine);
-        }
-    }
-    moves.sort_unstable_by_key(|step| step.predecessor);
-    executor.carry_strip_delays = moves.into_boxed_slice();
-    Ok(())
-}
-
 /// One source-claim line a warm successor fills at its adoption block (#1355 D5, lemma L2): the
 /// strip delay line of a track whose source the carry program moves. The source is read `P`
 /// further ahead in the successor, so the line takes the `P` frames between: the predecessor's
@@ -6043,91 +6189,6 @@ pub fn prime_carry_retained_bytes(claims: usize, sidechains: usize) -> Option<u6
     let claims = claims.checked_mul(core::mem::size_of::<ClaimFillRow>())?;
     let sidechains = sidechains.checked_mul(core::mem::size_of::<SidechainFillRow>())?;
     u64::try_from(claims.checked_add(sidechains)?).ok()
-}
-
-/// Install the prime section of the hand-over a warm successor runs at its adoption block (#1355
-/// D5), after its [`GraphCarryProgram`]. In the first block after a carried hand-over the plan
-/// replays `lead_blocks` blocks of every source the program moves, and of the timeline, from the
-/// source-read sample the predecessor would have read, and pushes them into `claims` and
-/// `sidechains` behind the predecessor's pending words (pushed at the carry). The plan's own
-/// sources then read `lead_blocks` quanta further ahead, its source-read offset.
-///
-/// A plan with this section installed fills its lines whenever it is adopted with a carry: there
-/// is no adoption of it whose lines stay at rest. Its readiness is the publisher's to check: it is
-/// published `Primed { lead_blocks, .. }` (#1311), so the prime never underruns.
-///
-/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program or source set, `lead_blocks` is 0, a fill names a line that is not the plan's, a node
-/// that is not one of its source claims, or no lane, or a line appears twice. Predecessor lines are
-/// checked against the predecessor at the swap block, where one that does not resolve refuses the
-/// whole hand-over.
-pub fn install_prime_carry(
-    plan: &mut PreparedRenderPlan,
-    lead_blocks: u32,
-    claims: Vec<GraphClaimFill>,
-    sidechains: Vec<GraphSidechainFill>,
-) -> Result<(), GraphCarryInstallError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    let Some(set) = executor.source_set.as_ref() else {
-        return Err(GraphCarryInstallError::NoPrimeCarryProgram);
-    };
-    if executor.carry.is_none() || lead_blocks == 0 {
-        return Err(GraphCarryInstallError::NoPrimeCarryProgram);
-    }
-    let claim_index = |node: &GraphNodeId| {
-        set.claims
-            .binary_search_by(|claim| claim.node.cmp(node))
-            .ok()
-            .and_then(|index| u32::try_from(index).ok())
-    };
-    let both = STRIP_DELAY_LEFT | STRIP_DELAY_RIGHT;
-    let mut lines = BTreeSet::new();
-    let mut claim_rows = Vec::with_capacity(claims.len());
-    for fill in &claims {
-        let claim = claim_index(&fill.claim).ok_or(GraphCarryInstallError::PrimeFillOutOfRange)?;
-        if fill.line as usize >= executor.runtime.track_delays.len()
-            || fill.lanes == 0
-            || fill.lanes & !both != 0
-            || fill.pending_lanes & !fill.lanes != 0
-        {
-            return Err(GraphCarryInstallError::PrimeFillOutOfRange);
-        }
-        if !lines.insert(fill.line) {
-            return Err(GraphCarryInstallError::DuplicatePrimeFill);
-        }
-        claim_rows.push(ClaimFillRow {
-            line: fill.line,
-            claim,
-            predecessor: fill.predecessor,
-            pending_lanes: fill.pending_lanes,
-            lanes: fill.lanes,
-        });
-    }
-    let mut lines = BTreeSet::new();
-    let mut sidechain_rows = Vec::with_capacity(sidechains.len());
-    for fill in &sidechains {
-        let claim = claim_index(&fill.claim).ok_or(GraphCarryInstallError::PrimeFillOutOfRange)?;
-        if fill.line as usize >= executor.runtime.delays.len() {
-            return Err(GraphCarryInstallError::PrimeFillOutOfRange);
-        }
-        if !lines.insert(fill.line) {
-            return Err(GraphCarryInstallError::DuplicatePrimeFill);
-        }
-        sidechain_rows.push(SidechainFillRow {
-            line: fill.line,
-            claim,
-            predecessor: fill.predecessor,
-            claim_line: fill.claim_line,
-            written: [0; 2],
-        });
-    }
-    executor.prime_blocks = lead_blocks;
-    executor.prime_claims = claim_rows.into_boxed_slice();
-    executor.prime_sidechains = sidechain_rows.into_boxed_slice();
-    Ok(())
 }
 
 // REALTIME_POLICY_BEGIN: #1355 D5, the prime's fills run in the adoption block.
@@ -6292,54 +6353,6 @@ fn replay_prime(
     }
 }
 // REALTIME_POLICY_END
-
-/// Install the live-send section of the hand-over this graph plan runs when it displaces its
-/// predecessor (#1284 D2), after its [`GraphCarryProgram`], which names that predecessor.
-///
-/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program, a successor unit is not a live route of the plan, or a successor or predecessor unit
-/// repeats. Predecessor units are checked against the predecessor at the swap block, where one that
-/// does not resolve refuses the whole hand-over.
-pub fn install_route_carry(
-    plan: &mut PreparedRenderPlan,
-    mut moves: Vec<GraphRouteMove>,
-) -> Result<(), GraphCarryInstallError> {
-    let executor = plan
-        .executor_any_mut()
-        .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    if executor.carry.is_none() {
-        return Err(GraphCarryInstallError::NoRouteCarryProgram);
-    }
-    let mut successors = BTreeSet::new();
-    let mut predecessors = BTreeSet::new();
-    for step in &moves {
-        if !executor.runtime.is_live_route(step.successor) {
-            return Err(GraphCarryInstallError::RouteOutOfRange);
-        }
-        if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
-            return Err(GraphCarryInstallError::DuplicateRoute);
-        }
-    }
-    moves.sort_unstable_by_key(|step| step.predecessor);
-    let slots: Box<[runtime::RouteCarryCheck]> = moves
-        .iter()
-        .zip(0_u32..)
-        .filter(|(step, _)| step.predecessor_follows)
-        .map(|(_, index)| runtime::RouteCarryCheck::new(index))
-        .collect();
-    executor.route_checks = (!slots.is_empty()).then(|| {
-        Box::new(RouteCarryChecks {
-            slots,
-            pending: false,
-        })
-    });
-    executor.carry_routes = moves
-        .into_iter()
-        .map(runtime::RouteCarryStep::new)
-        .collect();
-    Ok(())
-}
 
 /// The side table of a live-send section (#1652 D3, MINOR-3): one slot per move whose
 /// predecessor row is a following route, in move order, and whether the swap block left a
@@ -7077,9 +7090,9 @@ impl PreparedPlanExecutor for GraphExecutor {
 
     // REALTIME_POLICY_BEGIN
     /// Move the sources the installed [`GraphCarryProgram`] names out of the predecessor graph
-    /// plan, and copy the strip input lanes [`install_builtin_input_carry`] names (issue #1276),
-    /// the fader, mute and matrix stages [`install_builtin_strip_carry`] names (issue #1277) and
-    /// the console effect lanes [`install_effect_carry`] names (issue #1279), at the swap block: a
+    /// plan, and copy the strip input lanes [`GraphCarryBuilder::builtin_inputs`] names (issue #1276),
+    /// the fader, mute and matrix stages [`GraphCarryBuilder::builtin_strips`] names (issue #1277) and
+    /// the console effect lanes [`GraphCarryBuilder::effects`] names (issue #1279), at the swap block: a
     /// bounded series of swaps and fixed-size lane copies, nothing allocated or freed.
     ///
     /// No program, or a predecessor that is not a graph plan, takes nothing (`NotRequested`). A
@@ -7090,7 +7103,7 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// moves resolved leaves its lane as prepared and counts in [`carry_refusal_count`] (#1279
     /// D6); the hand-over still reports `Carried`.
     ///
-    /// A warm successor ([`install_prime_carry`], #1355 D5) also pushes the predecessor's pending
+    /// A warm successor ([`GraphCarryBuilder::prime`], #1355 D5) also pushes the predecessor's pending
     /// words into the lines its prime fills, and its first block replays the prime.
     fn adopt_predecessor(
         &mut self,
@@ -11748,10 +11761,10 @@ mod tests {
             timeline,
         };
         assert_eq!(
-            install_carry_program(&mut plan, program(true)),
-            Err(GraphCarryInstallError::NoSourceSet)
+            carry_builder(&mut plan, program(true)).err(),
+            Some(GraphCarryInstallError::NoSourceSet)
         );
-        assert_eq!(install_carry_program(&mut plan, program(false)), Ok(()));
+        assert!(carry_builder(&mut plan, program(false)).is_ok());
     }
 
     /// Issue #2302: a plan's carry program is installed once. A second program, naming another
@@ -11767,15 +11780,17 @@ mod tests {
             sources: Box::new([]),
             timeline: false,
         };
-        assert_eq!(install_carry_program(&mut plan, program(1)), Ok(()));
-        let second = install_carry_program(&mut plan, program(2));
+        carry_builder(&mut plan, program(1))
+            .expect("the first program")
+            .seal();
+        let second = carry_builder(&mut plan, program(2)).err();
         let installed = plan
             .executor_any_mut()
             .and_then(|any| any.downcast_mut::<GraphExecutor>())
             .and_then(|executor| executor.carry.as_ref())
             .map(|program| program.predecessor);
         assert_eq!(installed, Some(1), "the first program stays");
-        assert_eq!(second, Err(GraphCarryInstallError::CarryProgramInstalled));
+        assert_eq!(second, Some(GraphCarryInstallError::CarryProgramInstalled));
     }
 
     #[test]

@@ -6248,7 +6248,9 @@ mod tests {
                 if block == SWAP_BLOCK {
                     let mut plan = successor.take().expect("successor");
                     if let Some(program) = (program.take().expect("program"))(identity) {
-                        graph::install_carry_program(&mut plan, program).expect("install");
+                        graph::carry_builder(&mut plan, program)
+                            .expect("install")
+                            .seal();
                     }
                     assert!(publisher.publish(plan, 0).is_ok());
                 }
@@ -6384,8 +6386,9 @@ mod tests {
 
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
             let mut successor = bind(SourceGraphSource::vacant(2), &validity);
-            graph::install_carry_program(&mut successor, carry_source_zero(identity))
-                .expect("install");
+            graph::carry_builder(&mut successor, carry_source_zero(identity))
+                .expect("install")
+                .seal();
             assert_eq!(
                 successor.adopt_predecessor_plan(&mut predecessor),
                 CarryOutcome::Carried
@@ -6419,16 +6422,16 @@ mod tests {
                 timeline: false,
             };
             assert_eq!(
-                graph::install_carry_program(&mut vacant, program(&[(1, 0)])),
-                Err(GraphCarryInstallError::SourceIndexOutOfRange)
+                graph::carry_builder(&mut vacant, program(&[(1, 0)])).err(),
+                Some(GraphCarryInstallError::SourceIndexOutOfRange)
             );
             assert_eq!(
-                graph::install_carry_program(&mut occupied, program(&[(0, 0)])),
-                Err(GraphCarryInstallError::SourceNotVacant)
+                graph::carry_builder(&mut occupied, program(&[(0, 0)])).err(),
+                Some(GraphCarryInstallError::SourceNotVacant)
             );
             assert_eq!(
-                graph::install_carry_program(&mut vacant, program(&[(0, 0), (0, 1)])),
-                Err(GraphCarryInstallError::DuplicateSourceIndex)
+                graph::carry_builder(&mut vacant, program(&[(0, 0), (0, 1)])).err(),
+                Some(GraphCarryInstallError::DuplicateSourceIndex)
             );
             let mut plain = PreparedRenderPlan::prepare(engine::realtime::PrepareRenderPlan {
                 plan_id: 1,
@@ -6437,13 +6440,15 @@ mod tests {
             })
             .expect("plain plan");
             assert_eq!(
-                graph::install_carry_program(&mut plain, program(&[(0, 0)])),
-                Err(GraphCarryInstallError::NotAGraphPlan)
+                graph::carry_builder(&mut plain, program(&[(0, 0)])).err(),
+                Some(GraphCarryInstallError::NotAGraphPlan)
             );
             assert_eq!(graph::plan_identity(&mut plain), None);
             // A refused install charges nothing; an accepted one charges its move table.
             assert_eq!(graph::carry_program_retained_bytes(&mut vacant), 0);
-            graph::install_carry_program(&mut vacant, program(&[(0, 0)])).expect("install");
+            graph::carry_builder(&mut vacant, program(&[(0, 0)]))
+                .expect("install")
+                .seal();
             assert_eq!(
                 graph::carry_program_retained_bytes(&mut vacant),
                 core::mem::size_of::<(u32, u32)>() as u64
@@ -6538,7 +6543,7 @@ mod tests {
                 two_source_mappings(),
                 &validity,
             );
-            graph::install_carry_program(
+            graph::carry_builder(
                 &mut successor,
                 GraphCarryProgram {
                     predecessor: identity,
@@ -6546,7 +6551,8 @@ mod tests {
                     timeline: false,
                 },
             )
-            .expect("install");
+            .expect("install")
+            .seal();
             assert_eq!(
                 successor.adopt_predecessor_plan(&mut predecessor),
                 CarryOutcome::PredecessorMismatch
@@ -6567,15 +6573,16 @@ mod tests {
                 &validity,
             );
             assert_eq!(
-                graph::install_carry_program(
+                graph::carry_builder(
                     &mut successor,
                     GraphCarryProgram {
                         predecessor: 1,
                         sources: vec![(0, 0), (1, 0)].into_boxed_slice(),
                         timeline: false,
                     },
-                ),
-                Err(GraphCarryInstallError::DuplicateSourceIndex)
+                )
+                .err(),
+                Some(GraphCarryInstallError::DuplicateSourceIndex)
             );
         }
 
@@ -6658,8 +6665,9 @@ mod tests {
                 vec![mono(a, 1), mono(b, 1)],
                 &validity,
             );
-            graph::install_carry_program(&mut successor, carry_source_zero(identity))
-                .expect("install");
+            graph::carry_builder(&mut successor, carry_source_zero(identity))
+                .expect("install")
+                .seal();
             assert_eq!(
                 successor.adopt_predecessor_plan(&mut predecessor),
                 CarryOutcome::PredecessorMismatch

@@ -2276,16 +2276,15 @@ fn a_diverged_lane_keeps_its_chain_dual_after_the_swap_on_every_width() {
     }
 }
 
-/// D6 and P11 of #1276. Installing the input section refuses a plan with no carry program (no
-/// predecessor named), a padding lane, and a repeated successor or predecessor lane. At the swap
+/// D6 and P11 of #1276. Staging the input section refuses a padding lane and a repeated successor
+/// or predecessor lane (a section without a carry program does not compile, #2375). At the swap
 /// block a predecessor lane that does not resolve refuses the whole hand-over, before any lane
 /// moves. Red if install accepts a padding lane, or if the swap block copies the lanes that
 /// resolve and skips the rest.
 #[test]
 fn a_bad_input_move_is_refused_whole() {
     use graph::{
-        GraphCarryInstallError, GraphCarryProgram, GraphLaneLocation, GraphLaneMove,
-        install_builtin_input_carry, install_carry_program,
+        GraphCarryInstallError, GraphCarryProgram, GraphLaneLocation, GraphLaneMove, carry_builder,
     };
     let backend = Backend::Simd4;
     let a = Session::compile(filtered_session(false));
@@ -2315,11 +2314,7 @@ fn a_bad_input_move_is_refused_whole() {
         .find(|(id, _)| &**id == "eq0")
         .expect("eq0")
         .1;
-    assert_eq!(
-        install_builtin_input_carry(&mut successor.plan, vec![step(into, eq0)]),
-        Err(GraphCarryInstallError::NoCarryProgram)
-    );
-    install_carry_program(
+    let mut carry = carry_builder(
         &mut successor.plan,
         GraphCarryProgram {
             predecessor: predecessor.inventory.plan_identity(),
@@ -2341,11 +2336,11 @@ fn a_bad_input_move_is_refused_whole() {
     assert_eq!(members, 2);
     let padding = GraphLaneLocation { lane: 2, ..last };
     assert_eq!(
-        install_builtin_input_carry(&mut successor.plan, vec![step(padding, eq0)]),
+        carry.builtin_inputs(vec![step(padding, eq0)]),
         Err(GraphCarryInstallError::InputLaneOutOfRange)
     );
     assert_eq!(
-        install_builtin_input_carry(&mut successor.plan, vec![step(into, eq0), step(into, eq8)]),
+        carry.builtin_inputs(vec![step(into, eq0), step(into, eq8)]),
         Err(GraphCarryInstallError::DuplicateInputLane)
     );
     // A predecessor location past every unit: it sorts after eq0's valid move.
@@ -2358,11 +2353,10 @@ fn a_bad_input_move_is_refused_whole() {
         .find(|(id, _)| &**id == "eq1")
         .expect("eq1")
         .1;
-    install_builtin_input_carry(
-        &mut successor.plan,
-        vec![step(into, eq0), step(other, nowhere)],
-    )
-    .expect("successor lanes resolve; predecessor lanes are checked at the swap block");
+    carry
+        .builtin_inputs(vec![step(into, eq0), step(other, nowhere)])
+        .expect("successor lanes resolve; predecessor lanes are checked at the swap block");
+    carry.seal();
 
     // Render the predecessor so eq0's filters hold state, then hand over.
     let feed = Feed::new(SOURCE, 17);

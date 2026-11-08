@@ -4899,12 +4899,6 @@ fn prepare_or_project(
     let jump_lengths =
         graph::attach_jump_lengths(&mut plan, session_jump_lengths(model), &live_superseded)
             .map_err(|_| graph_failure("host.jump_lengths.attach"))?;
-    // Issue #1272 D4: the join's program goes in before the plan leaves preparation.
-    let has_carry_program = carry_program.is_some();
-    if let Some(program) = carry_program {
-        graph::install_carry_program(&mut plan, program)
-            .map_err(|_| graph_failure("host.carry.install"))?;
-    }
     // Issue #1276 D6: this plan's own input lanes, sorted by strip ID: the inventory its
     // successor joins with, and the table the join below looks this plan's lanes up in.
     let mut input_sections: Vec<InputSectionInventoryRow> = graph::builtin_input_lanes(&mut plan)
@@ -5459,22 +5453,18 @@ fn prepare_or_project(
     .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let delay_carry_bytes = graph::delay_carry_retained_bytes(delay_carry.len())
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    if !carried_inputs.is_empty() {
-        let moves: Vec<graph::GraphLaneMove> = carried_inputs
-            .iter()
-            .filter_map(|join| {
-                input_section_row(&input_sections, join.id).map(|row| graph::GraphLaneMove {
-                    successor: row.location,
-                    predecessor: join.predecessor,
-                })
+    let input_moves: Vec<graph::GraphLaneMove> = carried_inputs
+        .iter()
+        .filter_map(|join| {
+            input_section_row(&input_sections, join.id).map(|row| graph::GraphLaneMove {
+                successor: row.location,
+                predecessor: join.predecessor,
             })
-            .collect();
-        // Every strip banks its input section in a shipped plan, so every carried strip finds
-        // its lane here; one that did not would silently restart at rest.
-        debug_assert_eq!(moves.len(), carried_inputs.len());
-        graph::install_builtin_input_carry(&mut plan, moves)
-            .map_err(|_| graph_failure("host.carry.install"))?;
-    }
+        })
+        .collect();
+    // Every strip banks its input section in a shipped plan, so every carried strip finds its
+    // lane here; one that did not would silently restart at rest.
+    debug_assert_eq!(input_moves.len(), carried_inputs.len());
     // #1355 D5, L3: a warm successor's `Input`-tap sidechain lines from a restarted track on a
     // moved source into a carried strip. `restarted` is every join's restart set and the lead's
     // whole restarts (#1324a), gathered above.
@@ -5543,10 +5533,6 @@ fn prepare_or_project(
     {
         return Err(resource("host.graph.resource.limit"));
     }
-    if !strip_carry.moves.is_empty() {
-        graph::install_builtin_strip_carry(&mut plan, strip_carry.moves)
-            .map_err(|_| graph_failure("host.carry.install"))?;
-    }
     // Issue #1363 D3: each added route's arm, on its live route op. #1877 D1: each takes an
     // inventory row, so a later successor re-arms it and carries its entry, as a strip's.
     let route_arms = route_fade_arms(
@@ -5567,6 +5553,8 @@ fn prepare_or_project(
     let mut fade_arm_rows = Vec::new();
     let mut route_copy_rows = Vec::new();
     let mut fade_watch = graph::GraphFadeArmWatch::default();
+    // The fade table goes in before the hand-over takes the plan: its pairs index it (#1392 D3).
+    let mut fade_pairs = Vec::new();
     if !fade_arms.is_empty() || !route_arms.is_empty() || !copy_arms.is_empty() {
         let (strips, mut arms): (Vec<_>, Vec<_>) = fade_arms.into_iter().unzip();
         let route_count = route_arms.len();
@@ -5575,7 +5563,6 @@ fn prepare_or_project(
         let (entries, watch) = graph::install_fade_arms(&mut plan, arms)
             .map_err(|_| graph_failure("host.fade.install"))?;
         fade_watch = watch;
-        let mut pairs = Vec::new();
         let strip_count = strips.len();
         for (id, entry) in strips.into_iter().zip(&entries) {
             let Some(entry) = *entry else {
@@ -5584,7 +5571,7 @@ fn prepare_or_project(
             if let Some(&(_, Some(predecessor))) =
                 fade_strips.iter().find(|(strip, _)| *strip == id)
             {
-                pairs.push(graph::GraphFadeArmPair {
+                fade_pairs.push(graph::GraphFadeArmPair {
                     successor: entry,
                     predecessor,
                 });
@@ -5601,7 +5588,7 @@ fn prepare_or_project(
                 continue;
             };
             if let Some(predecessor) = fade.carried {
-                pairs.push(graph::GraphFadeArmPair {
+                fade_pairs.push(graph::GraphFadeArmPair {
                     successor: entry,
                     predecessor,
                 });
@@ -5621,7 +5608,7 @@ fn prepare_or_project(
                 continue;
             };
             if let Some(predecessor) = copy.carried {
-                pairs.push(graph::GraphFadeArmPair {
+                fade_pairs.push(graph::GraphFadeArmPair {
                     successor: entry,
                     predecessor,
                 });
@@ -5634,10 +5621,6 @@ fn prepare_or_project(
         route_copy_rows.sort_unstable_by(|left: &RouteCopyRow, right: &RouteCopyRow| {
             left.route.id.as_str().cmp(right.route.id.as_str())
         });
-        if !pairs.is_empty() {
-            graph::install_fade_arm_carry(&mut plan, pairs)
-                .map_err(|_| graph_failure("host.carry.install"))?;
-        }
         fade_arm_rows
             .sort_unstable_by(|left, right| (&left.id, left.owner).cmp(&(&right.id, right.owner)));
     }
@@ -5652,63 +5635,92 @@ fn prepare_or_project(
             predecessor: step.predecessor_entry,
         })
         .collect();
-    if !effect_carry.moves.is_empty() {
-        graph::install_effect_carry(&mut plan, effect_carry.moves, effect_carry_scratch_bytes)
-            .map_err(|_| graph_failure("host.carry.install"))?;
-    }
-    if !meter_carry.moves.is_empty()
+    // #2375: the hand-over is assembled whole on one builder, which takes the plan from its
+    // program to its seal, so no section can go in without the program that names its
+    // predecessor. The join's program (#1272 D4) is the one the builder starts from. Without one,
+    // a line or a send that carries between two plans whose strips all restart or differ in a
+    // prepared value names the predecessor with a program that moves no source (it retains no
+    // byte); any other section without the join's program is refused, as it always was.
+    let lines_or_sends_carry = !(delay_carry.is_empty()
+        && strip_delay_carry.moves.is_empty()
+        && route_carry.moves.is_empty());
+    let observers_carry = !meter_carry.moves.is_empty()
         || !meter_carry.joins.is_empty()
-        || !spectrum_carry.moves.is_empty()
-    {
-        // One section holds every kind's moves (#1327 D2, #1395 D2); the meters' come first.
-        let mut moves = meter_carry.moves;
-        moves.extend(spectrum_carry.moves);
-        graph::install_observer_carry(&mut plan, moves, meter_carry.joins)
-            .map_err(|_| graph_failure("host.carry.install"))?;
-    }
-    if !observation_carry.is_empty() {
-        graph::install_observation_carry(&mut plan, observation_carry)
-            .map_err(|_| graph_failure("host.carry.install"))?;
-    }
-    if let Some(base) = successor
-        && !(delay_carry.is_empty()
-            && strip_delay_carry.moves.is_empty()
-            && route_carry.moves.is_empty())
-    {
-        // A line or a send carries between two plans whose strips all restart or differ in a
-        // prepared value, so the join above may have found nothing else to carry: the program then
-        // names the predecessor and moves no source (it retains no byte).
-        if !has_carry_program {
-            graph::install_carry_program(
-                &mut plan,
-                graph::GraphCarryProgram {
-                    predecessor: base.inventory.plan_identity(),
-                    sources: Box::default(),
-                    timeline: false,
-                },
-            )
-            .map_err(|_| graph_failure("host.carry.install"))?;
+        || !spectrum_carry.moves.is_empty();
+    let program = match carry_program {
+        Some(program) => Some(program),
+        None if !carried_inputs.is_empty()
+            || !strip_carry.moves.is_empty()
+            || !fade_pairs.is_empty()
+            || !effect_carry.moves.is_empty()
+            || observers_carry
+            || !observation_carry.is_empty() =>
+        {
+            return Err(graph_failure("host.carry.install"));
         }
-        if !delay_carry.is_empty() {
-            graph::install_delay_carry(&mut plan, delay_carry)
-                .map_err(|_| graph_failure("host.carry.install"))?;
-        }
-        if !strip_delay_carry.moves.is_empty() {
-            graph::install_strip_delay_carry(&mut plan, strip_delay_carry.moves)
-                .map_err(|_| graph_failure("host.carry.install"))?;
-        }
-        if !route_carry.moves.is_empty() {
-            graph::install_route_carry(&mut plan, route_carry.moves)
-                .map_err(|_| graph_failure("host.carry.install"))?;
-        }
-    }
+        None => successor
+            .filter(|_| lines_or_sends_carry)
+            .map(|base| graph::GraphCarryProgram {
+                predecessor: base.inventory.plan_identity(),
+                sources: Box::default(),
+                timeline: false,
+            }),
+    };
     // #1355 D5: a warm successor fills its grown lines whenever it is adopted with a carry, so
     // none of its lines can stay at rest. Its prime replays `P / q` blocks.
-    if let Some(lead) = warm.filter(|lead| lead.lead_samples != 0) {
-        let blocks = u32::try_from(lead.lead_samples / u64::from(compiled.quantum().0))
-            .map_err(|_| resource("host.resource.arithmetic"))?;
-        graph::install_prime_carry(&mut plan, blocks, strip_delay_carry.fills, sidechain_fills)
-            .map_err(|_| graph_failure("host.carry.install"))?;
+    let prime_blocks = warm
+        .filter(|lead| lead.lead_samples != 0)
+        .map(|lead| u32::try_from(lead.lead_samples / u64::from(compiled.quantum().0)))
+        .transpose()
+        .map_err(|_| resource("host.resource.arithmetic"))?;
+    if let Some(program) = program {
+        let install = |_| graph_failure("host.carry.install");
+        let mut carry = graph::carry_builder(&mut plan, program).map_err(install)?;
+        if !carried_inputs.is_empty() {
+            carry.builtin_inputs(input_moves).map_err(install)?;
+        }
+        if !strip_carry.moves.is_empty() {
+            carry.builtin_strips(strip_carry.moves).map_err(install)?;
+        }
+        if !fade_pairs.is_empty() {
+            carry.fade_arms(fade_pairs).map_err(install)?;
+        }
+        if !effect_carry.moves.is_empty() {
+            carry
+                .effects(effect_carry.moves, effect_carry_scratch_bytes)
+                .map_err(install)?;
+        }
+        if observers_carry {
+            // One section holds every kind's moves (#1327 D2, #1395 D2); the meters' come first.
+            let mut moves = meter_carry.moves;
+            moves.extend(spectrum_carry.moves);
+            carry.observers(moves, meter_carry.joins).map_err(install)?;
+        }
+        if !observation_carry.is_empty() {
+            carry.observations(observation_carry).map_err(install)?;
+        }
+        if successor.is_some() {
+            if !delay_carry.is_empty() {
+                carry.delays(delay_carry).map_err(install)?;
+            }
+            if !strip_delay_carry.moves.is_empty() {
+                carry
+                    .strip_delays(strip_delay_carry.moves)
+                    .map_err(install)?;
+            }
+            if !route_carry.moves.is_empty() {
+                carry.routes(route_carry.moves).map_err(install)?;
+            }
+        }
+        if let Some(blocks) = prime_blocks {
+            carry
+                .prime(blocks, strip_delay_carry.fills, sidechain_fills)
+                .map_err(install)?;
+        }
+        carry.seal();
+    } else if prime_blocks.is_some() {
+        // A prime names no predecessor of its own: it needs the program a carry starts from.
+        return Err(graph_failure("host.carry.install"));
     }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
     // The admission charged the input moves of every strip the input join carries; the
@@ -11034,8 +11046,9 @@ mod tests {
         );
     }
 
-    /// The carry program is built only when some owner may carry, and the effect carry refuses a
-    /// plan without one (`NoEffectCarryProgram`). A strip whose only non-prepared owner is a
+    /// The carry program is built only when some owner may carry, and preparation refuses an
+    /// effect section without one (no carry builder takes a section without its program, #2375).
+    /// A strip whose only non-prepared owner is a
     /// surviving insert must therefore say it may carry; a join that looked at the console slots
     /// alone would refuse a valid transaction with `host.carry.install`. (No swap reaches this
     /// today: a strip present in both models also joins its fader, which is never prepared when
