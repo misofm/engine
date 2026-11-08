@@ -5058,8 +5058,10 @@ impl<S> GraphBoundPlan<S> {
 }
 
 /// Test-only (#2388): [`GraphBoundPlan::bank_effect_lanes`] of a sealed plan, for evidence that
-/// reads a plan's banks after it rendered; `None` for any other plan. The lanes are the ones bind
-/// placed: render moves no binding.
+/// reads a plan's banks after it rendered; `None` for any other plan. Each row's location, owner
+/// and effect ID are bind's home location for that instance. Its `kind` is the lane's current
+/// occupant's, which a pack can change: `lane_swap_fits` lets a `BypassOnly` and an
+/// `Uncontrolled` lane trade (#2135).
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_bank_effect_lanes(
@@ -5138,8 +5140,8 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
 ///
 /// It is not a [`PreparedRenderPlan`], so it can neither render nor be published. [`Self::seal`],
 /// or the seal of the [`GraphCarryBuilder`] it starts ([`carry_builder`]), is the only way to one,
-/// and a sealed plan offers no bind read, attach or install. Its state `S` names the one-shot steps
-/// it has left:
+/// and outside test-support a sealed plan offers no bind read, attach or install. Its state `S`
+/// names the one-shot steps it has left:
 ///
 /// - [`BindTables`], from bind: it still holds its bind identity tables, which
 ///   [`Self::take_bind_tables`] hands out once, by value.

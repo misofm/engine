@@ -158,10 +158,10 @@ older pair's claim is a case of this one.
     (`PredecessorMismatch`), and nothing moves.
 
   It is the only test of the first two refusals. The fixture is nine tracks of the silent-bank
-  desk, so every width's last input bank is partial. Its "nothing moved" half now compares every
-  block through the plan's latency with a fresh twin. Comparing the first block only, as at base,
-  stayed green under a carry that copies the resolving lanes, because the desk's latency hides the
-  first block.
+  desk, so every width's last input bank is partial. Its "nothing moved" half compares every block
+  through the plan's latency with a fresh twin. On this desk a first-block check alone would stay
+  green under a carry that copies the resolving lanes, because the desk's latency hides the first
+  block. (The base test's first-block check, on its own fixture, did go red; see the fold below.)
 - New: the `GraphBoundPlan` doctest pair. Test value: a bound plan that dereferences to its
   `PreparedRenderPlan`, or exposes `render`, would let an unsealed plan render. No other test sees
   a type-level change.
@@ -222,15 +222,31 @@ plan word is touched.
 - `./target/release/realtime_policy`: ok (298 marked regions in 48 files). No marked region
   changed.
 
-**Proposed successor (not filed).** "Graph: the bind-time joins on a sealed plan are typed too".
-These are left as they were:
-- `PreparedRenderPlan::arm_mono_collapse` and `force_mono_collapse_off` (engine, doc-hidden) are
-  bind-time joins. `prepare_or_project` still runs them on the sealed plan (5882 at base), and so
-  do the test fixtures.
-- So does `set_source_read_offset`.
-- `take_revision_gate` is a one-shot take on the sealed plan.
-- `attach_jump_lengths` and `attach_automation_program` are now bound-plan methods but keep their
-  run-time `AlreadyAttached` refusals.
+**Successor.** #SUCCESSOR. Its spec is at the coordinator's scratchpad `succ/t.md`, corrected in the
+attempt 1 fold below.
 
-Typing these means a bound-plan surface in `engine` or a bound-plan method per join. That
-crosses the engine crate, which is outside this issue's scope.
+**Verdict (attempt 1): PASS** (Sol, `c57c52d90`), minors only, folded below.
+
+### Attempt 1 fold (Terra), same branch, `origin/main` @ `d060df5cd` merged in (JS and specs only)
+
+1. **The moved test's history, corrected.** The base host-core test's first-block comparison
+   went red under the partial-carry mutation, on its own fixture. Only the new desk fixture's
+   latency would hide a first-block check. The "Moved" bullet above now says so.
+2. **`test_only_bank_effect_lanes`'s doc, corrected.** The doc no longer says "render moves no
+   binding". It now says that each row's location, owner and effect ID are bind's home location,
+   and that its `kind` is the lane's current occupant's, which a pack can change (`lane_swap_fits`
+   lets `BypassOnly` and `Uncontrolled` lanes trade, #2135). The `GraphBoundPlan` doc now says
+   that a sealed plan offers no bind read "outside test-support".
+3. **The successor, corrected and written as a ready-to-file spec** (`succ/t.md`):
+   - `force_mono_collapse_off` is dropped: it is test-only and toggled between renders, not a
+     bind-time join;
+   - `take_revision_gate` is named as the engine-level one-shot it is, taken in control-plane
+     `compile.rs` ~2470 and host-core `limiter_linked_session.rs` ~442;
+   - `stamp_held_gate` (`prepare.rs` ~5905), `donate_sources` (`source.rs` ~1207) and the
+     unreachable `host.inventory.identity` arm on `graph::plan_identity` (`prepare.rs` ~5771) are
+     added.
+
+**Gates (fold head).** `cargo test --locked -p graph --all-targets --features graph/test-support`:
+148 passed. Graph doctests: 2 passed (the `compile_fail` pair). `RUSTDOCFLAGS="-D warnings" cargo doc --locked
+--no-deps -p graph`: ok. `cargo fmt --check`: ok. The fold changes doc comments and this record
+only, so no render path or test moved.
