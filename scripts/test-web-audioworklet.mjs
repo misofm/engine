@@ -1373,6 +1373,60 @@ async function testMainRealm() {
       assert.equal(frameHost.discardedControlEvents, 0, `${malformed.tag}: a malformed frame is not counted`);
       await frameHost.dispose().catch(() => undefined);
     }
+    // Issue #2371: once the host has failed, a well-formed unsolicited frame already in flight
+    // reaches no listener: it is dropped and counted in `discardedFramesAfterFailure`, and not in
+    // `discardedControlEvents`. Test value: the frame dispatched before any lifecycle check, so a
+    // consumer sees engine progress after it was told the engine failed.
+    {
+      const frameHost = await createMisoAudioWorkletHost({
+        context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const heard = [];
+      await frameHost.meters({ enabled: true, onFrame: () => heard.push("meter") });
+      await frameHost.telemetry({ enabled: true, onFrame: () => heard.push("telemetry") });
+      frameHost.onControlEvent(() => heard.push("control-event"));
+      frameHost.onWatermark(() => heard.push("watermark"));
+      const deliverAll = () => {
+        for (const data of [
+          {
+            tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0x3, lossCount: 0,
+            windows: 1, trackCount: 0, structureEpoch: 1, peaks: new Float32Array(2),
+            trackGrDb: new Float32Array(0), masterGrDb: null, firstSample: 0n, endSample: 64n,
+            submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
+          },
+          {
+            tag: "miso.telemetry.v1", sequence: 1, blocks: 1, cpuPercent: 1, peakBlockMs: 1,
+            meanBlockMs: 1, budgetMs: 1, deadlineMisses: 0, resolutionMs: 1, belowResolution: false,
+          },
+          { tag: "miso.control-event.v1", lane: 0, frame: new Uint8Array([1]) },
+          {
+            tag: "miso.watermark.v1", revision: 1n, sample: 64n, outcome: 1n, exactCount: 1n,
+            transitionFallbackCount: 0n, supersededCount: 0n,
+          },
+        ]) frameHost.node.port.onmessage({ data });
+      };
+      deliverAll();
+      assert.deepEqual(heard, ["meter", "telemetry", "control-event", "watermark"],
+        "a live host delivers each frame");
+      assert.equal(frameHost.discardedFramesAfterFailure, 0, "a live host drops none");
+      frameHost.node.port.onmessageerror();
+      deliverAll();
+      assert.deepEqual(heard, ["meter", "telemetry", "control-event", "watermark"],
+        "a failed host delivers no frame");
+      assert.equal(frameHost.discardedFramesAfterFailure, 4, "each frame after the failure is counted");
+      assert.equal(frameHost.discardedControlEvents, 0, "a failed host's event is no listener-less drop");
+      await errorResult(frameHost.status(), 255);
+      // A failed host stays failed while its dispose waits for the reply.
+      holdAll = true;
+      const disposal = frameHost.dispose();
+      holdAll = false;
+      deliverAll();
+      assert.equal(heard.length, 4, "a failed host's dispose in flight delivers no frame");
+      assert.equal(frameHost.discardedFramesAfterFailure, 8);
+      for (const respond of heldAll.splice(0)) respond();
+      await disposal.catch(() => undefined);
+    }
 
     // #1536: concurrent status calls share one read and are never refused for being in flight.
     const sharedStatusHost = async () => createMisoAudioWorkletHost({
@@ -2745,6 +2799,105 @@ async function testMainRealm() {
           await failing.dispose().catch(() => undefined);
         }
 
+        // Issue #2371: the steps that follow a request's reply (the service step, the watermark,
+        // the event drain) report a sticky error to that request, which the page already saw
+        // answered. The host fails with the error's own code and ID, in both modes: a request in
+        // flight and every later one reject with it, and the peer that posted it is not told back.
+        // Test value: the error taken for a reply that matches no request, so the page fails with
+        // 255 and the oldest request's ID, loses the code 3, and tells the peer a failure it posted.
+        for (const mode of ["single", "worker"]) {
+          const failing = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js", instanceMode: mode,
+          });
+          const node = FakeNode.latest;
+          const worker = mode === "worker" ? workers.at(-1) : undefined;
+          holdAll = worker === undefined;
+          workerBehaviour = "controlSilent";
+          const held = failing.control(new Uint8Array([1]));
+          holdAll = false;
+          workerBehaviour = "ready";
+          // In `single` mode the answered request is the last one the host sent.
+          await failing.control(new Uint8Array([2]));
+          const answered = worker === undefined
+            ? events.findLast((event) => event[1] === "miso.control.v1")[2]
+            : worker.posts.findLast((message) => message.tag === "miso.control.v1").requestId;
+          assert.equal(await settledState(held), "pending");
+          (worker ?? node.port).onmessage({ data: { tag: "miso.error.v1", requestId: answered, result: 3 } });
+          assert.equal((await errorResult(held, 3)).requestId, answered, `${mode}: the request in flight`);
+          heldAll.length = 0;
+          await errorResult(failing.control(new Uint8Array([1])), 3);
+          assert.deepEqual([
+            node.port.failPosts.length,
+            worker?.posts.filter((message) => message.tag === "miso.fail.v1").length ?? 0,
+          ], [0, 0], `${mode}: the peer that posted the failure is not told back`);
+          await failing.dispose().catch(() => undefined);
+        }
+        // The answered-request clause admits only an ID the host sent: a typed error to an ID it
+        // never allocated is a reply that matches no request, and fails the host with 255. Test value: the
+        // clause reading any request ID as answered, so a stray error passes for a typed failure.
+        for (const requestId of [999, -1, 1.5]) {
+          const stray = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js", instanceMode: "single",
+          });
+          stray.node.port.onmessage({ data: { tag: "miso.error.v1", requestId, result: 3 } });
+          await errorResult(stray.status(), 255);
+          await stray.dispose().catch(() => undefined);
+        }
+        // In `worker` mode the two peers share the allocator but each is sent only some IDs, so
+        // the clause is bounded by the highest request ID sent to the peer that posts the error.
+        // Each case is a stray, 255: the Worker's error to the control reply's fence or to a
+        // render-port request, which only the worklet was sent, and the worklet's error to the
+        // fence it answered (no peer reports to a fence afterwards, so a fence is not counted).
+        // Test value: the clause bounded by the shared allocator, a request counted for both
+        // peers, or a fence counted, so an error to an ID its sender never had to report to
+        // passes for a typed failure.
+        // A request whose post threw never reached the peer: an error to its ID is a stray too.
+        // Test value: the ID counted before the post, so it passes for an answered request's.
+        {
+          const unsent = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js", instanceMode: "single",
+          });
+          const port = unsent.node.port;
+          const post = port.postMessage.bind(port);
+          port.postMessage = () => { throw new Error("port closed"); };
+          const refused = await errorResult(unsent.control(new Uint8Array([1])), 255);
+          port.postMessage = post;
+          port.onmessage({ data: { tag: "miso.error.v1", requestId: refused.requestId, result: 3 } });
+          await errorResult(unsent.status(), 255);
+          await unsent.dispose().catch(() => undefined);
+        }
+        const fenceId = () => events.findLast((event) => event[1] === "miso.fence.v1")[2];
+        for (const [label, act, poster] of [
+          ["the Worker, to the fence", async (host) => {
+            await host.control(new Uint8Array([1]));
+            return fenceId();
+          }, "worker"],
+          ["the Worker, to a render-port request", async (host) => {
+            await host.renderAllocationCount();
+            return events.findLast((event) => event[1] === "miso.renderallocations.v1")[2];
+          }, "worker"],
+          ["the worklet, to the fence", async (host) => {
+            await host.control(new Uint8Array([1]));
+            return fenceId();
+          }, "worklet"],
+        ]) {
+          const crossed = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js", instanceMode: "worker",
+          });
+          const worker = workers.at(-1);
+          const requestId = await act(crossed);
+          (poster === "worker" ? worker : crossed.node.port)
+            .onmessage({ data: { tag: "miso.error.v1", requestId, result: 3 } });
+          await errorResult(crossed.control(new Uint8Array([1])), 255).catch((error) => {
+            throw new Error(`${label}: ${error.message}`);
+          });
+          await crossed.dispose().catch(() => undefined);
+        }
+
         // Issue #2279 (WEB-6), the worker-mode row: a render failure posted while the
         // dispose is with the Worker fails the host, and the Worker's own reply still settles the
         // dispose, cleanly. Test value: a dispose rejected with the render failure and the Worker
@@ -3219,7 +3372,9 @@ async function testMainRealm() {
             assert.deepEqual(failPosts(peers), { worker: [], worklet: [] }, `${what}: a live host posts no failure`);
             await act(peers);
             assert.deepEqual(failPosts(peers), { worker: toWorker, worklet: toWorklet }, `${what}: who is told`);
-            inject(peers.node.port, { tag: "miso.meter.v1" });
+            // Issue #2371: a frame on a failed host is dropped before its schema check, so the
+            // second failure is a channel's.
+            peers.node.port.onmessageerror();
             assert.deepEqual(failPosts(peers), { worker: toWorker, worklet: toWorklet },
               `${what}: a second failure tells nobody again`);
             assert.deepEqual([...(peers.worker?.posts ?? []), ...peers.node.port.failPosts]

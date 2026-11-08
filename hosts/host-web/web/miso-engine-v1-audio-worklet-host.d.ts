@@ -97,7 +97,11 @@
 //   A render refusal that is no trap (`RESULT_RENDER_REJECTED`, 8, say) reaches the page the
 //   same way, with its own code.
 // - In a message handler: the request in flight is settled as `miso.error.v1` with result 255, or
-//   the failure is posted as request ID 0 when no request is in flight.
+//   the failure is posted as request ID 0 when no request is in flight. A failure the steps after
+//   a reply find (the service step, the watermark, the event drain), a trap or not, is posted with
+//   that reply's request ID instead, by the worklet in `single` mode and by the control Worker in
+//   `worker` mode. The page fails with the error's own code and ID, as for request ID 0 (issue
+//   2371).
 //
 // # A render failure never frees
 //
@@ -663,6 +667,10 @@ export interface MisoAudioWorkletHost {
   /// @internal The count of engine events that arrived while no listener was subscribed (issue
   /// 1570b D5). Such an event is dropped here, which changes no engine state.
   readonly discardedControlEvents: number;
+  /// @internal The count of meter, telemetry, control-event and watermark frames that arrived after
+  /// the host failed (issue 2371). Such a frame is dropped and reaches no listener, so nothing a
+  /// listener hears comes after the failure. It is not counted in `discardedControlEvents`.
+  readonly discardedFramesAfterFailure: number;
   /// Dispose the host. Every later call returns the same promise once it ended in teardown. It
   /// rejects with the engine's error, or with a `MisoTeardown` when nobody answered (issue 1332
   /// S8); the node is disconnected (and in `"worker"` mode the Worker terminated) either way.
