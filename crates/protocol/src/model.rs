@@ -5,6 +5,7 @@
 //! non-publishable `CompiledSession` control-plane artifact.
 
 use core::fmt;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use session::{
@@ -1640,7 +1641,18 @@ impl SessionStore {
             return Ok(prepared);
         }
         let next_revision = current.0 + 1;
-        let mut candidate = self.compiled.normalized_model().clone();
+        // #2403: a transaction of monitor edits only reads its candidate and writes none of it,
+        // so it borrows the committed model. Its edits are `Observe`s, which write the copy of the
+        // binding table, and `SetControl`s of a monitor row, for which `check_monitor` never says
+        // "model row" (its descriptor is the one `is_monitor_row_edit` read) and which `continue`
+        // or are refused. A replace is never monitor-only (it is prepared without a monitor), and a
+        // monitor-only transaction is not compiled. Every other transaction clones it here.
+        let committed = self.compiled.normalized_model();
+        let mut candidate: Cow<'_, SessionModel> = if monitor_only {
+            Cow::Borrowed(committed)
+        } else {
+            Cow::Owned(committed.clone())
+        };
         let mut edit_ramps = EditRamps::new();
         let mut control_writes = ControlRampWrites::new();
         let mut monitor_edits: Vec<controls::MonitorWrite> = Vec::new();
@@ -1737,7 +1749,7 @@ impl SessionStore {
                     continue;
                 }
             }
-            apply_session_edit(&mut candidate, edit).map_err(refused)?;
+            apply_session_edit(candidate.to_mut(), edit).map_err(refused)?;
             match (edit, &mut set_control_rows) {
                 (SessionEdit::SetControl { address, .. }, Some(rows)) => rows.push(address.clone()),
                 _ => set_control_rows = None,
@@ -1748,15 +1760,19 @@ impl SessionStore {
         // #1386 D2: the replace's smoothing, whole. The rows it changes are not `SetControl`
         // rows the fast classification could list, so the candidate is classified whole.
         if let Some(control_smoothing) = replacement {
-            candidate.control_smoothing = control_smoothing;
+            candidate.to_mut().control_smoothing = control_smoothing;
             set_control_rows = None;
         }
+        debug_assert!(
+            !monitor_only || matches!(candidate, Cow::Borrowed(_)),
+            "a monitor-only transaction wrote or cloned its candidate"
+        );
         // Not a mutation: the committed compilation, at the committed revision, which the store
         // holds and the transaction does not copy (#2394).
         let compiled = if monitor_only {
             None
         } else {
-            candidate.revision = next_revision;
+            candidate.to_mut().revision = next_revision;
             Some(
                 compile_session(&candidate, self.caps).map_err(|diagnostics| {
                     SessionStoreError::Validation {
