@@ -1404,6 +1404,27 @@ fn observation_is_identical_across_rack_placement() {
     );
 }
 
+/// One batch of stable selections read with `host_core::observation::read_with`: the rows it
+/// wrote, in the order it wrote them, and its refusal, if any.
+fn read_rows(
+    index: &host_core::observation::ObservationIndex,
+    selections: &[host_core::observation::ObservationSelection<'_>],
+    issued: impl FnMut(&host_core::observation::ObservationKey<'_>) -> (u64, bool),
+) -> (
+    Vec<(usize, host_core::observation::ObservationRow)>,
+    Result<(), host_core::observation::ObservationReadError>,
+) {
+    let mut rows = Vec::new();
+    let result = host_core::observation::read_with(
+        index,
+        selections,
+        |selection| Ok(*selection),
+        issued,
+        |position, _, row| rows.push((position, row)),
+    );
+    (rows, result)
+}
+
 /// The `OBSERVATION_READ` index of `session`'s plan: one entry per observed instance, at its
 /// handle's position.
 fn observation_index(session: &Session) -> host_core::observation::ObservationIndex {
@@ -1437,8 +1458,7 @@ fn observation_index(session: &Session) -> host_core::observation::ObservationIn
 #[test]
 fn a_re_armed_tap_reads_pending_until_a_window_opens_after_the_re_arm() {
     use host_core::observation::{
-        ObservationReadChannels, ObservationReadStatus, ObservationRow, ObservationSelection,
-        read_into,
+        ObservationReadChannels, ObservationReadStatus, ObservationSelection,
     };
     let mut session = prepare(Leg::AllArmed);
     subscribe_tagged(&mut session, true, WINDOW_BLOCKS, 7);
@@ -1448,8 +1468,7 @@ fn a_re_armed_tap_reads_pending_until_a_window_opens_after_the_re_arm() {
     let (strip_id, effect_id) = (handle.track_id.clone(), handle.effect_id.clone());
     let (section, tap_id) = (handle.address.rack, handle.descriptor.observations[0].id.0);
     let read = |index, tag| {
-        let mut rows = [ObservationRow::default()];
-        read_into(
+        let (rows, result) = read_rows(
             index,
             &[ObservationSelection {
                 strip_id: &strip_id,
@@ -1459,10 +1478,9 @@ fn a_re_armed_tap_reads_pending_until_a_window_opens_after_the_re_arm() {
                 channels: ObservationReadChannels::Both,
             }],
             |_| (tag, true),
-            &mut rows,
-        )
-        .expect("a good batch");
-        rows[0]
+        );
+        result.expect("a good batch");
+        rows[0].1
     };
     let first = read(&index, 7);
     assert_eq!(first.status(), ObservationReadStatus::Ready);
@@ -1498,7 +1516,8 @@ fn a_re_armed_tap_reads_pending_until_a_window_opens_after_the_re_arm() {
 
 /// #1586 D3, D4: host-core's read checks the whole batch before it writes a row. A batch whose
 /// last selection is bad, or whose last selection names an earlier one's tap with other lanes,
-/// leaves every row as it was and names that selection; a good batch reads each tap's own window.
+/// writes no row and names that selection; a good batch writes each row once, in order, with its own
+/// tap's window.
 ///
 /// Test value: red if the read writes a row before the whole batch passed (no browser test gives
 /// a partly bad batch a caller-owned output), if the duplicate rule tells two selections of one tap
@@ -1506,8 +1525,8 @@ fn a_re_armed_tap_reads_pending_until_a_window_opens_after_the_re_arm() {
 #[test]
 fn a_read_checks_the_whole_batch_before_it_writes_a_row() {
     use host_core::observation::{
-        ObservationReadChannels, ObservationReadError, ObservationReadStatus, ObservationReading,
-        ObservationRefusal, ObservationRow, ObservationSelection, read_into,
+        ObservationReadChannels, ObservationReadError, ObservationReadStatus, ObservationRefusal,
+        ObservationSelection,
     };
     let mut session = prepare(Leg::AllArmed);
     subscribe_all(&mut session, true, WINDOW_BLOCKS);
@@ -1526,25 +1545,10 @@ fn a_read_checks_the_whole_batch_before_it_writes_a_row() {
         }
     };
     let both = ObservationReadChannels::Both;
-    // No read writes a row with no tap.
-    let sentinel = ObservationRow {
-        reading: ObservationReading::Ready {
-            arm_sample: 0,
-            arm_tag: 7,
-            window: engine::realtime::ObservationWindow {
-                left: -7.0,
-                ..Default::default()
-            },
-            channels: ObservationReadChannels::Left,
-        },
-        tap: None,
-    };
     let refused = |selections: &[ObservationSelection<'_>]| {
-        let mut rows = [sentinel; 3];
-        let error =
-            read_into(&index, selections, |_| (0, false), &mut rows).expect_err("a refused batch");
-        assert_eq!(rows, [sentinel; 3], "a refused batch writes no row");
-        error
+        let (rows, result) = read_rows(&index, selections, |_| (0, false));
+        assert!(rows.is_empty(), "a refused batch writes no row");
+        result.expect_err("a refused batch")
     };
     let unknown_tap = ObservationSelection {
         tap_id: 99,
@@ -1580,14 +1584,20 @@ fn a_read_checks_the_whole_batch_before_it_writes_a_row() {
         }
     );
 
-    let mut rows = [ObservationRow::default(); 2];
-    read_into(
+    let (written, result) = read_rows(
         &index,
         &[select(0, both), select(5, ObservationReadChannels::Right)],
         |_| (0, false),
-        &mut rows,
-    )
-    .expect("a good batch");
+    );
+    result.expect("a good batch");
+    assert_eq!(
+        written
+            .iter()
+            .map(|(position, _)| *position)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    let rows: Vec<_> = written.into_iter().map(|(_, row)| row).collect();
     for (row, track) in rows.iter().zip([0, 5]) {
         let window = observations[track].readers[0].read().expect("a window");
         assert_eq!(row.status(), ObservationReadStatus::Ready);

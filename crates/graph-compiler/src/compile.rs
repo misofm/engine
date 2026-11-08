@@ -84,7 +84,8 @@ impl GraphCompiler {
     /// diagnostics.
     ///
     /// It is [`Self::project`] and [`Self::compile_projected`] with every entry's processor
-    /// supplied: the plan keeps each one, a banked member's too, as it always did.
+    /// supplied: the plan keeps each one its bank plan leaves per node and drops a banked member's,
+    /// which its bank renders, so the plan holds what [`Self::compile_projected`]'s holds (#2378 C8).
     // The transactional API returns the complete prepared-effect and builtin inputs by value on
     // failure. Boxing them would change that ownership contract solely to optimize a cold path.
     #[allow(clippy::result_large_err)]
@@ -1177,7 +1178,8 @@ trait ProcessorSupply: Sized {
     ) -> Result<Vec<EffectPlacement>, (Self, Vec<GraphDiagnostic>)>;
 }
 
-/// Every entry's processor, in entry order: the plan keeps each one, a banked member's too.
+/// Every entry's processor, in entry order: the plan keeps each one the bank plan leaves per node,
+/// and drops a banked member's, which its bank renders (#2378 C8).
 impl ProcessorSupply for Vec<Box<dyn effect_contract::PreparedNativeEffect>> {
     fn place(
         self,
@@ -1193,9 +1195,7 @@ impl ProcessorSupply for Vec<Box<dyn effect_contract::PreparedNativeEffect>> {
             .zip(banked)
             .map(|(processor, &banked)| {
                 if banked {
-                    EffectPlacement::Banked {
-                        kept: Some(processor),
-                    }
+                    EffectPlacement::Banked
                 } else {
                     EffectPlacement::PerNode(processor)
                 }
@@ -1218,7 +1218,7 @@ impl ProcessorSupply for Unprepared {
         let mut placements = Vec::with_capacity(entries.len());
         for (entry, &banked) in entries.iter().zip(banked) {
             if banked {
-                placements.push(EffectPlacement::Banked { kept: None });
+                placements.push(EffectPlacement::Banked);
                 continue;
             }
             match entry.prepare() {

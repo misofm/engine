@@ -581,8 +581,8 @@ pub fn route_coefficients(
 /// whichever of them live controls drive (issue #140 A).
 ///
 /// `placements` is each entry's [`EffectPlacement`], in entry order: the plan holds a per-node
-/// effect for every processor a placement carries, and none for a bank member the compile never
-/// prepared one for (issue #2199), since its bank renders it.
+/// effect for every entry placed per node, and none for a bank member (issue #2199), since its
+/// bank renders it.
 ///
 /// The two vectors are returned side by side rather than as one because
 /// `core::mem::size_of::<RuntimeOp>()` is a reported byte: see
@@ -637,27 +637,21 @@ pub(crate) enum EffectPlacement {
     /// The bank plan leaves the entry per node: it renders with this processor, which its caller
     /// supplied or the compile prepared.
     PerNode(Box<dyn effect_contract::PreparedNativeEffect>),
-    /// The entry is a bank member and renders in its bank. `kept` is the processor its caller
-    /// supplied, which the plan keeps beside the bank
-    /// ([`GraphCompiler::compile_with_builtins`]), or `None` when the compile prepared none
-    /// ([`GraphCompiler::compile_projected`]).
-    Banked {
-        kept: Option<Box<dyn effect_contract::PreparedNativeEffect>>,
-    },
+    /// The entry is a bank member and renders in its bank: the plan holds no processor for it
+    /// (issue #2199). A processor its caller supplied is dropped with the placement
+    /// ([`GraphCompiler::compile_with_builtins`], #2378 C8).
+    Banked,
 }
 
 impl EffectPlacement {
-    fn has_processor(&self) -> bool {
-        match self {
-            Self::PerNode(_) => true,
-            Self::Banked { kept } => kept.is_some(),
-        }
+    const fn has_processor(&self) -> bool {
+        matches!(self, Self::PerNode(_))
     }
 
     fn into_processor(self) -> Option<Box<dyn effect_contract::PreparedNativeEffect>> {
         match self {
             Self::PerNode(processor) => Some(processor),
-            Self::Banked { kept } => kept,
+            Self::Banked => None,
         }
     }
 }

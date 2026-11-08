@@ -64,7 +64,11 @@ pub struct OutputPeakGate(Arc<AtomicU64>);
 
 impl OutputPeakGate {
     /// Let the meter observe every block that starts at or after `from_sample`. A window opens at
-    /// the first such block. A new activation discards a window the meter has open.
+    /// the first such block. The meter reads the gate once per block, so only the value a block
+    /// meets counts: a window the meter has open is discarded when that value differs from the one
+    /// the window was opened under, and kept when it is the same, however the gate moved between
+    /// the two blocks (an activation at the sample it already holds, or a deactivation and a
+    /// reactivation there).
     pub fn activate(&self, from_sample: u64) {
         self.0.store(from_sample, Ordering::Release);
     }
@@ -857,9 +861,6 @@ pub struct MeterCarry {
 pub struct MeterDelivery {
     output: OutputPeakReader,
     gate: OutputPeakGate,
-    /// The first sample the gate admits, or `u64::MAX` while it is inactive: the delivery's own
-    /// copy of the word it last stored.
-    gate_from: u64,
     /// Closed output windows at the queue's head that a delivery reset discarded: the next poll
     /// pops them unread and uncounted, as the reset of the ring they replace cleared it.
     output_discard: usize,
@@ -902,7 +903,6 @@ impl MeterDelivery {
         Self {
             output,
             gate,
-            gate_from: INACTIVE,
             output_discard: 0,
             output_dropped_seen: 0,
             window_frames,
@@ -948,10 +948,15 @@ impl MeterDelivery {
         self.loss_count
     }
 
-    /// The first sample the output meter's gate admits, or `u64::MAX` while it is inactive.
+    /// The first sample the output meter's gate admits, or `u64::MAX` while it is inactive: the
+    /// activation while the level is on, as [`Self::align`] stores it.
     #[must_use]
     pub fn output_gate_from(&self) -> u64 {
-        self.gate_from
+        if self.level {
+            self.activation
+        } else {
+            INACTIVE
+        }
     }
 
     /// Windows folded since the level last turned on or off.
@@ -1268,10 +1273,8 @@ impl MeterDelivery {
     pub fn align(&mut self, from: u64) {
         self.activation = self.grid_boundary(from);
         if self.level {
-            self.gate_from = self.activation;
             self.gate.activate(self.activation);
         } else {
-            self.gate_from = INACTIVE;
             self.gate.deactivate();
         }
     }

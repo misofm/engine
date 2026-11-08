@@ -1557,28 +1557,28 @@ impl SessionStore {
     /// # Errors
     ///
     /// As [`Self::prepare_transaction_with_monitor`]; an in-place preparation accepts only what the
-    /// full one accepts, so an error here is a defect of the host or the store.
+    /// full one accepts, so an error here is a defect of the host or the store. A refused
+    /// transaction is left as it was, in place (#2378 C9).
     pub fn materialize(
         &self,
-        prepared: PreparedSessionTransaction,
-    ) -> Result<PreparedSessionTransaction, SessionStoreError> {
+        prepared: &mut PreparedSessionTransaction,
+    ) -> Result<(), SessionStoreError> {
         let edits = match &prepared.form {
-            TransactionForm::Compiled(_) | TransactionForm::MonitorWhole(_) => {
-                return Ok(prepared);
-            }
+            TransactionForm::Compiled(_) | TransactionForm::MonitorWhole(_) => return Ok(()),
             TransactionForm::InPlace(edit) => &edit.edits,
             TransactionForm::MonitorInPlace(edits) => edits,
         };
         // A token prepared in place holds no `Observe` edit (the full path prepares those), so no
         // binding table is needed.
-        self.prepare_transaction_with(
+        *prepared = self.prepare_transaction_with(
             ExpectedRevision::Exact(prepared.base_revision),
             edits,
             true,
             false,
             None,
             ObserveContext::NONE,
-        )
+        )?;
+        Ok(())
     }
 
     /// `replacement` is a replace's `control_smoothing` ([`Self::prepare_replacement`]): `Some`
@@ -2294,7 +2294,8 @@ mod tests {
             "one route is edited, not the model"
         );
         assert_eq!(prepared.revision().0, fast.revision().0 + 1);
-        let materialized = fast.materialize(prepared).expect("materializes");
+        let mut materialized = prepared;
+        fast.materialize(&mut materialized).expect("materializes");
         assert!(!materialized.is_in_place());
         let oracle = full
             .prepare_transaction_with_monitor(revision, &edits)

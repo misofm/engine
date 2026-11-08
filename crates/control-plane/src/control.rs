@@ -2289,9 +2289,7 @@ fn wire_row(row: &host_core::observation::ObservationRow) -> protocol::Observati
         }),
         left: row.left(),
         right: row.right(),
-        unit: row
-            .tap
-            .map_or(protocol::ParameterUnit::Db, |tap| wire_unit(tap.unit)),
+        unit: wire_unit(row.tap.unit),
     }
 }
 
@@ -2307,7 +2305,7 @@ const fn wire_unit(unit: effect_contract::ParameterUnit) -> protocol::ParameterU
 }
 
 /// D4's status and code for a refusal the codec cannot rule out; `None` for one it does (a batch
-/// of more than 256, or a row table shorter than the batch), which is an internal fault here.
+/// of more than 256), which is an internal fault here.
 const fn observation_refusal(
     refusal: host_core::observation::ObservationRefusal,
 ) -> Option<(protocol::StatusCode, &'static str)> {
@@ -2327,7 +2325,7 @@ const fn observation_refusal(
             protocol::StatusCode::InvalidField,
             "observation.selection.duplicate",
         )),
-        Refusal::TooManySelections | Refusal::RowsTooShort => None,
+        Refusal::TooManySelections => None,
     }
 }
 

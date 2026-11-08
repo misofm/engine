@@ -2724,8 +2724,8 @@ fn boot_command_spectrum(
 /// `Some(config)`, every structural rebuild is classified with [`host_core::warm_lead`] and a
 /// latency growth that ducks no strip is published `Primed`; with `None`, every rebuild takes
 /// the ordinary path. Every product session takes the production bounds (#1360 D1); the gates set
-/// both bounds directly, or none.
-#[cfg(test)]
+/// both bounds directly, or none. Only the `test-support` warm-successor gates call it.
+#[cfg(all(test, feature = "test-support"))]
 pub(crate) fn compile_children_warm<A: ControlAdapter>(
     document: &str,
     limits: ControlLimits,

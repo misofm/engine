@@ -915,3 +915,57 @@ fn a_collapsed_glide_matches_the_dual_glide_and_survives_the_disengage() {
         }
     }
 }
+
+/// #2378 C3: a countdown word the engine never writes, `-0.0`, is refused wherever a payload holds
+/// one (each parameter ramp's, each link weight's and the two run clocks), on either channel,
+/// while the `+0.0` each holds at rest restores, and a refused restore writes nothing.
+///
+/// Test value: red if a countdown's or clock's check admits `-0.0` (the base's `integral_within`
+/// did). The engine never writes `-0.0` in any of these words. In a ramp's or link weight's
+/// countdown the kernel never steps it, and the rest scan's exact `+0.0` test never reports the lane
+/// at rest, so a restored lane would never be silent-skipped. The rest scan does not read the clocks,
+/// so a `-0.0` clock is refused only because the engine never writes one.
+#[test]
+fn a_negative_zero_countdown_is_refused() {
+    let values = oracle_values();
+    let mut target = Under::new(None, &[request(&values, LinkMode::Maximum)]);
+    let sizes = QUALITIES[1].maximum_state;
+    let restore = |under: &mut Under, payload: &(Vec<u8>, Vec<u8>, Vec<u8>)| {
+        let Under::Scalar(effect) = under else {
+            unreachable!("a scalar instance")
+        };
+        effect.restore_state_payload(
+            STATE_LAYOUT_VERSION,
+            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("sizes"),
+        )
+    };
+    let payload = target.snapshot(0);
+    restore(&mut target, &payload).expect("a rest payload restores");
+    let before = target.snapshot(0);
+    let countdowns = (0..RAMPS)
+        .map(|ramp| {
+            (
+                SIGNAL_WORDS + PARAMETER_COUNT + ramp * 4 + 3,
+                "effect.state.parameter",
+            )
+        })
+        .chain((0..LINK_COUNT).map(|link| (STATE_LINK_WORD + link * 4 + 3, "effect.state.link")))
+        .chain([SIGNAL_WORDS - 2, SIGNAL_WORDS - 1].map(|word| (word, "effect.state.signal")));
+    for (word, code) in countdowns {
+        for right in [false, true] {
+            let mut forged = payload.clone();
+            let section = if right { &mut forged.2 } else { &mut forged.1 };
+            let bytes = &mut section[word * 4..word * 4 + 4];
+            assert_eq!(bytes, 0.0_f32.to_le_bytes(), "word {word} rests at +0.0");
+            bytes.copy_from_slice(&(-0.0_f32).to_le_bytes());
+            assert_eq!(
+                restore(&mut target, &forged)
+                    .expect_err("a -0.0 countdown")
+                    .code,
+                code,
+                "word {word}, right {right}"
+            );
+            assert_eq!(target.snapshot(0), before, "a refused restore wrote");
+        }
+    }
+}
