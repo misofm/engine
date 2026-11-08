@@ -61,15 +61,13 @@ fn live_controls() -> HostLiveControlRequest {
 /// One prepared console session, its per-track meter consumers, and its effect producers.
 struct Console {
     prepared: PreparedHost,
-    /// The plan's gate handle: live values are cells, written under a stamp of it.
-    gate: engine::realtime::PlanRevisionGate,
     handles: host_core::HostLiveControlHandles,
     /// Absolute block cursor, so successive `render` calls stay contiguous in the source ring.
     block: usize,
 }
 
 fn prepare() -> Console {
-    let (_session, mut prepared, handles) =
+    let (_session, prepared, handles) =
         prepare_host_session_with_live_controls(SESSION, &caps(), &live_controls()).unwrap_or_else(
             |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
         );
@@ -85,13 +83,8 @@ fn prepare() -> Console {
         prepared.report.effect_bank_scratch_bytes > 0,
         "the cohort planner bound at least one homogeneous bank on this host"
     );
-    let gate = prepared
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
     Console {
         prepared,
-        gate,
         handles,
         block: 0,
     }
@@ -144,7 +137,10 @@ fn render(console: &mut Console, blocks: usize) -> Vec<Vec<u32>> {
 
 /// Pushes one band-gain retarget into the addressed track's first console slot's channel.
 fn command(console: &mut Console, track_id: &str, value: f32) {
-    let Console { handles, gate, .. } = console;
+    let Console {
+        handles, prepared, ..
+    } = console;
+    let gate = &mut prepared.gate;
     let producer = handles
         .effect_controls
         .iter_mut()

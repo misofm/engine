@@ -315,10 +315,7 @@ fn render(document: &str, tap: MeterTap, live: Option<&LiveWrite>, forced_off: b
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
     prepared.plan.force_mono_collapse_off(forced_off);
-    let mut gate = prepared
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
+    let mut gate = prepared.gate;
     let mut planes = [Vec::new(), Vec::new()];
     for block in 0..BLOCKS {
         if let Some(write) = live.filter(|write| write.block == block) {

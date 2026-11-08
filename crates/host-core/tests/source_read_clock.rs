@@ -192,10 +192,7 @@ fn run(offset: u64, anchor: Option<u64>, swap: Swap) -> (Vec<Vec<u32>>, Vec<(u64
                 "the inventory row's offset"
             );
             assert_eq!(next.sources.adopt_persisting(&mut sources), 1);
-            next.plan
-                .take_revision_gate()
-                .expect("the successor's handle")
-                .publish(SUCCESSOR_REVISION);
+            next.gate.publish(SUCCESSOR_REVISION);
             publisher
                 .reserve_replacement(next.plan, PlanAdoption::Next)
                 .unwrap_or_else(|_| panic!("reserve the successor"))

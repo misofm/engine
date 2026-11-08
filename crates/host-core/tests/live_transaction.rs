@@ -166,7 +166,7 @@ fn one_transaction_is_applied_whole_in_the_block_its_revision_is_published_for()
     let target = model(true, false);
     let planes = feed(128 * 64);
 
-    let (mut host, mut handles) = prepare_host_runtime_with_live_lanes(
+    let (host, mut handles) = prepare_host_runtime_with_live_lanes(
         &compile(&initial),
         &caps(),
         &HostLiveControlRequest::default(),
@@ -175,10 +175,7 @@ fn one_transaction_is_applied_whole_in_the_block_its_revision_is_published_for()
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
     let quantum = host.report.quantum_frames as usize;
-    let mut gate = host
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
+    let mut gate = host.gate;
     let revision = 7;
     let initial_plan = host.plan;
     let mut sources = host.sources;

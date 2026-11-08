@@ -154,7 +154,6 @@ fn mute_entry(
 struct Rig {
     prepared: PreparedHost,
     handles: Option<host_core::HostLiveControlHandles>,
-    gate: Option<engine::realtime::PlanRevisionGate>,
     quantum: usize,
     generation: u64,
     frame: u64,
@@ -196,7 +195,7 @@ impl Rig {
         let compiled = host_core::compile_host_session(&document, &caps)
             .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
         let request = host_core::HostLiveControlRequest::default();
-        let (mut prepared, handles) = if !form.live {
+        let (prepared, handles) = if !form.live {
             (
                 host_core::test_only_prepare_host_runtime_on(&compiled, &caps, form.backend)
                     .unwrap_or_else(|failure| {
@@ -217,15 +216,9 @@ impl Rig {
                 });
             (prepared, Some(handles))
         };
-        let gate = if handles.is_some() {
-            prepared.plan.take_revision_gate()
-        } else {
-            None
-        };
         Self {
             prepared,
             handles,
-            gate,
             quantum: model.quantum_frames as usize,
             generation: 1,
             frame: 0,
@@ -276,19 +269,16 @@ impl Rig {
     fn live_mute(&mut self, muted: bool, window: u32) {
         use builtins_compiler::TestOnlyWriteGate;
         let handles = self.handles.as_mut().expect("live controls");
-        self.gate
-            .as_mut()
-            .expect("the plan's gate")
-            .write_published(|stamp| {
-                handles.strip_controls[0].fader.write(
-                    stamp,
-                    builtins_compiler::TrackFaderRecord::Mute {
-                        lanes: builtins::BuiltinLaneSelector::Both,
-                        muted,
-                        smoothing_samples: window,
-                    },
-                );
-            });
+        self.prepared.gate.write_published(|stamp| {
+            handles.strip_controls[0].fader.write(
+                stamp,
+                builtins_compiler::TrackFaderRecord::Mute {
+                    lanes: builtins::BuiltinLaneSelector::Both,
+                    muted,
+                    smoothing_samples: window,
+                },
+            );
+        });
     }
 
     /// Write a live offsets record `S = offsets_sum` (ramp `window`) on both channels of track 0,
@@ -296,22 +286,19 @@ impl Rig {
     fn live_offsets(&mut self, offsets_sum: f64, window: u32) {
         use builtins_compiler::TestOnlyWriteGate;
         let handles = self.handles.as_mut().expect("live controls");
-        self.gate
-            .as_mut()
-            .expect("the plan's gate")
-            .write_published(|stamp| {
-                for channel in 0..2 {
-                    handles.strip_controls[0].fader.write_offsets(
-                        stamp,
-                        channel,
-                        builtins_compiler::FaderOffsetsRecord {
-                            offsets_sum,
-                            smoothing_samples: window,
-                            own_db: None,
-                        },
-                    );
-                }
-            });
+        self.prepared.gate.write_published(|stamp| {
+            for channel in 0..2 {
+                handles.strip_controls[0].fader.write_offsets(
+                    stamp,
+                    channel,
+                    builtins_compiler::FaderOffsetsRecord {
+                        offsets_sum,
+                        smoothing_samples: window,
+                        own_db: None,
+                    },
+                );
+            }
+        });
     }
 
     /// Render one block; returns its first render sample.
@@ -1162,12 +1149,12 @@ fn carry_run(
         )
     };
     let PreparedHost {
-        mut plan,
+        plan,
+        mut gate,
         mut sources,
         inventory,
         ..
     } = prepared;
-    let mut gate = plan.take_revision_gate();
     let (mut publisher, mut owner, _retirer) = plan_exchange(
         plan,
         PlanExchangeConfig {
@@ -1203,7 +1190,7 @@ fn carry_run(
         {
             let next = compiled(next);
             let committed = compiled(committed).normalized_model().clone();
-            let revision = gate.as_ref().map_or(1, |gate| gate.last_published()) + 1;
+            let revision = gate.last_published() + 1;
             let base = host_core::SuccessorBase::new(&inventory, &committed, revision);
             let prepared = if form.live {
                 host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
@@ -1228,11 +1215,11 @@ fn carry_run(
             prepared.sources.adopt_persisting(&mut sources);
             restarted = prepared.restarted_strips().to_vec();
             let PreparedHost {
-                mut plan,
+                plan,
+                gate: mut next_gate,
                 sources: next_sources,
                 ..
             } = prepared;
-            let mut next_gate = plan.take_revision_gate().expect("the successor's gate");
             next_gate.publish(revision);
             successor_live = next_handles.map(|handles| (handles, next_gate));
             publisher
@@ -1245,10 +1232,10 @@ fn carry_run(
         submit(successor_sources.as_mut().unwrap_or(&mut sources), at);
         if let Some((handles, gate)) = successor_live.as_mut() {
             edit(block, handles, gate);
-        } else if let (Some(handles), Some(gate)) = (handles.as_mut(), gate.as_mut())
+        } else if let Some(handles) = handles.as_mut()
             && successor_sources.is_none()
         {
-            edit(block, handles, gate);
+            edit(block, handles, &mut gate);
         }
         let mut samples = vec![0.0_f32; quantum * 2];
         let output =

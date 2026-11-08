@@ -917,7 +917,6 @@ struct LiveWrite {
 struct LivePlan {
     prepared: host_core::PreparedHost,
     handles: host_core::HostLiveControlHandles,
-    gate: engine::realtime::PlanRevisionGate,
 }
 
 impl LivePlan {
@@ -925,19 +924,8 @@ impl LivePlan {
         host_core::HostLiveControlRequest::default()
     }
 
-    fn new(
-        mut prepared: host_core::PreparedHost,
-        handles: host_core::HostLiveControlHandles,
-    ) -> Self {
-        let gate = prepared
-            .plan
-            .take_revision_gate()
-            .expect("the plan's gate handle");
-        Self {
-            prepared,
-            handles,
-            gate,
-        }
+    fn new(prepared: host_core::PreparedHost, handles: host_core::HostLiveControlHandles) -> Self {
+        Self { prepared, handles }
     }
 
     fn fresh(session: &Session, backend: Backend) -> Self {
@@ -1018,10 +1006,14 @@ impl LivePlan {
         // The commit's gate steps (#1277 D10): the handle inherits the preparation's open stamp
         // (a retarget's), stamps the revision again and publishes it.
         let _ = successor
+            .prepared
             .gate
             .stamp(successor::SUCCESSOR_REVISION)
             .expect("the open revision stamps again");
-        successor.gate.publish(successor::SUCCESSOR_REVISION);
+        successor
+            .prepared
+            .gate
+            .publish(successor::SUCCESSOR_REVISION);
         successor
     }
 
@@ -1036,7 +1028,8 @@ impl LivePlan {
             .input
             .as_mut()
             .expect("input lane");
-        self.gate
+        self.prepared
+            .gate
             .write_published(|stamp| input.write(stamp, write.record));
     }
 
@@ -2709,7 +2702,7 @@ impl CellPlan {
     }
 
     fn fresh(session: &Session, backend: Backend) -> Self {
-        let (mut prepared, handles) = Self::prepared(
+        let (prepared, handles) = Self::prepared(
             host_core::test_only_prepare_host_runtime_with_live_controls_on(
                 &session.compiled,
                 &caps(),
@@ -2717,16 +2710,8 @@ impl CellPlan {
                 backend,
             ),
         );
-        let gate = prepared
-            .plan
-            .take_revision_gate()
-            .expect("a fresh plan's handle");
         Self {
-            live: LivePlan {
-                prepared,
-                handles,
-                gate,
-            },
+            live: LivePlan { prepared, handles },
             next: 1,
         }
     }
@@ -2748,20 +2733,13 @@ impl CellPlan {
                 base,
                 backend,
             )?;
-        let mut gate = prepared
-            .plan
-            .take_revision_gate()
-            .expect("the successor's handle");
-        let _ = gate
+        let _ = prepared
+            .gate
             .stamp(revision)
             .expect("the open revision stamps again");
-        gate.publish(revision);
+        prepared.gate.publish(revision);
         Ok(Self {
-            live: LivePlan {
-                prepared,
-                handles,
-                gate,
-            },
+            live: LivePlan { prepared, handles },
             next: revision + 1,
         })
     }
@@ -2794,7 +2772,12 @@ impl CellPlan {
             return;
         }
         let revision = self.next;
-        let stamp = self.live.gate.stamp(revision).expect("a legal revision");
+        let stamp = self
+            .live
+            .prepared
+            .gate
+            .stamp(revision)
+            .expect("a legal revision");
         for (strip, record) in writes {
             if let CellRecord::Route(route, record) = *record {
                 let position =
@@ -2817,7 +2800,7 @@ impl CellPlan {
                 CellRecord::Route(..) => unreachable!("written above"),
             }
         }
-        self.live.gate.publish(revision);
+        self.live.prepared.gate.publish(revision);
         self.next = revision + 1;
     }
 
@@ -6425,7 +6408,7 @@ fn successor_handle(
     let b = Session::compile(next);
     let backend = Backend::current();
     let predecessor = CellPlan::fresh(&a, backend);
-    let (mut prepared, _handles) =
+    let (prepared, _handles) =
         host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
             &b.compiled,
             &caps(),
@@ -6438,10 +6421,7 @@ fn successor_handle(
             backend,
         )
         .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
-    prepared
-        .plan
-        .take_revision_gate()
-        .expect("the successor's handle")
+    prepared.gate
 }
 
 /// D5: a preparation that writes no retarget does not stamp. Red if every successor stamps its
@@ -7322,7 +7302,10 @@ struct EffectWrite {
 /// One transaction on `plan`'s own gate: the value is written to the addressed effect's cells and
 /// its revision is published.
 fn write_effect_value(plan: &mut LivePlan, write: &EffectWrite) {
-    let LivePlan { handles, gate, .. } = plan;
+    let LivePlan {
+        handles, prepared, ..
+    } = plan;
+    let gate = &mut prepared.gate;
     if let EffectValue::SendGain {
         route,
         gain_db,
@@ -9038,7 +9021,7 @@ fn a_lifted_bypass_carries_across_a_rebuild_at_every_width() {
 fn an_owner_without_live_controls_on_one_side_restarts(backend: Backend) {
     let what = format!("{backend:?}");
     let (a, b) = tail_pair();
-    let mut plan = LivePlan::fresh(&a, backend);
+    let plan = LivePlan::fresh(&a, backend);
     let successor = b
         .prepare_successor(&plan.prepared.inventory, &a.model, &caps(), backend)
         .unwrap_or_else(|failure| panic!("{what}: {failure:?}"));
@@ -9049,7 +9032,6 @@ fn an_owner_without_live_controls_on_one_side_restarts(backend: Backend) {
         ["eq0", "eq1", "eq2"].map(Box::<str>::from).to_vec(),
         "{what}: every strip with a per-node insert restarts"
     );
-    drop(plan.prepared.plan.take_revision_gate());
 }
 
 #[test]
@@ -9425,14 +9407,13 @@ mod meter_carry {
                 .set_host_attachment(Rig::new(core::mem::take(&mut b_handles.meters))),
         }
         let PreparedHost {
-            mut plan,
+            plan,
+            gate: mut next_gate,
             sources: mut b_sources,
             inventory: b_inventory,
             ..
         } = b_prepared;
-        plan.take_revision_gate()
-            .expect("the successor's handle")
-            .publish(SUCCESSOR_REVISION);
+        next_gate.publish(SUCCESSOR_REVISION);
         publisher
             .reserve_replacement(plan, PlanAdoption::Next)
             .unwrap_or_else(|_| panic!("reserve the successor"))
@@ -11301,10 +11282,14 @@ fn discontinuity_successor(
         .unwrap_or_else(|failure| panic!("discontinuity successor: {failure:?}"));
     let mut successor = LivePlan::new(prepared, handles);
     let _ = successor
+        .prepared
         .gate
         .stamp(successor::SUCCESSOR_REVISION)
         .expect("a fresh gate stamps the committed revision");
-    successor.gate.publish(successor::SUCCESSOR_REVISION);
+    successor
+        .prepared
+        .gate
+        .publish(successor::SUCCESSOR_REVISION);
     successor
 }
 
@@ -12329,13 +12314,12 @@ mod spectrum_carry {
         let pairing = b_prepared.inventory.spectrum_pairing().to_vec();
         b_prepared.plan.set_host_attachment(Rig::new());
         let PreparedHost {
-            mut plan,
+            plan,
+            gate: mut next_gate,
             sources: mut b_sources,
             ..
         } = b_prepared;
-        plan.take_revision_gate()
-            .expect("the successor's handle")
-            .publish(SUCCESSOR_REVISION);
+        next_gate.publish(SUCCESSOR_REVISION);
         publisher
             .reserve_replacement(plan, PlanAdoption::Next)
             .unwrap_or_else(|_| panic!("reserve the successor"))

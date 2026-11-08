@@ -401,7 +401,8 @@ fn bindings(artifact: &PreparedGraphBuiltinsArtifact, feeds: &Feeds) -> GraphRun
 /// One bound plan, its live-route producers (empty when none were attached) and its block count.
 struct Bound {
     plan: PreparedRenderPlan,
-    /// The plan's gate handle: every write is a transaction stamped from it (#1347 D4).
+    /// The plan's gate handle: every write is a transaction stamped from it (#1347 D4). `None`
+    /// once a test moves it to a producer thread.
     gate: Option<PlanRevisionGate>,
     /// The session's `live_values_superseded` count the lanes add to.
     superseded: LiveValuesSuperseded,
@@ -425,15 +426,13 @@ impl Bound {
             Vec::new()
         };
         let bindings = bindings(&artifact, feeds);
-        let mut plan = artifact
+        let sealed = artifact
             .into_bound(bindings)
             .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
-            .seal()
-            .plan;
-        let gate = plan.take_revision_gate();
+            .seal();
         Self {
-            plan,
-            gate,
+            plan: sealed.plan,
+            gate: Some(sealed.gate),
             superseded,
             snapshot: 0,
             producers,

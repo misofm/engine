@@ -339,6 +339,7 @@ fn prepared_plan(lend: bool, calls: &Arc<Calls>) -> engine::realtime::PreparedRe
         )
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
         .seal()
+        .0
 }
 
 /// Render `BLOCKS` blocks into one reused host buffer, keeping every block's master bits.

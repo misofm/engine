@@ -211,9 +211,6 @@ fn backends() -> Vec<graph_compiler::Backend> {
 struct Rig {
     prepared: PreparedHost,
     handles: host_core::HostLiveControlHandles,
-    /// Read only by the `classifier` module, which needs the `control-provider` feature.
-    #[cfg_attr(not(feature = "control-provider"), allow(dead_code))]
-    gate: engine::realtime::PlanRevisionGate,
     quantum: usize,
     rendered: u64,
     out: [Vec<f32>; 2],
@@ -226,16 +223,13 @@ impl Rig {
         let compiled = compiled(model);
         let caps = caps(model);
         let request = host_core::HostLiveControlRequest::default();
-        let (mut prepared, handles) =
-            host_core::test_only_prepare_host_runtime_with_live_controls_on(
-                &compiled, &caps, &request, backend,
-            )
-            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
-        let gate = prepared.plan.take_revision_gate().expect("the plan's gate");
+        let (prepared, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+            &compiled, &caps, &request, backend,
+        )
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
         Self {
             prepared,
             handles,
-            gate,
             quantum: model.quantum_frames as usize,
             rendered: 0,
             out: [Vec::new(), Vec::new()],
@@ -888,12 +882,12 @@ fn carry_run(
     )
     .unwrap_or_else(|failure| fail(failure));
     let PreparedHost {
-        mut plan,
+        plan,
+        mut gate,
         mut sources,
         inventory,
         ..
     } = prepared;
-    let mut gate = plan.take_revision_gate().expect("the plan's gate");
     let (mut publisher, mut owner, _retirer) = plan_exchange(
         plan,
         PlanExchangeConfig {
@@ -930,11 +924,11 @@ fn carry_run(
             prepared.sources.adopt_persisting(&mut sources);
             restarted = prepared.restarted_strips().to_vec();
             let PreparedHost {
-                mut plan,
+                plan,
+                gate: mut next_gate,
                 sources: next_sources,
                 ..
             } = prepared;
-            let mut next_gate = plan.take_revision_gate().expect("the successor's gate");
             next_gate.publish(revision);
             publisher
                 .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
@@ -1330,7 +1324,7 @@ mod classifier {
         use builtins_compiler::TestOnlyWriteGate;
         let positions: Vec<usize> = delta.iter().map(|(strip, ..)| rig.strip(strip)).collect();
         let handles = &mut rig.handles;
-        rig.gate.write_published(|stamp| {
+        rig.prepared.gate.write_published(|stamp| {
             for ((_, fader, cells), &position) in delta.iter().zip(&positions) {
                 let producer = &mut handles.strip_controls[position];
                 for &record in fader {

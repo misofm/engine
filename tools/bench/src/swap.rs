@@ -589,16 +589,15 @@ impl Stream {
         assert!(self.pending.is_none(), "one candidate at a time");
         self.revision += 1;
         let PreparedHost {
-            mut plan,
+            plan,
+            mut gate,
             mut sources,
             inventory,
             ..
         } = host;
         // The successor's carry retargets are stamped with this revision; it is published on the
         // successor's own gate before the successor is (#1277 D5).
-        plan.take_revision_gate()
-            .expect("the successor's gate")
-            .publish(self.revision);
+        gate.publish(self.revision);
         let not_before = lead_blocks.map(|_| self.publisher.render_clock());
         let adoption = match (not_before, lead_blocks) {
             (Some(not_before), Some(lead_blocks)) => {

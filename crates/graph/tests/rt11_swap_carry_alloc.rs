@@ -237,7 +237,7 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
     let _restore = RestoreMode(mode());
     set_mode(Mode::Count);
 
-    let mut predecessor = bound(Some(vec![0.75; 64].into_boxed_slice())).seal();
+    let mut predecessor = bound(Some(vec![0.75; 64].into_boxed_slice())).seal().0;
     let identity = plan_identity(&mut predecessor).expect("graph plan");
     let successor = carry_builder(
         bound(None),
@@ -248,7 +248,8 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
         },
     )
     .expect("install")
-    .seal();
+    .seal()
+    .0;
     let (mut publisher, mut owner, _retirer) = plan_exchange(
         predecessor,
         PlanExchangeConfig {

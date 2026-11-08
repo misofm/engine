@@ -35,7 +35,8 @@ fn plan(id: u64) -> PreparedRenderPlan {
         },
         scratch: &[],
     })
-    .expect("plan");
+    .expect("plan")
+    .0;
     plan.set_host_attachment(Box::new(Attachment(Box::new([0; 256]))));
     plan
 }

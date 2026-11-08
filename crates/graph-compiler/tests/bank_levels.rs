@@ -440,7 +440,7 @@ pub fn compile_bind_render(
             .collect();
         bound.arm_mono_collapse(&|track: &str| mono_source.contains(track));
     }
-    let mut plan = bound.seal();
+    let mut plan = bound.seal().0;
     if blocks > 0 {
         let blocks = blocks.max(outcome.latency.div_ceil(frames as u64) + AUDIBLE_BLOCKS);
         let mut bits = Vec::with_capacity(blocks as usize * frames * 2);

@@ -147,7 +147,8 @@ mod tests {
             },
             Box::new(SnapshotExecutor),
         )
-        .expect("plan");
+        .expect("plan")
+        .0;
         let mut sink = SnapshotSink {
             calls: 0,
             first_word: u32::MAX,
@@ -204,7 +205,8 @@ mod tests {
             envelope,
             scratch: &[],
         })
-        .expect("plan");
+        .expect("plan")
+        .0;
         assert_eq!(plan.next_absolute_sample(), 0);
 
         let mut samples = [0.0_f32; 8];
@@ -274,7 +276,8 @@ mod tests {
                 },
                 Box::new(OffsetExecutor { offset }),
             )
-            .expect("plan");
+            .expect("plan")
+            .0;
             assert_eq!(plan.source_read_offset(), offset);
             plan
         };
@@ -369,6 +372,7 @@ mod tests {
             scratch: &[],
         })
         .expect("plan")
+        .0
     }
     #[test]
     fn reserved_replacement_preowns_publication_epoch_and_retirement_credit() {
@@ -443,7 +447,8 @@ mod tests {
             },
             scratch: &[],
         })
-        .expect("other envelope");
+        .expect("other envelope")
+        .0;
         assert!(matches!(
             publisher.reserve_replacement(incompatible, PlanAdoption::Next),
             Err(PlanReplacementReservationError::Incompatible(returned))
@@ -687,11 +692,14 @@ mod tests {
             render_once(owner, index * QUANTUM)
         }
 
-        /// A plan with its gate handle taken, as the control plane takes it before publication.
+        /// A plan with its gate handle, as preparation returns them.
         fn plan_with_gate(id: u64) -> (PreparedRenderPlan, PlanRevisionGate) {
-            let mut plan = prepared(id);
-            let gate = plan.take_revision_gate().expect("a fresh plan's handle");
-            (plan, gate)
+            PreparedRenderPlan::prepare(PrepareRenderPlan {
+                plan_id: id,
+                envelope: prepared(id).envelope(),
+                scratch: &[],
+            })
+            .expect("plan")
         }
 
         type Exchange = (
@@ -956,7 +964,7 @@ mod tests {
         }
 
         fn probed(id: u64, probe: &SnapshotProbe) -> (PreparedRenderPlan, PlanRevisionGate) {
-            let mut plan = PreparedRenderPlan::prepare_with_executor(
+            PreparedRenderPlan::prepare_with_executor(
                 PrepareRenderPlan {
                     plan_id: id,
                     envelope: prepared(id).envelope(),
@@ -964,9 +972,7 @@ mod tests {
                 },
                 Box::new(Snapshotting(probe.clone())),
             )
-            .expect("plan");
-            let gate = plan.take_revision_gate().expect("a fresh plan's handle");
-            (plan, gate)
+            .expect("plan")
         }
 
         /// #1502 gate 1: each block's snapshot is the revision published on the gate of the plan
@@ -1095,8 +1101,8 @@ mod tests {
             writer: CellWriter<2>,
         }
 
-        /// A probe plan whose cell holds the model value of `revision`, stamped on the plan's held
-        /// gate as a successor's carry retargets are, with its handle taken and published.
+        /// A probe plan whose cell holds the model value of `revision`, stamped on the handle its
+        /// preparation returned, as a successor's carry retargets are.
         fn probe_plan_at(
             id: u64,
             revision: u64,
@@ -1104,7 +1110,7 @@ mod tests {
         ) -> (PreparedRenderPlan, Newest) {
             let cell = Arc::new(LatestCell::<2>::new());
             let dirty = Arc::new(DirtyWord::new());
-            let mut plan = PreparedRenderPlan::prepare_with_executor(
+            let (plan, mut gate) = PreparedRenderPlan::prepare_with_executor(
                 PrepareRenderPlan {
                     plan_id: id,
                     envelope: prepared(id).envelope(),
@@ -1120,12 +1126,8 @@ mod tests {
             )
             .expect("plan");
             let mut writer = CellWriter::<2>::new();
-            let stamp = plan
-                .stamp_held_gate(revision)
-                .expect("held")
-                .expect("a revision above 0");
+            let stamp = gate.stamp(revision).expect("a revision above 0");
             writer.write(&cell, &dirty, 0, stamp, [revision as u32, 1]);
-            let gate = plan.take_revision_gate().expect("a fresh plan's handle");
             (
                 plan,
                 Newest {
@@ -1303,68 +1305,6 @@ mod tests {
                 }
                 assert_eq!(read(&publisher).revision, revision);
             });
-        }
-
-        /// A plan hands out its gate handle once: a second handle would be a second writer with
-        /// its own pin (#1502 D1).
-        #[test]
-        fn a_plan_hands_out_its_gate_handle_once() {
-            let mut plan = prepared(1);
-            assert!(plan.take_revision_gate().is_some());
-            assert!(plan.take_revision_gate().is_none());
-        }
-
-        /// A plan stamps on its own pin while it holds its handle, and the open stamp moves with
-        /// the pin into the handle (#1277 D11): the holder stamps the same revision again and
-        /// publishes it, the plan's next block covers it, and once the handle is out the plan
-        /// stamps nothing.
-        #[test]
-        fn a_held_gate_stamps_on_the_pin_the_handle_inherits() {
-            let mut plan = prepared(1);
-            assert!(
-                plan.stamp_held_gate(0).expect("held").is_err(),
-                "0 is not above 0"
-            );
-            assert!(
-                plan.stamp_held_gate(GATE_REVISION_MAX + 1)
-                    .expect("held")
-                    .is_err()
-            );
-            let stamp = plan
-                .stamp_held_gate(5)
-                .expect("the pin is held")
-                .expect("legal");
-            assert_eq!(stamp.revision(), 5);
-            let mut gate = plan.take_revision_gate().expect("the handle");
-            assert!(
-                plan.stamp_held_gate(5).is_none(),
-                "the pin left with the handle"
-            );
-            gate.stamp(5).expect("the open revision stamps again");
-            gate.publish(5);
-            let mut output = [0.0_f32; 2];
-            let io = RenderIo {
-                output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
-            };
-            let report = plan
-                .render(io, RenderTime { absolute_sample: 0 })
-                .expect("render");
-            assert_eq!(report.live_snapshot.revision(), 5);
-        }
-
-        /// The stamp a plan took before hand-out is open on the handle's pin: a different revision
-        /// stamped on the handle while it is open breaks the publish-before-stamp rule (#1432).
-        #[cfg(debug_assertions)]
-        #[test]
-        #[should_panic(expected = "is stamped and not yet published")]
-        fn the_handle_inherits_the_open_stamp_of_a_held_gate() {
-            let mut plan = prepared(1);
-            let _ = plan
-                .stamp_held_gate(5)
-                .expect("the pin is held")
-                .expect("legal");
-            let mut gate = plan.take_revision_gate().expect("the handle");
-            let _ = gate.stamp(6);
         }
 
         /// The initial revision is published on the initial plan's own gate: a handle of another
@@ -1579,6 +1519,7 @@ mod tests {
                 executor,
             )
             .expect("plan")
+            .0
         }
 
         fn gated(id: u64, probe: &Probe) -> PreparedRenderPlan {
@@ -1915,7 +1856,8 @@ mod tests {
                 },
                 scratch: &[],
             })
-            .expect("launch rate");
+            .expect("launch rate")
+            .0;
             let mut output = [1.0];
             plan.render(
                 RenderIo {
@@ -2156,6 +2098,7 @@ mod tests {
                 executor,
             )
             .expect("plan")
+            .0
         }
 
         fn oscillator(id: u64, carry: bool, hooks: &Arc<AtomicUsize>) -> PreparedRenderPlan {
@@ -2386,7 +2329,8 @@ mod tests {
                     hooks: Arc::clone(&hooks),
                 }),
             )
-            .expect("plan");
+            .expect("plan")
+            .0;
             let mut output = [0.0_f32; 2 * FRAMES as usize];
             predecessor
                 .render_contiguous(

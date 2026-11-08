@@ -100,11 +100,7 @@ fn successor(
         backend,
     )
     .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
-    prepared
-        .plan
-        .take_revision_gate()
-        .expect("the successor's handle")
-        .publish(revision);
+    prepared.gate.publish(revision);
     prepared
 }
 

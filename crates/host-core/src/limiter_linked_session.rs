@@ -368,9 +368,9 @@ fn source_sample(channel: u64, frame: u64) -> f32 {
 }
 
 struct Console {
+    /// The prepared host. Its gate handle ([`PreparedHost::gate`]) stamps the live values, which
+    /// are cells.
     prepared: PreparedHost,
-    /// The plan's gate handle: live values are cells, written under a stamp of it.
-    gate: engine::realtime::PlanRevisionGate,
     handles: HostLiveControlHandles,
     /// `limiters[t]` indexes `handles.effect_controls` for track `t`'s limiter.
     limiters: Vec<usize>,
@@ -386,7 +386,7 @@ fn refused(failure: &PrepareDiagnostics) -> ! {
 
 fn prepare(backend: Backend) -> Console {
     let compiled = compile_host_session(&session(backend), &caps()).unwrap_or_else(|f| refused(&f));
-    let (mut prepared, handles) = prepare_host_runtime_with_live_controls_backend(
+    let (prepared, handles) = prepare_host_runtime_with_live_controls_backend(
         &compiled,
         &caps(),
         &live_controls(),
@@ -437,13 +437,8 @@ fn prepare(backend: Backend) -> Console {
                 .unwrap_or_else(|| panic!("track {track}'s limiter has an observation handle"))
         })
         .collect();
-    let gate = prepared
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
     Console {
         prepared,
-        gate,
         handles,
         limiters,
         compressors,
@@ -516,12 +511,13 @@ fn push(console: &mut Console, channel: usize, record: EffectControlRecord) {
             .unwrap_or_else(|_| panic!("room in control channel {channel}'s queue"));
         return;
     }
-    let revision = console.gate.last_published() + 1;
-    let stamp = console.gate.stamp(revision).expect("a legal revision");
+    let gate = &mut console.prepared.gate;
+    let revision = gate.last_published() + 1;
+    let stamp = gate.stamp(revision).expect("a legal revision");
     producer
         .write(stamp, record)
         .unwrap_or_else(|_| panic!("a cell in control channel {channel}"));
-    console.gate.publish(revision);
+    gate.publish(revision);
 }
 
 /// What the run saw.

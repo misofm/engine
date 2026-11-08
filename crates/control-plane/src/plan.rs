@@ -509,7 +509,8 @@ mod tests {
             },
             executor,
         )
-        .expect("plan");
+        .expect("plan")
+        .0;
         let (publisher, owner, _retirer) = plan_exchange(
             plan,
             PlanExchangeConfig {

@@ -282,12 +282,60 @@ fn assert_planes(actual: &Planes, expected: &Planes, from: usize, what: &str) {
 
 // ---- One prepared host ------------------------------------------------------------------------
 
+/// Submits block `block` of every feed to `sources`: [`Live::submit`] on the host's fields, so a
+/// test that lends the gate to a producer thread submits without borrowing the whole [`Live`].
+fn submit_block(
+    sources: &mut host_core::SourceControlSet,
+    sample_rate_hz: u32,
+    feeds: &Feeds,
+    block: usize,
+) {
+    let range = block * QUANTUM..(block + 1) * QUANTUM;
+    for (id, planes) in feeds {
+        sources
+            .submit(
+                id.as_bytes(),
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: range.start as u64,
+                    sample_rate_hz,
+                    planes: &[&planes[0][range.clone()], &planes[1][range.clone()]],
+                    frames: QUANTUM as u32,
+                    end_of_region: false,
+                },
+            )
+            .expect("source block");
+    }
+}
+
+/// Renders block `block` of `plan` into `pcm` and returns the revision its snapshot applied:
+/// [`Live::render_block`] on the host's fields. The render itself allocates nothing.
+fn render_one(
+    plan: &mut engine::realtime::PreparedRenderPlan,
+    pcm: &mut [f32],
+    block: usize,
+) -> u64 {
+    pcm.fill(HOST_SENTINEL);
+    plan.render(
+        engine::realtime::RenderIo {
+            output: engine::realtime::PlanarBufferMut::try_new(pcm, 2, QUANTUM, QUANTUM)
+                .expect("output planes"),
+        },
+        engine::realtime::RenderTime {
+            absolute_sample: (block * QUANTUM) as u64,
+        },
+    )
+    .expect("render")
+    .live_snapshot
+    .revision()
+}
+
 /// One host prepared through host-core, its live handles and the feeds it renders.
 struct Live {
+    /// The prepared host. Its gate handle ([`PreparedHost::gate`]) stamps every send write as a
+    /// transaction (#1347 D4).
     host: PreparedHost,
     handles: HostLiveControlHandles,
-    /// The plan's gate handle: every send write is a transaction stamped from it (#1347 D4).
-    gate: Option<engine::realtime::PlanRevisionGate>,
     /// The snapshot revision the last rendered block applied under.
     snapshot: u64,
     feeds: Feeds,
@@ -302,7 +350,7 @@ impl Live {
 
     /// `live` prepares with live controls; otherwise through the plain entry, with no handles.
     fn from_document(document: &str, feeds: &Feeds, live: bool) -> Self {
-        let (mut host, handles) = if live {
+        let (host, handles) = if live {
             let (_, host, handles) = prepare_host_session_with_live_controls(
                 document,
                 &caps(),
@@ -330,16 +378,10 @@ impl Live {
             };
             (host, handles)
         };
-        let gate = host
-            .plan
-            .take_revision_gate()
-            .expect("the plan's gate handle");
-        let snapshot = gate.last_published();
-        let gate = Some(gate);
+        let snapshot = host.gate.last_published();
         Self {
             host,
             handles,
-            gate,
             snapshot,
             feeds: feeds.clone(),
             block: 0,
@@ -365,8 +407,7 @@ impl Live {
         length: u32,
     ) -> Result<(), RouteControlError> {
         let producer = &mut self.handles.route_controls[index];
-        let gate = self.gate.as_mut().expect("the gate stays with the host");
-        gate.write_published(|stamp| {
+        self.host.gate.write_published(|stamp| {
             producer.set(
                 stamp,
                 values.gain_db,
@@ -397,47 +438,17 @@ impl Live {
 
     /// Submits the next block of every feed.
     fn submit(&mut self) {
-        let range = self.block * QUANTUM..(self.block + 1) * QUANTUM;
-        for (id, planes) in &self.feeds {
-            self.host
-                .sources
-                .submit(
-                    id.as_bytes(),
-                    SourceSubmission {
-                        generation: 1,
-                        start_frame: range.start as u64,
-                        sample_rate_hz: self.host.report.sample_rate_hz,
-                        planes: &[&planes[0][range.clone()], &planes[1][range.clone()]],
-                        frames: QUANTUM as u32,
-                        end_of_region: false,
-                    },
-                )
-                .expect("source block");
-        }
+        submit_block(
+            &mut self.host.sources,
+            self.host.report.sample_rate_hz,
+            &self.feeds,
+            self.block,
+        );
     }
 
     /// Renders one block into `self.pcm`; the render itself allocates nothing here.
     fn render_block(&mut self) {
-        self.pcm.fill(HOST_SENTINEL);
-        let report = self
-            .host
-            .plan
-            .render(
-                engine::realtime::RenderIo {
-                    output: engine::realtime::PlanarBufferMut::try_new(
-                        &mut self.pcm,
-                        2,
-                        QUANTUM,
-                        QUANTUM,
-                    )
-                    .expect("output planes"),
-                },
-                engine::realtime::RenderTime {
-                    absolute_sample: (self.block * QUANTUM) as u64,
-                },
-            )
-            .expect("render");
-        self.snapshot = report.live_snapshot.revision();
+        self.snapshot = render_one(&mut self.host.plan, &mut self.pcm, self.block);
         self.block += 1;
     }
 
@@ -761,9 +772,8 @@ fn a_refused_send_record_writes_nothing() {
             .find(|producer| producer.route_id() == "r0")
             .expect("r0 is live");
         split
+            .host
             .gate
-            .as_mut()
-            .expect("the gate stays with the host")
             .write_published(|stamp| producer.write(stamp, record));
     }
     let mut whole = Live::new(&model, &feeds, true);
@@ -1143,7 +1153,6 @@ fn live_sends_render_without_allocating() {
     // The four sends and, since #1391, `b-main` and `x-main`: routes into the output from the
     // buses' `input` tap, which precedes the fader.
     assert_eq!(producers.len(), 6);
-    let gate = live.gate.take().expect("the gate");
     let edits: Vec<(Values, [bool; 2], u32)> = (0..32)
         .map(|index| {
             (
@@ -1155,6 +1164,22 @@ fn live_sends_render_without_allocating() {
         .collect();
     let mut index = 0;
     let snapshot = core::cell::Cell::new(live.snapshot);
+    // The producer thread holds the gate; the render loop holds every other field of the host.
+    let Live {
+        host,
+        feeds,
+        block: next,
+        pcm,
+        ..
+    } = &mut live;
+    let PreparedHost {
+        plan,
+        gate,
+        sources,
+        report,
+        ..
+    } = host;
+    let rate = report.sample_rate_hz;
     assert_installed();
     render_while_producing(
         blocks,
@@ -1176,13 +1201,14 @@ fn live_sends_render_without_allocating() {
         // it and applies the values it wrote.
         |(gate, _)| gate.last_published() > snapshot.get(),
         |block| {
-            live.submit();
+            submit_block(sources, rate, feeds, *next);
             let before: u64 = drained().iter().sum();
             let mark = current_thread_counters();
-            live.render_block();
+            let applied = render_one(plan, pcm, *next);
             let delta = current_thread_delta_since(mark);
+            *next += 1;
             let after: u64 = drained().iter().sum();
-            snapshot.set(live.snapshot);
+            snapshot.set(applied);
             assert!(after > before, "block {block} applied a value");
             if block > 0 {
                 assert_eq!(
@@ -1240,7 +1266,7 @@ impl Live {
     fn on(model: &SessionModel, feeds: &Feeds, backend: Backend) -> Self {
         let compiled = compile_host_session(&document(model), &caps())
             .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
-        let (mut host, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+        let (host, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
             &compiled,
             &caps(),
             &HostLiveControlRequest::default(),
@@ -1249,15 +1275,10 @@ impl Live {
         .unwrap_or_else(|failure| {
             panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
         });
-        let gate = host
-            .plan
-            .take_revision_gate()
-            .expect("the plan's gate handle");
         Self {
+            snapshot: host.gate.last_published(),
             host,
             handles,
-            snapshot: gate.last_published(),
-            gate: Some(gate),
             feeds: feeds.clone(),
             block: 0,
             pcm: vec![0.0; QUANTUM * 2],
@@ -1286,22 +1307,19 @@ impl Live {
             following,
         );
         let handles = &mut self.handles;
-        self.gate
-            .as_mut()
-            .expect("the gate stays with the host")
-            .write_published(|stamp| {
-                for route in &delta.routes {
-                    let host_core::SendRecord::Following(record) = route.record else {
-                        panic!("a following route takes the seven-word record");
-                    };
-                    let index = host_core::follow_route_producer_position(
-                        &handles.follow_route_controls,
-                        route.route_id,
-                    )
-                    .expect("the route's seven-word producer");
-                    handles.follow_route_controls[index].write(stamp, record);
-                }
-            });
+        self.host.gate.write_published(|stamp| {
+            for route in &delta.routes {
+                let host_core::SendRecord::Following(record) = route.record else {
+                    panic!("a following route takes the seven-word record");
+                };
+                let index = host_core::follow_route_producer_position(
+                    &handles.follow_route_controls,
+                    route.route_id,
+                )
+                .expect("the route's seven-word producer");
+                handles.follow_route_controls[index].write(stamp, record);
+            }
+        });
         counts
     }
 }

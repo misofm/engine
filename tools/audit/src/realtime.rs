@@ -38,6 +38,7 @@ fn prepared_plan(id: u64) -> PreparedRenderPlan {
         scratch: &[],
     })
     .expect("valid prepared audit plan")
+    .0
 }
 
 /// One rendered block, checked against the owner's own view of the active plan.

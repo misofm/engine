@@ -408,7 +408,7 @@ fn bind_unsealed(
     setup: Setup,
 ) -> (
     graph::GraphBoundPlan<graph::ProgramAttached>,
-    impl FnOnce(PreparedRenderPlan) -> Bound,
+    impl FnOnce((PreparedRenderPlan, PlanRevisionGate)) -> Bound,
 ) {
     let session = compile_session(
         model,
@@ -555,12 +555,8 @@ fn bind_unsealed(
         .plan
         .arm_mono_collapse(&|track: &str| mono_source.contains(track));
     let controls = bound.track_controls;
-    let finish = move |mut plan: PreparedRenderPlan| {
-        let gate = if setup.live || setup.effects_live {
-            plan.take_revision_gate()
-        } else {
-            None
-        };
+    let finish = move |(plan, gate): (PreparedRenderPlan, PlanRevisionGate)| {
+        let gate = (setup.live || setup.effects_live).then_some(gate);
         Bound {
             plan,
             frames,

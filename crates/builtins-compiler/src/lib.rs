@@ -6608,18 +6608,25 @@ pub struct PreparedBuiltinsGraphArtifact<R> {
 ///
 /// Field order is drop order: `track_controls` producers are released before the `plan` that owns
 /// their consumer endpoints, and `meter_consumers` outlive the plan that owns their producers.
-pub struct PreparedBuiltinsGraphBound<P = graph::GraphBoundPlan<graph::ProgramAttached>> {
+pub struct PreparedBuiltinsGraphBound {
     pub track_controls: Vec<TrackControlProducer>,
-    pub plan: P,
+    pub plan: graph::GraphBoundPlan<graph::ProgramAttached>,
     pub meter_consumers: Vec<MeterConsumer>,
-    /// The plan's gate handle, taken by the first [`PreparedBuiltinsGraphSealed::test_only_write`].
-    #[cfg(any(test, feature = "test-support"))]
-    test_gate: Option<engine::realtime::PlanRevisionGate>,
 }
 
 /// A [`PreparedBuiltinsGraphBound`] whose plan is sealed ([`PreparedBuiltinsGraphBound::seal`]),
-/// ready to render or be published.
-pub type PreparedBuiltinsGraphSealed = PreparedBuiltinsGraphBound<PreparedRenderPlan>;
+/// ready to render or be published, with the plan's revision-gate handle the seal returned
+/// (#2417).
+///
+/// Field order is drop order, as in [`PreparedBuiltinsGraphBound`].
+pub struct PreparedBuiltinsGraphSealed {
+    pub track_controls: Vec<TrackControlProducer>,
+    pub plan: PreparedRenderPlan,
+    /// The plan's one revision-gate handle: only its holder stamps and publishes on the plan's
+    /// gate.
+    pub gate: engine::realtime::PlanRevisionGate,
+    pub meter_consumers: Vec<MeterConsumer>,
+}
 
 impl PreparedBuiltinsGraphBound {
     /// Seal the bound plan with no hand-over ([`graph::GraphBoundPlan::seal`]), keeping its
@@ -6630,15 +6637,13 @@ impl PreparedBuiltinsGraphBound {
             track_controls,
             plan,
             meter_consumers,
-            #[cfg(any(test, feature = "test-support"))]
-            test_gate,
         } = self;
-        PreparedBuiltinsGraphBound {
+        let (plan, gate) = plan.seal();
+        PreparedBuiltinsGraphSealed {
             track_controls,
-            plan: plan.seal(),
+            plan,
+            gate,
             meter_consumers,
-            #[cfg(any(test, feature = "test-support"))]
-            test_gate,
         }
     }
 }
@@ -6653,13 +6658,8 @@ impl PreparedBuiltinsGraphSealed {
         &mut self,
         write: impl FnOnce(&mut [TrackControlProducer], LiveStamp<'_>) -> R,
     ) -> R {
-        let gate = self.test_gate.get_or_insert_with(|| {
-            self.plan
-                .take_revision_gate()
-                .expect("the bound plan's gate handle is untaken")
-        });
         let controls = &mut self.track_controls;
-        gate.write_published(|stamp| write(controls, stamp))
+        self.gate.write_published(|stamp| write(controls, stamp))
     }
 }
 
@@ -8164,8 +8164,6 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             track_controls,
             plan: plan.attach_automation_program(automation_program),
             meter_consumers,
-            #[cfg(any(test, feature = "test-support"))]
-            test_gate: None,
         }
     }
 
@@ -11323,7 +11321,7 @@ mod tests {
             Ok(bound) => bound,
             Err(failure) => panic!("harness bind: {}", failure.code),
         };
-        let mut plan = bound.plan.seal();
+        let mut plan = bound.plan.seal().0;
         if matches!(variant, BoundaryVariant::AliasObserved) {
             ALIAS_CAPTURE.with(|capture| capture.borrow_mut().clear());
         }

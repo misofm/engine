@@ -378,11 +378,7 @@ fn successor_of(
 /// at the swap block. Returns the swap block's carry outcome.
 fn hand_over(successor: &mut PreparedHost, predecessor: &mut PreparedHost) -> CarryOutcome {
     successor.sources.adopt_persisting(&mut predecessor.sources);
-    successor
-        .plan
-        .take_revision_gate()
-        .expect("the successor's gate handle")
-        .publish(SUCCESSOR_REVISION);
+    successor.gate.publish(SUCCESSOR_REVISION);
     successor.plan.adopt_predecessor_plan(&mut predecessor.plan)
 }
 
@@ -964,11 +960,7 @@ fn the_timeline_carry_and_the_blocks_after_it_allocate_and_free_nothing() {
     render_fed(&mut predecessor, &mut fed, 1);
     let mut successor = successor_of(&b, &a, &predecessor.inventory, false);
     successor.sources.adopt_persisting(&mut predecessor.sources);
-    successor
-        .plan
-        .take_revision_gate()
-        .expect("the successor's gate handle")
-        .publish(SUCCESSOR_REVISION);
+    successor.gate.publish(SUCCESSOR_REVISION);
     submit(&mut successor.sources, 1, fed..fed + 11 * Q);
     let mark = bench_alloc::current_thread_counters();
     let carry = successor.plan.adopt_predecessor_plan(&mut predecessor.plan);
