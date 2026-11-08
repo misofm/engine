@@ -91,16 +91,16 @@ mod swap_tests;
 use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
     AutomationRate, BankProcessReport, EffectBankProcessBlock, EffectDescriptor,
-    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
-    LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
-    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
-    ObservationTapId, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
-    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedBankMetadata, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LaneSwap,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
+    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask,
@@ -5916,7 +5916,29 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         self.core.restore_track(track, state_layout_version, &input)
     }
 
-    fn validate_track_state_payload(
+    fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+        Some(self)
+    }
+
+    fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+        Some(self)
+    }
+    // REALTIME_POLICY_END
+}
+
+impl<L: Lane> LaneSwap for PreparedTruePeakLimiterBank<L> {
+    // REALTIME_POLICY_BEGIN: #2392, the lane swap runs at a render block boundary.
+    fn lane_default_bytes(&self) -> usize {
+        LANE_DEFAULT_BYTES
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        // A per-channel write lands on live state (#2352).
+        MonoCollapse::enter::<false>(&mut self.core);
+        self.core.exchange_lane_defaults(lane, bytes)
+    }
+
+    fn validate_lane_payload(
         &self,
         track_index: u32,
         state_layout_version: u32,
@@ -5925,16 +5947,6 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         self.checked_member(track_index)?;
         self.core.parse_track(state_layout_version, input)?;
         Ok(())
-    }
-
-    fn lane_default_bytes(&self) -> Option<usize> {
-        Some(LANE_DEFAULT_BYTES)
-    }
-
-    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
-        // A per-channel write lands on live state (#2352).
-        MonoCollapse::enter::<false>(&mut self.core);
-        self.core.exchange_lane_defaults(lane, bytes)
     }
     // REALTIME_POLICY_END
 }
@@ -7473,7 +7485,11 @@ mod tests {
                 .flat_map(|value| value.to_bits().to_le_bytes())
                 .chain((M as u32).to_le_bytes())
                 .collect();
-            assert!(bank.processor.exchange_lane_defaults(0, &mut bytes));
+            assert!(
+                bank.processor
+                    .lane_swap_mut()
+                    .is_some_and(|swap| swap.exchange_lane_defaults(0, &mut bytes))
+            );
             assert!(
                 engages(&mut bank),
                 "W{lanes}: padded bank after a swap made it uniform"

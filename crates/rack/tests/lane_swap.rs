@@ -19,7 +19,7 @@ use bench_support::alloc::{assert_installed, current_thread_counters, current_th
 use effect_contract::{
     BankProcessReport, BankWidth, BypassSwitch, EffectBankProcessBlock, EffectCellWriter,
     EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec,
-    EffectProgramKey, EffectQuality, EffectTargetError, LatencySamples, LinkMode,
+    EffectProgramKey, EffectQuality, EffectTargetError, LaneSwap, LatencySamples, LinkMode,
     ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
     ObservationFold, ObservationKind, ObservationLane, ObservationSample, ObservationTapId,
     PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
@@ -343,23 +343,12 @@ impl PreparedNativeEffectBank for StripBank {
         Ok(())
     }
 
-    /// The restore above, which refuses only a lane out of range.
-    fn validate_track_state_payload(
-        &self,
-        track_index: u32,
-        _state_layout_version: u32,
-        _input: &StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        self.lanes
-            .get(track_index as usize)
-            .map(|_| ())
-            .ok_or(StatePayloadError {
-                code: "effect.state.lane",
-            })
+    fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+        Some(self)
     }
 
-    fn lane_default_bytes(&self) -> Option<usize> {
-        Some(8)
+    fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+        Some(self)
     }
 
     /// Target slot 0's word 0 is a gain the ramp restarts toward, as a parameter span does, so
@@ -385,6 +374,12 @@ impl PreparedNativeEffectBank for StripBank {
         }
         Ok(())
     }
+}
+
+impl LaneSwap for StripBank {
+    fn lane_default_bytes(&self) -> usize {
+        8
+    }
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         let (Some(own), Ok(word)) = (self.defaults.get(lane), <[u8; 8]>::try_from(&*bytes)) else {
@@ -393,6 +388,21 @@ impl PreparedNativeEffectBank for StripBank {
         let old = own.swap(u64::from_le_bytes(word), Ordering::Relaxed);
         bytes.copy_from_slice(&old.to_le_bytes());
         true
+    }
+
+    /// The restore above, which refuses only a lane out of range.
+    fn validate_lane_payload(
+        &self,
+        track_index: u32,
+        _state_layout_version: u32,
+        _input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.lanes
+            .get(track_index as usize)
+            .map(|_| ())
+            .ok_or(StatePayloadError {
+                code: "effect.state.lane",
+            })
     }
 }
 

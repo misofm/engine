@@ -711,7 +711,7 @@ impl LinkModeSet {
 /// One lane's link mode in a lane's prepared defaults (issue #1368): a
 /// [`lane_link`](EffectDescriptor::lane_link) bank holds the mode per lane, so a render-time lane
 /// swap ([`swap_bank_lanes`]) moves it with the lane's other defaults, through
-/// [`PreparedNativeEffectBank::exchange_lane_defaults`].
+/// [`LaneSwap::exchange_lane_defaults`].
 ///
 /// Writes `link`'s word into `word` (`m as u32`, little-endian) and returns the mode the word
 /// held. A word that names no mode -- the swap's spare holds arbitrary bytes on its first pass --
@@ -2489,6 +2489,57 @@ pub trait PreparedNativeEffect: Send {
         false
     }
 }
+/// A bank's render-time lane swap capability ([`swap_bank_lanes`], issues #1747, #2324, #2392):
+/// its prepared per-lane defaults, their exchange and its restore's verdict, as one type.
+///
+/// A swap moves a strip into another strip's lane, so it moves the lane's prepared defaults
+/// beside its state payload, and it proves both lanes' own payloads restore before its first
+/// write. A bank reaches it through [`PreparedNativeEffectBank::lane_swap`] and its `&mut` twin
+/// [`PreparedNativeEffectBank::lane_swap_mut`], which name one object. None of the three methods
+/// has a default, so a bank either swaps lanes with all three or declines with none: a bank that
+/// declares its defaults can neither inherit a declining verdict nor lack the exchange.
+pub trait LaneSwap {
+    /// The bytes of **prepared per-lane defaults** each lane of this bank holds (issue #1747).
+    ///
+    /// Prepared defaults are the per-lane values a bank was prepared with and keeps outside its
+    /// state payload: the initial parameter values (and any prepared per-lane shape derived from
+    /// them) that `reset(ResetKind::FullToDefaults)` and the D7 non-finite recovery re-seed a lane
+    /// from, or that a restore validates a payload against. The plan-swap carry does not move
+    /// them, because it moves a strip into the same strip's successor lane, which keeps its own
+    /// prepared defaults. A render-time lane swap moves a strip into another strip's lane, so it
+    /// exchanges them through [`exchange_lane_defaults`](Self::exchange_lane_defaults) beside the
+    /// payload. `0` is a bank that keeps no per-lane defaults. Off the render thread, or at a
+    /// block boundary; constant time.
+    fn lane_default_bytes(&self) -> usize;
+
+    /// Exchange lane `lane`'s prepared per-lane defaults with `bytes`, in place: on `true`,
+    /// `bytes` holds the lane's old defaults and the lane holds what `bytes` held (issue #1747).
+    ///
+    /// `bytes` is exactly [`lane_default_bytes`](Self::lane_default_bytes) long, in the bank's own
+    /// little-endian encoding. A caller only ever leaves a lane holding another lane's (or this
+    /// lane's) own defaults of a bank of one layout; on the way it may rotate arbitrary bytes
+    /// through a lane and back out again before anything reads it. So nothing is validated and no
+    /// byte is refused. Bytes the bank wrote itself round-trip exactly; bytes outside its encoding
+    /// (an enum or flag word of a spare area) may come back canonicalised. Returns `false`,
+    /// changing nothing, for a lane out of range or a wrong length. It changes no state word and
+    /// no payload word.
+    ///
+    /// On the render thread at a block boundary: allocation-free, lock-free and bounded by the
+    /// defaults size.
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool;
+
+    /// The bank's restore verdict: what
+    /// [`PreparedNativeEffectBank::validate_track_state_payload`] answers for a bank that swaps
+    /// lanes, whose default reads it here (issue #2324). A bank with this capability does not
+    /// override that method, so the swap's verdict and the restore's are one body.
+    fn validate_lane_payload(
+        &self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: &StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError>;
+}
+
 /// A bound homogeneous bank: the part of a bound bank that render owns.
 ///
 /// Like [`PreparedNativeEffect`], it has no `metadata()` method; its [`PreparedBankMetadata`]
@@ -2640,25 +2691,28 @@ pub trait PreparedNativeEffectBank: Send {
     /// The verdict reads only `input`, the lane's prepared per-lane defaults and the bank's
     /// prepared configuration, never its running state, so it stands across every render, reset
     /// and restore of any lane until the lane's defaults are exchanged
-    /// ([`exchange_lane_defaults`](Self::exchange_lane_defaults)). [`swap_bank_lanes`] relies on
+    /// ([`LaneSwap::exchange_lane_defaults`]). [`swap_bank_lanes`] relies on
     /// that: it proves both lanes' own payloads restore before its first write, so the undo it
     /// may need is known to take.
     ///
-    /// The default declines with `effect.state.unchecked`, so a bank that has not stated its
-    /// restore's verdict cannot swap lanes. A bank that declares its lane defaults
-    /// ([`lane_default_bytes`](Self::lane_default_bytes)) must implement it, and every launch
-    /// effect's bank does. Render-safe, like the restore it answers for: allocation-free,
-    /// lock-free and bounded by the prepared state size.
+    /// The default is the bank's [`LaneSwap::validate_lane_payload`] when it swaps lanes
+    /// ([`lane_swap`](Self::lane_swap), issue #2392), so a bank that swaps lanes has stated its
+    /// restore's verdict and does not override this. Otherwise it declines with
+    /// `effect.state.unchecked`; a bank that does not swap lanes may still override it (the
+    /// multiband compressor's does). Render-safe, like the restore it answers for:
+    /// allocation-free, lock-free and bounded by the prepared state size.
     fn validate_track_state_payload(
         &self,
         track_index: u32,
         state_layout_version: u32,
         input: &StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        let _ = (track_index, state_layout_version, input);
-        Err(StatePayloadError {
-            code: "effect.state.unchecked",
-        })
+        match self.lane_swap() {
+            Some(swap) => swap.validate_lane_payload(track_index, state_layout_version, input),
+            None => Err(StatePayloadError {
+                code: "effect.state.unchecked",
+            }),
+        }
     }
 
     /// This bank as [`core::any::Any`], so that [`copy_lane_from`](Self::copy_lane_from) can find
@@ -3032,45 +3086,23 @@ pub trait PreparedNativeEffectBank: Send {
         let _ = (lanes_mask, frames);
     }
 
-    /// The bytes of **prepared per-lane defaults** each lane of this bank holds, or `None` when
-    /// the bank has not declared them (issue #1747).
+    /// This bank's render-time lane swap capability ([`LaneSwap`], issue #2392): its prepared
+    /// per-lane defaults, their exchange and its restore's verdict, or `None` when the bank does
+    /// not swap lanes.
     ///
-    /// Prepared defaults are the per-lane values a bank was prepared with and keeps outside its
-    /// state payload: the initial parameter values (and any prepared per-lane shape derived from
-    /// them) that `reset(ResetKind::FullToDefaults)` and the D7 non-finite recovery re-seed a lane
-    /// from, or that a restore validates a payload against. The plan-swap carry does not move
-    /// them, because it moves a strip into the same strip's successor lane, which keeps its own
-    /// prepared defaults. A render-time lane swap moves a strip into another strip's lane, so it
-    /// exchanges them through [`exchange_lane_defaults`](Self::exchange_lane_defaults) beside the
-    /// payload. `Some(0)` is a bank that keeps no per-lane defaults.
-    ///
-    /// The default `None` declines: `swap_bank_lanes` refuses a bank that has not declared its
-    /// defaults, because a swap that left them behind would re-seed a moved strip from another
-    /// strip's values. A bank that declares them also implements
-    /// [`validate_track_state_payload`](Self::validate_track_state_payload), which the swap reads
-    /// before its first write (issue #2324). Off the render thread, or at a block boundary;
-    /// constant time.
-    fn lane_default_bytes(&self) -> Option<usize> {
+    /// The default `None` declines: `swap_bank_lanes` refuses a bank without the capability
+    /// ([`LaneSwapRefusal::Defaults`]), because a swap that left the lane's prepared defaults
+    /// behind would re-seed a moved strip from another strip's values. It names the same object
+    /// as [`lane_swap_mut`](Self::lane_swap_mut): a bank implements [`LaneSwap`] and returns
+    /// `Some(self)` from both. Constant time.
+    fn lane_swap(&self) -> Option<&dyn LaneSwap> {
         None
     }
 
-    /// Exchange lane `lane`'s prepared per-lane defaults with `bytes`, in place: on `true`,
-    /// `bytes` holds the lane's old defaults and the lane holds what `bytes` held (issue #1747).
-    ///
-    /// `bytes` is exactly [`lane_default_bytes`](Self::lane_default_bytes) long, in the bank's own
-    /// little-endian encoding. A caller only ever leaves a lane holding another lane's (or this
-    /// lane's) own defaults of a bank of one layout; on the way it may rotate arbitrary bytes
-    /// through a lane and back out again before anything reads it. So nothing is validated and no
-    /// byte is refused. Bytes the bank wrote itself round-trip exactly; bytes outside its encoding
-    /// (an enum or flag word of a spare area) may come back canonicalised. Returns `false`,
-    /// changing nothing, for a lane out of range or a wrong length. It changes no state word and
-    /// no payload word.
-    ///
-    /// The default refuses. On the render thread at a block boundary: allocation-free,
-    /// lock-free and bounded by the defaults size.
-    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
-        let _ = (lane, bytes);
-        false
+    /// The `&mut` twin of [`lane_swap`](Self::lane_swap), the same object, for the exchange.
+    /// The default `None` declines. Constant time.
+    fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+        None
     }
 
     /// Glides lane `track`'s detector link to `mode` over `samples` samples (issue #1370 D1).

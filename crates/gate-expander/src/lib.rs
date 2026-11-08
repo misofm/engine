@@ -42,16 +42,16 @@ pub mod kernel;
 
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
-    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
-    LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
-    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
-    ObservationTapId, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
-    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedBankMetadata, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort, ProcessReport,
-    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LaneSwap,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort,
+    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::collapse::{CollapsibleChannels, MonoCollapse};
@@ -1761,17 +1761,6 @@ macro_rules! bank_impl {
                 let track = checked_track(track_index, <$lane>::WIDTH)?;
                 self.restore_lane(track, state_layout_version, &input)
             }
-
-            fn validate_track_state_payload(
-                &self,
-                track_index: u32,
-                state_layout_version: u32,
-                input: &StatePayloadInput<'_>,
-            ) -> Result<(), StatePayloadError> {
-                checked_track(track_index, <$lane>::WIDTH)?;
-                self.parse_payload(state_layout_version, input)?;
-                Ok(())
-            }
             // REALTIME_POLICY_END
 
             fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
@@ -1784,8 +1773,19 @@ macro_rules! bank_impl {
                 self.advance_skipped_clocks(lanes_mask, frames);
             }
 
-            fn lane_default_bytes(&self) -> Option<usize> {
-                Some(LANE_DEFAULT_BYTES)
+            fn lane_swap(&self) -> Option<&dyn LaneSwap> {
+                Some(self)
+            }
+
+            fn lane_swap_mut(&mut self) -> Option<&mut dyn LaneSwap> {
+                Some(self)
+            }
+        }
+
+        impl LaneSwap for PreparedGate<$lane, false> {
+            // REALTIME_POLICY_BEGIN: #2392, the lane swap runs at a render block boundary.
+            fn lane_default_bytes(&self) -> usize {
+                LANE_DEFAULT_BYTES
             }
 
             fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
@@ -1793,6 +1793,18 @@ macro_rules! bank_impl {
                 MonoCollapse::enter::<false>(self);
                 self.exchange_defaults(lane, bytes)
             }
+
+            fn validate_lane_payload(
+                &self,
+                track_index: u32,
+                state_layout_version: u32,
+                input: &StatePayloadInput<'_>,
+            ) -> Result<(), StatePayloadError> {
+                checked_track(track_index, <$lane>::WIDTH)?;
+                self.parse_payload(state_layout_version, input)?;
+                Ok(())
+            }
+            // REALTIME_POLICY_END
         }
     };
 }
