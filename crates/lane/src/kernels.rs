@@ -30,6 +30,23 @@ pub mod halfband;
 /// the same body at `L = f32` as the bank kernels do at every width.
 pub use builtins::ramp_toward;
 
+/// The longest ramp countdown a lane word carries exactly: `2^24`, the largest power of two whose
+/// every smaller integer is an `f32` (issue #2410: the one bound for every ramp that counts down
+/// in an `f32` lane word).
+///
+/// A ramp's authoritative countdown may be a wider integer -- a builtins window may be up to
+/// `u32::MAX` updates -- but the countdown word a ramp kernel reads (the trim, fader/mute and
+/// matrix kernels in [`builtins`], `effect_runtime`'s `RampLanes`) is an `f32` integer. So the
+/// builtins stages clamp it to this bound each time they build the word from their `u32`, before
+/// every ramp kernel, and `RampLanes::gather` asserts it in debug builds (no effect ramp is
+/// longer; `effect_contract::LINK_GLIDE_MAX_SAMPLES`, the longest link glide, is this bound).
+/// The bound is exact because every integer up to it converts both ways exactly, so the kernel's
+/// compares are integer compares. The clamp is invisible because a lane reaches zero inside a
+/// block only when its countdown is at most the block length, and a render block is far shorter
+/// than `2^24` frames: a clamped lane ramps through the whole block as the unclamped one would,
+/// and the next block's word is built afresh from the authoritative countdown.
+pub const EXACT_COUNTDOWN: u32 = 1 << 24;
+
 use crate::{Lane, flush, flush_pair, silence_step};
 
 /// Where an SVF kernel reads its per-frame rest thresholds from (issue #1328): an effect channel's
