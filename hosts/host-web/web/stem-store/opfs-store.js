@@ -8,6 +8,8 @@ const STAGING_DIRECTORY = "staging"
 const INDEX_VERSION = 1
 const FINAL_NAME = /^blake3-([0-9a-f]{64})$/
 const LOCK_PREFIX = "miso:stem-store:v1"
+// An ingest that fails integrity is attempted once more, in the same hold.
+const INGEST_ATTEMPTS = 2
 
 /** A typed web-adapter storage refusal. */
 export class StemStoreError extends Error {
@@ -232,10 +234,17 @@ export class OpfsStemStore {
     await this.open()
     const digest = stemDigest(identity)
     return this.#withStemLock(identity, options.signal, async (hold) => {
-      const handle = await this.#fileHandle(stemFileName(identity), false)
-      if (handle === null) return false
       let observed
       try {
+        // A lookup lands nothing, so a stalled one is only a stalled read: it is not fenced (#2397).
+        const handle = await withDeadline(
+          this.#fileHandle(stemFileName(identity), false),
+          this.#readDeadlineMs,
+          "storage.read_stalled",
+          `Looking up ${identity} made no progress`,
+          options.signal
+        )
+        if (handle === null) return false
         observed = await this.#hashFile(handle, {
           signal: options.signal,
           onChunk: options.onProgress,
@@ -331,15 +340,25 @@ export class OpfsStemStore {
     const promise = this.#withStemLock(stem.identity, options.signal, async (hold) => {
       if (await this.#verifyIndexed(stem, options.onProgress, options.signal, hold)) return
       let lastError
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      for (let attempt = 0; attempt < INGEST_ATTEMPTS; attempt += 1) {
+        if (attempt > 0) {
+          // A step of this hold still in flight could land on the staged file or the final the retry
+          // writes, and the retry's promote would wait on it with no deadline. So the retry runs only
+          // once every fenced step has settled; a step that rejected has settled (#2397).
+          await withDeadline(
+            settled(hold.fences),
+            this.#readDeadlineMs,
+            "storage.write_stalled",
+            `An earlier attempt at ${stem.identity} left a step unsettled`,
+            options.signal
+          )
+        }
         try {
           await this.#ingestAttempt(stem, resolver, options, hold)
           return
         } catch (error) {
           lastError = error
-          if (!(error instanceof StemStoreError) || error.code !== "stem.ingest.integrity") {
-            throw error
-          }
+          if (!isIntegrityFailure(error)) throw error
         }
       }
       throw lastError
@@ -358,13 +377,27 @@ export class OpfsStemStore {
     throwIfAborted(options.signal)
     const digest = stemDigest(stem.identity)
     const stagingName = `${this.#tabId}-${digest}`
-    await removeEntry(this.#staging, stagingName)
-    const handle = await this.#staging.getFileHandle(stagingName, { create: true })
+    // A late removal could delete the staged file a later hold of this tab writes, and a late
+    // create could leave one behind it: both are fenced, and a stall fails this attempt (#2397).
+    await this.#fencedStep(
+      hold,
+      removeEntry(this.#staging, stagingName),
+      "storage.remove_stalled",
+      `Clearing staging for ${stem.identity} made no progress`,
+      options.signal
+    )
+    const handle = await this.#fencedStep(
+      hold,
+      this.#staging.getFileHandle(stagingName, { create: true }),
+      "storage.write_stalled",
+      `Creating staging for ${stem.identity} made no progress`,
+      options.signal
+    )
     let leaveDebris = false
     try {
       // Prove the device writable before any network: an unwritable store
       // must refuse with a typed storage error, not after a full download.
-      const writable = await this.#openStagingWritable(handle, stem, options)
+      const writable = await this.#openStagingWritable(handle, stem, options, hold)
       const hash = new IncrementalBlake3()
       let reader
       let bytes = 0
@@ -435,9 +468,10 @@ export class OpfsStemStore {
             )
           }
           hash.update(result.value)
-          await withDeadline(
+          // The staging writable's steps may land late too: each is fenced into the hold (#2397).
+          await this.#fencedStep(
+            hold,
             writable.write(result.value),
-            this.#readDeadlineMs,
             "storage.write_stalled",
             `Writing staging for ${stem.identity} made no progress`,
             options.signal
@@ -454,17 +488,18 @@ export class OpfsStemStore {
             stagingName,
           })
         }
-        await withDeadline(
+        await this.#fencedStep(
+          hold,
           writable.close(),
-          this.#readDeadlineMs,
           "storage.write_stalled",
           `Closing staging for ${stem.identity} made no progress`,
           options.signal
         )
       } catch (error) {
-        await withDeadline(
+        // Best-effort and fenced: a retry waits for it in #ensureIngested.
+        await this.#fencedStep(
+          hold,
           writable.abort(error),
-          this.#readDeadlineMs,
           "storage.write_stalled",
           `Aborting staging for ${stem.identity} made no progress`
         ).catch(() => {})
@@ -529,11 +564,9 @@ export class OpfsStemStore {
       if (isQuotaError(error)) {
         // The failing identity is not a survivor: a quota error may have
         // happened during fallback-final or index writing after its staging
-        // bytes were complete. Remove any unindexed final so retry is clean.
-        await removeEntry(
-          this.#directory,
-          stemFileName(stem.identity)
-        ).catch(() => {})
+        // bytes were complete. Remove any unindexed final so retry is clean. Like a demotion's, the
+        // removal keeps the stem lock until it settles and the wait for it is best-effort (#2397).
+        await this.#removeDemoted(stem.identity, hold)
         throw await this.#quotaError(
           stem.bytes,
           error,
@@ -542,20 +575,34 @@ export class OpfsStemStore {
       }
       throw error
     } finally {
-      if (!leaveDebris) await removeEntry(this.#staging, stagingName)
+      if (!leaveDebris) {
+        await this.#fencedStep(
+          hold,
+          removeEntry(this.#staging, stagingName),
+          "storage.remove_stalled",
+          `Removing staging for ${stem.identity} made no progress`
+        ).catch(() => {
+          // The attempt's own outcome stands, and a later ingest clears the staged file first. The
+          // removal stays fenced, so a retry waits for it in #ensureIngested.
+        })
+      }
     }
   }
 
-  async #openStagingWritable(handle, stem, options) {
+  async #openStagingWritable(handle, stem, options, hold) {
+    let opening
     try {
+      opening = handle.createWritable()
       return await withDeadline(
-        handle.createWritable(),
+        opening,
         this.#readDeadlineMs,
         "storage.write_stalled",
         `Opening staging for ${stem.identity} made no progress`,
         options.signal
       )
     } catch (error) {
+      // A writable that opens after its wait ended is aborted; the hold is kept until it is (#2397).
+      this.#fence(hold, Promise.resolve(opening).then((late) => late?.abort(error)))
       // Abort and quota errors keep their own handling; any other refusal is
       // the device saying it cannot store this stem.
       if (
@@ -579,7 +626,14 @@ export class OpfsStemStore {
     await abortable(settled(hold.fences), options.signal)
     if (typeof stagingHandle.move === "function") {
       try {
-        await stagingHandle.move(this.#directory, finalName)
+        // A move that lands after its deadline writes the final, so it keeps the lock (#2397).
+        await this.#fencedStep(
+          hold,
+          stagingHandle.move(this.#directory, finalName),
+          "storage.write_stalled",
+          `Moving ${stem.identity} into place made no progress`,
+          options.signal
+        )
         await this.#hooks.afterMove?.({ identity: stem.identity, finalName })
         return
       } catch (error) {
@@ -594,9 +648,13 @@ export class OpfsStemStore {
       `Reading staged ${stem.identity} made no progress`,
       options.signal
     )
-    const finalHandle = await this.#directory.getFileHandle(finalName, {
-      create: true,
-    })
+    const finalHandle = await this.#fencedStep(
+      hold,
+      this.#directory.getFileHandle(finalName, { create: true }),
+      "storage.write_stalled",
+      `Creating fallback final for ${stem.identity} made no progress`,
+      options.signal
+    )
     let writablePromise
     let writable
     let reader
@@ -620,17 +678,18 @@ export class OpfsStemStore {
           options.signal
         )
         if (result.done) break
-        await withDeadline(
+        // Fenced directly, not through the late abort: a write or close may still land (#2397).
+        await this.#fencedStep(
+          hold,
           writable.write(result.value),
-          this.#readDeadlineMs,
           "storage.write_stalled",
           `Writing fallback final for ${stem.identity} made no progress`,
           options.signal
         )
       }
-      await withDeadline(
+      await this.#fencedStep(
+        hold,
         writable.close(),
-        this.#readDeadlineMs,
         "storage.write_stalled",
         `Closing fallback final for ${stem.identity} made no progress`,
         options.signal
@@ -668,7 +727,9 @@ export class OpfsStemStore {
       observed.bytes !== stem.bytes ||
       observed.hex !== stemDigest(stem.identity)
     ) {
-      await removeEntry(this.#directory, finalName)
+      // Best-effort, like a demotion's: the removal keeps the stem lock until it settles, and the
+      // retry in #ensureIngested waits for it (#2397).
+      await this.#removeDemoted(stem.identity, hold)
       throw new StemStoreError(
         "stem.ingest.integrity",
         `Fallback promotion verification failed for ${stem.identity}`,
@@ -680,15 +741,28 @@ export class OpfsStemStore {
   async #verifyIndexed(stem, onProgress, signal, hold) {
     const index = await this.#withIndexLock(() => this.#readIndex(true), signal)
     if (index.stems[stem.identity] === undefined) return false
-    const handle = await this.#fileHandle(stemFileName(stem.identity), false)
-    if (handle === null) {
-      await this.#demote(stem.identity, hold)
-      return false
-    }
-    // Only the read and the hash: a failure there is a read that stalled or failed, not damage.
+    // Only the lookup, the read and the hash: a failure there is a read that stalled or failed, not
+    // damage.
     const unreadable = async (error) => {
       if (signal?.aborted || error?.name === "AbortError") throw error
       await this.#demoteUnreadable(stem.identity, hold, undefined, error)
+      return false
+    }
+    let handle
+    try {
+      // A lookup lands nothing, so a stalled one is not fenced (#2397).
+      handle = await withDeadline(
+        this.#fileHandle(stemFileName(stem.identity), false),
+        this.#readDeadlineMs,
+        "storage.read_stalled",
+        `Looking up ${stem.identity} made no progress`,
+        signal
+      )
+    } catch (error) {
+      return unreadable(error)
+    }
+    if (handle === null) {
+      await this.#demote(stem.identity, hold)
       return false
     }
     let file
@@ -1374,6 +1448,14 @@ export class OpfsStemStore {
     }
   }
 
+  // A step in `hold` that changes the store and may still land after its deadline (a create, a move,
+  // a removal of a staged file) is fenced into `hold`, so the stem lock outlives it; the caller waits
+  // at most the local-store deadline (#2397). A removal of a final goes through #removeFinal.
+  #fencedStep(hold, operation, code, message, signal) {
+    this.#fence(hold, operation)
+    return withDeadline(operation, this.#readDeadlineMs, code, message, signal)
+  }
+
   // Keeps `hold` until `operation` settles.
   #fence(hold, operation) {
     const done = Promise.resolve(operation).then(
@@ -1606,6 +1688,10 @@ function classifyStorageError(error, action, overrides = {}) {
     overrides,
     error
   )
+}
+
+function isIntegrityFailure(error) {
+  return error instanceof StemStoreError && error.code === "stem.ingest.integrity"
 }
 
 function isQuotaError(error) {
