@@ -1110,7 +1110,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// Issue #2291: contain a throw that escaped a message handler. Each handler entry that reaches
   /// an export catches here: the page's port in both modes, the control Worker's port, and the SDK
   /// PCM feed prelude's attach port (its `prepare-seek`, which calls `trap(0)`). No export a
-  /// handler calls can throw past it. `process()` contains its render call itself, and
+  /// handler calls can throw past it. `process()` contains its render call and its meter frame
+  /// itself (#2370; it posts nothing, so it records the trap with `fail` alone), and
   /// `receiveDispose` and the releases contain theirs. A throw is a trap: the handler cannot tell one from its own fault (V8
   /// reports a Wasm stack overflow as a `RangeError`, and a JavaScript exception thrown through Wasm
   /// frames is not a `WebAssembly.RuntimeError`), and its own code throws only on a module fault,
@@ -1823,7 +1824,18 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     output[0].set(this.outputLeft);
     output[1].set(this.outputRight);
-    if (this.meterLease) this.postMeterFrame();
+    // Issue #2370: the meter frame calls exports after the render call (`meter_poll`, and in
+    // `worker` mode `meter_header_ptr`). A throw there is a trap like the render's, by #2291's
+    // rule that a throw past an export is one: the failure is recorded trapped and the block
+    // silenced, so no export runs on the instance again and its dispose or release is answered
+    // without one.
+    try {
+      if (this.meterLease) this.postMeterFrame();
+    } catch (_) {
+      this.fail(RESULT_INTERNAL, true);
+      this.silence(outputs);
+      return true;
+    }
     if (this.telemetryLease) this.recordRenderTime(this.clock.read() - started, actualFrames);
     return true;
   }
