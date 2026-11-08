@@ -1150,7 +1150,8 @@ impl PreparedSessionTransaction {
     ///
     /// A transaction of monitor writes only prepared whole lends `store`'s committed compilation:
     /// it changes no model and no revision, so its compilation is the committed one, and it holds
-    /// no copy of it (#2394). Every other transaction prepared whole lends its own.
+    /// no copy of it (#2394). It lends nothing once `store` is at another revision than the one it
+    /// was prepared against. Every other transaction prepared whole lends its own.
     ///
     /// `None` for a transaction prepared in place ([`SessionStore::prepare_transaction_in_place`]
     /// and [`Self::is_in_place`]): it has no compilation of its own. A host that prepares in place
@@ -1159,13 +1160,10 @@ impl PreparedSessionTransaction {
     pub fn compiled<'a>(&'a self, store: &'a SessionStore) -> Option<&'a CompiledSession> {
         match &self.form {
             TransactionForm::Compiled(compiled) => Some(compiled),
+            // Only at the revision it was prepared against: a store that has committed since
+            // holds another compilation, which is not this transaction's.
             TransactionForm::MonitorWhole => {
-                debug_assert_eq!(
-                    store.revision(),
-                    self.base_revision,
-                    "a solo lends the compilation of the store it was prepared against"
-                );
-                Some(store.compiled())
+                (store.revision() == self.base_revision).then(|| store.compiled())
             }
             TransactionForm::InPlace(_) | TransactionForm::MonitorInPlace(_) => None,
         }
@@ -2291,6 +2289,55 @@ mod tests {
         assert!(displaced.is_none(), "a solo displaces no compilation");
         assert_eq!(store.revision(), base);
         assert_eq!(store.compiled().normalized_model(), &committed);
+    }
+
+    /// #2394 review fold. A solo token prepared whole lends the store's committed compilation only
+    /// at the revision it was prepared against: after the store commits a mutation, the token lends
+    /// nothing.
+    ///
+    /// Red if the lend skips the revision check: the solo token would then hand out the newer
+    /// compilation as its own prospective one, a model it was never prepared against.
+    #[test]
+    fn a_solo_lends_no_compilation_once_the_store_has_moved() {
+        let mut store = store();
+        let base = store.revision();
+        let track = store.compiled().normalized_model().tracks[0].id.clone();
+        let solo = SessionEdit::set_control(
+            controls::ControlAddress {
+                owner: Owner::Strip(track),
+                section: Section::Own,
+                control: 2,
+                lane: Lane::Both,
+            },
+            1.0,
+            None,
+        );
+        let prepared = store
+            .prepare_transaction_with_monitor(
+                ExpectedRevision::Exact(base),
+                std::slice::from_ref(&solo),
+            )
+            .expect("prepares");
+        assert!(prepared.is_monitor_only() && !prepared.is_in_place());
+        assert!(
+            prepared
+                .compiled(&store)
+                .is_some_and(|compiled| core::ptr::eq(compiled, store.compiled())),
+            "at its base revision it lends the committed compilation"
+        );
+        store
+            .apply_transaction(
+                ExpectedRevision::Exact(base),
+                &[SessionEdit::SetSessionId {
+                    session_id: id("moved"),
+                }],
+            )
+            .expect("a mutation commits");
+        assert_ne!(store.revision(), base);
+        assert!(
+            prepared.compiled(&store).is_none(),
+            "a moved store's compilation is not the solo's"
+        );
     }
 
     /// #1613. A transaction of values is prepared in place, holds the edited owners and no

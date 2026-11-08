@@ -45,7 +45,8 @@ Two leftovers from #2286, which made `TransactionForm` the one statement of whet
 
 **Change.**
 - `MonitorWhole` holds nothing. `PreparedSessionTransaction::compiled(&self, store: &SessionStore)`
-  lends `store.compiled()` for it (debug-asserted at the token's base revision) and the token's own
+  lends `store.compiled()` for it (attempt 1 only debug-asserted the token's base revision; the
+  fold below makes the check hold in release) and the token's own
   compilation for `Compiled`. A new `own_compiled()` returns only a mutation's own compilation (and
   `None` for a solo or in-place token). The preparation reads `compiled.as_ref().unwrap_or(&self.compiled)`
   for the ramp bound and the observe tagging, which is the same model as the old clone.
@@ -130,8 +131,28 @@ attachment (attach length, response bytes, both event frames, revision); and a o
 
 **Dropped claims.** None.
 
-**Follow-ups (not filed).**
-- A whole-path solo still clones the committed *model* as its candidate (857 B on the fixture; it
-  scales with the session). It is dropped at the end of preparation and not held by the token. No
-  edit of a monitor-only transaction writes the candidate, so a later issue could check monitor edits
-  against the committed model and skip that clone too.
+**Follow-ups.**
+- #SUCCESSOR: a whole-path solo still clones the committed *model* as its candidate (857 B on the
+  fixture; it grows with the session). It is freed when preparation ends; the token does not hold it.
+  No edit of a monitor-only transaction writes the candidate, so the edits could borrow the committed
+  model instead (low priority, for the performance pass).
+
+### Sol verdict on attempt 1 (`3a4846b87`): PASS, minor findings only
+
+Folded on the same branch:
+1. **The lend's precondition now holds in release builds.** In attempt 1,
+   `PreparedSessionTransaction::compiled` checked only with a `debug_assert` that the store was at
+   the token's base revision. With the public `prepare_transaction_with_monitor` followed by
+   `apply_transaction` on the same store, a release build would lend the newer compilation. It now
+   returns `(store.revision() == self.base_revision).then(|| store.compiled())`, so it lends nothing
+   once the store has moved.
+   - New test: `model::tests::a_solo_lends_no_compilation_once_the_store_has_moved`. It turns red if
+     the lend skips the revision check, because the token would then hand out a compilation it was
+     never prepared against.
+   - Mutation: replacing the check with plain `Some(store.compiled())` makes it RED at "a moved
+     store's compilation is not the solo's". On attempt 1's head, the `debug_assert` panics in a
+     debug build.
+   - No production caller can meet a moved store. The controller refuses a stale token before any
+     reader runs, and control-plane reads under the same `&mut` borrow.
+2. **The candidate-model clone gets a successor.** A stateless successor spec was written, and the
+   follow-up above names it as `#SUCCESSOR`.
