@@ -238,3 +238,75 @@ Every row is the spec's prediction. The same probe on the branch: rows 1-3 `Err(
   - `cargo fmt --all --check`: clean.
   - `realtime_policy`: ok (312 marked regions in 48 files).
   - The render path changed only by two `#[cfg(debug_assertions)]` statements in the chain, which a release build drops, so the web gate was not re-run. It passed on attempt 2.
+
+**Sol's verdict on attempt 3 (`f70ba6fff`): FAIL.** There was one MAJOR finding, again on tests only. The code was judged correct, and M1-M3 were red.
+1. MAJOR: no rack test checked that the recovery runs *only* on `Stranded`. Two mutations stayed green in debug and release:
+   - R1: the shared reset's guard `swapped == Err(Stranded)` widened to `is_err()`.
+   - R3: the four stage-arm guards `refusal == Stranded` widened to `!= Scratch`.
+2. MINOR: `LaneSwapRefusal::Stranded`'s doc should also cover a lane that keeps a state word an exchange touched.
+
+### Attempt 4 (Sol's attempt-3 findings folded), same branch, from `f70ba6fff`
+
+**Item 1, tests.**
+- `StripBank`'s `Fault` gains `arm_once(call)`, which refuses that one exchange alone. A bank whose exchange 1 refuses alone then unwinds cleanly to `Err(Exchange)`.
+- New `a_cleanly_refused_stage_swap_runs_no_recovery` covers four cases: the effect stage (slot 2) and the live stage (slot 1), each with a peer lane in the same stage and in the other chain's stage. It calls `BankStage::swap_lanes` directly, so the chain's tripwire is out of the path. For each case it asserts:
+  - `false`;
+  - zero `FullToDefaults` resets in both banks;
+  - `lane_swap_stranded() == 0` on both stages;
+  - `RESTORED` still held on both lanes.
+- New debug-only `#[should_panic]` tests, `an_uncounted_refusal_trips_the_chain_in_debug` (in-chain) and `an_uncounted_cross_chain_refusal_trips_the_chain_in_debug`, drive the same clean refusal through `BankChain::swap_lanes`. The chain's tripwire must fire in each arm.
+
+**Item 2.** `Stranded`'s doc now says that any per-lane state of either lane may differ. That includes a state word an exchange touched and no restore put back, such as a detector link's glide seated at rest.
+
+**Mutation sweep** (`sweep.py`/`sweep.sh` in scratch). Each mutation of a guard or branch in this issue's rack and effect-contract diff was applied alone, the focused lane-swap tests ran in debug and in release, and the tree was restored. All 49 are red in both builds, except the two tripwire mutations, which are red in debug and green in release by design.
+
+| Mutation | Where | Debug | Release | Red at |
+| --- | --- | --- | --- | --- |
+| R1-widen: `is_err()` | shared reset | red | red | `a_cleanly_refused_stage_swap_runs_no_recovery` |
+| R1-invert: reset on non-strands only | shared reset | red | red | `a_cleanly_refused_stage_swap_runs_no_recovery` |
+| R1-drop: never reset | shared reset | red | red | `a_stranded_slot_...` |
+| R2: peer's reset in the calling bank | shared reset | red | red | `a_stranded_slot_...` |
+| R2: in-chain reset of `first_lane` twice | shared reset | red | red | `a_stranded_slot_...` |
+| R3-widen: `!= Scratch`, ×4 arms | stage guards | red | red | `a_cleanly_refused_...` |
+| R3-invert: `!= Stranded`, ×4 arms | stage guards | red | red | `a_cleanly_refused_...` (live other: `a_stranded_slot_...`) |
+| R4: count dropped, ×4 arms | stage counts | red | red | `a_stranded_slot_...` (in debug the tripwire fires first) |
+| R5: `RESTORED` refresh dropped, ×4 arms | stage refreshes | red | red | `a_stranded_slot_...` |
+| R6: `return false` dropped, ×4 arms | stage arms | red | red | `a_cleanly_refused_...` (live other: `a_stranded_slot_...`) |
+| R7: tripwire disabled, ×2 arms | chain | red | green, compiled out by design | the two `#[should_panic]` tests |
+| R8: swap-back skipped, ×2 arms | chain | red | red | `a_stranded_slot_...` |
+| forward exchange result ignored | effect-contract rotation | red | red | `a_refused_exchange_...` |
+| `taken == 3` widened to `>= 2` | effect-contract rotation | red | red | `a_refused_exchange_...` |
+| unwind skipped | effect-contract rotation | red | red | `a_refused_exchange_...` |
+| unwind refusal → `continue` | effect-contract rotation | red | red | `a_refused_exchange_...` |
+| step-1 exchange in the wrong bank | effect-contract rotation | red | red | `every_lane_swap_refusal_...` |
+| step-1 exchange on the wrong lane | effect-contract rotation | red | red | `every_lane_swap_refusal_...` |
+| always `Exchange` | step 1 | red | red | `a_refused_exchange_...` |
+| guard inverted | step 1 | red | red | `a_refused_exchange_...` |
+| own restore dropped | step 1 | red | red | `a_refused_exchange_...` |
+| stranded reported as `Exchange` | step 1 | red | red | `a_refused_exchange_...` |
+| `&&` → `||` | step 2 | red | red | `a_refused_exchange_...` |
+| restore result ignored | step 2 | red | red | `a_refused_exchange_...` |
+| undo result ignored | step 2 | red | red | `a_refused_exchange_...` |
+| `&&` → `||` | step 3 | red | red | `a_refused_exchange_...` |
+| restore result ignored | step 3 | red | red | `a_refused_exchange_...` |
+| undo result ignored | step 3 | red | red | `a_refused_exchange_...` |
+| first restore's result ignored | `OwnPayloads::restore` | red | red | `a_refused_exchange_...` |
+| second restore's result ignored | `OwnPayloads::restore` | red | red | `a_refused_exchange_...` |
+| second restore in the wrong bank | `OwnPayloads::restore` | red | red | `every_lane_swap_refusal_...` |
+| second restore on the wrong lane | `OwnPayloads::restore` | red | red | `a_refused_exchange_...` |
+
+Two branches have no reachable mutant:
+- `OwnPayloads::restore`'s `let ... else { return false }`: `swap_payload_input` cannot fail on the sizes the swap already cut the scratch to.
+- `rotation_exchange`'s `_` arm: steps 0 and 2 are the only other values.
+
+**Gates.** Run one crate at a time with `-j 4` and one private target dir, deleted afterwards:
+- `cargo test --locked`: every run below passed, with none failing.
+  - `effect-contract`, debug;
+  - `effect-contract --release --lib lane_swap`;
+  - `rack`, debug;
+  - `rack --release --test lane_swap`.
+- Clippy `-D warnings` on `effect-contract` and `rack` (all targets), in debug and release: clean. The pre-existing `clippy.toml` `math::fast_db` notices are unchanged.
+- `cargo fmt --all --check`: clean.
+- `check-workspace-policy.sh`: ok.
+- `realtime_policy`: ok (312 marked regions in 48 files).
+- Production code changed only in the `Stranded` doc comment, so no rendered bit can move and the web gate was not re-run.

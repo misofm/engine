@@ -3268,11 +3268,12 @@ pub enum LaneSwapRefusal {
     Restore,
     /// The swap could not undo itself (issue #2414): after an exchange or a restore refused, an
     /// exchange of the undo refused too, or so did a restore that puts a lane's own payload back
-    /// after the undo. A defect, and the one refusal that does **not**
-    /// leave both lanes as they were: either lane may hold the other lane's or the spare's
-    /// defaults, and the first lane the second's payload. The caller must recover both lanes
-    /// rather than assume nothing moved (`rack` resets them to the defaults they hold, the D7
-    /// lane recovery, and counts it).
+    /// after the undo. A defect, and the one refusal that does **not** leave both lanes as they
+    /// were: any per-lane state of either lane may differ. Either lane may hold the other lane's
+    /// or the spare's defaults, the first lane the second's payload, and either lane a state
+    /// word an exchange touched and no restore put back (a detector link's glide seated at
+    /// rest). The caller must recover both lanes rather than assume nothing moved (`rack`
+    /// resets them to the defaults they hold, the D7 lane recovery, and counts it).
     Stranded,
 }
 

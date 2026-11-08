@@ -13,7 +13,7 @@
 //! This file has its own test binary so that `bench_support`'s audited allocator serves it.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use effect_contract::{
@@ -32,7 +32,7 @@ use engine::realtime::{
 };
 use rack::{
     AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, ChainLanePeer, ChainLaneSwapRefusal,
-    EffectBankStage, LiveControlEffectBankStage,
+    EffectBankStage, LanePeerMut, LiveControlEffectBankStage,
 };
 
 const QUANTUM: u32 = 8;
@@ -178,6 +178,8 @@ struct StripBank {
 struct Fault {
     /// Every defaults exchange from this call on (counted from 1) refuses; `0` never.
     refuse_from: AtomicU32,
+    /// Only the exchange of call `refuse_from` refuses; every later one takes.
+    once: AtomicBool,
     exchanges: AtomicU32,
     /// Per lane: [`ResetKind::FullToDefaults`] lane resets.
     resets: [AtomicU32; 8],
@@ -187,7 +189,14 @@ impl Fault {
     /// From now on, refuse every exchange from the `call`-th on.
     fn arm(&self, call: u32) {
         self.exchanges.store(0, Ordering::Relaxed);
+        self.once.store(false, Ordering::Relaxed);
         self.refuse_from.store(call, Ordering::Relaxed);
+    }
+
+    /// From now on, refuse the `call`-th exchange alone.
+    fn arm_once(&self, call: u32) {
+        self.arm(call);
+        self.once.store(true, Ordering::Relaxed);
     }
 
     fn resets(&self) -> Vec<u32> {
@@ -419,7 +428,8 @@ impl LaneSwap for StripBank {
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         let call = self.fault.exchanges.fetch_add(1, Ordering::Relaxed) + 1;
         let from = self.fault.refuse_from.load(Ordering::Relaxed);
-        if from != 0 && call >= from {
+        let once = self.fault.once.load(Ordering::Relaxed);
+        if from != 0 && (call == from || (!once && call > from)) {
             return false;
         }
         let (Some(own), Ok(word)) = (self.defaults.get(lane), <[u8; 8]>::try_from(&*bytes)) else {
@@ -1492,4 +1502,106 @@ fn a_stranded_slot_resets_its_two_lanes_and_the_chain_reports_a_defect() {
             }
         }
     }
+}
+
+/// Issue #2414: a stage's lane swap whose bank refuses its first defaults exchange alone, a
+/// broken exchange contract that the swap unwinds cleanly (`LaneSwapRefusal::Exchange`), runs
+/// none of a stranded swap's recovery: the stage returns `false` and resets no lane, counts
+/// nothing, and leaves both lanes' `RESTORED` term held. Each stage is called directly
+/// ([`BankStage::swap_lanes`]), so the chain's debug tripwire is out of the path: the effect
+/// stage and the live stage, each with a peer lane in the same stage and in another stage.
+///
+/// Test value: a recovery that runs on any refusal rather than on `Stranded` alone, in the
+/// shared reset or in either stage's count and symmetry refresh, in either arm.
+#[test]
+fn a_cleanly_refused_stage_swap_runs_no_recovery() {
+    let width = BankWidth::Four;
+    let shape = Shape {
+        padded: false,
+        slot_gap: false,
+        collapse: None,
+    };
+    // `(slot, other chain)`: chain 0's lane 1 with lane 2 of chain 0 (the same stage) or of
+    // chain 1 (another stage of the same slot).
+    for (slot, other_chain) in [(2, 0), (2, 1), (1, 0), (1, 1)] {
+        let what = format!("slot {slot}, peer in chain {other_chain}");
+        let mut world = World::new(width, 5, shape);
+        world.faults[0][slot].arm_once(1);
+        let mut scratch = world.scratch();
+        let [first, second] = &mut world.chains;
+        let swapped = if other_chain == 0 {
+            first.slot_stage_mut(slot).expect("a stage").swap_lanes(
+                1,
+                LanePeerMut::Same(2),
+                &mut scratch,
+            )
+        } else {
+            let peer = second.slot_stage_mut(slot).expect("a stage");
+            first.slot_stage_mut(slot).expect("a stage").swap_lanes(
+                1,
+                LanePeerMut::Other(peer, 2),
+                &mut scratch,
+            )
+        };
+        world.faults[0][slot].arm(0);
+        assert!(!swapped, "{what}: the swap refused");
+        for chain in 0..2 {
+            assert_eq!(
+                world.faults[chain][slot].resets(),
+                vec![0_u32; 8],
+                "{what}: chain {chain}: no lane reset"
+            );
+            let stage = world.chains[chain].slot_stage_mut(slot).expect("a stage");
+            assert_eq!(stage.lane_swap_stranded(), 0, "{what}: nothing counted");
+        }
+        for (chain, lane) in [(0, 1), (other_chain, 2)] {
+            assert!(
+                world.chains[chain]
+                    .lane_symmetry(lane)
+                    .holds(ChannelSymmetryWitness::RESTORED),
+                "{what}: ({chain}, {lane}) keeps its RESTORED term"
+            );
+        }
+    }
+}
+
+/// Issue #2414: in a debug build, a slot that refuses its lane swap after the chain's check
+/// passed without counting a strand ([`BankStage::lane_swap_stranded`]) trips the chain: here
+/// a bank whose first exchange refuses alone, which the swap unwinds cleanly. `other` is the
+/// peer lane: in the calling chain, or in the other chain.
+#[cfg(debug_assertions)]
+fn uncounted_refusal(other: (usize, usize)) {
+    let mut world = World::new(
+        BankWidth::Four,
+        5,
+        Shape {
+            padded: false,
+            slot_gap: false,
+            collapse: None,
+        },
+    );
+    world.faults[0][2].arm_once(1);
+    let mut scratch = world.scratch();
+    let _ = world.swap((0, 1), other, &mut scratch);
+}
+
+/// [`uncounted_refusal`] within one chain.
+///
+/// Test value: a chain whose in-chain arm drops its tripwire, so a refusal no stage recovered
+/// or counted passes for a recovered defect.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a checked slot swaps its lanes, or strands and counts it")]
+fn an_uncounted_refusal_trips_the_chain_in_debug() {
+    uncounted_refusal((0, 2));
+}
+
+/// [`uncounted_refusal`] across two chains.
+///
+/// Test value: the same tripwire dropped from the cross-chain arm.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a checked slot swaps its lanes, or strands and counts it")]
+fn an_uncounted_cross_chain_refusal_trips_the_chain_in_debug() {
+    uncounted_refusal((1, 2));
 }
