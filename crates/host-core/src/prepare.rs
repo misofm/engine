@@ -34,7 +34,7 @@ use effect_contract::{
 pub use controls::LiveRamps;
 use controls::RebuildReason;
 pub use effect_contract::control::LiveRampRow;
-use engine::realtime::{GATE_REVISION_MAX, PreparedRenderPlan};
+use engine::realtime::{GATE_REVISION_MAX, PlanRevisionGate, PreparedRenderPlan};
 use graph::{
     GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, StableGraphId,
     TrackStage,
@@ -865,6 +865,12 @@ pub fn strip_control_table_bytes(
 pub struct PreparedHost {
     /// The exclusive render plan. Move it to the render thread once and render there only.
     pub plan: PreparedRenderPlan,
+    /// The plan's one revision-gate handle (#1502 D1), which the plan's seal returned by value
+    /// (#2417): only its holder stamps and publishes on the plan's gate. A successor's carry
+    /// retargets are stamped on it with an open stamp at [`SuccessorBase::revision`], which the
+    /// commit stamps again and publishes. Control side: the host moves it out with the plan and
+    /// keeps it on the control thread.
+    pub gate: PlanRevisionGate,
     /// The control-side source producers. Feed PCM from one control thread.
     pub sources: SourceControlSet,
     /// Address-free resource facts about this preparation.
@@ -1710,8 +1716,8 @@ pub struct SuccessorBase<'a> {
     /// it by ID.
     pub committed: &'a SessionModel,
     /// `r`, the revision the successor commits as (#1277 D10). Its carry retargets are stamped
-    /// with it on the successor's own gate pin ([`PreparedRenderPlan::stamp_held_gate`]), and the
-    /// host that commits the successor publishes it on the successor's gate handle. Precondition:
+    /// with it on the successor's gate handle ([`PreparedHost::gate`]), and the host that commits
+    /// the successor publishes it on that handle. Precondition:
     /// `1 <= revision <= GATE_REVISION_MAX`; a preparation refuses any other with
     /// `host.successor.revision` before it allocates. It has no neutral value.
     pub revision: u64,
@@ -5756,7 +5762,9 @@ fn prepare_or_project(
     // #2412: set on the bound plan, which cannot have rendered; the seal below fixes it. No
     // hand-over section reads it: the carry builder only moves staged sections into the executor.
     plan.set_source_read_offset(source_read_offset);
-    let mut plan = if let Some(program) = carry_program {
+    // #2417: the seal hands the plan's revision-gate handle out by value beside it. The carry
+    // retargets below stamp on it, and the host's commit takes it from `PreparedHost::gate`.
+    let (mut plan, mut gate) = if let Some(program) = carry_program {
         let install = |_| graph_failure("host.carry.install");
         let mut carry =
             graph::carry_builder(plan, program).map_err(|_| graph_failure("host.carry.install"))?;
@@ -5917,10 +5925,11 @@ fn prepare_or_project(
     };
 
     // Issue #1277 D5: the carried strips' live differences, written to this plan's own cells,
-    // stamped with the revision it commits as. This is preparation's last fallible step, so a
-    // preparation that fails writes nothing, and nothing writes the retargets again: the host's
-    // commit stamps `revision` once more on the handle that inherits the open stamp, and
-    // publishes it. A preparation that writes no retarget does not stamp.
+    // stamped with the revision it commits as, on the gate handle the seal returned (#2417).
+    // This is preparation's last fallible step, so a preparation that fails writes nothing, and
+    // nothing writes the retargets again: the host's commit stamps `revision` once more on the
+    // same handle, whose pin holds the open stamp, and publishes it. A preparation that writes no
+    // retarget does not stamp.
     if let (Some(base), false) = (
         successor,
         strip_carry.retargets.is_empty()
@@ -5936,7 +5945,7 @@ fn prepare_or_project(
                 "host.successor.monitor",
             ));
         }
-        let Some(Ok(stamp)) = plan.stamp_held_gate(base.revision) else {
+        let Ok(stamp) = gate.stamp(base.revision) else {
             return Err(successor_revision_refusal());
         };
         // Issue #1280 D4: the carried effect lanes' live differences, through the successor's own
@@ -6027,6 +6036,7 @@ fn prepare_or_project(
     Ok(PrepareOutcome::Prepared(Box::new((
         PreparedHost {
             plan,
+            gate,
             sources,
             report,
             inventory,

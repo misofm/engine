@@ -87,8 +87,6 @@ fn live_controls(leg: Leg) -> HostLiveControlRequest {
 
 struct Session {
     prepared: PreparedHost,
-    /// The plan's gate handle: live values are cells, written under a stamp of it.
-    gate: engine::realtime::PlanRevisionGate,
     handles: HostLiveControlHandles,
     block: usize,
 }
@@ -96,7 +94,10 @@ struct Session {
 /// One transaction: write `record` to the addressed effect's cell under a stamp of the plan's
 /// gate and publish the revision.
 fn write_cell(session: &mut Session, track_id: &str, record: EffectControlRecord) {
-    let Session { handles, gate, .. } = session;
+    let Session {
+        handles, prepared, ..
+    } = session;
+    let gate = &mut prepared.gate;
     let producer = handles
         .effect_controls
         .iter_mut()
@@ -116,7 +117,7 @@ fn prepare(leg: Leg) -> Session {
 
 fn prepare_from(document: &str, leg: Leg) -> Session {
     // The baseline leg is the plain entry: no live controls at all.
-    let (mut prepared, handles) = if leg == Leg::NoLiveControls {
+    let (prepared, handles) = if leg == Leg::NoLiveControls {
         let (_session, prepared) =
             prepare_host_session(document, &caps()).unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
@@ -147,13 +148,8 @@ fn prepare_from(document: &str, leg: Leg) -> Session {
         prepared.report.effect_bank_scratch_bytes > 0,
         "the cohort planner bound at least one homogeneous bank on this host"
     );
-    let gate = prepared
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
     Session {
         prepared,
-        gate,
         handles,
         block: 0,
     }
@@ -363,7 +359,7 @@ fn render_publishes_each_taps_arm_state_on_every_leg() {
         (DYNAMIC_BANK_SESSION, TRACKS, true),
         (DYNAMIC_SESSION, 1, false),
     ] {
-        let (_session, mut prepared, handles) =
+        let (_session, prepared, handles) =
             prepare_host_session_with_live_controls(document, &caps(), &request).unwrap_or_else(
                 |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
             );
@@ -372,13 +368,8 @@ fn render_publishes_each_taps_arm_state_on_every_leg() {
             banked,
             "the leg renders through the publish site it names"
         );
-        let gate = prepared
-            .plan
-            .take_revision_gate()
-            .expect("the plan's gate handle");
         let mut session = Session {
             prepared,
-            gate,
             handles,
             block: 0,
         };
@@ -640,10 +631,6 @@ fn prepare_successor(
         None => host_core::prepare_host_runtime_with_live_controls(compiled, &caps(), &request),
     }
     .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
-    let gate = prepared
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
     let mut block = 0;
     if let Some((first, _)) = first {
         assert_eq!(
@@ -663,7 +650,6 @@ fn prepare_successor(
     }
     Session {
         prepared,
-        gate,
         handles,
         block,
     }
@@ -975,7 +961,7 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
         observation_taps: 4,
     };
-    let (_session, mut prepared, handles) =
+    let (_session, prepared, handles) =
         prepare_host_session_with_live_controls(DYNAMIC_SESSION, &caps(), &request).unwrap_or_else(
             |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
         );
@@ -983,13 +969,8 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
         prepared.report.effect_bank_scratch_bytes, 0,
         "a single track cannot fill a cohort, so this is the per-node scalar path"
     );
-    let gate = prepared
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
     let mut session = Session {
         prepared,
-        gate,
         handles,
         block: 0,
     };

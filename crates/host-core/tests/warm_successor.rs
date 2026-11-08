@@ -1213,6 +1213,8 @@ struct Stream {
     owner: engine::realtime::RealtimePlanOwner,
     retirer: engine::realtime::PlanRetirer,
     sources: host_core::SourceControlSet,
+    /// The newest published plan's gate handle.
+    gate: engine::realtime::PlanRevisionGate,
     /// The newest published plan's inventory and committed model: the next edit's base.
     inventory: host_core::PlanStateInventory,
     committed: SessionModel,
@@ -1237,6 +1239,7 @@ impl Stream {
         let rate = host.report.sample_rate_hz;
         let PreparedHost {
             plan,
+            gate,
             sources,
             inventory,
             ..
@@ -1248,6 +1251,7 @@ impl Stream {
             owner,
             retirer,
             sources,
+            gate,
             inventory,
             committed: committed.clone(),
             offset,
@@ -1297,14 +1301,13 @@ impl Stream {
         host.sources.adopt_persisting(&mut self.sources);
         self.revision += 1;
         let PreparedHost {
-            mut plan,
+            plan,
+            mut gate,
             sources,
             inventory,
             ..
         } = host;
-        plan.take_revision_gate()
-            .expect("the successor's gate")
-            .publish(self.revision);
+        gate.publish(self.revision);
         self.pending = Some(inventory.source_read_offset());
         let mut reservation = self
             .publisher
@@ -1315,6 +1318,7 @@ impl Stream {
         }
         reservation.commit(self.revision);
         self.sources = sources;
+        self.gate = gate;
         self.inventory = inventory;
         self.committed = committed.clone();
     }
@@ -1613,12 +1617,11 @@ fn muted_twin(
         )
         .unwrap_or_else(|failure| panic!("the fresh W': {failure:?}"));
     assert_eq!(reference.inventory.source_read_offset(), 0);
-    let mut gate = reference
-        .plan
-        .take_revision_gate()
-        .expect("the fresh W's gate");
-    let _ = gate.stamp(2).expect("the open revision stamps again");
-    gate.publish(2);
+    let _ = reference
+        .gate
+        .stamp(2)
+        .expect("the open revision stamps again");
+    reference.gate.publish(2);
     let position = host_core::route_producer_position(&handles.route_controls, route)
         .expect("the pre_fader route is a live send");
     let values = twin
@@ -1638,9 +1641,9 @@ fn muted_twin(
     .expect("a send record");
     let mut reference = Stream::start(reference, &twin.model, &caps, backend, AHEAD);
     reference.render(mute_block);
-    let stamp = gate.stamp(3).expect("a legal revision");
+    let stamp = reference.gate.stamp(3).expect("a legal revision");
     handles.route_controls[position].write(stamp, mute);
-    gate.publish(3);
+    reference.gate.publish(3);
     reference.render(blocks - mute_block);
     reference
 }

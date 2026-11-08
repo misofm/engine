@@ -418,7 +418,8 @@ fn bind_and_render_every_track(plan: PreparedGraphPlan, inputs: Vec<GraphNodeId>
             observers: Vec::new(),
         })
         .unwrap_or_else(|failure| panic!("65,537-input bind: {}", failure.code))
-        .seal();
+        .seal()
+        .0;
     let frames = HAND_BUILT_FRAMES as usize;
     let mut pcm = vec![f32::NAN; frames * 2];
     bound

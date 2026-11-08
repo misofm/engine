@@ -1539,11 +1539,11 @@ mod tests {
         command_target: bool,
     ) -> Vec<Vec<f32>> {
         let frames = artifact.envelope().quantum.0 as usize;
-        let mut plan = bind_session_builtins(artifact, cross_index_input_binding, Vec::new());
+        let (mut plan, mut gate) =
+            bind_session_builtins_unsealed(artifact, cross_index_input_binding, Vec::new()).seal();
         if command_target {
             // One transaction: the cells are written under a stamp of the plan's gate, and the
             // revision is published after the last of them.
-            let mut gate = plan.take_revision_gate().expect("the plan's gate handle");
             let revision = gate.last_published() + 1;
             let stamp = gate.stamp(revision).expect("a legal revision");
             // A live bypass is the command: the fixture's effect declares its one parameter at the
@@ -2433,7 +2433,9 @@ mod tests {
         input: impl Fn(&GraphNodeId) -> Box<dyn GraphRuntimeProcessor>,
         observers: Vec<GraphNodeObserverBinding>,
     ) -> PreparedRenderPlan {
-        bind_session_builtins_unsealed(artifact, input, observers).seal()
+        bind_session_builtins_unsealed(artifact, input, observers)
+            .seal()
+            .0
     }
 
     /// [`bind_session_builtins`] before its seal: the bound plan, for a test that joins its mono
@@ -7030,8 +7032,7 @@ mod tests {
         if mono_collapse {
             bound.arm_mono_collapse(&|_| true);
         }
-        let mut plan = bound.seal();
-        let gate = plan.take_revision_gate().expect("the plan's gate handle");
+        let (plan, gate) = bound.seal();
         BoundQueuedEq {
             plan,
             gate,
@@ -11507,9 +11508,7 @@ mod tests {
             .seal();
         let mut plan = bound.plan;
         let mut controls = bound.track_controls;
-        let mut gate = plan
-            .take_revision_gate()
-            .expect("the bound plan's gate handle");
+        let mut gate = bound.gate;
         let pcm = (0..blocks)
             .map(|block| {
                 // Admitted *before* the block renders, which is the contract under test: every
@@ -12787,7 +12786,7 @@ mod tests {
             Ok(bound) => bound,
             Err(_) => panic!("sealed builtin bank bind"),
         };
-        let mut plan = bound.plan.seal();
+        let mut plan = bound.plan.seal().0;
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0; frames * 2 * 3];
         for block in 0..3 {
@@ -13164,7 +13163,7 @@ mod tests {
                 nodes,
                 observers: tap_observers,
             }) {
-                Ok(bound) => bound.plan.seal(),
+                Ok(bound) => bound.plan.seal().0,
                 Err(_) => panic!("seeded bind"),
             };
             let frames = envelope.quantum.0 as usize;
@@ -13980,7 +13979,7 @@ mod tests {
             nodes,
             observers: Vec::new(),
         }) {
-            Ok(bound) => bound.plan.seal(),
+            Ok(bound) => bound.plan.seal().0,
             Err(failure) => panic!("bind: {}", failure.code),
         };
         let frames = envelope.quantum.0 as usize;

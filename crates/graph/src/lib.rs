@@ -45,8 +45,9 @@ use effect_contract::{
 };
 use engine::realtime::{
     BufferArena, CarryOutcome, ExecutorBlockReport, LiveSnapshot, ObserverCarry, ObserverKind,
-    PlanUnitEligibility, PlanarBufferMut, PrepareRenderPlan, PreparedPlanExecutor,
-    PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError, ResponseSnapshotSink,
+    PlanRevisionGate, PlanUnitEligibility, PlanarBufferMut, PrepareRenderPlan,
+    PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError,
+    ResponseSnapshotSink,
 };
 use lane::Backend;
 use rack::AoSoaScratch;
@@ -2685,7 +2686,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     }
 }
 type OptionalSourceBindResult = Result<
-    PreparedRenderPlan,
+    (PreparedRenderPlan, PlanRevisionGate),
     (
         PreparedGraphPlan,
         GraphRuntimeBindings,
@@ -3269,7 +3270,7 @@ impl PreparedGraphPlan {
     #[allow(clippy::result_large_err)]
     pub fn bind(self, bindings: GraphRuntimeBindings) -> Result<GraphBoundPlan, GraphBindFailure> {
         match self.bind_optional_source_set(bindings, None) {
-            Ok(plan) => Ok(GraphBoundPlan::bound(plan)),
+            Ok((plan, gate)) => Ok(GraphBoundPlan::bound(plan, gate)),
             Err((plan, bindings, _, code)) => Err(GraphBindFailure {
                 plan: Box::new(plan),
                 bindings,
@@ -3286,7 +3287,7 @@ impl PreparedGraphPlan {
         source_set: GraphPreparedSourceSet,
     ) -> Result<GraphBoundPlan, GraphSourceBindFailure> {
         self.bind_optional_source_set(bindings, Some(source_set))
-            .map(GraphBoundPlan::bound)
+            .map(|(plan, gate)| GraphBoundPlan::bound(plan, gate))
             .map_err(
                 |(plan, bindings, source_set, code)| GraphSourceBindFailure {
                     plan: Box::new(plan),
@@ -3489,7 +3490,7 @@ impl PreparedGraphPlan {
             source_set.take(),
             planning,
         );
-        let render_plan = PreparedRenderPlan::prepare_with_executor(
+        let plan_and_gate = PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
                 plan_id,
                 envelope,
@@ -3498,7 +3499,7 @@ impl PreparedGraphPlan {
             Box::new(executor),
         )
         .expect("prevalidated graph plan");
-        Ok(render_plan)
+        Ok(plan_and_gate)
     }
 }
 
@@ -5194,12 +5195,15 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
 /// use engine::realtime::{RenderIo, RenderTime};
 ///
 /// fn render_sealed(plan: graph::GraphBoundPlan, io: RenderIo<'_>) {
-///     let _ = plan.seal().render(io, RenderTime { absolute_sample: 0 });
+///     let _ = plan.seal().0.render(io, RenderTime { absolute_sample: 0 });
 /// }
 /// ```
 #[must_use = "a bound plan renders only once it is sealed"]
 pub struct GraphBoundPlan<S = BindTables> {
     plan: PreparedRenderPlan,
+    /// The plan's revision-gate handle, which its preparation returned beside it (#2417). The
+    /// bound plan only keeps it: both seals hand it out by value with the plan.
+    gate: PlanRevisionGate,
     state: S,
 }
 
@@ -5288,14 +5292,16 @@ impl<S: core::fmt::Debug> core::fmt::Debug for GraphBoundPlan<S> {
 }
 
 impl GraphBoundPlan {
-    /// The plan bind just built, which is a graph plan.
-    fn bound(plan: PreparedRenderPlan) -> Self {
+    /// The plan bind just built, which is a graph plan, with the gate handle its preparation
+    /// returned.
+    fn bound(plan: PreparedRenderPlan, gate: PlanRevisionGate) -> Self {
         debug_assert!(
             plan.executor_any()
                 .is_some_and(|any| any.downcast_ref::<GraphExecutor>().is_some())
         );
         Self {
             plan,
+            gate,
             state: BindTables,
         }
     }
@@ -5320,9 +5326,31 @@ impl<S> GraphBoundPlan<S> {
     /// Seal the plan without a hand-over: from here it renders and may be published, and offers
     /// no bind read, attach or install. A successor's hand-over seals with
     /// [`GraphCarryBuilder::seal`] instead.
-    #[must_use = "the sealed plan is the one that renders"]
-    pub fn seal(self) -> PreparedRenderPlan {
-        self.plan
+    ///
+    /// The seal hands out the plan's revision-gate handle by value beside it (#2417), so the
+    /// handle has one holder from here and the sealed plan has none to give: a second take, on
+    /// the sealed plan, does not type-check (E0599):
+    ///
+    /// ```compile_fail,E0599
+    /// fn take_twice(plan: graph::GraphBoundPlan) {
+    ///     let (mut sealed, _gate) = plan.seal();
+    ///     let _ = sealed.take_revision_gate();
+    /// }
+    /// ```
+    ///
+    /// The holder stamps on the handle the seal returned. This twin shares the doctest above's
+    /// seal and binding, and calls a method the handle has where the doctest calls one the plan
+    /// lacks, so a renamed item or a typo in the shared code turns it red (issue #1422 D2):
+    ///
+    /// ```
+    /// fn take_once(plan: graph::GraphBoundPlan) {
+    ///     let (_sealed, mut gate) = plan.seal();
+    ///     let _ = gate.stamp(1);
+    /// }
+    /// ```
+    #[must_use = "the sealed plan renders, and its gate handle publishes"]
+    pub fn seal(self) -> (PreparedRenderPlan, PlanRevisionGate) {
+        (self.plan, self.gate)
     }
 
     /// The bound graph executor, which bind built.
@@ -5357,7 +5385,7 @@ impl<S> GraphBoundPlan<S> {
     ///
     /// ```compile_fail,E0599
     /// fn join_sealed(plan: graph::GraphBoundPlan) {
-    ///     plan.seal().arm_mono_collapse(&|_| true);
+    ///     plan.seal().0.arm_mono_collapse(&|_| true);
     /// }
     /// ```
     ///
@@ -5389,7 +5417,7 @@ impl<S> GraphBoundPlan<S> {
     ///
     /// ```compile_fail,E0599
     /// fn offset_sealed(plan: graph::GraphBoundPlan) {
-    ///     plan.seal().set_source_read_offset(128);
+    ///     plan.seal().0.set_source_read_offset(128);
     /// }
     /// ```
     ///
@@ -5412,6 +5440,7 @@ impl<S> GraphBoundPlan<S> {
     fn with_state<T>(self, state: T) -> GraphBoundPlan<T> {
         GraphBoundPlan {
             plan: self.plan,
+            gate: self.gate,
             state,
         }
     }
@@ -6048,18 +6077,19 @@ impl<S> GraphCarryBuilder<S> {
         Ok(())
     }
 
-    /// Install the program and every staged section in the plan at once, and hand the plan back:
-    /// from here it holds its whole hand-over, which nothing can change, and may be published.
-    /// Allocates the effect section's carried slots and the observer section's carry record here,
-    /// off the render thread.
-    #[must_use = "the sealed plan is the one that renders"]
-    pub fn seal(self) -> PreparedRenderPlan {
+    /// Install the program and every staged section in the plan at once, and hand the plan back
+    /// with its revision-gate handle, as [`GraphBoundPlan::seal`] does (#2417): from here the plan
+    /// holds its whole hand-over, which nothing can change, and may be published. Allocates the
+    /// effect section's carried slots and the observer section's carry record here, off the render
+    /// thread.
+    #[must_use = "the sealed plan renders, and its gate handle publishes"]
+    pub fn seal(self) -> (PreparedRenderPlan, PlanRevisionGate) {
         let Self {
             plan,
             program,
             sections,
         } = self;
-        let mut plan = plan.plan;
+        let GraphBoundPlan { mut plan, gate, .. } = plan;
         let executor = carry_executor(&mut plan);
         let CarrySections {
             inputs,
@@ -6097,7 +6127,7 @@ impl<S> GraphCarryBuilder<S> {
         executor.prime_blocks = prime_blocks;
         executor.prime_claims = prime_claims;
         executor.prime_sidechains = prime_sidechains;
-        plan
+        (plan, gate)
     }
 }
 
@@ -9031,14 +9061,20 @@ mod tests {
                 assert_eq!(copies.load(Ordering::SeqCst), 0);
                 assert_eq!(drops.load(Ordering::SeqCst), 0);
                 let retry = match source {
-                    Some(source) => returned
-                        .bind_with_source_set(bindings, source)
-                        .unwrap_or_else(|failure| panic!("retry: {}", failure.code))
-                        .seal(),
-                    None => returned
-                        .bind(bindings)
-                        .unwrap_or_else(|failure| panic!("retry: {}", failure.code))
-                        .seal(),
+                    Some(source) => {
+                        returned
+                            .bind_with_source_set(bindings, source)
+                            .unwrap_or_else(|failure| panic!("retry: {}", failure.code))
+                            .seal()
+                            .0
+                    }
+                    None => {
+                        returned
+                            .bind(bindings)
+                            .unwrap_or_else(|failure| panic!("retry: {}", failure.code))
+                            .seal()
+                            .0
+                    }
                 };
                 assert_eq!(retry.bank_route_folds(), 4);
                 assert_eq!(
@@ -9164,7 +9200,8 @@ mod tests {
         let bound = bank_plan
             .bind(bank_bindings)
             .unwrap_or_else(|failure| panic!("bank-excluded duplicate rejected: {}", failure.code))
-            .seal();
+            .seal()
+            .0;
         assert_eq!(
             render_three_blocks(bound).0.map(f32::to_bits),
             [10.0, -15.0, 20.0, -30.0, 30.0, -45.0].map(f32::to_bits)
@@ -9410,7 +9447,8 @@ mod tests {
             scalar_graph
                 .bind(scalar_bindings)
                 .unwrap_or_else(|failure| panic!("scalar reference bind: {}", failure.code))
-                .seal(),
+                .seal()
+                .0,
         );
 
         let (bank_graph, bank_bindings, bank_observers) =
@@ -9427,7 +9465,8 @@ mod tests {
             bank_graph
                 .bind(bank_bindings)
                 .unwrap_or_else(|failure| panic!("banked bind: {}", failure.code))
-                .seal(),
+                .seal()
+                .0,
         );
 
         let analytic = [10.0, -15.0, 20.0, -30.0, 30.0, -45.0];
@@ -9453,7 +9492,7 @@ mod tests {
         bindings.observers.clear();
         let failure = match invalid.bind(bindings) {
             Ok(plan) => {
-                let (pcm, _) = render_three_blocks(plan.seal());
+                let (pcm, _) = render_three_blocks(plan.seal().0);
                 assert_eq!(
                     [pcm[0], pcm[2], pcm[4]],
                     [10.0, 20.0, 30.0],
@@ -9470,7 +9509,8 @@ mod tests {
         let recovered = recovered
             .bind(failure.bindings)
             .unwrap_or_else(|retry| panic!("scalar ownership retry: {}", retry.code))
-            .seal();
+            .seal()
+            .0;
         assert_eq!(
             render_three_blocks(recovered).0.map(f32::to_bits),
             [10.0, -15.0, 20.0, -30.0, 30.0, -45.0].map(f32::to_bits)
@@ -9731,7 +9771,7 @@ mod tests {
                 observers: bindings.observers,
             };
             let mut plan = match plan.bind(bindings) {
-                Ok(plan) => plan.seal(),
+                Ok(plan) => plan.seal().0,
                 Err(failure) => panic!("identity bindings rejected: {}", failure.code),
             };
             let mut samples = [f32::NAN; 2];
@@ -9773,7 +9813,7 @@ mod tests {
     fn compile_request_plan_id_survives_binding() {
         let (plan, bindings, _) = binding_plan();
         let mut plan = match plan.bind(bindings) {
-            Ok(plan) => plan.seal(),
+            Ok(plan) => plan.seal().0,
             Err(_) => panic!("exact bindings rejected"),
         };
         let mut samples = [1.0_f32; 2];
@@ -10541,11 +10581,13 @@ mod tests {
         let mut aliased_plan = aliased
             .bind(aliased_bindings)
             .unwrap_or_else(|failure| panic!("aliased bind: {}", failure.code))
-            .seal();
+            .seal()
+            .0;
         let mut materialised_plan = materialised
             .bind(materialised_bindings)
             .unwrap_or_else(|failure| panic!("materialised bind: {}", failure.code))
-            .seal();
+            .seal()
+            .0;
         assert_eq!(
             render_blocks(&mut aliased_plan, FRAMES, 4),
             render_blocks(&mut materialised_plan, FRAMES, 4),
@@ -10575,7 +10617,8 @@ mod tests {
         let mut observed_plan = observed
             .bind(observed_bindings)
             .unwrap_or_else(|failure| panic!("observed bind: {}", failure.code))
-            .seal();
+            .seal()
+            .0;
         let observed_bits = render_blocks(&mut observed_plan, FRAMES, 4);
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -10645,7 +10688,8 @@ mod tests {
             let mut sequential = sequential_plan
                 .bind(sequential_bindings)
                 .unwrap_or_else(|failure| panic!("seed {seed} sequential bind: {}", failure.code))
-                .seal();
+                .seal()
+                .0;
             let bits = render_blocks(&mut sequential, FRAMES, BLOCKS);
             assert!(
                 bits.iter().any(|value| *value != 0),
@@ -10841,7 +10885,8 @@ mod tests {
                 observers: Vec::new(),
             })
             .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
-            .seal();
+            .seal()
+            .0;
         let bits = render_blocks(&mut render, FRAMES, BLOCKS);
 
         // The scalar oracle: the D9 sum in route-ID order (r0, r1, r2), then the delay.
@@ -10968,7 +11013,8 @@ mod tests {
         let mut bound = plan
             .bind(bindings)
             .unwrap_or_else(|failure| panic!("permanent bind: {}", failure.code))
-            .seal();
+            .seal()
+            .0;
         runtime::test_only_observe_calls_reset(skip_disabled);
         test_only_observation_dispatch_reset();
         test_only_meter_input_reset(false);
@@ -11340,7 +11386,7 @@ mod tests {
         latency: u64,
         control: Option<Box<EffectControlLane>>,
         source: Box<dyn GraphRuntimeProcessor>,
-    ) -> PreparedRenderPlan {
+    ) -> (PreparedRenderPlan, PlanRevisionGate) {
         let input = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse("track").expect("ID"),
             stage: TrackStage::Input,
@@ -11606,11 +11652,11 @@ mod tests {
     }
 
     impl LiveControl {
-        fn new(writer: effect_contract::EffectCellWriter, plan: &mut PreparedRenderPlan) -> Self {
-            Self {
-                writer,
-                gate: plan.take_revision_gate().expect("the plan's gate handle"),
-            }
+        fn new(
+            writer: effect_contract::EffectCellWriter,
+            gate: engine::realtime::PlanRevisionGate,
+        ) -> Self {
+            Self { writer, gate }
         }
 
         fn push(&mut self, record: effect_contract::EffectControlRecord) {
@@ -11632,8 +11678,9 @@ mod tests {
     #[test]
     fn a_live_control_parameter_command_applies_at_the_next_block_boundary() {
         let (writer, control) = control_pair();
-        let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
-        let mut producer = LiveControl::new(writer, &mut plan);
+        let (mut plan, gate) =
+            live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, gate);
         let block0 = render_live_control_blocks(&mut plan, 0, 1);
         assert_eq!(
             &block0[..4],
@@ -11669,8 +11716,9 @@ mod tests {
     #[test]
     fn a_per_node_effect_waits_for_the_revision_that_covers_its_value() {
         let (writer, control) = control_pair();
-        let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
-        let mut producer = LiveControl::new(writer, &mut plan);
+        let (mut plan, gate) =
+            live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, gate);
         let revision = producer.gate.last_published() + 1;
         {
             let stamp = producer.gate.stamp(revision).expect("a legal revision");
@@ -11710,9 +11758,9 @@ mod tests {
     fn live_bypass_is_latency_preserving_and_reversible() {
         const LATENCY: u64 = 2;
         let (writer, control) = control_pair();
-        let mut plan =
+        let (mut plan, gate) =
             live_control_effect_plan(LATENCY, Some(control), Box::new(SampleIndexSource));
-        let mut producer = LiveControl::new(writer, &mut plan);
+        let mut producer = LiveControl::new(writer, gate);
         producer.push(effect_contract::EffectControlRecord::Parameter {
             parameter_index: 0,
             channel: ParameterChannel::Left,
@@ -11765,8 +11813,9 @@ mod tests {
     #[test]
     fn a_settled_bypassed_per_node_effect_skips_only_blocks_without_work() {
         let (writer, control) = control_pair();
-        let mut plan = live_control_effect_plan(2, Some(control), Box::new(SampleIndexSource));
-        let mut producer = LiveControl::new(writer, &mut plan);
+        let (mut plan, gate) =
+            live_control_effect_plan(2, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, gate);
         producer.push(effect_contract::EffectControlRecord::Bypass(
             effect_contract::BypassSwitch {
                 bypassed: true,
@@ -11809,9 +11858,10 @@ mod tests {
     #[test]
     fn idle_live_controls_change_no_rendered_bit() {
         for latency in [0_u64, 3] {
-            let mut without = live_control_effect_plan(latency, None, Box::new(SampleIndexSource));
+            let (mut without, _) =
+                live_control_effect_plan(latency, None, Box::new(SampleIndexSource));
             let (_writer, control) = control_pair();
-            let mut with =
+            let (mut with, _) =
                 live_control_effect_plan(latency, Some(control), Box::new(SampleIndexSource));
             let plain = render_live_control_blocks(&mut without, 0, 4);
             let live = render_live_control_blocks(&mut with, 0, 4);
@@ -11828,8 +11878,9 @@ mod tests {
     #[test]
     fn the_live_control_effect_applies_every_cell_within_its_window() {
         let (writer, control) = control_pair();
-        let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
-        let mut producer = LiveControl::new(writer, &mut plan);
+        let (mut plan, gate) =
+            live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, gate);
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
             producer.push(effect_contract::EffectControlRecord::Parameter {
                 parameter_index: 0,
@@ -12112,7 +12163,7 @@ mod tests {
     #[test]
     fn faster_main_and_faster_sidechain_align_on_their_typed_ports() {
         for delay_main in [true, false] {
-            let mut plan = sidechain_pdc_plan(delay_main).seal();
+            let mut plan = sidechain_pdc_plan(delay_main).seal().0;
             let mut samples = [0.0_f32; 8];
             let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
             plan.render(
@@ -12377,7 +12428,7 @@ mod tests {
             observers: Vec::new(),
         };
         match graph.bind(bindings) {
-            Ok(plan) => plan.seal(),
+            Ok(plan) => plan.seal().0,
             Err(_) => panic!("bindings"),
         }
     }

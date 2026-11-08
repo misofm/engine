@@ -150,10 +150,7 @@ fn estimate() -> GraphResourceEstimate {
 /// The plan: `LANES` tracks of source -> probe bank -> (alias) -> per-node probe, each feeding the
 /// output, and lane 0 also sending through a live route into a submix whose input feeds the
 /// output.
-fn prepared(
-    width: BankWidth,
-    silent: u32,
-) -> (PreparedRenderPlan, Arc<Recorder>, GraphRouteControlProducer) {
+fn prepared(width: BankWidth, silent: u32) -> (Sealed, Arc<Recorder>, GraphRouteControlProducer) {
     let envelope = RenderEnvelope {
         sample_rate: SampleRateHz(48_000),
         quantum: QuantumFrames(FRAMES as u32),
@@ -361,6 +358,9 @@ fn render(owner: &mut RealtimePlanOwner, block: usize) -> (realtime::RenderRepor
     (report.render, pcm)
 }
 
+/// A sealed plan with the gate handle its seal returned.
+type Sealed = (PreparedRenderPlan, realtime::PlanRevisionGate);
+
 /// The exchange around `plan`, whose gate handle the caller keeps. The publisher and the retirer
 /// stay alive with the owner: no plan is replaced in this file.
 type Exchange = (
@@ -369,8 +369,7 @@ type Exchange = (
     (realtime::PlanPublisher, realtime::PlanRetirer),
 );
 
-fn exchange(mut plan: PreparedRenderPlan) -> Exchange {
-    let mut gate = plan.take_revision_gate().expect("a fresh plan's gate");
+fn exchange((plan, mut gate): Sealed) -> Exchange {
     let (publisher, owner, retirer) = plan_exchange_at_revision(
         plan,
         &mut gate,
@@ -605,7 +604,7 @@ mod effect_bank {
 
     /// `LANES` tracks of source -> gain bank -> output, the bank one slot of width `width`, and a
     /// live control lane (a bypass cell) on `LIVE_LANE` only.
-    fn plan(width: BankWidth, silent: u32) -> (PreparedRenderPlan, EffectCellWriter) {
+    fn plan(width: BankWidth, silent: u32) -> (Sealed, EffectCellWriter) {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(FRAMES as u32),

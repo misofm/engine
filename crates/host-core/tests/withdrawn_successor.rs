@@ -293,10 +293,7 @@ fn fresh(session: &Session, backend: Backend) -> PreparedHost {
 /// Publish the revision the successor's carry retargets were stamped with on its own gate, as a
 /// host's commit does before the successor renders.
 fn commit(host: &mut PreparedHost) {
-    host.plan
-        .take_revision_gate()
-        .expect("the successor's gate handle")
-        .publish(SUCCESSOR_REVISION);
+    host.gate.publish(SUCCESSOR_REVISION);
 }
 
 /// P0 prepared and rendered [`BEFORE`] blocks with `a` and `b` fed one block ahead.

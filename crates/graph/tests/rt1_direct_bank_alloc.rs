@@ -289,6 +289,7 @@ fn prepared_plan(folded: bool) -> engine::realtime::PreparedRenderPlan {
         })
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
         .seal()
+        .0
 }
 
 #[test]

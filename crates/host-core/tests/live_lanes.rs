@@ -367,11 +367,7 @@ fn fader_and_matrix_lanes_render_as_the_session_with_their_values_baked() {
         let mut reference = lanes_free(&baked(model.clone()));
         let mut untouched = lanes_free(&model);
         let (mut live, mut handles) = with_lanes(&model, HostLiveLanes::FADER_AND_MATRIX);
-        let mut gate = live
-            .plan
-            .take_revision_gate()
-            .expect("the plan's gate handle");
-        gate.write_published(|stamp| {
+        live.gate.write_published(|stamp| {
             handles.strip_controls[MUTED].fader.write(
                 stamp,
                 TrackFaderRecord::Mute {

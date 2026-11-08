@@ -2677,7 +2677,7 @@ impl LaneReference {
     fn new(document: &str) -> Self {
         let caps = prepare_caps(limits());
         let compiled = host_core::compile_host_session(document, &caps).expect("lane compile");
-        let (mut host, handles) = prepare_host_runtime_with_live_lanes(
+        let (host, handles) = prepare_host_runtime_with_live_lanes(
             &compiled,
             &caps,
             &HostLiveControlRequest::default(),
@@ -2685,12 +2685,8 @@ impl LaneReference {
             &host_core::LiveValuesSuperseded::default(),
         )
         .expect("lane prepare");
-        let gate = host
-            .plan
-            .take_revision_gate()
-            .expect("the plan's gate handle");
         Self {
-            gate,
+            gate: host.gate,
             reference: Reference {
                 plan: host.plan,
                 sources: host.sources,

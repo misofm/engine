@@ -35,7 +35,7 @@ use effect_contract::{
     AutomationRate, EffectControlRecord, EffectDescriptor, NativeEffectRegistry,
     ParameterChannelPolicy, ParameterDomain,
 };
-use engine::realtime::{PlanRevisionGate, PlanarBufferMut, RenderIo, RenderTime};
+use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
     HostPrepareCaps, HostShapePolicy, LiveValuesSuperseded, PreparedHost,
@@ -576,11 +576,11 @@ fn bus_strip(
 /// One prepared console: the host, its live handles, and the rendered output so far.
 struct Arm {
     label: &'static str,
+    /// The prepared host. Its gate handle ([`PreparedHost::gate`]) stamps every fader and matrix
+    /// write as a transaction and publishes it, so the plan's next block reads the write (#1312
+    /// D7).
     host: PreparedHost,
     handles: HostLiveControlHandles,
-    /// The plan's gate handle: every fader and matrix write is a transaction stamped from it and
-    /// published on it, so the plan's next block reads the write (#1312 D7).
-    gate: PlanRevisionGate,
 }
 
 /// One block's live-control records, applied to every arm.
@@ -721,7 +721,8 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
 /// write and always lands; an effect lane takes the records it has a cell for and refuses the
 /// others, the same on every arm, because every arm has seen the same records.
 fn push(arm: &mut Arm, record: Live) -> bool {
-    let Arm { handles, gate, .. } = arm;
+    let Arm { handles, host, .. } = arm;
+    let gate = &mut host.gate;
     match record {
         Live::Input(track, record) => {
             let input = handles.strip_controls[track]
@@ -820,15 +821,10 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
         .map(|(label, forced)| {
             let (mut host, handles) = prepared();
             host.plan.force_mono_collapse_off(forced);
-            let gate = host
-                .plan
-                .take_revision_gate()
-                .expect("the plan's gate handle");
             Arm {
                 label,
                 host,
                 handles,
-                gate,
             }
         })
         .collect();

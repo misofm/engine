@@ -2396,8 +2396,12 @@ impl SessionRuntime {
             .plan
             .arm_mono_collapse(&|track: &str| eligible.contains(track));
         let bound = bound.seal();
-        let (plan, meter_consumers, strip_controls) =
-            (bound.plan, bound.meter_consumers, bound.track_controls);
+        let (plan, gate, meter_consumers, strip_controls) = (
+            bound.plan,
+            bound.gate,
+            bound.meter_consumers,
+            bound.track_controls,
+        );
         assert_eq!(
             strip_controls.len(),
             if strip_controls_requested {
@@ -2434,7 +2438,6 @@ impl SessionRuntime {
         plan.force_mono_collapse_off(workload.collapse_forced_off());
         let (bsr_ideal, bsr_ideal_key_class) =
             ideal_bank_slot_runs(&mut plan, &effect_lanes, &model, input, &rack_cohorts);
-        let gate = plan.take_revision_gate().expect("the plan's gate handle");
         let mut runtime = Self {
             strip_controls,
             superseded,

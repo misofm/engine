@@ -1761,12 +1761,12 @@ mod follow {
             .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
         let rate = prepared.report.sample_rate_hz;
         let PreparedHost {
-            mut plan,
+            plan,
+            mut gate,
             sources: mut a_sources,
             inventory,
             ..
         } = prepared;
-        let mut gate = plan.take_revision_gate().expect("the plan's gate");
         let (mut publisher, mut owner, _retirer) = successor::exchange(plan);
         pcm.submit(&mut a_sources, rate, 0);
         let mut blocks = Vec::with_capacity(BLOCKS);
@@ -1798,13 +1798,12 @@ mod follow {
             .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
         prepared.sources.adopt_persisting(&mut a_sources);
         let PreparedHost {
-            mut plan,
+            plan,
+            gate: mut next_gate,
             sources: mut b_sources,
             ..
         } = prepared;
-        plan.take_revision_gate()
-            .expect("the successor's gate")
-            .publish(revision);
+        next_gate.publish(revision);
         publisher
             .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
             .unwrap_or_else(|_| panic!("reserve the successor"))
@@ -2212,12 +2211,12 @@ fn a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison() {
         let first = prepare(&a, None);
         let rate = first.report.sample_rate_hz;
         let PreparedHost {
-            mut plan,
+            plan,
+            gate,
             sources: mut a_sources,
             inventory: a_inventory,
             ..
         } = first;
-        let gate = plan.take_revision_gate().expect("the plan's gate");
         let (mut publisher, mut owner, mut retirer) = successor::exchange(plan);
         pcm.submit(&mut a_sources, rate, 0);
         let mut blocks = Vec::with_capacity(BLOCKS);
@@ -2227,14 +2226,13 @@ fn a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison() {
         }
         let mut publish = |prepared: PreparedHost, revision: u64| {
             let PreparedHost {
-                mut plan,
+                plan,
+                gate: mut next_gate,
                 sources,
                 inventory,
                 ..
             } = prepared;
-            plan.take_revision_gate()
-                .expect("the successor's gate")
-                .publish(revision);
+            next_gate.publish(revision);
             publisher
                 .reserve_replacement(plan, PlanAdoption::Next)
                 .unwrap_or_else(|_| panic!("{what}: reserve the successor"))

@@ -427,7 +427,7 @@ fn arm<S>(
     forced_off: bool,
 ) -> PreparedRenderPlan {
     join(&mut plan, tracks);
-    seal_forced(plan.seal(), forced_off)
+    seal_forced(plan.seal().0, forced_off)
 }
 
 /// Join the bound `plan`'s mono collapse for `tracks`.
@@ -2045,7 +2045,7 @@ fn a_swap_carries_a_per_node_effects_agreement_with_its_state() {
         )
         .expect("carry program");
         carry.effects(moves, 0).expect("effect carry");
-        let mut after = seal_forced(carry.seal(), forced_off);
+        let mut after = seal_forced(carry.seal().0, forced_off);
         let frames = after.envelope().quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         let mut block = |plan: &mut PreparedRenderPlan, index: u64| {

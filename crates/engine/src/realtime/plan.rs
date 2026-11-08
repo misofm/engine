@@ -713,14 +713,17 @@ pub(crate) struct BlockFailure {
 }
 
 /// The control handle of one plan's revision gate (#1502 D1): the shared gate and the one
-/// [`GatePin`] that publishes to it. [`PreparedRenderPlan::take_revision_gate`] hands it out once.
+/// [`GatePin`] that publishes to it. [`PreparedRenderPlan::prepare`] returns it beside the plan,
+/// so the plan never holds it and no plan method hands it out (#2417): there is exactly one
+/// handle, and it exists from the plan's construction.
 ///
-/// Only the holder publishes on the plan's gate. The plan's owner stamps writes to the plan's
-/// cells before hand-out ([`PreparedRenderPlan::stamp_held_gate`]), and the holder after it; the
-/// open stamp moves with the pin into the handle (#1277 D11). The handle moves between threads
-/// only by ownership transfer, and only with no open stamp: every revision it stamped has been
-/// published. The control plane keeps it in the plan's provider epoch, so a handle follows its
-/// plan, its cells and the producers that write them.
+/// Only the holder publishes on the plan's gate, and only the holder stamps writes to the plan's
+/// cells, the builder's before the plan's seal (a successor's carry retargets) and the commit's
+/// after it; an open stamp stays in the pin, so the commit stamps the same revision again and
+/// publishes it (#1277 D11). The handle moves between threads only by ownership transfer, and
+/// only with no open stamp: every revision it stamped has been published. The control plane
+/// keeps it in the plan's provider epoch, so a handle follows its plan, its cells and the
+/// producers that write them.
 pub struct PlanRevisionGate {
     gate: Arc<RevisionGate>,
     pin: GatePin,
@@ -894,8 +897,6 @@ pub struct PreparedRenderPlan {
     /// This plan's revision gate (#1502 D1), built at revision 0 on the control thread. Render
     /// takes the block's live snapshot from it.
     gate: Arc<RevisionGate>,
-    /// The pin of `gate` until [`Self::take_revision_gate`] hands the control handle out.
-    gate_pin: Option<GatePin>,
     /// Host data that travels with the plan (issue #1400 D4). Render never reads or drops it, and
     /// calls it once per applied swap, through [`HostAttachment::adopt_predecessor`] in the swap
     /// block. It is set on the control thread before publication, and drops with the plan on the
@@ -962,13 +963,29 @@ impl Drop for DropObserver {
     }
 }
 impl PreparedRenderPlan {
-    /// Compile fixed storage and immutable program outside the render plane.
-    pub fn prepare(request: PrepareRenderPlan<'_>) -> Result<Self, RenderError> {
+    /// Compile fixed storage and immutable program outside the render plane, and return the plan
+    /// with its revision gate's one control handle (#1502 D1, #2417).
+    ///
+    /// The handle leaves the plan by value here: the plan keeps the shared gate for render's
+    /// snapshot, and has no method that hands a handle out or stamps on one, so a second take or
+    /// a stamp on the plan's own pin is a compile error, not a run-time `None`.
+    ///
+    /// # Errors
+    ///
+    /// The envelope's validation error, or the arena's when `request.scratch` cannot be sized.
+    pub fn prepare(
+        request: PrepareRenderPlan<'_>,
+    ) -> Result<(Self, PlanRevisionGate), RenderError> {
         let envelope = request.envelope.validate()?;
         // Revision 0, below every revision the plan will stamp (#1432: a gate built at `r` cannot
         // take a stamp of `r`).
-        let (gate, gate_pin) = RevisionGate::pair(0);
-        Ok(Self {
+        let (gate, pin) = RevisionGate::pair(0);
+        let gate = Arc::new(gate);
+        let handle = PlanRevisionGate {
+            gate: Arc::clone(&gate),
+            pin,
+        };
+        let plan = Self {
             program: PreparedProgram {
                 plan_id: request.plan_id,
                 envelope,
@@ -978,15 +995,15 @@ impl PreparedRenderPlan {
             next_absolute_sample: 0,
             response_snapshot_valid: true,
             executor: None,
-            gate: Arc::new(gate),
-            gate_pin: Some(gate_pin),
+            gate,
             host_attachment: None,
             strip_meters: true,
             strip_meters_carried: false,
             _not_sync: Cell::new(()),
             #[cfg(test)]
             drop_observer: None,
-        })
+        };
+        Ok((plan, handle))
     }
     /// Attach host data to this plan (issue #1400 D4), on the control thread before the plan is
     /// published. A second call replaces the first, which drops here, on the calling thread.
@@ -1006,35 +1023,6 @@ impl PreparedRenderPlan {
             .as_any_mut()
             .downcast_mut::<T>()
     }
-    /// Hand out this plan's one revision-gate handle (#1502 D1): the first call returns it, every
-    /// later call `None`. The plan keeps the shared gate for render; only the holder of the
-    /// handle publishes on it.
-    pub fn take_revision_gate(&mut self) -> Option<PlanRevisionGate> {
-        let pin = self.gate_pin.take()?;
-        Some(PlanRevisionGate {
-            gate: Arc::clone(&self.gate),
-            pin,
-        })
-    }
-    /// Stamp a write to this plan's cells on the plan's own pin, while the plan still holds its
-    /// handle (#1277 D11): the same stamp [`PlanRevisionGate::stamp`] gives, for the plan's owner
-    /// before [`Self::take_revision_gate`] hands the handle out. A preparation that writes cell
-    /// values into the plan it is building (a successor's carry retargets) stamps them here.
-    ///
-    /// The open stamp stays in the pin, so it moves with the pin into the handle: the holder
-    /// stamps the same revision again as its last fallible step (the pin allows a stamp at the
-    /// open revision) and publishes it. A plan that is dropped with an open stamp has published
-    /// nothing, so nothing it stamped is ever visible.
-    ///
-    /// `None` once the handle was taken, and nothing is stamped. Otherwise the result is exactly
-    /// [`GatePin::stamp`]'s: a refusal in every build for a revision at or below the last
-    /// published one or above [`GATE_REVISION_MAX`](crate::realtime::GATE_REVISION_MAX).
-    pub fn stamp_held_gate(
-        &mut self,
-        revision: u64,
-    ) -> Option<Result<LiveStamp<'_>, StampRefused>> {
-        Some(self.gate_pin.as_mut()?.stamp(revision))
-    }
     /// Whether `handle` is the control handle of this plan's gate, by pointer identity.
     pub(crate) fn owns_revision_gate(&self, handle: &PlanRevisionGate) -> bool {
         Arc::ptr_eq(&self.gate, &handle.gate)
@@ -1043,14 +1031,18 @@ impl PreparedRenderPlan {
     ///
     /// The executor is owned by the plan, so it is destroyed only when the retired plan is
     /// reclaimed off the render thread.  No publication behavior is changed here.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::prepare`]'s.
     #[doc(hidden)]
     pub fn prepare_with_executor(
         request: PrepareRenderPlan<'_>,
         executor: Box<dyn PreparedPlanExecutor>,
-    ) -> Result<Self, RenderError> {
-        let mut plan = Self::prepare(request)?;
+    ) -> Result<(Self, PlanRevisionGate), RenderError> {
+        let (mut plan, gate) = Self::prepare(request)?;
         plan.executor = Some(executor);
-        Ok(plan)
+        Ok((plan, gate))
     }
     /// The absolute sample the next *contiguous* block must start at.
     ///
@@ -1183,8 +1175,8 @@ impl PreparedRenderPlan {
     /// The heap bytes this plan retains (#1074), exclusive of the plan value itself (its owner
     /// holds it by value): the buffer arena's three tables, the executor's box and everything the
     /// executor walks ([`PreparedPlanExecutor::retained_bytes`]), and the revision gate's shared
-    /// allocation, charged in full whoever else holds it. The program and the gate pin own no
-    /// heap.
+    /// allocation, charged in full whoever else holds it (its control handle shares it). The
+    /// program owns no heap.
     ///
     /// Excluded: the [`HostAttachment`]. It is host data the plan only carries (#1400 D4), and no
     /// host that compares this walk with an allocator binds one (capi binds none; host-web's

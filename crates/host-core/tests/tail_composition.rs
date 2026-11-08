@@ -555,11 +555,7 @@ fn a_live_fader_moved_to_its_maximum_is_covered() {
         host.report.output_tail_every_peak,
         TailSamples::Finite(every_peak)
     );
-    let mut gate = host
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
-    gate.write_published(|stamp| {
+    host.gate.write_published(|stamp| {
         handles.strip_controls[0].fader.write(
             stamp,
             TrackFaderRecord::FaderDb {

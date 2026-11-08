@@ -154,7 +154,8 @@ fn the_sixty_four_track_swap_block_allocates_and_audits_nothing() {
         }
         let revision = 2 + step as u64;
         let PreparedHost {
-            mut plan,
+            plan,
+            gate: mut next_gate,
             sources: mut next_sources,
             inventory: next_inventory,
             ..
@@ -162,9 +163,7 @@ fn the_sixty_four_track_swap_block_allocates_and_audits_nothing() {
             &next.1,
             Some(SuccessorBase::new(&inventory, &committed, revision)),
         );
-        plan.take_revision_gate()
-            .expect("the successor's gate")
-            .publish(revision);
+        next_gate.publish(revision);
         let reservation = publisher
             .reserve_replacement(plan, PlanAdoption::Next)
             .unwrap_or_else(|_| panic!("reserve the successor"));

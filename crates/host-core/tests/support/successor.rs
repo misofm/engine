@@ -303,7 +303,8 @@ pub(crate) fn swapped_run_with(
     let [sources, inputs, strips, effects, _] = graph::test_only_carry_counts(&mut b_prepared.plan);
     let carry_counts = [sources, inputs, strips, effects];
     let PreparedHost {
-        mut plan,
+        plan,
+        mut gate,
         sources: mut b_sources,
         report,
         ..
@@ -312,9 +313,7 @@ pub(crate) fn swapped_run_with(
         // The commit's last write (#1277 D5): the revision the successor's carry retargets were
         // stamped with is published on its own gate before the successor is published, so its
         // adoption block's snapshot covers them.
-        plan.take_revision_gate()
-            .expect("the successor's handle")
-            .publish(SUCCESSOR_REVISION);
+        gate.publish(SUCCESSOR_REVISION);
     }
     publisher
         .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)

@@ -199,14 +199,9 @@ fn a_bus_fader_record_renders_as_the_session_with_that_fader() {
     };
     let feeds: Vec<[Vec<f32>; 2]> = TRACKS.iter().map(|_| [plane(), plane()]).collect();
 
-    let mut gate = live
-        .0
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
     for block in 0..BLOCKS {
         if block == COMMANDED {
-            gate.write_published(|stamp| {
+            live.0.gate.write_published(|stamp| {
                 live.1.strip_controls[3].fader.write(
                     stamp,
                     TrackFaderRecord::FaderDb {
