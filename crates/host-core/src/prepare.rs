@@ -924,14 +924,36 @@ impl PlanStateInventory {
     }
 }
 
-/// Set `host`'s source-read offset (#1396 deliverable 2): the plan's
-/// ([`PreparedRenderPlan::set_source_read_offset`]) and its inventory row's together, so a
-/// successor prepared from the inventory inherits it. Call it before the plan is published. The
-/// one production writer of a nonzero offset is a warm successor's preparation (#1355).
 #[cfg(feature = "test-support")]
-pub fn test_only_set_source_read_offset(host: &mut PreparedHost, offset: u64) {
-    host.plan.set_source_read_offset(offset);
-    host.inventory.source_read_offset = offset;
+std::thread_local! {
+    static TEST_NEXT_SOURCE_READ_OFFSET: core::cell::Cell<Option<u64>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// Give the next plan this thread prepares the source-read offset `offset` in place of the one
+/// its preparation computes (#1396 deliverable 2): the plan's
+/// ([`PreparedRenderPlan::source_read_offset`]) and its inventory row's together, so a successor
+/// prepared from the inventory inherits it. The preparation sets it on the bound plan, before the
+/// seal, as it sets its own (#2412): a sealed plan's offset never changes. Taken once, at the
+/// start of the next preparation on this thread, whether that preparation then succeeds or is
+/// refused, so a refused preparation never leaves it for a later one; a projection does not take
+/// it. The one production writer of a nonzero offset is a warm successor's preparation (#1355).
+#[cfg(feature = "test-support")]
+pub fn test_only_set_next_source_read_offset(offset: u64) {
+    TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(Some(offset)));
+}
+
+/// Drop an offset [`test_only_set_next_source_read_offset`] scheduled and no preparation took, so
+/// a caller whose preparation may stop before host-core's leaves nothing for a later one.
+#[cfg(feature = "test-support")]
+pub fn test_only_clear_next_source_read_offset() {
+    TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(None));
+}
+
+/// Takes the offset [`test_only_set_next_source_read_offset`] scheduled, once.
+#[cfg(feature = "test-support")]
+fn take_test_next_source_read_offset() -> Option<u64> {
+    TEST_NEXT_SOURCE_READ_OFFSET.with(core::cell::Cell::take)
 }
 
 /// One source of a prepared plan, as its successor's preparation sees it (issue #1272 D1).
@@ -3319,6 +3341,14 @@ fn prepare_or_project(
     mode: PrepareMode,
 ) -> Result<PrepareOutcome, PrepareDiagnostics> {
     let projecting = mode == PrepareMode::Project;
+    // #1396 deliverable 2: a test's scheduled offset, taken by this preparation alone, before
+    // anything can refuse it (#2412).
+    #[cfg(feature = "test-support")]
+    let test_source_read_offset = if projecting {
+        None
+    } else {
+        take_test_next_source_read_offset()
+    };
     // #1709 D1: the whole preparation runs in the canonical floating-point environment, so a
     // route or send gain (`compile_graph`'s `db_to_gain_f32`), a native effect's coefficients and
     // every value composed below are what a canonical thread prepares, whatever the caller has
@@ -5713,6 +5743,19 @@ fn prepare_or_project(
     plan.arm_mono_collapse(&|track: &str| mono_source.contains(track));
     // #2401: the plan's identity, read on the bound plan, which is always a graph plan's.
     let plan_identity = plan.plan_identity();
+    // #1396 D2: an ordinary successor reads its sources as far ahead of its render clock as its
+    // predecessor does, so the source-read clock never moves backwards across a rebuild. A first
+    // plan reads on its render clock, and so does a discontinuity successor, whose base inventory
+    // is `at_discontinuity`'s.
+    // #1355 D1: a warm successor reads its sources its lead further ahead, `O + P`.
+    let source_read_offset = successor.map_or(0, |base| {
+        base.inventory.source_read_offset + warm.map_or(0, |lead| lead.lead_samples)
+    });
+    #[cfg(feature = "test-support")]
+    let source_read_offset = test_source_read_offset.unwrap_or(source_read_offset);
+    // #2412: set on the bound plan, which cannot have rendered; the seal below fixes it. No
+    // hand-over section reads it: the carry builder only moves staged sections into the executor.
+    plan.set_source_read_offset(source_read_offset);
     let mut plan = if let Some(program) = carry_program {
         let install = |_| graph_failure("host.carry.install");
         let mut carry =
@@ -5778,15 +5821,6 @@ fn prepare_or_project(
             + route_carry_bytes
     );
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
-    // #1396 D2: an ordinary successor reads its sources as far ahead of its render clock as its
-    // predecessor does, so the source-read clock never moves backwards across a rebuild. A first
-    // plan reads on its render clock, and so does a discontinuity successor, whose base inventory
-    // is `at_discontinuity`'s.
-    // #1355 D1: a warm successor reads its sources its lead further ahead, `O + P`.
-    let source_read_offset = successor.map_or(0, |base| {
-        base.inventory.source_read_offset + warm.map_or(0, |lead| lead.lead_samples)
-    });
-    plan.set_source_read_offset(source_read_offset);
     let inventory = PlanStateInventory {
         plan_identity,
         sources: inventory_sources.into_boxed_slice(),

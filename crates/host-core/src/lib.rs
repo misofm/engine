@@ -278,10 +278,11 @@ pub use effect_compiler::{
 pub use graph::test_only_timeline_at;
 #[cfg(feature = "test-support")]
 pub use prepare::{
-    test_only_prepare_host_runtime_on, test_only_prepare_host_runtime_successor_on,
+    test_only_clear_next_source_read_offset, test_only_prepare_host_runtime_on,
+    test_only_prepare_host_runtime_successor_on,
     test_only_prepare_host_runtime_with_live_controls_on,
     test_only_prepare_host_runtime_with_live_controls_successor_on,
-    test_only_prepare_host_runtime_with_selected_meters_on, test_only_set_source_read_offset,
+    test_only_prepare_host_runtime_with_selected_meters_on, test_only_set_next_source_read_offset,
 };
 #[cfg(feature = "test-support")]
 pub use spectrum::{

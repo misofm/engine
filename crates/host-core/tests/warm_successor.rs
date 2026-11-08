@@ -558,8 +558,9 @@ fn lead_bound_holds_at_the_exact_thresholds() {
     assert_eq!(stall_ring_frames(44_100, 128), 4736);
     let stall = stall_ring_frames(48_000, 128);
     // `ΣP = 384`.
-    let mut edit = limiter_on_t1();
-    host_core::test_only_set_source_read_offset(&mut edit.host_a, 384);
+    host_core::test_only_set_next_source_read_offset(384);
+    let edit = limiter_on_t1();
+    assert_eq!(edit.host_a.inventory.source_read_offset(), 384);
     let bound = |p_max| WarmConfig { p_max, ..CONFIG };
     assert!(matches!(
         edit.decide(&bound(384 + LEAD)),
