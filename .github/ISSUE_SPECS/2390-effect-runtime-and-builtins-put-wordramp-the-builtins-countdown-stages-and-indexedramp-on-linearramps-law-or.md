@@ -90,10 +90,12 @@ debug-only check of the half of the invariant they do hold. No release code path
   fields, because the effects read them per sample.
 - New test `tests/ramp_lanes.rs::a_word_ramp_walks_the_scalar_law_word_for_word`. For three ramps
   per call, at every width, it checks all four words against `LinearRamp::next_value` on every
-  frame. The defect it catches is the word-ramp path leaving the scalar law: the wrong gate, a
-  dropped or swapped word, or a later ramp of the slice skipped. The de-esser and the dynamic EQ
-  never scatter these words, so the lane-vector walk test cannot see this path. No existing test
-  of the word walk existed, so none is deleted.
+  frame. The defect it catches, and no other test does, is in the destructuring glue between the
+  word ramps and the shared walk: the wrong gate, a dropped or swapped word, or a later ramp of
+  the slice skipped (W1-W4 below). The de-esser and the dynamic EQ never scatter these words, so
+  the lane-vector walk test cannot see this path. The walk's own law, M5 included, was already
+  covered through the de-esser's lib tests (see M5 below), so no test is made useless and none is
+  deleted. (Corrected in the fold: the first draft said no existing test covered the word walk.)
 - `builtins`. The new `settled_on_target(current, target, remaining)` is the settled half of
   `from_words`'s invariant. Its doc is the record of why the stages do not build their lanes
   through `from_words`, for the four reasons above. Each `import_lane` doc names its writers:
@@ -128,8 +130,13 @@ reverted.
 
 M5 was an equivalent mutant in #2376 because the effects there scatter through `record_advance`,
 which stores `+0.0` on a settled lane. A `WordRamp` is never scattered, and the stale step would
-reach the state payload, where `from_words` refuses it on restore. The new test catches it, so it
-is no longer equivalent.
+reach the state payload, where `from_words` refuses it on restore. So M5 is not equivalent for
+the word ramps. It was not equivalent on the base either, and existing tests already caught it.
+Re-run in the fold: three de-esser lib tests go red under M5, namely
+`ramp_tests::a_ramp_no_writer_announced_still_arrives`,
+`glide_tests::a_silent_bank_never_skips_a_glide` and
+`glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law`. The new test's unique catches
+are W1-W4.
 
 `builtins`. These are the settle rules each stage keeps, and the new import check.
 
@@ -208,20 +215,31 @@ The W4 bank does not bind on this AVX2 host, so the 4-lane walk is covered by th
   (299 marked regions in 48 files).
 - `graph_fixture --check` exits 0. No struct changed.
 
-**Follow-ups** (not filed):
-1. The builtins treat the kernel's `f32` countdown residue three ways:
-   - the fader neither carries nor imports it (#2377 T2);
-   - the matrix's import writes it but its export does not carry it (S2: a dead write);
-   - the input's export carries it (`InputChannelState::ramp[3]`) and its import writes it,
-     though `load_countdown` rebuilds it before every ramp kernel.
+**Follow-ups.**
+1. Successor #SUCCESSOR covers one rule for the builtins stages' `f32` countdown residue plus one
+   exact-countdown constant. Today the residue is handled three ways: the fader neither carries
+   nor imports it (#2377 T2); the matrix's import writes it although its export does not carry it
+   (S2, a dead write); and the input's export carries it (`InputChannelState::ramp[3]`) and its
+   import writes it back. Four `1 << 24` constants spell the bound:
+   `FADER_RAMP_COUNTDOWN_MAXIMUM`, `MATRIX_RAMP_COUNTDOWN_MAXIMUM`,
+   `InputStage::RAMP_COUNTDOWN_MAXIMUM` and effect-runtime's `EXACT_COUNTDOWN`. The successor
+   spec also covers two consequences. One is the coupling with `trim_ramp_words` and
+   `trim_ramp_channels_agree`: the residue is P3-M2's only observable. The other is the
+   `InputLaneState` size change, which may move graph fixtures.
+2. Deliberately not filed: a lane-level helper for the D11 frame walk that the builtins' block
+   kernels in `crates/lane/src/kernels/builtins.rs` spell inline (trim, fader/mute, matrix:
+   `remaining - 1`, `done = remaining <= 0`, `select(done, target, ramp_toward(..))`). There is no
+   defect, and the helper would put an abstraction across the SIMD kernels.
 
-   Dropping the matrix write and the input payload word would give one rule. The input change is
-   a size change of `InputLaneState`.
-2. Four constants are all `1 << 24`: `FADER_RAMP_COUNTDOWN_MAXIMUM`,
-   `MATRIX_RAMP_COUNTDOWN_MAXIMUM`, `InputStage::RAMP_COUNTDOWN_MAXIMUM` and effect-runtime's
-   `EXACT_COUNTDOWN`.
-3. The builtins' block kernels in `crates/lane/src/kernels/builtins.rs` each spell the D11 frame
-   walk inline: `remaining - 1`, `done = remaining <= 0`, then `select(done, target,
-   ramp_toward(..))`. The kernels are the trim, the fader/mute and the matrix. A lane-level
-   helper could hold that walk once. That is beyond this issue's contract, which leaves the
-   countdown authority alone.
+### Attempt 1 verdict: PASS (minor findings folded)
+
+Sol passed `541919384`. The three minor findings were folded in after merging `origin/main`:
+1. Follow-ups 1 and 2 are one stateless successor spec, #SUCCESSOR. Follow-up 3 is recorded as
+   deliberately not filed.
+2. The M5 paragraph and the new test's "test value" are corrected: three de-esser lib tests
+   already caught M5, and the new test's unique value is the glue (W1-W4).
+3. `IndexedRamp`'s doc now says its fields are public and no choice of them gives a settled ramp
+   off its target, and that today only `settled` and `new` build one.
+
+After the fold, the effect-runtime, lane and de-esser tests pass, and so do clippy
+`-D warnings` and rustdoc `-D warnings` for effect-runtime, builtins and lane.

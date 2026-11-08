@@ -1663,11 +1663,11 @@ pub const INDEXED_RAMP_LENGTH_MAXIMUM: u32 = 1 << 22;
 /// is off its target, because a D11 ramp at rest renders that word for as long as it rests. This
 /// ramp has no running word and no countdown. Its phase is the caller's index `k` against
 /// `length`, and from `k >= length` on [`IndexedRamp::coefficients_at`] and
-/// [`route_mix_ramp_block`] assign `target` whatever `start` and `step` hold. So no choice of
-/// words gives a settled ramp off its target, and there is nothing for a `from_words` to refuse.
-/// Nor are its words ever read from outside the engine. [`IndexedRamp::settled`] and
-/// [`IndexedRamp::new`] build every ramp, and a plan swap carries a ramp by value with its index
-/// (the graph's live routes, the effect contract's live crossfade).
+/// [`route_mix_ramp_block`] assign `target` whatever `start` and `step` hold. The fields are
+/// public, but no choice of them gives a settled ramp off its target, so there is nothing for a
+/// `from_words` to refuse. Today only [`IndexedRamp::settled`] and [`IndexedRamp::new`] build
+/// one, and a plan swap carries a ramp by value with its index (the graph's live routes, the
+/// effect contract's live crossfade).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IndexedRamp {
     /// `c(0)`: the coefficients the ramp starts from.
