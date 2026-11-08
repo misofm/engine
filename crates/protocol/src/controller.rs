@@ -2249,20 +2249,15 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// # Errors
     ///
     /// The store's refusal, which cannot happen for a token the store prepared in place: an
-    /// in-place preparation accepts only what the full one accepts.
+    /// in-place preparation accepts only what the full one accepts. A refused token keeps its
+    /// in-place session (#2378 C9).
     pub fn materialize_prepared(
         &self,
         prepared: &mut PreparedStructuralCommand,
     ) -> Result<(), SessionStoreError> {
-        let Some(session) = prepared.prospective_session.take() else {
-            return Ok(());
-        };
-        match self.session.materialize(session) {
-            Ok(session) => {
-                prepared.prospective_session = Some(session);
-                Ok(())
-            }
-            Err(error) => Err(error),
+        match prepared.prospective_session.as_mut() {
+            Some(session) => self.session.materialize(session),
+            None => Ok(()),
         }
     }
 

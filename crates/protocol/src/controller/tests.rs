@@ -1833,6 +1833,71 @@ fn solo_edit(track: &session::StableId, on: bool, ramp: Option<u32>) -> SessionE
     }
 }
 
+/// #2378 C9. A store that refuses to materialize an in-place token leaves the token as it was: it
+/// keeps its in-place session, so its accessors still answer and a store that accepts the
+/// materialization later gets the edits. Here the refusal is a revision conflict, met by a store
+/// that has committed past the token's base.
+///
+/// Red if the refusal takes the token's session with it, leaving a token whose
+/// `prospective_session` panics and whose edits are lost.
+#[test]
+fn a_refused_materialization_leaves_the_token_its_in_place_session() {
+    let mut owner = controller(8);
+    let mut other = controller(8);
+    let rename = [SessionEdit::SetSessionId {
+        session_id: session::StableId::parse("advanced").expect("ID"),
+    }];
+    let advance = prepare_at(&mut other, 7, &rename);
+    other
+        .commit_prepared_structural(advance, EditPath::ModelOnly)
+        .expect("commits");
+    assert_eq!(other.session().revision(), SessionRevision(8));
+    let gain = [SessionEdit::set_control(
+        crate::control_core::row_address(
+            crate::control_core::Owner::Route(session::StableId::parse("to-main").expect("ID")),
+            crate::control_core::Section::Own,
+            "gain_db",
+            crate::control_core::Lane::Both,
+        )
+        .expect("a route row"),
+        -3.0,
+        None,
+    )];
+    let input = full_command(
+        8,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&gain),
+    );
+    let mut prepared = match owner
+        .prepare_command_frame_in_place(
+            &input,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
+        .expect("prepares")
+    {
+        PreparedCommandFrame::Structural(prepared) => *prepared,
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => panic!("a value edit is structural"),
+    };
+    assert!(prepared.prospective_session().is_in_place());
+    assert!(matches!(
+        other.materialize_prepared(&mut prepared),
+        Err(SessionStoreError::RevisionConflict { .. })
+    ));
+    assert!(prepared.prospective_session().is_in_place());
+    owner
+        .materialize_prepared(&mut prepared)
+        .expect("materializes");
+    assert!(!prepared.prospective_session().is_in_place());
+    assert_eq!(
+        prepared.prospective_session().revision(),
+        SessionRevision(8)
+    );
+}
+
 /// A transaction of monitor writes (#1559 D3, D4): its token exposes the writes, commits no model
 /// and no revision, emits no `SESSION_COMMITTED` and cancels no automation, answers `monitor` at
 /// the committed revision, and an exact replay returns the same bytes. A solo spends no revision

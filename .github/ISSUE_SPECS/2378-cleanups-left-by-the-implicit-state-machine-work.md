@@ -26,4 +26,17 @@ Successor bundle filed when the implicit-state-machine tracker #2258 closed. The
 - `scripts/check-workspace-policy.sh` and the call-graph gate are green.
 
 ## Evidence / attempt record
-(empty)
+
+Attempt 1 (Terra), branch `codex/issue-2378-ism-cleanups`, one commit per row.
+
+- **C9, confirmed defect.** `ProtocolController::materialize_prepared` took the token's
+  `prospective_session` out and handed it by value to `SessionStore::materialize`; on a store
+  refusal the session was gone, leaving a token whose `prospective_session()` panics ("live affine
+  token owns prospective session") and whose edits are lost. The one production caller
+  (`control-plane` `commit_live`) drops the token on that error, but the API is public and the
+  refusal is reachable through it: a store at another revision (a foreign controller, which the
+  call does not check) refuses with `RevisionConflict`. Fix: `SessionStore::materialize` takes
+  `&mut PreparedSessionTransaction` and replaces it only on success, and `materialize_prepared`
+  lends it. Test `controller::tests::a_refused_materialization_leaves_the_token_its_in_place_session`
+  is red on base: `panicked at crates/protocol/src/controller.rs:1528:14: live affine token owns
+  prospective session`. The base is the mutation (the `take()` restored turns it red).
