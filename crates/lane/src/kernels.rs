@@ -1656,6 +1656,18 @@ pub const INDEXED_RAMP_LENGTH_MAXIMUM: u32 = 1 << 22;
 /// running value, and a settled ramp is `target` exactly, so a route that has ramped and settled
 /// mixes the bits a freshly prepared plan mixes. D11 is unchanged and stays the law everywhere
 /// else.
+///
+/// # Why it does not share `LinearRamp::from_words` (issue #2390)
+///
+/// `effect_runtime::ramp::LinearRamp::from_words` refuses a settled countdown whose running word
+/// is off its target, because a D11 ramp at rest renders that word for as long as it rests. This
+/// ramp has no running word and no countdown. Its phase is the caller's index `k` against
+/// `length`, and from `k >= length` on [`IndexedRamp::coefficients_at`] and
+/// [`route_mix_ramp_block`] assign `target` whatever `start` and `step` hold. The fields are
+/// public, but no choice of them gives a settled ramp off its target, so there is nothing for a
+/// `from_words` to refuse. Today only [`IndexedRamp::settled`] and [`IndexedRamp::new`] build
+/// one, and a plan swap carries a ramp by value with its index (the graph's live routes, the
+/// effect contract's live crossfade).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IndexedRamp {
     /// `c(0)`: the coefficients the ramp starts from.
