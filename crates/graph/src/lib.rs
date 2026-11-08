@@ -5202,8 +5202,7 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
 pub struct GraphBoundPlan<S = BindTables> {
     plan: PreparedRenderPlan,
     /// The plan's revision-gate handle, which its preparation returned beside it (#2417). The
-    /// bound plan keeps it so a builder can stamp the plan's cells before the seal, and both seals
-    /// hand it out by value with the plan.
+    /// bound plan only keeps it: both seals hand it out by value with the plan.
     gate: PlanRevisionGate,
     state: S,
 }
@@ -5349,7 +5348,7 @@ impl<S> GraphBoundPlan<S> {
     ///     let _ = gate.stamp(1);
     /// }
     /// ```
-    #[must_use = "the sealed plan is the one that renders, and its gate handle the one that publishes"]
+    #[must_use = "the sealed plan renders, and its gate handle publishes"]
     pub fn seal(self) -> (PreparedRenderPlan, PlanRevisionGate) {
         (self.plan, self.gate)
     }
@@ -6083,7 +6082,7 @@ impl<S> GraphCarryBuilder<S> {
     /// holds its whole hand-over, which nothing can change, and may be published. Allocates the
     /// effect section's carried slots and the observer section's carry record here, off the render
     /// thread.
-    #[must_use = "the sealed plan is the one that renders, and its gate handle the one that publishes"]
+    #[must_use = "the sealed plan renders, and its gate handle publishes"]
     pub fn seal(self) -> (PreparedRenderPlan, PlanRevisionGate) {
         let Self {
             plan,

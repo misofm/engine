@@ -720,10 +720,10 @@ pub(crate) struct BlockFailure {
 /// Only the holder publishes on the plan's gate, and only the holder stamps writes to the plan's
 /// cells, the builder's before the plan's seal (a successor's carry retargets) and the commit's
 /// after it; an open stamp stays in the pin, so the commit stamps the same revision again and
-/// publishes it (#1277 D11). The handle moves between threads
-/// only by ownership transfer, and only with no open stamp: every revision it stamped has been
-/// published. The control plane keeps it in the plan's provider epoch, so a handle follows its
-/// plan, its cells and the producers that write them.
+/// publishes it (#1277 D11). The handle moves between threads only by ownership transfer, and
+/// only with no open stamp: every revision it stamped has been published. The control plane
+/// keeps it in the plan's provider epoch, so a handle follows its plan, its cells and the
+/// producers that write them.
 pub struct PlanRevisionGate {
     gate: Arc<RevisionGate>,
     pin: GatePin,
@@ -1175,8 +1175,8 @@ impl PreparedRenderPlan {
     /// The heap bytes this plan retains (#1074), exclusive of the plan value itself (its owner
     /// holds it by value): the buffer arena's three tables, the executor's box and everything the
     /// executor walks ([`PreparedPlanExecutor::retained_bytes`]), and the revision gate's shared
-    /// allocation, charged in full whoever else holds it. The program and the gate pin own no
-    /// heap.
+    /// allocation, charged in full whoever else holds it (its control handle shares it). The
+    /// program owns no heap.
     ///
     /// Excluded: the [`HostAttachment`]. It is host data the plan only carries (#1400 D4), and no
     /// host that compares this walk with an allocator binds one (capi binds none; host-web's

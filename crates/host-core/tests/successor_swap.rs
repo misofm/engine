@@ -1003,7 +1003,7 @@ impl LivePlan {
             )
             .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
         let mut successor = Self::new(prepared, handles);
-        // The commit's gate steps (#1277 D10): the handle inherits the preparation's open stamp
+        // The commit's gate steps (#1277 D10): the handle holds the preparation's open stamp
         // (a retarget's), stamps the revision again and publishes it.
         let _ = successor
             .prepared
@@ -2718,7 +2718,7 @@ impl CellPlan {
 
     /// `session` prepared as the successor of the plan `inventory` describes, committing as
     /// `revision`, with the commit's gate steps a host takes: stamp `revision` again on the
-    /// handle, which inherits the preparation's open stamp, and publish it.
+    /// handle, which holds the preparation's open stamp, and publish it.
     fn successor_at(
         session: &Session,
         base: host_core::SuccessorBase<'_>,
