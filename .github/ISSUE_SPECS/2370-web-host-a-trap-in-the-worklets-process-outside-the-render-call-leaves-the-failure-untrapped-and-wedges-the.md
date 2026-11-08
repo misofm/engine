@@ -124,5 +124,39 @@ The coordinator files the unguarded `receiveControlPlane` export calls on a trap
 - The artifact for these runs is the attempt-1 build with this commit's `miso-engine-v1-audio-worklet.js` and `.d.ts` copied in. The builder only copies those files, and the Wasm module is unchanged.
 - WebKit is still left to CI, for the reason above.
 
-**Follow-ups (not filed).**
-- The `single`-mode main-realm host takes a `miso.error.v1` with request ID 0 as a malformed reply (`validRequestId(0)` is false). It fails with `webError(255, oldest pending or 0)` instead of the posted code. For a trap the result is 255 either way. For a non-trap render refusal (for example `RESULT_RENDER_REJECTED`, 8), the page sees 255, not 8. `worker` mode takes the typed code (#1332 S8). Accepting request 0 typed in `single` mode too is a change to the main-realm host, so it is left out of this issue.
+### Second review fold (Terra, 2026-11-08)
+The coordinator ruled that the first fold's follow-up is this PR's to fix.
+
+**The defect.** In `single` mode the main-realm host took a `miso.error.v1` with request ID 0 as a malformed reply (`validRequestId(0)` is false), and failed with `webError(255, oldest pending or 0)`. The tick report the first fold added therefore turned a non-trap render refusal (8, say) into 255 and lost its code.
+
+One correction to the premise. `single` mode already posted request-0 errors before the fold: #2291's tick-step failures and its meter-view fault on a tick do (`trap(0)`, `sticky(.., 0)`). Those reached the same malformed path, so this fix gives them their typed code too.
+
+**Fix.**
+- `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js`: the #1332 S8 branch that takes a request-0 `miso.error.v1` as an unsolicited, typed failure no longer requires `worker` mode (the `this.#worker !== undefined` term is gone). Its guards are unchanged:
+  - exact fields `tag`, `requestId`, `result`;
+  - a valid, non-OK result.
+- The branch calls `#fail(message, null, peer)`, so in `single` mode the worklet, which sent the failure, is not told it back.
+- Any other request-0 shape still falls to the malformed path and fails 255. There is no second path.
+- The `.d.ts` section (both copies, still byte-identical) adds that a non-trap render refusal reaches the page the same way, with its own code.
+
+**Row** (`scripts/test-web-audioworklet.mjs`, main-realm suite, "Issue #2370: in `single` mode the worklet posts a failure"):
+- a `single`-mode host, with a request held in flight, receives `{ tag: "miso.error.v1", requestId: 0, result: 8 }` on the worklet port;
+- the held request and a later request both reject with 8;
+- no `miso.fail.v1` goes back to the worklet.
+
+Red on `9d844ed99`: `AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 255 !== 8`, at the held request's `errorResult(held, 8)`.
+
+**Host mutations** (the hermetic suite over a mutated host copy, `MISO_ENGINE_WEB_HOST_TEST_MODULE`):
+- H1, request 0 accepted in `worker` mode only (the `9d844ed99` guard): RED, `255 !== 8` at the held request.
+- H2, the request-0 failure names no peer (`#fail(.., null, null)`, so the worklet is told back): RED, `single mode: the worklet is not told its own failure`.
+
+**Gates after the second fold.**
+- `bash scripts/test-web-audioworklet.sh`: exit 0, including the safe-integer host copies and their red mutation.
+- `bash scripts/check-workspace-policy.sh`: ok.
+- `check-sdk-generated.sh <artifact>`: current.
+- `check-sdk-types.sh`: passed (shipped-host mirror pin included).
+- `sdk-package.sh check`: passed.
+- SDK evals with the artifact: 716/716.
+- Chromium `single` and `worker`: all qualification gates passed, and the four render digests match base.
+- The artifact is the attempt-1 Wasm build with this commit's worklet JS, host JS and `.d.ts` copied in.
+- WebKit is still left to CI.

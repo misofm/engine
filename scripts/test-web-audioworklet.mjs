@@ -2722,6 +2722,29 @@ async function testMainRealm() {
           await failing.dispose();
         }
 
+        // Issue #2370: in `single` mode the worklet posts a failure `process()` recorded at the next
+        // service tick, as request ID 0. The host fails with its own code by the S8 path above: a
+        // render refusal (8) stays 8 for the request in flight and every later one, and the worklet,
+        // which sent it, is not told back. Test value: a request-0 error taken as a malformed reply
+        // in `single` mode, so the page sees 255 and loses the refusal's code.
+        {
+          const failing = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js", instanceMode: "single",
+          });
+          const node = FakeNode.latest;
+          holdAll = true;
+          const held = failing.control(new Uint8Array([1]));
+          holdAll = false;
+          assert.equal(await settledState(held), "pending");
+          node.port.onmessage({ data: { tag: "miso.error.v1", requestId: 0, result: 8 } });
+          await errorResult(held, 8);
+          heldAll.length = 0;
+          await errorResult(failing.control(new Uint8Array([1])), 8);
+          assert.deepEqual(node.port.failPosts, [], "single mode: the worklet is not told its own failure");
+          await failing.dispose().catch(() => undefined);
+        }
+
         // Issue #2279 (WEB-6), the worker-mode row: a render failure posted while the
         // dispose is with the Worker fails the host, and the Worker's own reply still settles the
         // dispose, cleanly. Test value: a dispose rejected with the render failure and the Worker

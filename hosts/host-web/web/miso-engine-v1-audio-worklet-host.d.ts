@@ -94,6 +94,8 @@
 //   which posts nothing: the page hears of it as `miso.error.v1` with result 255 and request ID 0,
 //   at the next service tick in `single` mode and at the control Worker's next render check in
 //   `worker` mode. The pending requests fail with it, and a later request is answered with it.
+//   A render refusal that is no trap (`RESULT_RENDER_REJECTED`, 8, say) reaches the page the
+//   same way, with its own code.
 // - In a message handler: the request in flight is settled as `miso.error.v1` with result 255, or
 //   the failure is posted as request ID 0 when no request is in flight.
 //
