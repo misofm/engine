@@ -1544,6 +1544,11 @@ pub struct SessionState<A: ControlAdapter> {
     /// The displaced plans [`Self::synchronize_plan_epochs`] has reclaimed (issue #2424): the
     /// generation a refused residue rebuild is retried on. Saturating, never reset.
     pub(crate) plans_reclaimed: u64,
+    /// The bank-contract defects of every plan [`Self::synchronize_plan_epochs`] has reclaimed
+    /// (issue #2427): each reclaimed epoch's defect watch, read once, when its plan has stopped
+    /// rendering, so its totals are final. With the watches of the epochs still held it is
+    /// `BANK_CONTRACT_DEFECTS` ([`Self::bank_contract_defects`]). Saturating, never reset.
+    pub(crate) bank_contract_defects_reclaimed: u64,
     /// The session's `source_frames_discarded` count (#1699 D1): the accepted source frames
     /// render never read because the caller's transaction removed or redeclared their source.
     /// [`Self::synchronize_plan_epochs`] adds each retired plan's unread frames before the plan is
@@ -4119,6 +4124,15 @@ where
                 .position(|provider| provider.epoch == retired_epoch.0)
                 .ok_or(CommandError::Internal)?;
             let reclaimed = self.retired_providers.remove(index);
+            // #2427: the reclaimed plan rendered its last block, so its defect totals are final;
+            // they move from the held epochs' sum into the reclaimed one, counted once.
+            self.bank_contract_defects_reclaimed =
+                self.bank_contract_defects_reclaimed.saturating_add(
+                    reclaimed
+                        .inventory
+                        .lane_swap_defects()
+                        .bank_contract_defects(),
+                );
             if let (
                 Some(ring),
                 Some(SessionMeters {
@@ -4603,8 +4617,9 @@ where
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
     /// controller's telemetry counters, the session's `live_values_superseded` count (#1312
     /// D8), its `strips_restarted` (#1768), `source_frames_discarded` (#1699) and
-    /// `meter_windows_lost` (#1583 D5) counts and the render-side `live_block_errors` (#1521 D3)
-    /// and `source_underrun_blocks` (#1537) mirrors.
+    /// `meter_windows_lost` (#1583 D5) counts, the render-side `live_block_errors` (#1521 D3)
+    /// and `source_underrun_blocks` (#1537) mirrors, and the plans' defect-path mirrors summed as
+    /// `bank_contract_defects` (#2427).
     /// A counter added later joins this refresh, never a single control call.
     fn refresh_provider_counters(&mut self) {
         let mut telemetry_counters = self.controller.queues().telemetry_counters();
@@ -4622,6 +4637,7 @@ where
             .meters
             .as_ref()
             .map_or(0, |meters| meters.windows_lost(rings));
+        let bank_contract_defects = self.bank_contract_defects();
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
@@ -4631,6 +4647,37 @@ where
         provider.set_source_underrun_blocks(underruns);
         provider.set_source_frames_discarded(discarded);
         provider.set_meter_windows_lost(meter_windows_lost);
+        provider.set_bank_contract_defects(bank_contract_defects);
+    }
+
+    /// The session's `BANK_CONTRACT_DEFECTS` (issue #2427, ruling
+    /// `docs/rulings/bank-contract-defect-counter-2026-11-09.md`): over every plan the session
+    /// adopted, the lane-swap recoveries and refused carry restores its render contained. The
+    /// reclaimed plans' final totals ([`Self::bank_contract_defects_reclaimed`]), then the defect
+    /// watch of the running epoch and of each parked one, whose plan render displaced and the
+    /// service step has not yet reclaimed: a plan's watch is read here until its reclaim adds it
+    /// to the reclaimed sum and drops the epoch, so no plan is counted twice or lost. A pending
+    /// epoch is not read: one render has not adopted holds no defect (asserted where a withdrawn
+    /// one drops), and one it has adopted is promoted by the service step of the first control
+    /// call after its adoption block, before this refresh, so its swap block's refused carry
+    /// counts from that call.
+    ///
+    /// **Lag.** Render stores each total on the defect path only, with a release store, before
+    /// the block publishes its active epoch, and this loads it with acquire, so the counter is
+    /// current by the first control call after the block that incurred the defect: every session
+    /// call runs the service step, whose refresh reads this. A healthy block stores nothing.
+    /// Allocates nothing; bounded by the held epochs.
+    fn bank_contract_defects(&self) -> u64 {
+        core::iter::once(&self.providers)
+            .chain(&self.retired_providers)
+            .fold(self.bank_contract_defects_reclaimed, |total, provider| {
+                total.saturating_add(
+                    provider
+                        .inventory
+                        .lane_swap_defects()
+                        .bank_contract_defects(),
+                )
+            })
     }
 
     /// Runs one control command frame. A success returns the response's length in the response
@@ -6879,6 +6926,13 @@ where
                     .pending_providers
                     .pop()
                     .expect("the withdrawn candidate is the newest pending epoch");
+                // #2427: render never adopted the withdrawn candidate, so its plan rendered no
+                // block and holds no defect; it drops uncounted.
+                debug_assert_eq!(
+                    donor.inventory.lane_swap_defects().bank_contract_defects(),
+                    0,
+                    "an unadopted plan has no render-time defect"
+                );
                 let mut donor_plan = candidate.into_plan();
                 if let Some(donation) = donation {
                     host_core::apply_donation(

@@ -1076,6 +1076,7 @@ dependencies = [
  "controls",
  "effect-contract",
  "engine",
+ "graph",
  "host-core",
  "loom",
  "math",

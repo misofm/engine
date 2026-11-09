@@ -7408,6 +7408,9 @@ struct EffectRun {
     superseded: u64,
     /// The successor's `carry_refusal_count()` after the swap block.
     refusals: u64,
+    /// The carry refusals total the successor's defect watch holds after the swap block (issue
+    /// #2427), as the control plane reads it.
+    mirrored: u64,
     /// Effect lanes the predecessor's inventory records.
     effect_lanes: usize,
     /// Bytes of effect state the swap block's carry passed through the payload scratch (#1282
@@ -7450,6 +7453,7 @@ fn effect_run_blocks(
     let mut swap_allocator = ((0, 0, 0), (0, 0));
     let mut superseded = 0;
     let mut refusals = 0;
+    let mut mirrored = 0;
     let mut payload_bytes = 0;
     plan.submit(feed, quantum, 0);
     for block in 0..blocks {
@@ -7492,6 +7496,11 @@ fn effect_run_blocks(
             superseded = successor.handles.live_values_superseded.get();
             refusals =
                 graph::carry_refusal_count(&mut successor.prepared.plan).expect("a graph plan");
+            mirrored = successor
+                .prepared
+                .inventory
+                .lane_swap_defects()
+                .carry_refusals();
             rendered.push(output.iter().map(|sample| sample.to_bits()).collect());
             plan = successor;
             continue;
@@ -7516,6 +7525,7 @@ fn effect_run_blocks(
         swap_allocator,
         superseded,
         refusals,
+        mirrored,
         effect_lanes,
         payload_bytes,
     }
@@ -8586,6 +8596,47 @@ fn a_bank_of_inserts_falls_apart_at_the_build_width() {
     let backend = Backend::current();
     for insert in [Insert::Compressor, Insert::Limiter] {
         an_insert_group_changes_form(backend, insert, false);
+    }
+}
+
+/// Issue #2427: a refused carry restore reaches the successor's defect watch as the plan's exact
+/// carry refusals total, on each of the carry's three refusing paths: a console lane into a
+/// console lane, a per-node insert into a bank lane, and a bank lane into a per-node insert. Two
+/// restores refuse on each (`graph::test_only_refuse_carry_restores` hands them an empty payload
+/// scratch, so the stage, or the per-node count, records a real refusal), and the hand-over still
+/// carries. The control plane sums these watches into `BANK_CONTRACT_DEFECTS`.
+///
+/// Test value: a refusing path that stores nothing (a host never sees a refused carry there), a
+/// store of the one refusal rather than the plan's total, or a total that leaves out the banks'
+/// refusals or the per-node ones.
+#[test]
+fn a_refused_carry_restore_reaches_the_defect_watch() {
+    let backend = Backend::current();
+    let feed = bursty_feed(SOURCE, 5);
+    let console = (
+        Session::compile(console_session(false, &["eq"])),
+        Session::compile(with_muted_track(console_session(false, &["eq"]))),
+    );
+    for (what, (a, b)) in [
+        ("console lane to lane", console),
+        (
+            "per node to bank",
+            form_pair(Insert::Compressor, backend, true),
+        ),
+        (
+            "bank to per node",
+            form_pair(Insert::Compressor, backend, false),
+        ),
+    ] {
+        graph::test_only_refuse_carry_restores(2);
+        let run = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
+        graph::test_only_refuse_carry_restores(0);
+        assert_eq!(run.carry, CarryOutcome::Carried, "{what}: the hand-over");
+        assert_eq!(
+            (run.refusals, run.mirrored),
+            (2, 2),
+            "{what}: the watch holds the plan's refusals total"
+        );
     }
 }
 

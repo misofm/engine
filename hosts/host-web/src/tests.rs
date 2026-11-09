@@ -3645,6 +3645,54 @@ fn the_counters_get_reply_counts_the_frames_a_source_removal_discards() {
     }
 }
 
+/// Issue #2427 parity row: `COUNTERS_GET` through the browser's control entry serves the refused
+/// carry restores of an adoption's swap block as `BANK_CONTRACT_DEFECTS`, at the first control
+/// call after that block. `graph::test_only_refuse_carry_restores` refuses two of the edit's
+/// console EQ restores in the nine-track session.
+///
+/// Test value: a browser host that never serves the value the control plane sums (it reads 0).
+#[test]
+fn the_counters_get_reply_counts_a_refused_carry_restore() {
+    const QUANTUM: u32 = 128;
+    let model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+    ))
+    .expect("accepted nine-track fixture");
+    let options = WebBootOptions {
+        require_sample_rate_hz: model.sample_rate_hz,
+        require_quantum_frames: QUANTUM,
+        ..WebBootOptions::explicit_defaults()
+    };
+    let document = canonical_session_json(&model).expect("canonical fixture");
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
+    let mut track = model.tracks[1].clone();
+    track.id = session::StableId::parse("eq9").expect("track id");
+    track.fader.left_mute = true;
+    track.fader.right_mute = true;
+    assert_eq!(host.render_next(), RESULT_OK);
+    apply_observe(&mut host, &[protocol::SessionEdit::UpsertTrack { track }])
+        .expect("the edit commits");
+    let committed = host.committed_revision();
+    graph::test_only_refuse_carry_restores(2);
+    for block in 0.. {
+        assert!(block < 64, "the edit is adopted");
+        assert_eq!(host.render_next(), RESULT_OK);
+        assert_eq!(host.read_watermark(), RESULT_OK);
+        if host.watermark().revision >= committed {
+            break;
+        }
+    }
+    graph::test_only_refuse_carry_restores(0);
+    assert_eq!(
+        served_counter(
+            &mut host,
+            next_request_id(),
+            protocol::CounterId::BankContractDefects
+        ),
+        2
+    );
+}
+
 #[test]
 fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
     let mut host = live_control_host(128, 2);

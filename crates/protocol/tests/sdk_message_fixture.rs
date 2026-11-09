@@ -127,6 +127,7 @@ fn counter_name(id: CounterId) -> &'static str {
         CounterId::SourceUnderrunBlocks => "sourceUnderrunBlocks",
         CounterId::SourceFramesDiscarded => "sourceFramesDiscarded",
         CounterId::MeterWindowsLost => "meterWindowsLost",
+        CounterId::BankContractDefects => "bankContractDefects",
     }
 }
 
