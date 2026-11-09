@@ -206,6 +206,37 @@ These are also the digests #2419 recorded. A healthy trade's only change is the 
 - #2427 (the counter) reads `PlanStateInventory::lane_swap_defects().recoveries()` per epoch and sums the retired ones: the signal this issue built.
 - A whole-carry refusal on the way home makes the inheritance rebuild once for nothing (decision 5). It is bounded at once per pair. Telling the two apart would need the carry outcome on the control side.
 
+### Verdict on attempt 1 (Sol, `14eec47ef`): PASS, minors only
+Seven minors, folded on the same branch after merging origin/main (#2425's ruling and its note on this spec are kept):
+1. The preparation read the base's residue twice, for the quarantine and for the restarts, while render raises flags concurrently.
+2. A retryable `Backpressure` refusal used up the epoch's one rebuild attempt.
+3. Mutant H7s (`if successor` -> `if false` in the inventory ceiling, which never charges a successor's quarantine and inherited rows) was untested.
+4. Mutant H6s (the order test swapped in `lane_swap_residue`'s merge) was untested.
+5. The watch's doc did not name the happens-before edge that makes a displaced plan's flags final at promotion.
+6. `publish_lane_swap_residue_rebuild` duplicated `monitor_rebuild`'s preamble; C7 (the `plan_alive` check dropped) must be red once it is shared.
+7. `service_step`'s "Bounded (D3)" doc did not say that a leading service step may prepare the residue rebuild, that a following transaction supersedes it, and what that does to the next structural edit.
+
+### Fold (Terra), same branch, with origin/main merged
+1. **One snapshot.** `prepare_or_project` reads `base.inventory.lane_swap_residue()` once, after the warm lead is known, into a sorted, deduplicated `lane_swap_residue`. The quarantine and the restarts both use it, so they agree, and a strip flagged after it is inherited at promotion. No test can place a raise between the two old reads (both are inside one preparation call), so this is a construction fix with no mutant.
+2. **Backpressure re-arms.**
+   - The attempt is now keyed on `(running epoch, the watch's recoveries total, plans_reclaimed)`. `SessionState::plans_reclaimed` counts each displaced plan `synchronize_plan_epochs` reclaims.
+   - So a refused rebuild is retried after a new plan runs (residue is inherited only at a promotion), a new defect is recovered, or a displaced plan is reclaimed, which frees what a `Backpressure` refusal waits for. It is never retried at every call.
+   - The recoveries total replaces attempt 1's residue count, which needed the merge to be distinct (item 4).
+   - New test `a_backpressured_rebuild_is_retried_after_a_reclaim`. It holds reclamation (`test_hold_reclamation`) across an edit's adoption, strands a trade, and injects an `AfterAdmission` fault (`Backpressure`). It expects one refusal, not retried over four blocks; then the hold is released and the reclaim retries and publishes.
+3. **The successor's quarantine charge is tested.** `a_session_with_no_route_slack_boots_with_its_defect_watch_charged` becomes `a_session_with_no_route_slack_charges_its_defect_watch_and_quarantine`. After the routeless boot it strands four pairs (`Rig::strand_positions`, by group position, so it holds at any bank width) and requires the rebuild that quarantines eight strips to be admitted and adopted.
+4. **No merge.** `lane_swap_residue` is now the flagged strips chained with the inherited ones. A strip in both is named twice, and every reader collects a sorted, deduplicated set or asks only whether it is empty. `lane_swap_residue_count` is gone, and the attempt key no longer counts strips, so nothing depends on order or distinctness.
+5. **Happens-before, in `GraphLaneSwapDefectWatch`'s doc.** A flag a block raises (the carry's way home in the adoption block included) is stored before that block's render publishes its epoch: `control-plane` `PlanState::render`'s release store of `active_epoch` (plan.rs 409). `synchronize_plan_epochs` loads it with acquire (control.rs 4091) before it promotes, so the promotion's `inherit_lane_swap_residue` reads final flags.
+6. **One preamble.** `SessionState::committed_rebuild_parts` (plan alive, revision in range, the committed model's copy, the unchanged overlay and subscription changes) is shared by `monitor_rebuild` and `publish_lane_swap_residue_rebuild`.
+7. **`service_step`'s doc.**
+   - The step prepares at most one plan: the deadline step's transition or the residue rebuild, only while nothing is pending.
+   - Every session call runs the step first, so a call that finds residue publishes the residue rebuild before its own work.
+   - A following structural transaction supersedes it: that submit prepares twice, and `lane_swap_rebuilds` counts the withdrawn rebuild as published.
+   - While that rebuild is pending, its duck is in the transaction's base, so a growth that would be prepared warm takes the transition fallback (a duck).
+
+FOLD_MUT
+
+FOLD_GATES
+
 ## Notes from #2419's review
 - **The carry's way home bypasses pins.** `Runtime::restore_home_lanes` (graph runtime.rs ~11665-11699) trades through `swap_bank_lanes` and does not read pins. It runs on the predecessor at carry (graph lib.rs ~7908). A pinned strip that is still off its home lane is traded again there, can hit the same defect, and then refuses the whole carry (`CarryOutcome::PredecessorMismatch`), so the replacement starts with nothing carried. This issue must decide how that is handled: restore skips or tolerates pinned strips, or a refused carry is accepted and counted. State the bound including this path.
 - **The bound counts trades, not counter increments.** At most n/2 defect-hitting trades per group of n strips per plan, from the packer, plus the carry path above. One trade can add `1 + 2·split rows` to `lane_swap_defect_count`, so the counter can exceed n/2.

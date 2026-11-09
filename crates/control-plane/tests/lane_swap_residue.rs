@@ -194,6 +194,11 @@ impl Rig {
         Self::of(&document, revision)
     }
 
+    /// The session and its render half, apart, for a test that drops the render half.
+    fn into_parts(self) -> (SessionState<Adapter>, PlanState<Adapter>) {
+        (self.session, self.plan)
+    }
+
     /// The rig of session `document`, at `revision`.
     fn of(document: &str, revision: u64) -> Self {
         let CompiledChildren { session, plan } =
@@ -744,4 +749,24 @@ fn a_backpressured_rebuild_is_retried_after_a_reclaim() {
     );
     rig.render_until_past(before);
     assert_eq!(rig.responses(), own);
+}
+
+/// A residue rebuild whose render half is gone is refused (`Backpressure`) before anything is
+/// prepared: no plan will render a successor.
+///
+/// Test value: a rebuild preamble that skips the plan's liveness, so the service step prepares
+/// and publishes a successor for a render half that no longer exists.
+#[test]
+fn a_rebuild_for_a_dropped_render_half_is_refused() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    rig.strand_trade();
+    let (mut session, plan) = rig.into_parts();
+    drop(plan);
+    session.service().expect("service");
+    assert_eq!(
+        session.lane_swap_rebuilds(),
+        (0, 1),
+        "refused, with nothing published"
+    );
 }
