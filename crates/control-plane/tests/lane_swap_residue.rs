@@ -14,6 +14,10 @@
 //! packer's own move) hits it. The rack resets both lanes to the defaults they then hold, the
 //! graph pins both strips and raises its defect watch, and each strip renders with the other's
 //! defaults: its composed response is the other strip's.
+//!
+//! Issue #2427: the same defects reach `CounterId::BankContractDefects`, summed from every
+//! adopted plan's defect watch, as does a refused carry restore, which
+//! `graph::test_only_refuse_carry_restores` makes at an adoption's swap block.
 #![cfg(feature = "test-support")]
 
 use control_plane::{
@@ -300,6 +304,22 @@ impl Rig {
             .find(|counter| counter.id == protocol::CounterId::StripsRestarted)
             .expect("the counter")
             .value
+    }
+
+    /// The session's `BankContractDefects` counter (issue #2427), as the last control call left it.
+    fn bank_contract_defects(&mut self) -> u64 {
+        self.session
+            .test_provider_counters()
+            .iter()
+            .find(|counter| counter.id == protocol::CounterId::BankContractDefects)
+            .expect("the counter")
+            .value
+    }
+
+    /// Whether the session holds no plan but the running one: every displaced plan reclaimed.
+    fn only_the_running_plan(&self) -> bool {
+        self.session.test_retired_providers().is_empty()
+            && self.session.test_pending_providers().is_empty()
     }
 
     /// Remove `eq1` and its route, render until the edit's plan is adopted, then 16 blocks more;
@@ -768,5 +788,103 @@ fn a_rebuild_for_a_dropped_render_half_is_refused() {
         session.lane_swap_rebuilds(),
         (0, 1),
         "refused, with nothing published"
+    );
+}
+
+/// Issue #2427: every lane-swap recovery reaches `BankContractDefects` at the first control call
+/// after it and is counted once over its plan's life: a strand on the running plan counts 1 at
+/// the next service call; render adopts the residue rebuild under a reclamation hold, so the
+/// displaced plan is parked and still counts 1; its reclaim keeps the 1; a strand on the
+/// successor counts 2. Each value is `graph::lane_swap_defect_count` summed over the adopted
+/// plans.
+///
+/// Test value: a counter that lags past the next control call (a plan read only at its reclaim),
+/// one that double-counts a plan across its reclaim or drops it there, or one that skips a
+/// parked plan (the counter falls between a promotion and the reclaim).
+#[test]
+fn every_lane_swap_recovery_is_counted_once_over_its_plan_life() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    assert_eq!(rig.bank_contract_defects(), 0, "0 from construction");
+    let before = rig.epoch();
+    rig.strand_trade();
+    rig.session.service().expect("service");
+    assert_eq!(
+        rig.bank_contract_defects(),
+        1,
+        "the strand, at the first control call after it"
+    );
+    control_plane::test_hold_reclamation(true);
+    rig.render_until_past(before);
+    rig.session.service().expect("service");
+    assert!(
+        !rig.session.test_retired_providers().is_empty(),
+        "the displaced plan is parked"
+    );
+    assert_eq!(rig.bank_contract_defects(), 1, "the parked plan counts");
+    control_plane::test_hold_reclamation(false);
+    rig.block();
+    rig.session.service().expect("service");
+    assert!(
+        rig.only_the_running_plan(),
+        "the displaced plan is reclaimed"
+    );
+    assert_eq!(graph::lane_swap_defect_count(rig.active()), Some(0));
+    assert_eq!(
+        rig.bank_contract_defects(),
+        1,
+        "the reclaimed plan's recovery, once"
+    );
+    rig.strand_positions(2, 3);
+    rig.session.service().expect("service");
+    assert_eq!(
+        rig.bank_contract_defects(),
+        2,
+        "the reclaimed plan's and the running one's"
+    );
+}
+
+/// Issue #2427: a refused carry restore at an adoption's swap block reaches `BankContractDefects`
+/// at the first control call after that block, with `graph::carry_refusal_count`'s total for the
+/// plan, and stays counted once after a later edit's successor displaces the plan and its reclaim
+/// drops it. Two restores refuse, so a store of the one refusal reads 1.
+///
+/// Test value: a counter that misses the carry total, takes one refusal for the plan's total, or
+/// loses a plan's refusals at its reclaim.
+#[test]
+fn a_refused_carry_restore_is_counted_once_over_its_plan_life() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let before = rig.epoch();
+    rig.transact(&[muted_track("eq9")]);
+    graph::test_only_refuse_carry_restores(2);
+    rig.render_until_past(before);
+    graph::test_only_refuse_carry_restores(0);
+    assert_eq!(
+        graph::carry_refusal_count(rig.active()),
+        Some(2),
+        "the adoption refused two restores"
+    );
+    assert_eq!(
+        rig.bank_contract_defects(),
+        2,
+        "the plan's carry refusals, at the first control call after its swap block"
+    );
+    let before = rig.epoch();
+    rig.transact(&[SessionEdit::RemoveTrack {
+        track_id: id("eq9"),
+    }]);
+    rig.render_until_past(before);
+    rig.block();
+    rig.session.service().expect("service");
+    assert!(
+        rig.only_the_running_plan(),
+        "the refusing plan is reclaimed"
+    );
+    assert_eq!(graph::carry_refusal_count(rig.active()), Some(0));
+    assert_eq!(
+        rig.bank_contract_defects(),
+        2,
+        "the reclaimed plan's refusals, once"
     );
 }

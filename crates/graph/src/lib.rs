@@ -23,14 +23,15 @@ pub use runtime::{
     test_only_bank_meter_passes, test_only_bank_sample_peak_passes, test_only_carry_payload_bytes,
     test_only_disable_bank_skip, test_only_disable_lane_packing, test_only_meter_input_counts,
     test_only_meter_input_reset, test_only_observation_dispatch_counts,
-    test_only_observation_dispatch_reset, test_only_reset_carry_payload_bytes,
-    test_only_resident_input_counts, test_only_resident_input_reset,
-    test_only_route_activity_built, test_only_route_drain_calls, test_only_route_drain_snapshots,
-    test_only_route_drained_counts, test_only_route_mix_counts, test_only_route_mix_reset,
-    test_only_set_bank_meter_declined, test_only_set_bank_sample_peak_declined,
-    test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
-    test_only_set_source_in_place_declined, test_only_source_plane_counts,
-    test_only_source_plane_reset, test_only_state_every_silence_fact,
+    test_only_observation_dispatch_reset, test_only_refuse_carry_restores,
+    test_only_reset_carry_payload_bytes, test_only_resident_input_counts,
+    test_only_resident_input_reset, test_only_route_activity_built, test_only_route_drain_calls,
+    test_only_route_drain_snapshots, test_only_route_drained_counts, test_only_route_mix_counts,
+    test_only_route_mix_reset, test_only_set_bank_meter_declined,
+    test_only_set_bank_sample_peak_declined, test_only_set_route_fold_declined,
+    test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
+    test_only_source_plane_counts, test_only_source_plane_reset,
+    test_only_state_every_silence_fact,
 };
 
 use core::cell::Cell;
@@ -4897,7 +4898,15 @@ impl Eq for GraphFadeArmWatch {}
 ///
 /// Render is the only writer and stores only on the defect path, so a healthy block runs no new
 /// instruction; each store is a release store with no lock. Made at bind with one flag per
-/// distinct track of the plan's pack groups, sorted; empty for a plan with no pack group.
+/// distinct track of the plan's pack groups, sorted (none for a plan with no pack group).
+///
+/// **The plan's bank-contract defects (issue #2427).** The same table holds the plan's carry
+/// refusals total ([`carry_refusal_count`]), which the carry's refused-restore path stores at the
+/// swap block, and nowhere else: every graph plan's watch has the table, so a plan with no pack
+/// group still reports its refused carry. [`Self::bank_contract_defects`] is the two totals'
+/// sum, the plan's share of `protocol::CounterId::BankContractDefects` (ruling
+/// `docs/rulings/bank-contract-defect-counter-2026-11-09.md`); the control plane reads it at each
+/// counter refresh, so the counter is current by the first control call after the defect's block.
 ///
 /// **When a displaced plan's flags are final (issue #2424).** A flag a block raises, the carry's
 /// way home in the adoption block included, is stored before that block's render publishes its
@@ -4919,15 +4928,15 @@ struct LaneSwapDefectCells {
     flags: Box<[core::sync::atomic::AtomicBool]>,
     /// The plan's lane-swap recoveries total ([`lane_swap_defect_count`]) at the last raise.
     recoveries: core::sync::atomic::AtomicU64,
+    /// The plan's carry refusals total ([`carry_refusal_count`]) at the last refused restore
+    /// (issue #2427).
+    carry_refusals: core::sync::atomic::AtomicU64,
 }
 
 impl GraphLaneSwapDefectWatch {
-    /// A watch over the distinct, sorted tracks `strips`; the empty watch when there is none.
-    /// Bind-time: allocates.
+    /// A watch over the distinct, sorted tracks `strips`, none for a plan with no pack group: the
+    /// table is made either way, for the plan's totals (issue #2427). Bind-time: allocates.
     pub(crate) fn new(strips: Box<[Box<str>]>) -> Self {
-        if strips.is_empty() {
-            return Self::default();
-        }
         let flags = strips
             .iter()
             .map(|_| core::sync::atomic::AtomicBool::new(false))
@@ -4936,6 +4945,7 @@ impl GraphLaneSwapDefectWatch {
             strips,
             flags,
             recoveries: core::sync::atomic::AtomicU64::new(0),
+            carry_refusals: core::sync::atomic::AtomicU64::new(0),
         })))
     }
 
@@ -4967,6 +4977,16 @@ impl GraphLaneSwapDefectWatch {
             .recoveries
             .store(recoveries, core::sync::atomic::Ordering::Release);
     }
+
+    /// Store the plan's carry `refusals` total (issue #2427). Render-thread code, on the carry's
+    /// refused-restore path only: one release store (render is the only writer).
+    pub(crate) fn store_carry_refusals(&self, refusals: u64) {
+        if let Some(cells) = self.0.as_deref() {
+            cells
+                .carry_refusals
+                .store(refusals, core::sync::atomic::Ordering::Release);
+        }
+    }
     // REALTIME_POLICY_END
 
     /// The tracks whose trades hit a lane-swap defect, sorted: each holds residue of the strip it
@@ -4980,6 +5000,16 @@ impl GraphLaneSwapDefectWatch {
                 .filter(|(_, flag)| flag.load(core::sync::atomic::Ordering::Acquire))
                 .map(|(strip, _)| &**strip)
         })
+    }
+
+    /// Test-only (issue #2427): the watch bind makes over the distinct, sorted tracks `strips`,
+    /// none for a plan with no pack group, so a test can hold [`Self::heap_bytes`] to the
+    /// allocator.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_new(strips: Box<[Box<str>]>) -> Self {
+        Self::new(strips)
     }
 
     /// Test-only (issue #2424): raise track `strip`'s flag as render's defect path would, from
@@ -5003,8 +5033,27 @@ impl GraphLaneSwapDefectWatch {
         })
     }
 
+    /// The plan's carry refusals total ([`carry_refusal_count`]) as render last stored it on the
+    /// refused-restore path (issue #2427): 0 until a refusal. Any thread.
+    #[must_use]
+    pub fn carry_refusals(&self) -> u64 {
+        self.0.as_deref().map_or(0, |cells| {
+            cells
+                .carry_refusals
+                .load(core::sync::atomic::Ordering::Acquire)
+        })
+    }
+
+    /// The plan's bank-contract defects (issue #2427): [`Self::recoveries`] plus
+    /// [`Self::carry_refusals`], saturating, what this plan adds to
+    /// `protocol::CounterId::BankContractDefects`. 0 in a correct build. Any thread.
+    #[must_use]
+    pub fn bank_contract_defects(&self) -> u64 {
+        self.recoveries().saturating_add(self.carry_refusals())
+    }
+
     /// Heap bytes the watch holds: the shared allocation (its two reference counts, the table
-    /// headers and the total), the flags and the names; none for the empty watch.
+    /// headers and the totals), the flags and the names; none for the empty watch.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
         self.0.as_deref().map_or(0, |cells| {
@@ -5018,12 +5067,10 @@ impl GraphLaneSwapDefectWatch {
 
 /// The heap bytes of a [`GraphLaneSwapDefectWatch`] over `strips` tracks whose IDs total
 /// `id_bytes` (issue #2424): what [`GraphLaneSwapDefectWatch::heap_bytes`] reports, and so the
-/// ceiling a preparation charges for a plan of at most that many strips. 0 for no strip.
+/// ceiling a preparation charges for a plan of at most that many strips. A graph plan's watch has
+/// its table even with no strip, for the plan's totals (issue #2427).
 #[must_use]
 pub const fn lane_swap_defect_watch_bytes(strips: usize, id_bytes: usize) -> usize {
-    if strips == 0 {
-        return 0;
-    }
     WATCH_HEADER_BYTES
         + core::mem::size_of::<LaneSwapDefectCells>()
         + strips
@@ -5298,7 +5345,10 @@ pub fn effect_carry_retained_bytes(
 /// other plan.
 ///
 /// Read after render, by whoever holds the plan: an own payload is never refused (#1278), so a
-/// nonzero count is a defect. Named like `RealtimePlanOwner::carry_mismatch_count`.
+/// nonzero count is a defect. Named like `RealtimePlanOwner::carry_mismatch_count`. A host reads
+/// it as part of `protocol::CounterId::BankContractDefects` (issue #2427, ruling
+/// `docs/rulings/bank-contract-defect-counter-2026-11-09.md`), through the plan's
+/// [`GraphLaneSwapDefectWatch::carry_refusals`].
 pub fn carry_refusal_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
     let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
     Some(
@@ -5318,7 +5368,10 @@ pub fn carry_refusal_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
 ///
 /// Read after render, by whoever holds the plan, beside [`carry_refusal_count`]: a bank that
 /// keeps its lane-swap contract never strands, so a nonzero count is a defect, and a plan
-/// rebuild prepares the lanes fresh.
+/// rebuild prepares the lanes fresh. A host reads it as part of
+/// `protocol::CounterId::BankContractDefects` (issue #2427, ruling
+/// `docs/rulings/bank-contract-defect-counter-2026-11-09.md`), through the plan's
+/// [`GraphLaneSwapDefectWatch::recoveries`].
 pub fn lane_swap_defect_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
     let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
     Some(executor.runtime.lane_swap_defect_count())

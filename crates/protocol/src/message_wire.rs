@@ -1126,6 +1126,11 @@ pub enum CounterId {
     SourceFramesDiscarded = 21,
     /// Meter windows that never reached a `METER_BATCH` (#1583 D5).
     MeterWindowsLost = 22,
+    /// The bank-contract defects the engine contained over every plan the session adopted
+    /// (#2427, ruling `docs/rulings/bank-contract-defect-counter-2026-11-09.md`): one count is
+    /// one lane-swap recovery (a strand, a split slot or a split row's reset, #2419) or one
+    /// refused carry restore (#1279 D6). 0 in a correct build; non-resetting.
+    BankContractDefects = 23,
 }
 
 /// What a meter table entry measures (#1583 D1, #1690 D3): the session output, a strip by its
@@ -2617,6 +2622,7 @@ fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
         20 => Ok(CounterId::SourceUnderrunBlocks),
         21 => Ok(CounterId::SourceFramesDiscarded),
         22 => Ok(CounterId::MeterWindowsLost),
+        23 => Ok(CounterId::BankContractDefects),
         _ => Err(DecodeError::InvalidField),
     }
 }

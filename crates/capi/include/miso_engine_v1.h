@@ -449,7 +449,11 @@ extern "C" {
  * loses the frames of every ring it did not move, and those frames are counted too. Frames render
  * played, a ring discarded by session destroy and the
  * rings of a withdrawn replacement (never fed: such a transaction is refused) are not counted; it
- * never resets. A rejected source
+ * never resets. The counter BANK_CONTRACT_DEFECTS (protocol counter 23, read with COUNTERS_GET or
+ * a configured COUNTER_SNAPSHOT) counts, over every plan the session adopted, the effect-bank
+ * defects render contained: each lane-swap recovery and each refused carry restore; it is current
+ * by the first session call after the block, a nonzero value is an engine defect, and it never
+ * resets. A rejected source
  * submission or seek likewise names the rule it broke ("source.region.outside",
  * "source.generation.stale", "source.channels.mismatch", ...). A null, empty, non-UTF-8 or
  * over-127-byte source ID on submit, seek, seek_at or seek_report is

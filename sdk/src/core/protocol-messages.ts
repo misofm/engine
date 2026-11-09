@@ -111,6 +111,7 @@ export const COUNTER_IDS = Object.freeze([
   { name: "sourceUnderrunBlocks", code: 20 },
   { name: "sourceFramesDiscarded", code: 21 },
   { name: "meterWindowsLost", code: 22 },
+  { name: "bankContractDefects", code: 23 },
 ] as const);
 
 /** A protocol counter, by name. */

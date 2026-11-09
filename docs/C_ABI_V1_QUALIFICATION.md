@@ -646,11 +646,11 @@ response would exceed the endpoint's response bound (the page then is not the en
 `AUTOMATION_ENQUEUE` (`0x0006`) is retired (#1627): the C ABI refuses a frame under that ID at decode (`INVALID_ARGUMENT`, nothing written and no state moved), and `CAPABILITIES_GET` lists no command `0x0006`, clears flag bit 5 and has no capability fields 9, 12, 19 and 20 (23 fields). Sample-timed changes are stored automation edits. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. The nine provider-owned counters (the two telemetry
+provider's counter and diagnostic pages. The ten provider-owned counters (the two telemetry
 counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSEDED` 16, #1312 D8,
 `TRANSITION_REPREPARE_REFUSALS` 17, #1351 D6, `STRIPS_RESTARTED` 18, #1768,
 `LIVE_BLOCK_ERRORS` 19, #1521, `SOURCE_UNDERRUN_BLOCKS` 20, #1537, `SOURCE_FRAMES_DISCARDED`
-21, #1699, and `METER_WINDOWS_LOST` 22, #1583) retain an independent nine-slot minimum even when
+21, #1699, `METER_WINDOWS_LOST` 22, #1583, and `BANK_CONTRACT_DEFECTS` 23, #2427) retain an independent ten-slot minimum even when
 the frame-derived telemetry configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
 queue (#1629).
 
@@ -711,8 +711,8 @@ A coalesced batch is counted by `TELEMETRY_COALESCED`, as any lossy record. The 
 peak (#1570a) is gone (#1583 D6). The strip-ID text of the stored tables is charged to
 `capi_retained_bytes` at the 128 entries an accepted table can hold, 127 bytes each, twice.
 
-**Served counters and the counter snapshot (#1351).** The provider serves exactly those nine
-counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all nine and a read of
+**Served counters and the counter snapshot (#1351).** The provider serves exactly those ten
+counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all ten and a read of
 any of them is never `NOT_FOUND`. `STRIPS_RESTARTED` adds, for each replacement plan render
 adopted, the strips that plan started at rest, each once; the control plane adds it when it
 promotes the adopted plan, so a withdrawn candidate adds nothing (#1768). `LIVE_BLOCK_ERRORS`
@@ -723,7 +723,12 @@ it owed (graph-wide; a held block and a block past the end of a region are not c
 service step copies the render-side mirror in, on both hosts (#1537). `SOURCE_FRAMES_DISCARDED`
 counts the accepted source frames render never read because the caller's transaction removed or
 redeclared the source, or a failed carry could not move; the service step adds them when it
-reclaims the displaced plan (#1699). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
+reclaims the displaced plan (#1699). `BANK_CONTRACT_DEFECTS` counts, over every plan the session
+adopted, the effect-bank defects render contained, each lane-swap recovery and each refused carry
+restore: render stores each plan's totals on the defect path only, and the service step sums the
+running and parked plans' with the totals of every plan it reclaimed, so the counter is current by
+the first session call after the block and stays 0 in a correct build (#2427, ruling
+`docs/rulings/bank-contract-defect-counter-2026-11-09.md`). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
 `MALFORMED_FRAMES`) is `NOT_FOUND`, and the stored configuration does not change. `TRANSITION_REPREPARE_REFUSALS`
 is protocol counter 17; nothing writes a nonzero value until #1360. The periodic `COUNTER_SNAPSHOT`
 event (`0x8021`) reports, for each configured ID in order, the value after the service step's first
@@ -733,6 +738,14 @@ since the last one (a configuration counts its period from the call that accepte
 sample at that point; blocks rendered with no control call between them yield one snapshot at the
 next call, and skipped periods are not replayed. The lane is lossy: the lossy queue may keep only part
 of a snapshot.
+- **Resource movement (#2427).** Every graph plan's defect watch now makes its table, also for a
+  plan with no pack group, which charged nothing before: the shared allocation's header and its
+  cells, 64 bytes on x86-64, in the plan's state inventory and so in `capi_retained_bytes`. A
+  plan with a pack group charges 8 bytes more, the carry refusals total beside its recoveries.
+  The provider's counter snapshot holds one more slot (its ten-slot minimum). A caller that sets
+  `maximum_capi_retained_bytes` to an exact figure measured before #2427 must raise it by these
+  bytes; no symbol, struct or feature bit is added.
+
 Candidate catalogs allocate before structural commit and are included in double-live resource
 admission. Host-core's default feature graph remains protocol-free; only capi enables the optional
 `control-provider` edge.

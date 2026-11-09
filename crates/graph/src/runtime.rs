@@ -59,6 +59,7 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_BANK_METER_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static TEST_ONLY_CARRY_PAYLOAD_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_ONLY_REFUSED_CARRY_RESTORES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static TEST_ONLY_BANK_SKIP_DISABLED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_LANE_PACKING_DISABLED: std::cell::Cell<bool> =
@@ -117,6 +118,29 @@ pub fn test_only_carry_payload_bytes() -> u64 {
 #[inline]
 fn test_only_note_carry_payload(bytes: u64) {
     TEST_ONLY_CARRY_PAYLOAD_BYTES.with(|value| value.set(value.get().saturating_add(bytes)));
+}
+
+/// Test-only (issue #2427): the next `count` effect-lane restores a plan swap's carry runs on this
+/// thread are refused, as a restore that refuses a payload is (#1279 D6): the carry hands the
+/// stage, or the per-node instance, an empty payload scratch, so the stage's own check refuses
+/// and counts it, the lane stays as prepared and the plan's [`crate::carry_refusal_count`] and
+/// defect watch see a real refusal. A host-level test drives a refused carry through it.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_refuse_carry_restores(count: u32) {
+    TEST_ONLY_REFUSED_CARRY_RESTORES.with(|left| left.set(count));
+}
+
+/// The payload scratch the carry's next restore takes: `scratch`, or none while
+/// [`test_only_refuse_carry_restores`] has restores left to refuse (issue #2427).
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_carry_scratch(scratch: &mut [u8]) -> &mut [u8] {
+    let refuse = TEST_ONLY_REFUSED_CARRY_RESTORES.with(|left| {
+        let refuse = left.get() > 0;
+        left.set(left.get().saturating_sub(1));
+        refuse
+    });
+    if refuse { &mut [] } else { scratch }
 }
 
 /// Decline (`true`) or restore (`false`) the banked sample-peak pass of issue #943, and reset its
@@ -8290,6 +8314,14 @@ impl crate::runtime::Runtime {
     /// (D6), and this returns the count of per-node instances that refused, which have no stage to
     /// count them. A refused lane carries no agreement, being at rest.
     ///
+    /// **The defect watch (issue #2427).** Each refusal, and only a refusal, stores the plan's
+    /// carry refusals total in its defect watch: `bank_refused`, the refusals the successor's
+    /// bank stages counted in this carry (a checked pair's restore counts each `false` it
+    /// returns), plus `node_refused`. A plan takes its predecessor once, at its swap block, and
+    /// its stages and executor count nothing before it, so the stored total is
+    /// [`crate::carry_refusal_count`]'s. O(1) per refusal; a carry that refuses nothing runs no
+    /// new instruction.
+    ///
     /// The pending `Observe` records of every moved predecessor instance are applied to its tap
     /// as its next block would have (#1280 D3), at `predecessor_next_sample`, after the first loop
     /// has moved every state: that loop marks each predecessor instance it resolves, and one call,
@@ -8308,6 +8340,7 @@ impl crate::runtime::Runtime {
         use crate::GraphEffectSite::{Lane, Node};
         let mut disengaged: Option<u32> = None;
         let mut node_refused = 0_u64;
+        let mut bank_refused = 0_u64;
         let mut tap_cursor = 0_usize;
         for (index, step) in moves.iter().enumerate() {
             match (step.successor, step.predecessor) {
@@ -8335,9 +8368,17 @@ impl crate::runtime::Runtime {
                     };
                     #[cfg(any(test, feature = "test-support"))]
                     test_only_note_carry_payload(into.layout().payload_bytes());
+                    #[cfg(any(test, feature = "test-support"))]
+                    let scratch = test_only_carry_scratch(scratch);
                     if into.carry_lane_from(lane, &from, predecessor_lane, scratch) {
                         chain.inherit_channel_agreement(agree);
                         mark_effect_move_taken(taps, &mut tap_cursor, index);
+                    } else {
+                        // Issue #2427: the refused-restore path, and only it, mirrors the total.
+                        bank_refused = bank_refused.saturating_add(1);
+                        self.lane_map
+                            .defects
+                            .store_carry_refusals(bank_refused.saturating_add(node_refused));
                     }
                 }
                 (Lane(successor), Node(before)) => {
@@ -8352,8 +8393,16 @@ impl crate::runtime::Runtime {
                     if let Some(EffectStageMut::Live(into)) = effect_stage_mut(chain, slot) {
                         #[cfg(any(test, feature = "test-support"))]
                         test_only_note_carry_payload(into.layout().payload_bytes());
+                        #[cfg(any(test, feature = "test-support"))]
+                        let scratch = test_only_carry_scratch(scratch);
                         if into.carry_lane_from_instance(lane, node.instance(), scratch) {
                             mark_effect_move_taken(taps, &mut tap_cursor, index);
+                        } else {
+                            // Issue #2427: the refused-restore path mirrors the total.
+                            bank_refused = bank_refused.saturating_add(1);
+                            self.lane_map
+                                .defects
+                                .store_carry_refusals(bank_refused.saturating_add(node_refused));
                         }
                     }
                 }
@@ -8382,6 +8431,8 @@ impl crate::runtime::Runtime {
                         *agree = false;
                     }
                     if let EffectStageMut::Live(stage) = &from {
+                        #[cfg(any(test, feature = "test-support"))]
+                        let scratch = test_only_carry_scratch(scratch);
                         if stage.carry_lane_into_instance(
                             predecessor_lane,
                             node.instance_mut(),
@@ -8390,6 +8441,10 @@ impl crate::runtime::Runtime {
                             mark_effect_move_taken(taps, &mut tap_cursor, index);
                         } else {
                             node_refused = node_refused.saturating_add(1);
+                            // Issue #2427: the refused-restore path mirrors the total.
+                            self.lane_map
+                                .defects
+                                .store_carry_refusals(bank_refused.saturating_add(node_refused));
                         }
                     }
                 }

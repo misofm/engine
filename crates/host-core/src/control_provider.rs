@@ -33,9 +33,9 @@ use crate::response::{
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
 /// counters, `live_values_superseded` (#1312 D8), `transition_reprepare_refusals` (D6),
 /// `strips_restarted` (#1768), `live_block_errors` (#1521), `source_underrun_blocks` (#1537),
-/// `source_frames_discarded` (#1699) and `meter_windows_lost` (#1583 D5). Each reads 0 from
-/// construction.
-const SERVED_COUNTERS: [CounterId; 9] = [
+/// `source_frames_discarded` (#1699), `meter_windows_lost` (#1583 D5) and
+/// `bank_contract_defects` (#2427). Each reads 0 from construction.
+const SERVED_COUNTERS: [CounterId; 10] = [
     CounterId::TelemetryCoalesced,
     CounterId::TelemetryDropped,
     CounterId::LiveValuesSuperseded,
@@ -45,6 +45,7 @@ const SERVED_COUNTERS: [CounterId; 9] = [
     CounterId::SourceUnderrunBlocks,
     CounterId::SourceFramesDiscarded,
     CounterId::MeterWindowsLost,
+    CounterId::BankContractDefects,
 ];
 
 /// The slots the provider's counter snapshot keeps even when the controller retains fewer IDs.
@@ -754,6 +755,17 @@ impl SessionControlProvider {
         set_counter(
             &mut self.counter_snapshot,
             CounterId::MeterWindowsLost,
+            count,
+        );
+    }
+
+    /// Record the session's bank-contract defects (#2427): the lane-swap recoveries and the refused
+    /// carry restores of every plan the session adopted, which the control plane sums from each
+    /// plan's defect watch. It stays 0 in a correct build.
+    pub fn set_bank_contract_defects(&mut self, count: u64) {
+        set_counter(
+            &mut self.counter_snapshot,
+            CounterId::BankContractDefects,
             count,
         );
     }
@@ -4441,6 +4453,7 @@ mod tests {
         provider.set_source_underrun_blocks(19);
         provider.set_source_frames_discarded(23);
         provider.set_meter_windows_lost(29);
+        provider.set_bank_contract_defects(31);
         let counters = provider
             .counters(&CountersRequest {
                 all: true,
@@ -4467,7 +4480,9 @@ mod tests {
         assert_eq!(counters.values[7].value, 23);
         assert_eq!(counters.values[8].id, CounterId::MeterWindowsLost);
         assert_eq!(counters.values[8].value, 29);
-        assert_eq!(counters.values.len(), 9);
+        assert_eq!(counters.values[9].id, CounterId::BankContractDefects);
+        assert_eq!(counters.values[9].value, 31);
+        assert_eq!(counters.values.len(), 10);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

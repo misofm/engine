@@ -949,8 +949,8 @@ impl PlanStateInventory {
         self.lane_swap_residue().next().is_some()
     }
 
-    /// The plan's lane-swap defect watch (issue #2424), shared with render: its flags and its
-    /// recoveries total, read while the plan renders.
+    /// The plan's lane-swap defect watch (issue #2424), shared with render: its flags, its
+    /// recoveries total and its carry refusals total (issue #2427), read while the plan renders.
     #[must_use]
     pub const fn lane_swap_defects(&self) -> &graph::GraphLaneSwapDefectWatch {
         &self.lane_swap_defects
@@ -1096,7 +1096,8 @@ pub struct PlanStateInventory {
     fade_watch: graph::GraphFadeArmWatch,
     /// Which of this plan's grouped strips a lane-swap defect reached at render, and its recoveries
     /// total (issue #2424): the plan's own watch, shared with render. A successor restarts each
-    /// flagged strip ([`Self::lane_swap_residue`]).
+    /// flagged strip ([`Self::lane_swap_residue`]). It also holds the plan's carry refusals total,
+    /// and the control plane reads the two as the plan's bank-contract defects (issue #2427).
     lane_swap_defects: graph::GraphLaneSwapDefectWatch,
     /// The strips this plan pins for a lane-swap defect (issue #2424), sorted: its base's own and
     /// its base's residue at preparation, each a strip of this plan's model. Every successor pins
@@ -10441,9 +10442,14 @@ fn projected_inventory_bytes(
     // more (a pack group is two peer chains of one strip or more each); and a successor's
     // quarantine and inherited residue, each at most every strip, distinct, with their ID text (a
     // plan prepared without a predecessor pins none and is never promoted, so it inherits none).
-    let watch_strips = if strips >= 2 { strips } else { 0 };
+    // Issue #2427: the watch's table is made with no strip too, for the plan's totals.
+    let (watch_strips, watch_ids) = if strips >= 2 {
+        (strips, strip_ids)
+    } else {
+        (0, 0)
+    };
     let lane_swap =
-        graph::lane_swap_defect_watch_bytes(watch_strips, strip_ids).checked_add(if successor {
+        graph::lane_swap_defect_watch_bytes(watch_strips, watch_ids).checked_add(if successor {
             strips
                 .checked_mul(2 * size_of::<Box<str>>())?
                 .checked_add(strip_ids.checked_mul(2)?)?

@@ -3023,6 +3023,7 @@ where
         lane_swap_rebuild_refusals: 0,
         lane_swap_rebuild_attempt: None,
         plans_reclaimed: 0,
+        bank_contract_defects_reclaimed: 0,
         source_frames_discarded: 0,
         decode_fields: decode_fields.into_boxed_slice(),
         response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
