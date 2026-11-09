@@ -651,3 +651,21 @@ fn a_grown_residue_is_rebuilt_after_a_refusal() {
         ["eq0", "eq1", "eq2", "eq3"].map(Box::<str>::from).to_vec()
     );
 }
+
+/// A session whose inventory ceiling has no route slack (the nine tracks with no route) still
+/// boots: the projection charges the plan's lane-swap defect watch, which its inventory holds.
+///
+/// Test value: a projection that leaves the watch out, under the inventory the boot then holds,
+/// which the preparation refuses as an internal fault (`host.control.projection`).
+#[test]
+fn a_session_with_no_route_slack_boots_with_its_defect_watch_charged() {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    model.routes.clear();
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let mut children = compile_children::<Adapter>(&document, limits(), Box::new(Preparer))
+        .unwrap_or_else(|failure| panic!("the boot is admitted: {failure:?}"));
+    assert!(
+        !graph::test_only_pack_groups(children.plan.test_owner_mut().active_plan_mut()).is_empty(),
+        "the nine strips form a pack group, so the plan holds a watch"
+    );
+}
