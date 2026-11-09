@@ -191,8 +191,13 @@ impl Rig {
     /// [`Self::new`] at `revision`.
     fn at(revision: Option<u64>) -> Self {
         let (document, revision) = document(revision);
+        Self::of(&document, revision)
+    }
+
+    /// The rig of session `document`, at `revision`.
+    fn of(document: &str, revision: u64) -> Self {
         let CompiledChildren { session, plan } =
-            compile_children::<Adapter>(&document, limits(), Box::new(Preparer))
+            compile_children::<Adapter>(document, limits(), Box::new(Preparer))
                 .expect("boot compile");
         let mut rig = Self {
             session,
@@ -309,6 +314,27 @@ impl Rig {
             self.session.service().expect("service");
         }
         self.strips_restarted() - restarted
+    }
+
+    /// [`Self::strand_trade`] of the strips at local positions `p` and `q` of the active plan's
+    /// pack group (position `x` is lane `x % width` of chain `x / width`'s first unit).
+    fn strand_positions(&mut self, p: usize, q: usize) {
+        let group = graph::test_only_pack_groups(self.active())
+            .into_iter()
+            .next()
+            .expect("a pack group");
+        let width = group.width as usize;
+        let at = |x: usize| (group.chains[x / width][0] as usize, x % width);
+        let defects = graph::lane_swap_defect_count(self.active()).expect("a graph plan");
+        effect_contract::test_only_strand_lane_swaps(1);
+        let moved = graph::test_only_swap_bank_lanes(self.active(), at(p), at(q));
+        effect_contract::test_only_strand_lane_swaps(0);
+        assert!(!moved, "the stranded trade moves nothing");
+        assert_eq!(
+            graph::lane_swap_defect_count(self.active()),
+            Some(defects + 1),
+            "the strand is a recovered defect"
+        );
     }
 
     /// The tracks the active plan pins.
@@ -652,20 +678,70 @@ fn a_grown_residue_is_rebuilt_after_a_refusal() {
     );
 }
 
-/// A session whose inventory ceiling has no route slack (the nine tracks with no route) still
-/// boots: the projection charges the plan's lane-swap defect watch, which its inventory holds.
+/// A session whose inventory ceiling has no route slack (the nine tracks with no route) boots,
+/// and so does its residue rebuild after four defect pairs: the projection charges the plan's
+/// lane-swap defect watch, which its inventory holds, and a successor's quarantine and inherited
+/// residue, which the rebuild's inventory holds for eight strips.
 ///
-/// Test value: a projection that leaves the watch out, under the inventory the boot then holds,
-/// which the preparation refuses as an internal fault (`host.control.projection`).
+/// Test value: a projection that leaves the watch out (the boot's inventory is over its ceiling)
+/// or a successor's quarantine rows out (the rebuild's is), each of which the preparation refuses
+/// as an internal fault (`host.control.projection`).
 #[test]
-fn a_session_with_no_route_slack_boots_with_its_defect_watch_charged() {
+fn a_session_with_no_route_slack_charges_its_defect_watch_and_quarantine() {
+    bench_support::alloc::assert_installed();
     let mut model = session::parse_session_json(SESSION).expect("fixture");
     model.routes.clear();
     let document = session::canonical_session_json(&model).expect("canonical");
-    let mut children = compile_children::<Adapter>(&document, limits(), Box::new(Preparer))
-        .unwrap_or_else(|failure| panic!("the boot is admitted: {failure:?}"));
-    assert!(
-        !graph::test_only_pack_groups(children.plan.test_owner_mut().active_plan_mut()).is_empty(),
-        "the nine strips form a pack group, so the plan holds a watch"
+    let mut rig = Rig::of(&document, model.revision);
+    for pair in 0..4 {
+        rig.strand_positions(2 * pair, 2 * pair + 1);
+    }
+    let before = rig.epoch();
+    rig.session.service().expect("service");
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 0),
+        "the rebuild is admitted"
     );
+    rig.render_until_past(before);
+    assert_eq!(rig.pinned().len(), 8, "the successor pins the four pairs");
+}
+
+/// A residue rebuild refused with `Backpressure` (the retryable refusal) is retried once a
+/// displaced plan is reclaimed, which frees what it waited for, and not at every call before.
+///
+/// Test value: a `Backpressure` refusal that uses up the running plan's one attempt, so a plan
+/// whose rebuild met a full retirement queue once keeps its residue for its life.
+#[test]
+fn a_backpressured_rebuild_is_retried_after_a_reclaim() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    // An edit's plan is adopted while the plan it displaced waits in the retirement queue.
+    control_plane::test_hold_reclamation(true);
+    let before = rig.epoch();
+    rig.transact(&[muted_track("eq9")]);
+    rig.render_until_past(before);
+    rig.strand_trade();
+    rig.session
+        .test_set_structural_faults([Some(TestStructuralFaultPhase::AfterAdmission), None]);
+    for _ in 0..4 {
+        rig.block();
+        rig.session.service().expect("service");
+    }
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (0, 1),
+        "one refusal, not retried before a reclaim"
+    );
+    control_plane::test_hold_reclamation(false);
+    let before = rig.epoch();
+    rig.session.service().expect("service");
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 1),
+        "the reclaim re-armed the attempt"
+    );
+    rig.render_until_past(before);
+    assert_eq!(rig.responses(), own);
 }

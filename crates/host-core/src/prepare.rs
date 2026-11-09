@@ -929,23 +929,17 @@ impl PlanStateInventory {
         &self.restarted
     }
 
-    /// The strips of this plan that hold another strip's lane-swap residue (issue #2424), sorted
-    /// and distinct: each its render flagged ([`graph::GraphLaneSwapDefectWatch`]) and each it took
-    /// over unrestarted at its adoption ([`Self::inherit_lane_swap_residue`]). A successor of this
-    /// plan restarts each one, so it is prepared fresh from its own session values. Allocates
+    /// The strips of this plan that hold another strip's lane-swap residue (issue #2424): each its
+    /// render flagged ([`graph::GraphLaneSwapDefectWatch`]), then each it took over unrestarted at
+    /// its adoption ([`Self::inherit_lane_swap_residue`]). A strip in both is named twice: every
+    /// reader collects the set (sorted and deduplicated) or asks only whether it is empty. A
+    /// successor of this plan restarts each one, so it is prepared fresh from its own session
+    /// values. Each call reads render's flags anew, so a preparation reads it once. Allocates
     /// nothing; any thread that holds the inventory.
     pub fn lane_swap_residue(&self) -> impl Iterator<Item = &str> {
-        let mut flagged = self.lane_swap_defects.flagged_strips().peekable();
-        let mut inherited = self.lane_swap_inherited.iter().map(|id| &**id).peekable();
-        core::iter::from_fn(move || match (flagged.peek(), inherited.peek()) {
-            (Some(left), Some(right)) if left == right => {
-                inherited.next();
-                flagged.next()
-            }
-            (Some(left), Some(right)) if left > right => inherited.next(),
-            (Some(_), _) => flagged.next(),
-            (None, _) => inherited.next(),
-        })
+        self.lane_swap_defects
+            .flagged_strips()
+            .chain(self.lane_swap_inherited.iter().map(|id| &**id))
     }
 
     /// Whether this plan holds lane-swap residue ([`Self::lane_swap_residue`]); allocates
@@ -953,12 +947,6 @@ impl PlanStateInventory {
     #[must_use]
     pub fn has_lane_swap_residue(&self) -> bool {
         self.lane_swap_residue().next().is_some()
-    }
-
-    /// How many strips hold lane-swap residue ([`Self::lane_swap_residue`]); allocates nothing.
-    #[must_use]
-    pub fn lane_swap_residue_count(&self) -> usize {
-        self.lane_swap_residue().count()
     }
 
     /// The plan's lane-swap defect watch (issue #2424), shared with render: its flags and its
@@ -3495,6 +3483,16 @@ fn prepare_or_project(
     // #1354 D4: a warm successor's lead is a whole number of quanta, and a declared discontinuity
     // has no lead. Checked before this preparation allocates anything.
     let warm = successor.and_then(|base| base.warm);
+    // Issue #2424: the base's lane-swap residue, read once. Render raises the base's flags while
+    // this runs, so the quarantine and the restarts below read this one snapshot and agree; a strip
+    // flagged after it is inherited at promotion.
+    let lane_swap_residue: Vec<Box<str>> = successor.map_or_else(Vec::new, |base| {
+        let mut residue: Vec<Box<str>> =
+            base.inventory.lane_swap_residue().map(Box::from).collect();
+        residue.sort_unstable();
+        residue.dedup();
+        residue
+    });
     if successor.is_some_and(|base| {
         base.warm.is_some_and(|lead| {
             base.discontinuity
@@ -5053,7 +5051,7 @@ fn prepare_or_project(
                 .lane_swap_quarantine
                 .iter()
                 .map(|id| &**id)
-                .chain(base.inventory.lane_swap_residue())
+                .chain(lane_swap_residue.iter().map(|id| &**id))
                 .filter(|id| committed_has_strip(model, id))
                 .map(Box::from)
                 .collect();
@@ -5352,12 +5350,12 @@ fn prepare_or_project(
         && let Some(base) = successor
     {
         restarted.extend(
-            base.inventory
-                .lane_swap_residue()
+            lane_swap_residue
+                .iter()
                 .filter(|id| {
                     committed_has_strip(base.committed, id) && committed_has_strip(model, id)
                 })
-                .map(Box::from),
+                .cloned(),
         );
         restarted.sort_unstable();
         restarted.dedup();

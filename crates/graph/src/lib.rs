@@ -4898,6 +4898,16 @@ impl Eq for GraphFadeArmWatch {}
 /// Render is the only writer and stores only on the defect path, so a healthy block runs no new
 /// instruction; each store is a release store with no lock. Made at bind with one flag per
 /// distinct track of the plan's pack groups, sorted; empty for a plan with no pack group.
+///
+/// **When a displaced plan's flags are final (issue #2424).** A flag a block raises, the carry's
+/// way home in the adoption block included, is stored before that block's render publishes its
+/// active epoch (`control-plane`'s `PlanState::render`, a release store of `active_epoch`). The
+/// control thread loads that epoch with acquire (`SessionState::synchronize_plan_epochs`) before
+/// it promotes the successor, so every flag the displaced plan raised happens before the
+/// promotion reads it (`PlanStateInventory::inherit_lane_swap_residue`), and the displaced plan
+/// never renders again. Each flag's own release store and acquire load order it alone; a read
+/// while the plan still renders may miss a flag raised in the same instant, which the next read,
+/// or the promotion, sees.
 #[derive(Clone, Debug, Default)]
 pub struct GraphLaneSwapDefectWatch(Option<std::sync::Arc<LaneSwapDefectCells>>);
 
