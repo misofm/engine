@@ -5343,12 +5343,14 @@ fn prepare_or_project(
         restarted.dedup();
     }
     // Issue #2424: every strip of the base's lane-swap residue restarts, as a join's restart does,
-    // so nothing it holds of another strip carries: it is prepared fresh from its own values. Not
-    // at a declared discontinuity, where every owner starts at rest anyway, and not in a warm
-    // successor, whose floors are derived from its lead's restart set; the residue of either is
-    // inherited at promotion, and the next successor restarts it.
-    if let Some(base) = successor.filter(|base| !base.discontinuity && warm.is_none()) {
-        let before = restarted.len();
+    // so nothing it holds of another strip carries: it is prepared fresh from its own values (a
+    // declared discontinuity's successor restarts every strip anyway). Not in a warm successor,
+    // whose floors are derived from its lead's restart set: the lead is taken from the ordinary
+    // successor, which restarts the residue, so only a strip render flagged between the two
+    // preparations is left out, and it is inherited at promotion and rebuilt.
+    if warm.is_none()
+        && let Some(base) = successor
+    {
         restarted.extend(
             base.inventory
                 .lane_swap_residue()
@@ -5357,10 +5359,8 @@ fn prepare_or_project(
                 })
                 .map(Box::from),
         );
-        if restarted.len() != before {
-            restarted.sort_unstable();
-            restarted.dedup();
-        }
+        restarted.sort_unstable();
+        restarted.dedup();
     }
     // #1324 D1: a carried effect keyed from a restarted strip's tap behind a restarted owner
     // would read the old chain until `S` and the restarted chain's at-rest output after it, so

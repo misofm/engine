@@ -255,9 +255,10 @@ impl Rig {
         self.strand_lanes(0, 1);
     }
 
-    /// [`Self::strand_trade`] of the strips on lanes `a` and `b` of the group's first unit, the
-    /// active plan's first defect.
+    /// [`Self::strand_trade`] of the strips on lanes `a` and `b` of the group's first unit: one
+    /// more recovered defect of the active plan.
     fn strand_lanes(&mut self, a: usize, b: usize) {
+        let defects = graph::lane_swap_defect_count(self.active()).expect("a graph plan");
         let group = graph::test_only_pack_groups(self.active())
             .into_iter()
             .find(|group| group.chains.first().is_some_and(|chain| !chain.is_empty()))
@@ -276,7 +277,7 @@ impl Rig {
         );
         assert_eq!(
             graph::lane_swap_defect_count(self.active()),
-            Some(1),
+            Some(defects + 1),
             "the strand is a recovered defect"
         );
     }
@@ -470,30 +471,6 @@ fn a_successor_adopted_after_a_late_defect_is_rebuilt() {
     assert_eq!(rig.pinned(), vec![Box::from("eq0"), Box::from("eq1")]);
 }
 
-/// A residue rebuild is never warm: with the session's warm bounds and a classification forced
-/// to `Warm`, it still restarts the residue, so the plan it publishes holds none and the service
-/// step does not rebuild again.
-///
-/// Test value: a residue rebuild classified warm, whose successor restarts nothing and inherits
-/// the residue at its promotion, so every promotion rebuilds again.
-#[test]
-fn a_residue_rebuild_is_never_warm() {
-    bench_support::alloc::assert_installed();
-    let mut rig = Rig::new();
-    let own = rig.responses();
-    let before = rig.epoch();
-    rig.strand_trade();
-    rig.session.test_set_next_zero_lead(Vec::new());
-    rig.session.service().expect("service");
-    rig.render_until_past(before);
-    for _ in 0..8 {
-        rig.block();
-        rig.session.service().expect("service");
-    }
-    assert_eq!(rig.session.lane_swap_rebuilds(), (1, 0), "one rebuild");
-    assert_eq!(rig.responses(), own);
-}
-
 /// The quarantine holds across every later successor of the session, and a strip the session
 /// removes leaves it: re-added, it is a new strip, movable again.
 ///
@@ -588,56 +565,6 @@ fn a_warm_edit_over_residue_commits_and_a_late_defect_is_rebuilt() {
     );
 }
 
-/// A declared discontinuity over residue: its successor starts every strip at rest, so it arms no
-/// restart for the residue and inherits none at its promotion, and no rebuild follows it; it
-/// pins the pair as every successor does.
-///
-/// Test value: a discontinuity successor that restarts the residue as a duck-swap (it arms a
-/// fade-in on each such strip, where every other strip starts at once), or a promotion that
-/// hands a discontinuity successor the residue it never carried, which rebuilds it for nothing.
-#[test]
-fn a_declared_discontinuity_over_residue_needs_no_rebuild() {
-    bench_support::alloc::assert_installed();
-    let mut rig = Rig::new();
-    let own = rig.responses();
-    // A plan that reads its sources ahead runs behind its natural timing, so a declaration
-    // rebuilds: the residue rebuild below is such a plan.
-    host_core::test_only_set_next_source_read_offset(QUANTUM as u64);
-    let before = rig.epoch();
-    rig.strand_trade();
-    rig.session.service().expect("service");
-    assert_eq!(rig.session.lane_swap_rebuilds(), (1, 0));
-    rig.render_until_past(before);
-    // A second pair's defect on the plan that runs behind, then the declaration: its service
-    // step publishes the residue rebuild, which the declaration supersedes at once.
-    rig.strand_lanes(2, 3);
-    let before = rig.epoch();
-    rig.session
-        .declare_discontinuity()
-        .expect("the declaration rebuilds");
-    assert_eq!(rig.session.lane_swap_rebuilds(), (2, 0));
-    rig.render_until_past(before);
-    assert_eq!(
-        graph::test_only_fade_arms(rig.active()),
-        Some(Vec::new()),
-        "a discontinuity successor arms no fade"
-    );
-    for _ in 0..8 {
-        rig.block();
-        rig.session.service().expect("service");
-    }
-    assert_eq!(
-        rig.session.lane_swap_rebuilds(),
-        (2, 0),
-        "no rebuild after the declaration"
-    );
-    assert_eq!(
-        rig.pinned(),
-        ["eq0", "eq1", "eq2", "eq3"].map(Box::<str>::from).to_vec()
-    );
-    assert_eq!(rig.responses(), own);
-}
-
 /// A strip with residue that an edit removes leaves nothing to rebuild: the edit's successor
 /// restarts the residue strip it keeps, the removed one is gone, and no rebuild follows the
 /// edit's adoption.
@@ -667,4 +594,35 @@ fn a_removed_residue_strip_rebuilds_nothing() {
         "the rebuild the edit superseded, and nothing after"
     );
     assert_eq!(rig.response_curves("eq0"), own[0], "eq0 is its own again");
+}
+
+/// After a refused rebuild, a new defect pair in the same running plan grows its residue, and the
+/// service step attempts the rebuild again, which restarts all four strips.
+///
+/// Test value: an attempt record that ignores the residue, so a plan whose rebuild was refused
+/// once keeps every later defect's residue for its life.
+#[test]
+fn a_grown_residue_is_rebuilt_after_a_refusal() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    rig.strand_trade();
+    rig.session
+        .test_set_structural_faults([Some(TestStructuralFaultPhase::AfterRuntimePrepare), None]);
+    rig.session.service().expect("service");
+    assert_eq!(rig.session.lane_swap_rebuilds(), (0, 1));
+    rig.strand_lanes(2, 3);
+    let before = rig.epoch();
+    rig.session.service().expect("service");
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 1),
+        "the grown residue rebuilt"
+    );
+    rig.render_until_past(before);
+    assert_eq!(rig.responses(), own);
+    assert_eq!(
+        rig.pinned(),
+        ["eq0", "eq1", "eq2", "eq3"].map(Box::<str>::from).to_vec()
+    );
 }

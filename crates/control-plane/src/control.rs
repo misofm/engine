@@ -362,7 +362,8 @@ enum Rebuild {
     /// every strip of the running plan's lane-swap residue and pins the session's quarantine. It
     /// carries like a transaction with no edit and commits like a monitor rebuild at the
     /// committed revision with the session's spectrum configuration: nothing is committed and the
-    /// revision does not change. Never warm, so its restarts always run.
+    /// revision does not change. It may be classified warm like any rebuild: a lead is derived
+    /// from the ordinary successor, which restarts the residue, so a warm one restarts it too.
     LaneSwapResidue(Box<CompiledSession>),
 }
 
@@ -4322,12 +4323,10 @@ where
             let mut next = self.pending_providers.remove(0);
             // #2424: render displaced the running plan, so its lane-swap flags are final. A strip
             // it flagged after `next` was prepared carried what it held into `next`, unless `next`
-            // restarted it; `next` inherits it, and the service step rebuilds. A declared
-            // discontinuity carried nothing but its sources.
-            if !next.discontinuity() {
-                next.inventory
-                    .inherit_lane_swap_residue(&self.providers.inventory);
-            }
+            // restarted it (a declared discontinuity's successor restarts every strip); `next`
+            // inherits it, and the service step rebuilds.
+            next.inventory
+                .inherit_lane_swap_residue(&self.providers.inventory);
             // #1768: render adopted `next`'s plan, so the strips it starts at rest restarted.
             let restarted =
                 u64::try_from(next.inventory.restarted_strips().len()).unwrap_or(u64::MAX);
@@ -6089,7 +6088,6 @@ where
         // preparation stamps with that revision as it does for a transaction.
         // #2424: a lane-swap residue rebuild commits like one.
         let monitor = matches!(kind, Rebuild::Monitor { .. } | Rebuild::LaneSwapResidue(_));
-        let residue = matches!(kind, Rebuild::LaneSwapResidue(_));
         // #1397 D2: the transition fallback across a donor.
         let fallback = matches!(kind, Rebuild::Transition { .. });
         let unchanged_revision = monitor && (!superseding || revision == 0);
@@ -6315,7 +6313,6 @@ where
             SuccessorShape::Transition
         } else if let Some(config) = self.warm
             && transition.is_some()
-            && !residue
         {
             let decision = host_core::warm_lead(
                 prospective,
