@@ -170,3 +170,128 @@ Branches with no reachable mutant:
 - A wire `CounterId` for `lane_swap_defect_count` (and `carry_refusal_count`) needs an owner ruling: both are in-process reads today.
 - `graph::lane_swap_defect_count`'s downcast wrapper is reached by no nonzero test. No prepared plan can hold a faulting bank without a test hook in the bound-plan code, which another stream owns. `Runtime::lane_swap_defect_count`, which it returns, is tested.
 - A split slot's residue (the other strip's prepared defaults and its control lane, taps and dry-shunt line) lasts until a plan rebuild. A host that reads a nonzero total could request one; nothing does yet.
+
+**Sol's verdict on attempt 1 (`d4fd3f88e`): FAIL**, with two MAJOR and four MINOR findings, plus a request for successor specs (item 6).
+1. MAJOR: the graph's row recovery left the healthy slots of a split row fully traded.
+   - A row's trade-back was the chain's own `swap_lanes`. When a slot stranded, the chain "swapped back" the earlier slots, which traded them forward again.
+   - `RowChains::Reset` then reset their effect state, but left their defaults, control lane, taps and shunt traded. A `BuiltinStage` (the no-op default) kept its whole lane traded.
+   - Sol's probe: two `FaultyStage` slots per unit, `(0,1)/(0,2)`, row 2's slot 1 strands forward, row 1's slot 1 strands on its trade-back. Result: `Split { row: 1 }` with unit 2's healthy slot 0 at `[32,34,33,35]`.
+2. MAJOR: untested checks, each green in debug and release:
+   - N1: `pin_positions` by position, not by home;
+   - N2: `base` dropped;
+   - N11: group forced to 0;
+   - N3: the tripwire's `Chain(Split)` arm removed;
+   - N4: the cross-unit reset used `high_lane`;
+   - N8: the total summed the even units only.
+3. MINOR: rack's `Split` doc said "no slot holds the other strip's history". The dry-shunt line and the builtin no-op contradict it.
+4. MINOR: no test reaches the pub `graph::lane_swap_defect_count` on a real plan.
+5. MINOR: the docs should say the total counts recoveries, not strips.
+6. Write the follow-ups as ready-to-file successor specs.
+
+### Attempt 2 (Sol's findings folded), same branch, origin/main `cf108f5b1` (#2423) merged
+
+**Item 1, the row trade-back.**
+- `rack` gains `BankChain::swap_lanes_back(lane, peer, scratch)`, a checked best-effort swap-back.
+  - It asks every slot, last first, and unwinds nothing.
+  - A slot that refuses has both lanes reset (`BankStage::reset_swapped_lanes`) and is counted, and the slots below it are still swapped back.
+  - It returns `Err(Split { slot })` naming the highest such slot.
+  - It and `swap_lanes`'s own swap-back are one body, `swap_slots_back(end, ..)`.
+- `BankChain::reset_swapped_lanes`, the attempt-1 whole-row reset, is removed.
+- The graph trades each row back with `swap_unit_lanes_back`:
+  - `RowChains::Back` calls `swap_lanes_back`;
+  - the row's readers are traded back whatever the slots did;
+  - `RowChains::Reset` and `recover_unit_lanes` are gone.
+- So after a split, every slot that swapped back is home, readers included. Only a refusing slot keeps what a reset leaves.
+- The `BankLaneMoveRefusal` and `Split` docs say this.
+- Test: `a_row_that_refuses_its_trade_back_is_recovered_as_a_split_strip` now runs on a two-slot rig (`SwapRig::new(2)`): a healthy slot 0 beside a broken slot 1. It asserts, among the rest:
+  - every unit's slot 0 tags are home, which is Sol's probe made a committed assertion;
+  - slot 0 was never reset.
+- Red on attempt 1's design: G7, the trade-back through the unwinding `swap_lanes` (below), turns it red.
+
+**Item 2, the untested checks.**
+- `a_defect_pins_the_strips_at_its_positions_by_home` runs on the `LaneMap` alone. It uses two groups, the second at `base` 8. A cycle of two moves displaces the strips, so neither of the trade's positions holds its own strip (the test asserts this first). `pin_positions` must pin exactly the two home positions. Red for N1, N2 and N11.
+- `a_row_its_chain_splits_is_a_recovered_defect`: row 1's chain returns `Chain(Split { slot: 0 })` on the forward trade (slot 1 strands, then slot 0 strands its swap-back). It asserts:
+  - no debug panic;
+  - row 0 traded back;
+  - both strips pinned;
+  - a total of 3.
+
+  Red for N3.
+- The split-row test gains a cross-unit trade of different lanes, `(0,1)/(1,2)` (red for N4 and its `swap_lanes_back` twin), and an in-unit trade on chain 1, `(1,1)/(1,3)`, whose counts land on the odd units (red for N8).
+
+**Item 3.** Rack's `Split` doc now says what a reset ends and what stays: the other strip's prepared defaults; its control lane, taps and dry-shunt line (up to a latency of its dry input); and the whole lane of a stage with no lane reset, such as a builtin bank's. `BankStage::reset_swapped_lanes`'s doc says the same.
+
+**Item 4.** `graph-compiler`'s `silent_bank_skip` gate 3 now asserts `graph::lane_swap_defect_count(plan) == Some(0)` on both moved plans, after their healthy forced swaps. This covers the downcast. A `None` wrapper is red (N5b). `Some(0 * ..)` (N5) stays green: a healthy plan reads zero, and a nonzero count through the wrapper still needs the fault hook that is out of this issue's regions.
+
+**Item 5.** The docs of `BankChain::lane_swap_defects`, `Runtime::lane_swap_defect_count` and `graph::lane_swap_defect_count` say the total counts recoveries, not strips: one slot that strands on its swap-back counts as a strand and as a split.
+
+**Item 6.** Two successor specs, ready to file, are in the scratchpad:
+- `succ/bb.md`, #SUCCESSOR-REBUILD: a plan rebuild on a nonzero lane-swap defect total, which is the residue's correct end state.
+- `succ/cc.md`, #SUCCESSOR-WIRE: an owner ruling on putting `lane_swap_defect_count` and `carry_refusal_count` on the wire.
+
+The follow-ups below name them.
+
+**Mutation sweep, attempt 2** (`sweep2.py` in scratch, rewritten for the new code). Each mutation was applied alone; the focused tests (rack `--test lane_swap`, the six graph tests, and for the wrapper `silent_bank_skip`'s gate 3) ran in debug and in release; the tree was restored. Sol's N1-N11 are included.
+
+Of 54 mutants, 50 are red in debug and release. The four that are not are listed at the end. A mutation in `swap_slots_back` runs both the rack and graph tests, because the chain's own swap-back and `swap_lanes_back` share it.
+
+| Mutation | Where | Debug | Release | Red at |
+| --- | --- | --- | --- | --- |
+| C1: the swap-back check dropped, each arm | `swap_slots_back` | red | red | `a_slot_that_refuses_...`, `a_row_that_refuses_...` |
+| C2: a refusing slot's reset dropped, each arm | `swap_slots_back` | red | red | the same |
+| C3: its count dropped, each arm | `swap_slots_back` | red | red | the same |
+| C4: the lowest slot named, each arm | `swap_slots_back` | red | red | `a_slot_that_refuses_...` |
+| C5: stop at the first refusal, each arm | `swap_slots_back` | red | red | both |
+| C6: in-chain reset of the calling lane twice | `swap_slots_back` | red | red | both |
+| N6: the forward slot named instead of the refusing one | `swap_slots_back` | red | red | `a_slot_that_refuses_...`, `a_row_its_chain_splits_...` |
+| C7: `swap_lanes_back` skips the last slot | chain | red | red | `a_row_that_refuses_...`, `a_row_its_chain_splits_...` |
+| C8: `swap_lanes_back` always `Ok` | chain | red | red | `a_row_that_refuses_...` |
+| C9: the chain's own swap-back skipped, each arm | chain | red | red | rack and graph tests |
+| S1: the effect stage's `recover_lane` resets nothing, or keeps `RESTORED` | stage | red | red | `a_slot_that_refuses_...`, `a_stranded_slot_...` |
+| S2: the live stage's `recover_lane` resets nothing, or sets no `unrestored` bit | stage | red | red | the same |
+| S3: `reset_swapped_lanes` drops its own lane, recovers the wrong in-chain lane, or drops the cross-chain peer; each stage alone | stage | red | red | `a_slot_that_refuses_...` |
+| S4: the strand branch recovers the peer's lane in its own bank, or one in-chain lane; each stage alone | stage | red | red | `a_stranded_slot_...`, `a_slot_that_refuses_...` |
+| K3: `lane_swap_defects` drops the stranded term, or the split term | chain | red | red | rack and graph tests |
+| G1: the trade-back check dropped | graph | red | red | `a_row_that_refuses_...` |
+| G3: the lowest split row named | graph | red | red | the same |
+| G4: the trade-back stops at the first refusal | graph | red | red | the same |
+| N7: the forward row named | graph | red | red | the same |
+| G5: no pin, or one strip pinned | graph | red | red | four graph tests |
+| N10: pin on `Split` only | graph | red | red | `a_stranded_trade_...`, `a_row_its_chain_splits_...` |
+| N1: pin by position, not by home | graph | red | red | `a_defect_pins_the_strips_at_its_positions_by_home` |
+| N2: pin without `base` | graph | red | red | the same |
+| N11: pin in group 0 | graph | red | red | the same |
+| G7: the trade-back through the unwinding `swap_lanes`, the attempt-1 shape; each arm | graph | red | red | `a_row_that_refuses_...` |
+| N4: the cross-unit trade-back swaps `high_lane` | graph | red | red | the same |
+| G8: the readers not traded back, each arm | graph | red | red | the same (and `a_row_its_chain_splits_...`) |
+| G9: `Runtime::lane_swap_defect_count` returns 0 | graph | red | red | the same and two more |
+| N8: the total sums the even units only | graph | red | red | `a_row_that_refuses_...` (the chain-1 case) |
+| N5b: the pub wrapper returns `None` | graph `lib.rs` | red | red | `silent_bank_skip::a_moved_strip_renders_the_bits_of_an_unmoved_one` |
+| G6: the tripwire disabled | graph | red | green, compiled out by design | `an_unrecovered_row_refusal_trips_the_trade_in_debug` |
+| N3: the tripwire's `Chain(Split)` arm removed | graph | red | green, compiled out by design | `a_row_its_chain_splits_is_a_recovered_defect` (debug panic) |
+
+The four that are not red in both builds:
+- G6 and N3 are tripwire mutants. They are red in debug and compiled out of release by design.
+- S2-designed, the live stage's `designed` refresh dropped, is green in both builds. It is equivalent: #2414's N7.
+- N5, the pub wrapper returning `Some(0 * ..)`, is green in both builds. A healthy real plan reads zero, and a nonzero read through the wrapper needs the fault hook in the bound-plan code.
+
+**No bit moved.** The #2392 gate-3 digest on the merged branch is `inserts=false 7d31fea2b6652670`, `inserts=true 8e4dfb8b8dc1d599`. This is identical to base `0c9a85b10` and to attempt 1. The healthy trade path changed only by `trade_unit_lanes`' `RowChains::Trade` arm returning `Ok` into the readers step. This is PR evidence, not committed.
+
+**Gates, on the merged tree.** Run one crate at a time with `-j 4` and one private target dir, deleted afterwards:
+- `cargo test --locked`: every run below passed, with none failing (113 result lines, all ok):
+  - `effect-contract`, `rack`, `graph`, `graph-compiler` and `host-core`, all in debug;
+  - `rack --release --test lane_swap`;
+  - `graph --release --lib` over the new graph tests;
+  - `graph-compiler --release --test silent_bank_skip` (14).
+- Clippy `-D warnings` on `effect-contract`, `rack` and `graph` (all targets), in debug and release: clean.
+- `cargo doc -D warnings`: clean.
+- `cargo fmt --all --check`: clean.
+- `check-workspace-policy.sh`: ok.
+- `check-rack-policy.sh`: PASS.
+- `realtime_policy`: ok (314 marked regions in 48 files).
+- `check-web-audioworklet.sh --without-metadata-regeneration`, on a rebuilt artifact and named twin with wabt 1.0.34: passed. `miso_engine_web_v1_render` has closure=38, atomic_waits=0, destructor_registration=0.
+
+**Follow-ups (not filed).**
+- #SUCCESSOR-REBUILD: a plan rebuild on a nonzero lane-swap defect total (`succ/bb.md`).
+- #SUCCESSOR-WIRE: an owner ruling on a wire `CounterId` for `lane_swap_defect_count` and `carry_refusal_count` (`succ/cc.md`).
+- A nonzero test through the pub `graph::lane_swap_defect_count` wrapper needs a fault hook in the bound-plan code, which another stream owns. The downcast is covered by the `Some(0)` read; `Runtime::lane_swap_defect_count` is covered by the graph tests.
