@@ -1565,6 +1565,107 @@ fn a_cleanly_refused_stage_swap_runs_no_recovery() {
     }
 }
 
+/// Issue #2419: a slot that refuses its swap-back, after a later slot's swap stranded, leaves a
+/// split strip. The chain still swaps back every other slot it swapped, resets both lanes of each
+/// slot that refused its swap-back, each in its own bank, withholds their `RESTORED` term, counts
+/// each beside the stranded slot's count ([`BankChain::lane_swap_defects`]), and returns `Split`
+/// naming the highest such slot. A slot that refused its swap-back cleanly keeps the two strips'
+/// defaults traded: that is the split. An effect slot (0) and the live slot (1) refuse, each in an
+/// in-chain and a cross-chain swap, and both at once in each.
+///
+/// Test value: a chain that takes a refused swap-back for a done one (`Defect`, no reset, no
+/// count), stops swapping back at the first refusal, resets a slot or lane that did not refuse or
+/// the peer's lane in the wrong bank, leaves a split lane's `RESTORED` term held, does not count
+/// the split, or names the lowest split slot instead of the highest.
+#[test]
+fn a_slot_that_refuses_its_swap_back_splits_the_strip_and_is_reset() {
+    let width = BankWidth::Four;
+    let shape = Shape {
+        padded: false,
+        slot_gap: false,
+        collapse: None,
+    };
+    let at = (0, 1);
+    // `(slots that refuse their swap-back, the slot that strands, other)`.
+    for (split, strand, other) in [
+        (&[1][..], 2, (0, 3)),
+        (&[1][..], 2, (1, 2)),
+        (&[0][..], 1, (0, 3)),
+        (&[0][..], 1, (1, 2)),
+        (&[1, 0][..], 2, (0, 3)),
+        (&[1, 0][..], 2, (1, 2)),
+    ] {
+        let what = format!("split {split:?}, stranded {strand}, {at:?} with {other:?}");
+        let mut world = World::new(width, 5, shape);
+        let before = world.strip_defaults();
+        let (first, second) = (world.strip_at(at), world.strip_at(other));
+        // The calling bank's forward swap takes three exchanges within one chain and two across
+        // chains; the first exchange of its swap-back refuses alone, which unwinds cleanly.
+        let swap_back = if other.0 == at.0 { 4 } else { 3 };
+        for &slot in split {
+            world.faults[0][slot].arm_once(swap_back);
+        }
+        world.faults[0][strand].arm(2);
+        let mut scratch = world.scratch();
+        assert_eq!(
+            world.swap(at, other, &mut scratch),
+            Err(ChainLaneSwapRefusal::Split { slot: split[0] }),
+            "{what}"
+        );
+        for slot in 0..3 {
+            world.faults[0][slot].arm(0);
+        }
+        assert_eq!(
+            world.chains[0].lane_swap_defects(),
+            1 + split.len() as u64,
+            "{what}: the strand and each split are counted"
+        );
+        assert_eq!(world.chains[1].lane_swap_defects(), 0, "{what}: once");
+        for chain in 0..2 {
+            for bank in 0..3 {
+                let mut expected = vec![0_u32; 8];
+                if bank == strand || split.contains(&bank) {
+                    for &(on, lane) in &[at, other] {
+                        if on == chain {
+                            expected[lane] += 1;
+                        }
+                    }
+                }
+                assert_eq!(
+                    world.faults[chain][bank].resets(),
+                    expected,
+                    "{what}: chain {chain} slot {bank}: the two lanes of a refusing slot, and only \
+                     they, reset"
+                );
+            }
+        }
+        for &slot in split {
+            for (on, lane) in [at, other] {
+                let stage = world.chains[on].slot_stage_mut(slot).expect("a stage");
+                assert!(
+                    !stage
+                        .lane_symmetry(lane)
+                        .holds(ChannelSymmetryWitness::RESTORED),
+                    "{what}: slot {slot} ({on}, {lane}): a split lane's RESTORED term is withheld"
+                );
+            }
+        }
+        let after = world.strip_defaults();
+        for bank in (0..3).filter(|&bank| bank != strand) {
+            let expected = if split.contains(&bank) {
+                [before[second][bank], before[first][bank]]
+            } else {
+                [before[first][bank], before[second][bank]]
+            };
+            assert_eq!(
+                [after[first][bank], after[second][bank]],
+                expected,
+                "{what}: slot {bank}: left traded if it refused its swap-back, else swapped back"
+            );
+        }
+    }
+}
+
 /// Issue #2414: in a debug build, a slot that refuses its lane swap after the chain's check
 /// passed without counting a strand ([`BankStage::lane_swap_stranded`]) trips the chain: here
 /// a bank whose first exchange refuses alone, which the swap unwinds cleanly. `other` is the

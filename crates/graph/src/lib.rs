@@ -5130,6 +5130,21 @@ pub fn carry_refusal_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
     )
 }
 
+/// The render-time lane-swap recoveries a bank's defect made this plan take (issues #2414,
+/// #2419): every bank stage's stranded swap, which reset two lanes, and every slot that refused a
+/// swap-back, in a chain's swap or a row's trade-back, which reset its two lanes; the trade then
+/// pinned both strips. It counts recoveries, not strips: one slot that strands on its swap-back
+/// counts as a strand and as a split, and one trade can count several. Saturating. `None` for any
+/// other plan.
+///
+/// Read after render, by whoever holds the plan, beside [`carry_refusal_count`]: a bank that
+/// keeps its lane-swap contract never strands, so a nonzero count is a defect, and a plan
+/// rebuild prepares the lanes fresh.
+pub fn lane_swap_defect_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
+    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
+    Some(executor.runtime.lane_swap_defect_count())
+}
+
 /// The due fade-arm fires whose target resolved to no fader lane or live route (issue #2257),
 /// each of which left its arm unfired and unreported; saturating. `None` for any other plan.
 ///
@@ -11893,7 +11908,9 @@ mod tests {
         assert_eq!(&block[4..], &[0.0, -2.0, -4.0, -6.0]);
     }
 
-    fn sidechain_pdc_plan(delay_main: bool) -> GraphBoundPlan {
+    /// A bound, unsealed plan whose `main-path` effect takes a sidechain from `sidechain-path`.
+    /// `runtime`'s lane-swap tests also move a rig's runtime into it (issue #2419).
+    pub(crate) fn sidechain_pdc_plan(delay_main: bool) -> GraphBoundPlan {
         let main_input = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse("main-path").expect("ID"),
             stage: TrackStage::Input,

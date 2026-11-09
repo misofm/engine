@@ -2523,8 +2523,18 @@ pub trait LaneSwap {
     /// through a lane and back out again before anything reads it. So nothing is validated and no
     /// byte is refused. Bytes the bank wrote itself round-trip exactly; bytes outside its encoding
     /// (an enum or flag word of a spare area) may come back canonicalised. Returns `false`,
-    /// changing nothing, for a lane out of range or a wrong length. It changes no state word and
-    /// no payload word.
+    /// changing nothing, for a lane out of range or a wrong length.
+    ///
+    /// It may change the lane's state in one way: a state word that seats the incoming defaults
+    /// and that the lane's own state payload holds. A bank whose prepared defaults carry the
+    /// lane's detector link seats the lane's link weights at rest at the incoming mode, which
+    /// ends a link glide in flight (`rest_link`, issue #1370 D6). It changes no other lane's
+    /// words, and no word a payload restore does not rewrite; a collapsed bank takes its
+    /// disengage copy first, as every writer does (issue #2352), which changes no rendered bit.
+    /// So a caller that exchanges defaults restores the lanes from payloads afterwards:
+    /// [`swap_bank_lanes`] restores each moved payload, and after an undo each lane's own
+    /// (issue #2414), so a swap that took, or one it unwound, leaves every lane's glide where
+    /// its payload had it.
     ///
     /// On the render thread at a block boundary: allocation-free, lock-free and bounded by the
     /// defaults size.
