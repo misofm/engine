@@ -53,3 +53,9 @@ So for the rest of the plan's life, a strip whose swap hit a defect renders with
 ## Notes from #2419's review
 - **The carry's way home bypasses pins.** `Runtime::restore_home_lanes` (graph runtime.rs ~11665-11699) trades through `swap_bank_lanes` and does not read pins. It runs on the predecessor at carry (graph lib.rs ~7908). A pinned strip that is still off its home lane is traded again there, can hit the same defect, and then refuses the whole carry (`CarryOutcome::PredecessorMismatch`), so the replacement starts with nothing carried. This issue must decide how that is handled: restore skips or tolerates pinned strips, or a refused carry is accepted and counted. State the bound including this path.
 - **The bound counts trades, not counter increments.** At most n/2 defect-hitting trades per group of n strips per plan, from the packer, plus the carry path above. One trade can add `1 + 2·split rows` to `lane_swap_defect_count`, so the counter can exceed n/2.
+
+## Note from the #2425 ruling (2026-11-09)
+`docs/rulings/bank-contract-defect-counter-2026-11-09.md` puts both totals on the wire as one accumulating `CounterId`, `BankContractDefects = 23`, in a separate successor issue. For this issue it rules:
+- add no `CounterId` here; keep reading `graph::lane_swap_defect_count` in process, and rebuild on the lane-swap total only (a refused carry leaves no residue);
+- build the render-side rebuild flag on the lane-swap defect path (the arms that already reset lanes, inside `REALTIME_POLICY`), so the counter issue can carry the running total through the same path rather than a parallel one; whichever lands second reuses the first's signal;
+- "the rebuild is visible" is met in process here (a tested tally and bound); a host sees a defect-driven rebuild as counter 23 rising with the plan epoch, so this issue needs no wire surface of its own.
