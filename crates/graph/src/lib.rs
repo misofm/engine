@@ -8341,6 +8341,35 @@ impl GraphExecutor {
 mod tests {
     use super::*;
 
+    /// Issue #2427: a defect watch charges exactly the heap it holds, a plan with no pack group's
+    /// too: its watch has no strip but still makes its table for the plan's totals. The watch's
+    /// `heap_bytes` is `lane_swap_defect_watch_bytes`, the charge the preparation's projection
+    /// and the plan's inventory row (and so `capi_retained_bytes`) both read, so this holds the
+    /// one formula to the allocator.
+    ///
+    /// Test value: a charge that leaves out the table of a watch with no strip (every plan without
+    /// a pack group then under-charges its inventory), or a strip's flag or name.
+    #[test]
+    fn a_defect_watch_charges_exactly_the_heap_it_holds() {
+        use bench_support::alloc::{
+            assert_installed, current_thread_counters, current_thread_delta_since,
+        };
+        assert_installed();
+        for names in [Vec::new(), vec!["eq0", "eq12"]] {
+            let strips: Box<[Box<str>]> = names.iter().map(|name| Box::from(*name)).collect();
+            // The names and their table exist before the watch takes them.
+            let given = core::mem::size_of_val::<[Box<str>]>(&strips)
+                + names.iter().map(|name| name.len()).sum::<usize>();
+            let mark = current_thread_counters();
+            let watch = GraphLaneSwapDefectWatch::new(strips);
+            let used = current_thread_delta_since(mark);
+            let made = usize::try_from(used.requested_bytes - used.released_bytes)
+                .expect("a small allocation");
+            assert!(made > 0, "{names:?}: the watch makes its table");
+            assert_eq!(watch.heap_bytes(), made + given, "{names:?}");
+        }
+    }
+
     use conformance::DualAccumulatorDelayFactory;
     use effect_contract::{
         BankWidth, EffectDescriptor, EffectId, EffectProcessBlock, EffectQuality,

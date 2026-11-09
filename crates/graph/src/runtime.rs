@@ -7287,40 +7287,6 @@ fn mark_effect_move_taken(taps: &mut [crate::ObserverTapMove], cursor: &mut usiz
     }
 }
 
-/// [`Runtime::carry_refusal_count`] of `units`: the restores refused on every effect bank stage
-/// (issue #1279 D6), which the carry's refused-restore path reads while it holds the runtime's
-/// fields apart (issue #2427). Saturating; bounded by the units and their slots.
-fn bank_carry_refusals(units: &mut [RuntimeUnit]) -> u64 {
-    let mut refused = 0_u64;
-    for unit in units {
-        let RuntimeUnit::Bank { chain, .. } = unit else {
-            continue;
-        };
-        let mut slot = 0_usize;
-        while chain.slot_stage_mut(slot).is_some() {
-            if let Some(stage) = effect_stage_mut(chain, slot) {
-                refused = refused.saturating_add(stage.carry_refused());
-            }
-            slot += 1;
-        }
-    }
-    refused
-}
-
-/// The refused-restore path of [`Runtime::carry_effect_lanes`] (issue #2427): store the plan's
-/// carry refusals total in its defect watch, the banks' refusals ([`bank_carry_refusals`]) and
-/// the `node_refused` per-node restores this carry has refused so far. A plan takes its
-/// predecessor once, at its swap block, so the executor holds no per-node refusal from before
-/// this carry and the stored total is [`crate::carry_refusal_count`]'s. Runs on no other path, so
-/// a carry that refuses nothing stores nothing; one release store, bounded by the units.
-fn mirror_carry_refusals(
-    units: &mut [RuntimeUnit],
-    defects: &crate::GraphLaneSwapDefectWatch,
-    node_refused: u64,
-) {
-    defects.store_carry_refusals(bank_carry_refusals(units).saturating_add(node_refused));
-}
-
 /// The effect bank stage slot `slot` of `chain` holds, of either type (issues #1279, #1280).
 /// Allocation-free: a slot borrow and one downcast.
 fn effect_stage_mut(chain: &mut BankChain, slot: usize) -> Option<EffectStageMut<'_>> {
@@ -7867,7 +7833,20 @@ impl crate::runtime::Runtime {
     /// Restores the console-effect carry refused, summed over every effect bank stage of this
     /// runtime (issue #1279 D6). Saturating.
     pub(crate) fn carry_refusal_count(&mut self) -> u64 {
-        bank_carry_refusals(&mut self.units)
+        let mut refused = 0_u64;
+        for unit in &mut self.units {
+            let crate::runtime::RuntimeUnit::Bank { chain, .. } = unit else {
+                continue;
+            };
+            let mut slot = 0_usize;
+            while chain.slot_stage_mut(slot).is_some() {
+                if let Some(stage) = effect_stage_mut(chain, slot) {
+                    refused = refused.saturating_add(stage.carry_refused());
+                }
+                slot += 1;
+            }
+        }
+        refused
     }
 
     /// Whether `at` names a populated lane of this runtime's bank that holds `owner`'s state.
@@ -8333,10 +8312,15 @@ impl crate::runtime::Runtime {
     /// the state from a per-node predecessor and is cleared when a bank lane's payload is the
     /// source. A lane whose restore refuses stays as prepared; a bank stage counts it
     /// (D6), and this returns the count of per-node instances that refused, which have no stage to
-    /// count them. A refused lane carries no agreement, being at rest. Each refusal, and only a
-    /// refusal, stores the plan's carry refusals total in its defect watch
-    /// ([`mirror_carry_refusals`], issue #2427), so a carry that refuses nothing runs no new
-    /// instruction.
+    /// count them. A refused lane carries no agreement, being at rest.
+    ///
+    /// **The defect watch (issue #2427).** Each refusal, and only a refusal, stores the plan's
+    /// carry refusals total in its defect watch: `bank_refused`, the refusals the successor's
+    /// bank stages counted in this carry (a checked pair's restore counts each `false` it
+    /// returns), plus `node_refused`. A plan takes its predecessor once, at its swap block, and
+    /// its stages and executor count nothing before it, so the stored total is
+    /// [`crate::carry_refusal_count`]'s. O(1) per refusal; a carry that refuses nothing runs no
+    /// new instruction.
     ///
     /// The pending `Observe` records of every moved predecessor instance are applied to its tap
     /// as its next block would have (#1280 D3), at `predecessor_next_sample`, after the first loop
@@ -8356,6 +8340,7 @@ impl crate::runtime::Runtime {
         use crate::GraphEffectSite::{Lane, Node};
         let mut disengaged: Option<u32> = None;
         let mut node_refused = 0_u64;
+        let mut bank_refused = 0_u64;
         let mut tap_cursor = 0_usize;
         for (index, step) in moves.iter().enumerate() {
             match (step.successor, step.predecessor) {
@@ -8390,11 +8375,10 @@ impl crate::runtime::Runtime {
                         mark_effect_move_taken(taps, &mut tap_cursor, index);
                     } else {
                         // Issue #2427: the refused-restore path, and only it, mirrors the total.
-                        mirror_carry_refusals(
-                            &mut self.units,
-                            &self.lane_map.defects,
-                            node_refused,
-                        );
+                        bank_refused = bank_refused.saturating_add(1);
+                        self.lane_map
+                            .defects
+                            .store_carry_refusals(bank_refused.saturating_add(node_refused));
                     }
                 }
                 (Lane(successor), Node(before)) => {
@@ -8415,11 +8399,10 @@ impl crate::runtime::Runtime {
                             mark_effect_move_taken(taps, &mut tap_cursor, index);
                         } else {
                             // Issue #2427: the refused-restore path mirrors the total.
-                            mirror_carry_refusals(
-                                &mut self.units,
-                                &self.lane_map.defects,
-                                node_refused,
-                            );
+                            bank_refused = bank_refused.saturating_add(1);
+                            self.lane_map
+                                .defects
+                                .store_carry_refusals(bank_refused.saturating_add(node_refused));
                         }
                     }
                 }
@@ -8459,11 +8442,9 @@ impl crate::runtime::Runtime {
                         } else {
                             node_refused = node_refused.saturating_add(1);
                             // Issue #2427: the refused-restore path mirrors the total.
-                            mirror_carry_refusals(
-                                &mut self.units,
-                                &self.lane_map.defects,
-                                node_refused,
-                            );
+                            self.lane_map
+                                .defects
+                                .store_carry_refusals(bank_refused.saturating_add(node_refused));
                         }
                     }
                 }

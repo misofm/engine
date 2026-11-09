@@ -6671,6 +6671,9 @@ struct PlainRun {
     transitions: [u64; 3],
     /// The successor's `carry_refusal_count()` after the last block (D6).
     refusals: u64,
+    /// The carry refusals total the successor's defect watch holds after the last block (issue
+    /// #2427).
+    mirrored: u64,
     /// The successor's carry-table entries ([`carry_counts`]).
     carry_counts: [usize; 4],
     /// Effect lanes the predecessor's inventory records.
@@ -6755,6 +6758,7 @@ fn plain_run(
         collapses,
         transitions: plan.plan.bank_collapse_transitions(),
         refusals: graph::carry_refusal_count(&mut plan.plan).expect("a graph plan"),
+        mirrored: plan.inventory.lane_swap_defects().carry_refusals(),
         carry_counts,
         effect_lanes,
     }
@@ -8604,15 +8608,33 @@ fn a_bank_of_inserts_falls_apart_at_the_build_width() {
 /// console lane, a per-node insert into a bank lane, and a bank lane into a per-node insert. Two
 /// restores refuse on each (`graph::test_only_refuse_carry_restores` hands them an empty payload
 /// scratch, so the stage, or the per-node count, records a real refusal), and the hand-over still
-/// carries. The control plane sums these watches into `BANK_CONTRACT_DEFECTS`.
+/// carries. The console case runs twice: on live stages, and on the plain stages of plans
+/// prepared with no live effect lane (the C ABI's `HostLiveLanes::FADER_AND_MATRIX` shape), each
+/// stage type counting its own refusals. The control plane sums these watches into
+/// `BANK_CONTRACT_DEFECTS`.
 ///
 /// Test value: a refusing path that stores nothing (a host never sees a refused carry there), a
-/// store of the one refusal rather than the plan's total, or a total that leaves out the banks'
-/// refusals or the per-node ones.
+/// store of the one refusal rather than the plan's total, a total that leaves out the banks'
+/// refusals or the per-node ones, or a stage type whose refusals the plan's count misses.
 #[test]
 fn a_refused_carry_restore_reaches_the_defect_watch() {
     let backend = Backend::current();
     let feed = bursty_feed(SOURCE, 5);
+    let a = Session::compile(console_session(false, &["eq"]));
+    let b = Session::compile(with_muted_track(console_session(false, &["eq"])));
+    graph::test_only_refuse_carry_restores(2);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    graph::test_only_refuse_carry_restores(0);
+    assert_eq!(
+        run.carry,
+        CarryOutcome::Carried,
+        "plain console lane to lane: the hand-over"
+    );
+    assert_eq!(
+        (run.refusals, run.mirrored),
+        (2, 2),
+        "plain console lane to lane: the watch holds the plan's refusals total"
+    );
     let console = (
         Session::compile(console_session(false, &["eq"])),
         Session::compile(with_muted_track(console_session(false, &["eq"]))),
