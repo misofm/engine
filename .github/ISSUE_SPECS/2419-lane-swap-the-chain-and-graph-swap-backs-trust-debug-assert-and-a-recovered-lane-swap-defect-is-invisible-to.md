@@ -226,8 +226,8 @@ Branches with no reachable mutant:
 **Item 5.** The docs of `BankChain::lane_swap_defects`, `Runtime::lane_swap_defect_count` and `graph::lane_swap_defect_count` say the total counts recoveries, not strips: one slot that strands on its swap-back counts as a strand and as a split.
 
 **Item 6.** Two successor specs, ready to file, are in the scratchpad:
-- `succ/bb.md`, #SUCCESSOR-REBUILD: a plan rebuild on a nonzero lane-swap defect total, which is the residue's correct end state.
-- `succ/cc.md`, #SUCCESSOR-WIRE: an owner ruling on putting `lane_swap_defect_count` and `carry_refusal_count` on the wire.
+- `succ/bb.md`, #2424: a plan rebuild on a nonzero lane-swap defect total, which is the residue's correct end state.
+- `succ/cc.md`, #2425: an owner ruling on putting `lane_swap_defect_count` and `carry_refusal_count` on the wire.
 
 The follow-ups below name them.
 
@@ -292,8 +292,8 @@ The four that are not red in both builds:
 - `check-web-audioworklet.sh --without-metadata-regeneration`, on a rebuilt artifact and named twin with wabt 1.0.34: passed. `miso_engine_web_v1_render` has closure=38, atomic_waits=0, destructor_registration=0.
 
 **Follow-ups (not filed).**
-- #SUCCESSOR-REBUILD: a plan rebuild on a nonzero lane-swap defect total (`succ/bb.md`).
-- #SUCCESSOR-WIRE: an owner ruling on a wire `CounterId` for `lane_swap_defect_count` and `carry_refusal_count` (`succ/cc.md`).
+- #2424: a plan rebuild on a nonzero lane-swap defect total (`succ/bb.md`).
+- #2425: an owner ruling on a wire `CounterId` for `lane_swap_defect_count` and `carry_refusal_count` (`succ/cc.md`).
 - *Corrected in attempt 3:* a nonzero test through the pub `graph::lane_swap_defect_count` wrapper needed no fault hook. It is `the_lane_swap_defect_total_reads_the_plans_runtime`, and N5 is now red.
 
 **Sol's verdict on attempt 2 (`20f4b3a2a`): FAIL**, with one MAJOR and two MINOR findings. The code was judged correct, and all 12 of the reviewer's mutants were red.
@@ -340,3 +340,6 @@ With N5 red, the only mutants not red in both builds are:
 - `realtime_policy`: ok (314 marked regions in 48 files).
 
 No render dispatch changed, so the web gate was not rerun; it passed on attempt 2.
+
+### Verdict on attempt 3 (Sol, `08d74a5b7`): PASS
+No BLOCKER or MAJOR. N5 (`Some(0 * ..)`), N5b (`None`) and two sibling-counter mutants are red in debug and release. The test items made `pub(crate)` leak nothing into non-test builds. The deleted `Some(0)` assertion in `silent_bank_skip` was a duplicate: rack's exact-count lane-swap test owns that claim (mutant H is red there). The two MINORs on the rebuild successor's bound (the carry path bypasses pins; the bound counts trades, not counter increments) are folded into #2424.
