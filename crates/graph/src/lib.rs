@@ -5002,6 +5002,16 @@ impl GraphLaneSwapDefectWatch {
         })
     }
 
+    /// Test-only (issue #2427): the watch bind makes over the distinct, sorted tracks `strips`,
+    /// none for a plan with no pack group, so a test can hold [`Self::heap_bytes`] to the
+    /// allocator.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_new(strips: Box<[Box<str>]>) -> Self {
+        Self::new(strips)
+    }
+
     /// Test-only (issue #2424): raise track `strip`'s flag as render's defect path would, from
     /// whichever thread holds the watch, so a test can place a defect between two control-thread
     /// reads of the watch (render raises concurrently with them). A track the watch does not
@@ -8340,35 +8350,6 @@ impl GraphExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Issue #2427: a defect watch charges exactly the heap it holds, a plan with no pack group's
-    /// too: its watch has no strip but still makes its table for the plan's totals. The watch's
-    /// `heap_bytes` is `lane_swap_defect_watch_bytes`, the charge the preparation's projection
-    /// and the plan's inventory row (and so `capi_retained_bytes`) both read, so this holds the
-    /// one formula to the allocator.
-    ///
-    /// Test value: a charge that leaves out the table of a watch with no strip (every plan without
-    /// a pack group then under-charges its inventory), or a strip's flag or name.
-    #[test]
-    fn a_defect_watch_charges_exactly_the_heap_it_holds() {
-        use bench_support::alloc::{
-            assert_installed, current_thread_counters, current_thread_delta_since,
-        };
-        assert_installed();
-        for names in [Vec::new(), vec!["eq0", "eq12"]] {
-            let strips: Box<[Box<str>]> = names.iter().map(|name| Box::from(*name)).collect();
-            // The names and their table exist before the watch takes them.
-            let given = core::mem::size_of_val::<[Box<str>]>(&strips)
-                + names.iter().map(|name| name.len()).sum::<usize>();
-            let mark = current_thread_counters();
-            let watch = GraphLaneSwapDefectWatch::new(strips);
-            let used = current_thread_delta_since(mark);
-            let made = usize::try_from(used.requested_bytes - used.released_bytes)
-                .expect("a small allocation");
-            assert!(made > 0, "{names:?}: the watch makes its table");
-            assert_eq!(watch.heap_bytes(), made + given, "{names:?}");
-        }
-    }
 
     use conformance::DualAccumulatorDelayFactory;
     use effect_contract::{
