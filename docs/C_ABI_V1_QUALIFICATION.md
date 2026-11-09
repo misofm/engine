@@ -738,6 +738,14 @@ since the last one (a configuration counts its period from the call that accepte
 sample at that point; blocks rendered with no control call between them yield one snapshot at the
 next call, and skipped periods are not replayed. The lane is lossy: the lossy queue may keep only part
 of a snapshot.
+- **Resource movement (#2427).** Every graph plan's defect watch now makes its table, also for a
+  plan with no pack group, which charged nothing before: the shared allocation's header and its
+  cells, 64 bytes on x86-64, in the plan's state inventory and so in `capi_retained_bytes`. A
+  plan with a pack group charges 8 bytes more, the carry refusals total beside its recoveries.
+  The provider's counter snapshot holds one more slot (its ten-slot minimum). A caller that sets
+  `maximum_capi_retained_bytes` to an exact figure measured before #2427 must raise it by these
+  bytes; no symbol, struct or feature bit is added.
+
 Candidate catalogs allocate before structural commit and are included in double-live resource
 admission. Host-core's default feature graph remains protocol-free; only capi enables the optional
 `control-provider` edge.
