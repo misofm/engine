@@ -4972,6 +4972,18 @@ impl GraphLaneSwapDefectWatch {
         })
     }
 
+    /// Test-only (issue #2424): raise track `strip`'s flag as render's defect path would, from
+    /// whichever thread holds the watch, so a test can place a defect between two control-thread
+    /// reads of the watch (render raises concurrently with them). A track the watch does not
+    /// name raises nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn test_only_raise(&self, strip: &str) {
+        if let Some(index) = self.strip_index(strip) {
+            self.raise([index, index], self.recoveries());
+        }
+    }
+
     /// The plan's lane-swap recoveries total ([`lane_swap_defect_count`]) as render last stored
     /// it on the defect path: 0 until a defect. Any thread.
     #[must_use]

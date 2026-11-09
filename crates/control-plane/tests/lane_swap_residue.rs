@@ -53,6 +53,13 @@ impl ControlAdapter for Adapter {
 
 struct Preparer;
 
+std::thread_local! {
+    /// A track whose defect flag the next warm preparation on this thread raises on its base's
+    /// watch before it prepares, as render would between the ordinary and the warm preparation of
+    /// one edit; taken once.
+    static RAISE_IN_WARM: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
 impl RuntimePreparer for Preparer {
     fn prepare(
         &self,
@@ -71,6 +78,11 @@ impl RuntimePreparer for Preparer {
         PrepareDiagnostics,
     > {
         let live = HostLiveControlRequest::default();
+        if let Some(base) = successor.filter(|base| base.warm.is_some())
+            && let Some(strip) = RAISE_IN_WARM.with(std::cell::Cell::take)
+        {
+            base.inventory.lane_swap_defects().test_only_raise(strip);
+        }
         let (host, handles) = match successor {
             Some(base) => prepare_host_runtime_with_live_lanes_successor(
                 compiled, caps, &live, lanes, base, superseded,
@@ -115,9 +127,13 @@ fn id(text: &str) -> StableId {
     StableId::parse(text).expect("stable ID")
 }
 
-/// The nine-track session, with `eq0`'s console EQ band gain at +9 dB on its left lane.
-fn document() -> (String, u64) {
+/// The nine-track session at `revision` (the fixture's when `None`), with `eq0`'s console EQ
+/// band gain at +9 dB on its left lane.
+fn document(revision: Option<u64>) -> (String, u64) {
     let mut model = session::parse_session_json(SESSION).expect("fixture");
+    if let Some(revision) = revision {
+        model.revision = revision;
+    }
     for param in &mut model.tracks[0].console[0].params {
         if param.parameter_id == 4 && param.channel == ParameterChannel::Left {
             param.value = 9.0;
@@ -127,6 +143,18 @@ fn document() -> (String, u64) {
         session::canonical_session_json(&model).expect("canonical"),
         model.revision,
     )
+}
+
+/// `eq1` and its route as the fixture declares them.
+fn fixture_eq1() -> (session::Track, session::Route) {
+    let model = session::parse_session_json(SESSION).expect("fixture");
+    let route = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "eq1-main")
+        .expect("eq1's route")
+        .clone();
+    (model.tracks[1].clone(), route)
 }
 
 /// A muted copy of `eq1` named `name` on its source, with no route: a structural edit that
@@ -157,7 +185,12 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        let (document, revision) = document();
+        Self::at(None)
+    }
+
+    /// [`Self::new`] at `revision`.
+    fn at(revision: Option<u64>) -> Self {
+        let (document, revision) = document(revision);
         let CompiledChildren { session, plan } =
             compile_children::<Adapter>(&document, limits(), Box::new(Preparer))
                 .expect("boot compile");
@@ -208,12 +241,23 @@ impl Rig {
 
     /// Both strips' response curves, left and right.
     fn responses(&mut self) -> [Curves; 2] {
-        [curves(&self.response("eq0")), curves(&self.response("eq1"))]
+        [self.response_curves("eq0"), self.response_curves("eq1")]
+    }
+
+    /// `strip`'s response curves, left and right.
+    fn response_curves(&mut self, strip: &str) -> Curves {
+        curves(&self.response(strip))
     }
 
     /// Trade `eq0` and `eq1` while the next bank lane swap strands: the plan's recovered defect.
     /// Render-thread work, between blocks, as the packer's move; the trade allocates nothing.
     fn strand_trade(&mut self) {
+        self.strand_lanes(0, 1);
+    }
+
+    /// [`Self::strand_trade`] of the strips on lanes `a` and `b` of the group's first unit, the
+    /// active plan's first defect.
+    fn strand_lanes(&mut self, a: usize, b: usize) {
         let group = graph::test_only_pack_groups(self.active())
             .into_iter()
             .find(|group| group.chains.first().is_some_and(|chain| !chain.is_empty()))
@@ -221,7 +265,7 @@ impl Rig {
         let unit = group.chains[0][0] as usize;
         effect_contract::test_only_strand_lane_swaps(1);
         let mark = bench_support::alloc::current_thread_counters();
-        let moved = graph::test_only_swap_bank_lanes(self.active(), (unit, 0), (unit, 1));
+        let moved = graph::test_only_swap_bank_lanes(self.active(), (unit, a), (unit, b));
         let used = bench_support::alloc::current_thread_delta_since(mark);
         effect_contract::test_only_strand_lane_swaps(0);
         assert!(!moved, "the stranded trade moves nothing");
@@ -307,16 +351,18 @@ impl Rig {
 
 /// A plan whose trade strands holds residue, and the next service step replaces it once: the
 /// successor restarts both strips, so each renders its own response again, and pins both, so its
-/// packer never trades them again. Further service calls rebuild nothing. On the base nothing
-/// read the defect: the plan kept the residue for its life.
+/// packer never trades them again. Further service calls rebuild nothing. At revision 0, which a
+/// residue rebuild keeps as a monitor rebuild does. On the base nothing read the defect: the plan
+/// kept the residue for its life.
 ///
 /// Test value: no rebuild on a defect (the residue stays), a rebuild that carries the strips
 /// instead of restarting them, a successor that does not pin them (a bank that strands at every
-/// plan would rebuild at every episode), or a rebuild repeated while the residue is gone.
+/// plan would rebuild at every episode), a rebuild repeated while the residue is gone, or one
+/// that commits as a transaction (refused at revision 0).
 #[test]
 fn a_lane_swap_defect_rebuilds_the_plan_once() {
     bench_support::alloc::assert_installed();
-    let mut rig = Rig::new();
+    let mut rig = Rig::at(Some(0));
     let own = rig.responses();
     assert_ne!(own[0], own[1], "the two strips' defaults differ");
     assert!(
@@ -446,4 +492,179 @@ fn a_residue_rebuild_is_never_warm() {
     }
     assert_eq!(rig.session.lane_swap_rebuilds(), (1, 0), "one rebuild");
     assert_eq!(rig.responses(), own);
+}
+
+/// The quarantine holds across every later successor of the session, and a strip the session
+/// removes leaves it: re-added, it is a new strip, movable again.
+///
+/// Test value: a successor that pins only the residue it restarts (a defect pair is traded, and
+/// rebuilt, again after the next edit), or a quarantine that keeps a removed strip's ID, which
+/// then grows with every removal over the session past its charge.
+#[test]
+fn the_quarantine_holds_across_successors_and_drops_a_removed_strip() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let before = rig.epoch();
+    rig.strand_trade();
+    rig.session.service().expect("service");
+    rig.render_until_past(before);
+    let pair = vec![Box::<str>::from("eq0"), Box::from("eq1")];
+    assert_eq!(rig.pinned(), pair);
+    let before = rig.epoch();
+    rig.transact(&[muted_track("eq9")]);
+    rig.render_until_past(before);
+    assert_eq!(
+        rig.pinned(),
+        pair,
+        "an edit's successor keeps the quarantine"
+    );
+    let (track, route) = fixture_eq1();
+    let before = rig.epoch();
+    rig.transact(&[
+        SessionEdit::RemoveRoute {
+            route_id: route.id.clone(),
+        },
+        SessionEdit::RemoveTrack {
+            track_id: track.id.clone(),
+        },
+    ]);
+    rig.render_until_past(before);
+    let before = rig.epoch();
+    rig.transact(&[
+        SessionEdit::UpsertTrack { track },
+        SessionEdit::UpsertRoute { route },
+    ]);
+    rig.render_until_past(before);
+    assert_eq!(
+        rig.pinned(),
+        vec![Box::<str>::from("eq0")],
+        "the re-added eq1 is not quarantined"
+    );
+    assert_eq!(rig.session.lane_swap_rebuilds(), (1, 0));
+}
+
+/// While the running plan holds residue, a structural edit classified warm (a forced zero lead)
+/// commits. Its lead is derived from the ordinary successor, which restarts the residue, so the
+/// warm successor restarts that residue too. A defect render raises between the two
+/// preparations (here on `eq2`, raised as the warm one starts) is not in the lead: the warm
+/// successor pins it and does not restart it, so its warm invariant holds, and it inherits the
+/// strip at its promotion, which the service step then rebuilds. (The residue rebuild is refused
+/// first, so the edit supersedes no candidate and ducks nothing, the one shape a warm answer is
+/// prepared warm in.)
+///
+/// Test value: a warm successor that restarts residue its lead did not, which its warm invariant
+/// refuses, so a defect raised during a warm edit's preparation fails the edit.
+#[test]
+fn a_warm_edit_over_residue_commits_and_a_late_defect_is_rebuilt() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    rig.strand_trade();
+    rig.session
+        .test_set_structural_faults([Some(TestStructuralFaultPhase::AfterRuntimePrepare), None]);
+    rig.session.service().expect("service");
+    assert_eq!(rig.session.lane_swap_rebuilds(), (0, 1));
+    rig.session.test_set_next_zero_lead(Vec::new());
+    RAISE_IN_WARM.with(|raise| raise.set(Some("eq2")));
+    let before = rig.epoch();
+    rig.transact(&[muted_track("eq9")]);
+    assert_eq!(
+        RAISE_IN_WARM.with(std::cell::Cell::get),
+        None,
+        "the edit was prepared warm"
+    );
+    rig.render_until_past(before);
+    let adopted = rig.epoch();
+    rig.render_until_past(adopted);
+    assert_eq!(rig.responses(), own, "eq0 and eq1 are their own again");
+    assert_eq!(
+        rig.pinned(),
+        ["eq0", "eq1", "eq2"].map(Box::<str>::from).to_vec()
+    );
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 1),
+        "eq2's rebuild after the refused one"
+    );
+}
+
+/// A declared discontinuity over residue: its successor starts every strip at rest, so it arms no
+/// restart for the residue and inherits none at its promotion, and no rebuild follows it; it
+/// pins the pair as every successor does.
+///
+/// Test value: a discontinuity successor that restarts the residue as a duck-swap (it arms a
+/// fade-in on each such strip, where every other strip starts at once), or a promotion that
+/// hands a discontinuity successor the residue it never carried, which rebuilds it for nothing.
+#[test]
+fn a_declared_discontinuity_over_residue_needs_no_rebuild() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    // A plan that reads its sources ahead runs behind its natural timing, so a declaration
+    // rebuilds: the residue rebuild below is such a plan.
+    host_core::test_only_set_next_source_read_offset(QUANTUM as u64);
+    let before = rig.epoch();
+    rig.strand_trade();
+    rig.session.service().expect("service");
+    assert_eq!(rig.session.lane_swap_rebuilds(), (1, 0));
+    rig.render_until_past(before);
+    // A second pair's defect on the plan that runs behind, then the declaration: its service
+    // step publishes the residue rebuild, which the declaration supersedes at once.
+    rig.strand_lanes(2, 3);
+    let before = rig.epoch();
+    rig.session
+        .declare_discontinuity()
+        .expect("the declaration rebuilds");
+    assert_eq!(rig.session.lane_swap_rebuilds(), (2, 0));
+    rig.render_until_past(before);
+    assert_eq!(
+        graph::test_only_fade_arms(rig.active()),
+        Some(Vec::new()),
+        "a discontinuity successor arms no fade"
+    );
+    for _ in 0..8 {
+        rig.block();
+        rig.session.service().expect("service");
+    }
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (2, 0),
+        "no rebuild after the declaration"
+    );
+    assert_eq!(
+        rig.pinned(),
+        ["eq0", "eq1", "eq2", "eq3"].map(Box::<str>::from).to_vec()
+    );
+    assert_eq!(rig.responses(), own);
+}
+
+/// A strip with residue that an edit removes leaves nothing to rebuild: the edit's successor
+/// restarts the residue strip it keeps, the removed one is gone, and no rebuild follows the
+/// edit's adoption.
+///
+/// Test value: a promotion that hands its successor the residue of a strip it does not have,
+/// which no successor can restart, so every promotion after it rebuilds again: a storm.
+#[test]
+fn a_removed_residue_strip_rebuilds_nothing() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    rig.strand_trade();
+    let (track, route) = fixture_eq1();
+    let before = rig.epoch();
+    rig.transact(&[
+        SessionEdit::RemoveRoute { route_id: route.id },
+        SessionEdit::RemoveTrack { track_id: track.id },
+    ]);
+    rig.render_until_past(before);
+    for _ in 0..16 {
+        rig.block();
+        rig.session.service().expect("service");
+    }
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 0),
+        "the rebuild the edit superseded, and nothing after"
+    );
+    assert_eq!(rig.response_curves("eq0"), own[0], "eq0 is its own again");
 }
