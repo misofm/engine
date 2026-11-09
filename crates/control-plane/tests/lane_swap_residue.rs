@@ -1,0 +1,772 @@
+//! Issue #2424: a recovered lane-swap defect leaves residue in its plan, and the session's service
+//! step replaces the plan, restarting each strip the defect reached.
+//!
+//! Each test drives control-plane's own session (`SessionState::command` and `service`, the code
+//! both hosts run) and its render half (`PlanState::render`) on one thread. The session is the
+//! nine-track EQ fixture at 48 kHz: input filters on every strip and the EQ console slot `eq`,
+//! nine strips over two banks or more, so the banks form a pack group. `eq0`'s console EQ band
+//! gain is raised on its left lane, so its prepared defaults differ from `eq1`'s, the strip it
+//! trades with.
+//!
+//! The defect is a real one on the plan's real banks: `effect_contract::test_only_strand_lane_swaps`
+//! makes the next bank lane swap strand as a broken bank's does (the two lanes' defaults rotated,
+//! their payloads not), and a trade of the two strips (`graph::test_only_swap_bank_lanes`, the
+//! packer's own move) hits it. The rack resets both lanes to the defaults they then hold, the
+//! graph pins both strips and raises its defect watch, and each strip renders with the other's
+//! defaults: its composed response is the other strip's.
+#![cfg(feature = "test-support")]
+
+use control_plane::{
+    CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources, PlanState,
+    RuntimePreparer, SessionState, TestStructuralFaultPhase, compile_children,
+};
+use host_core::{
+    CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
+    HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost, ResponseChannels,
+    ResponsePreviewGrid, ResponseSnapshotCollector, SuccessorBase, TrackResponse,
+    compose_track_response, prepare_host_runtime_with_live_lanes,
+    prepare_host_runtime_with_live_lanes_successor,
+};
+use protocol::{
+    CommandPayload, DecodeScratch, DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec,
+    RequestId, SessionEdit, SessionRevision, TypedCommandFrame,
+};
+use session::{ParameterChannel, StableId};
+
+const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+const QUANTUM: usize = 128;
+const GRID: ResponsePreviewGrid = ResponsePreviewGrid::Logarithmic {
+    points: 64,
+    minimum_hz: 20.0,
+    maximum_hz: 20_000.0,
+};
+/// The most blocks a rebuild's adoption may take: a duck-swap waits for its `S`, far inside 64
+/// blocks of 128 frames.
+const MAX_BLOCKS: usize = 64;
+
+struct Adapter;
+
+impl ControlAdapter for Adapter {
+    type Row = PlanResources;
+    const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+}
+
+struct Preparer;
+
+std::thread_local! {
+    /// A track whose defect flag the next warm preparation on this thread raises on its base's
+    /// watch before it prepares, as render would between the ordinary and the warm preparation of
+    /// one edit; taken once.
+    static RAISE_IN_WARM: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+impl RuntimePreparer for Preparer {
+    fn prepare(
+        &self,
+        compiled: &CompiledSession,
+        caps: &HostPrepareCaps,
+        lanes: HostLiveLanes,
+        _spectrum: Option<&host_core::SpectrumPreparation>,
+        successor: Option<SuccessorBase<'_>>,
+        superseded: &LiveValuesSuperseded,
+    ) -> Result<
+        (
+            PreparedHost,
+            HostLiveControlHandles,
+            Option<host_core::PreparedSpectrumCaptures>,
+        ),
+        PrepareDiagnostics,
+    > {
+        let live = HostLiveControlRequest::default();
+        if let Some(base) = successor.filter(|base| base.warm.is_some())
+            && let Some(strip) = RAISE_IN_WARM.with(std::cell::Cell::take)
+        {
+            base.inventory.lane_swap_defects().test_only_raise(strip);
+        }
+        let (host, handles) = match successor {
+            Some(base) => prepare_host_runtime_with_live_lanes_successor(
+                compiled, caps, &live, lanes, base, superseded,
+            ),
+            None => prepare_host_runtime_with_live_lanes(compiled, caps, &live, lanes, superseded),
+        }?;
+        Ok((host, handles, None))
+    }
+}
+
+fn limits() -> ControlLimits {
+    ControlLimits {
+        source_ring_frames: 1_024,
+        maximum_document_bytes: 1_000_000,
+        maximum_diagnostic_bytes: 4_096,
+        maximum_tracks: 100,
+        maximum_sources: 100,
+        maximum_routes: 100,
+        maximum_effects: 100,
+        maximum_graph_session_plus_plan_bytes: 1_000_000_000,
+        maximum_source_total_bytes: 100_000_000,
+        maximum_source_overhead_bytes: 100_000_000,
+        maximum_effect_state_bytes: 1_000_000_000,
+        maximum_effect_scratch_bytes: 1_000_000_000,
+        maximum_builtin_retained_bytes: 1_000_000_000,
+        maximum_control_retained_bytes: 100_000_000,
+        maximum_named_allocation_bytes: 1_000_000_000,
+        maximum_meter_streams: 4_096,
+        maximum_meter_items: 1 << 20,
+        maximum_meter_bytes: 1 << 26,
+        maximum_control_frame_bytes: 65_536,
+        maximum_replay_bytes: 262_144,
+        maximum_replay_entries: 16,
+        maximum_submixes: 0,
+        maximum_vcas: 4,
+        maximum_vca_reach_pairs: u64::MAX,
+        maximum_replacement_peak_bytes: u64::MAX,
+    }
+}
+
+fn id(text: &str) -> StableId {
+    StableId::parse(text).expect("stable ID")
+}
+
+/// The nine-track session at `revision` (the fixture's when `None`), with `eq0`'s console EQ
+/// band gain at +9 dB on its left lane.
+fn document(revision: Option<u64>) -> (String, u64) {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    if let Some(revision) = revision {
+        model.revision = revision;
+    }
+    for param in &mut model.tracks[0].console[0].params {
+        if param.parameter_id == 4 && param.channel == ParameterChannel::Left {
+            param.value = 9.0;
+        }
+    }
+    (
+        session::canonical_session_json(&model).expect("canonical"),
+        model.revision,
+    )
+}
+
+/// `eq1` and its route as the fixture declares them.
+fn fixture_eq1() -> (session::Track, session::Route) {
+    let model = session::parse_session_json(SESSION).expect("fixture");
+    let route = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "eq1-main")
+        .expect("eq1's route")
+        .clone();
+    (model.tracks[1].clone(), route)
+}
+
+/// A muted copy of `eq1` named `name` on its source, with no route: a structural edit that
+/// restarts no strip.
+fn muted_track(name: &str) -> SessionEdit {
+    let model = session::parse_session_json(SESSION).expect("fixture");
+    let mut track = model.tracks[1].clone();
+    track.id = id(name);
+    track.fader.left_mute = true;
+    track.fader.right_mute = true;
+    SessionEdit::UpsertTrack { track }
+}
+
+/// A strip's composed response curves, left and right.
+type Curves = (Option<Vec<f32>>, Option<Vec<f32>>);
+
+fn curves(response: &TrackResponse) -> Curves {
+    (response.left_db.clone(), response.right_db.clone())
+}
+
+struct Rig {
+    session: SessionState<Adapter>,
+    plan: PlanState<Adapter>,
+    revision: u64,
+    request: u64,
+    at: u64,
+}
+
+impl Rig {
+    fn new() -> Self {
+        Self::at(None)
+    }
+
+    /// [`Self::new`] at `revision`.
+    fn at(revision: Option<u64>) -> Self {
+        let (document, revision) = document(revision);
+        Self::of(&document, revision)
+    }
+
+    /// The session and its render half, apart, for a test that drops the render half.
+    fn into_parts(self) -> (SessionState<Adapter>, PlanState<Adapter>) {
+        (self.session, self.plan)
+    }
+
+    /// The rig of session `document`, at `revision`.
+    fn of(document: &str, revision: u64) -> Self {
+        let CompiledChildren { session, plan } =
+            compile_children::<Adapter>(document, limits(), Box::new(Preparer))
+                .expect("boot compile");
+        let mut rig = Self {
+            session,
+            plan,
+            revision,
+            request: 1,
+            at: 0,
+        };
+        rig.block();
+        rig.session.service().expect("service");
+        rig
+    }
+
+    /// Render one block (the sources underrun: silence is enough).
+    fn block(&mut self) {
+        let mut samples = [0.0_f32; QUANTUM * 2];
+        let output = engine::realtime::PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM)
+            .expect("output planes");
+        self.plan.render(self.at, output).expect("a rendered block");
+        self.at += QUANTUM as u64;
+    }
+
+    /// The active plan, as render holds it.
+    fn active(&mut self) -> &mut engine::realtime::PreparedRenderPlan {
+        self.plan.test_owner_mut().active_plan_mut()
+    }
+
+    /// The composed response of `strip` from the active plan, at the current boundary.
+    fn response(&mut self, strip: &str) -> TrackResponse {
+        let mut collector = ResponseSnapshotCollector::new(48_000, 16, 6, 127);
+        let capture = self
+            .plan
+            .copy_response_snapshot(engine::realtime::ResponseSnapshotRequest {
+                track_id: strip,
+                sink: &mut collector,
+            })
+            .expect("a direct capture");
+        compose_track_response(
+            strip,
+            &collector.finish(capture),
+            GRID,
+            ResponseChannels::Both,
+        )
+        .expect("a composed response")
+    }
+
+    /// Both strips' response curves, left and right.
+    fn responses(&mut self) -> [Curves; 2] {
+        [self.response_curves("eq0"), self.response_curves("eq1")]
+    }
+
+    /// `strip`'s response curves, left and right.
+    fn response_curves(&mut self, strip: &str) -> Curves {
+        curves(&self.response(strip))
+    }
+
+    /// Trade `eq0` and `eq1` while the next bank lane swap strands: the plan's recovered defect.
+    /// Render-thread work, between blocks, as the packer's move; the trade allocates nothing.
+    fn strand_trade(&mut self) {
+        self.strand_lanes(0, 1);
+    }
+
+    /// [`Self::strand_trade`] of the strips on lanes `a` and `b` of the group's first unit: one
+    /// more recovered defect of the active plan.
+    fn strand_lanes(&mut self, a: usize, b: usize) {
+        let defects = graph::lane_swap_defect_count(self.active()).expect("a graph plan");
+        let group = graph::test_only_pack_groups(self.active())
+            .into_iter()
+            .find(|group| group.chains.first().is_some_and(|chain| !chain.is_empty()))
+            .expect("the two strips are banked in a pack group");
+        let unit = group.chains[0][0] as usize;
+        effect_contract::test_only_strand_lane_swaps(1);
+        let mark = bench_support::alloc::current_thread_counters();
+        let moved = graph::test_only_swap_bank_lanes(self.active(), (unit, a), (unit, b));
+        let used = bench_support::alloc::current_thread_delta_since(mark);
+        effect_contract::test_only_strand_lane_swaps(0);
+        assert!(!moved, "the stranded trade moves nothing");
+        assert_eq!(
+            (used.allocations, used.deallocations),
+            (0, 0),
+            "the defect path allocates and frees nothing"
+        );
+        assert_eq!(
+            graph::lane_swap_defect_count(self.active()),
+            Some(defects + 1),
+            "the strand is a recovered defect"
+        );
+    }
+
+    /// The session's `StripsRestarted` counter (#1768): the strips the adopted plans listed.
+    fn strips_restarted(&mut self) -> u64 {
+        self.session
+            .test_provider_counters()
+            .iter()
+            .find(|counter| counter.id == protocol::CounterId::StripsRestarted)
+            .expect("the counter")
+            .value
+    }
+
+    /// Remove `eq1` and its route, render until the edit's plan is adopted, then 16 blocks more;
+    /// the `StripsRestarted` counter's growth.
+    fn remove_eq1(&mut self) -> u64 {
+        let (track, route) = fixture_eq1();
+        self.session.service().expect("service");
+        let restarted = self.strips_restarted();
+        let before = self.epoch();
+        self.transact(&[
+            SessionEdit::RemoveRoute { route_id: route.id },
+            SessionEdit::RemoveTrack { track_id: track.id },
+        ]);
+        self.render_until_past(before);
+        for _ in 0..16 {
+            self.block();
+            self.session.service().expect("service");
+        }
+        self.strips_restarted() - restarted
+    }
+
+    /// [`Self::strand_trade`] of the strips at local positions `p` and `q` of the active plan's
+    /// pack group (position `x` is lane `x % width` of chain `x / width`'s first unit).
+    fn strand_positions(&mut self, p: usize, q: usize) {
+        let group = graph::test_only_pack_groups(self.active())
+            .into_iter()
+            .next()
+            .expect("a pack group");
+        let width = group.width as usize;
+        let at = |x: usize| (group.chains[x / width][0] as usize, x % width);
+        let defects = graph::lane_swap_defect_count(self.active()).expect("a graph plan");
+        effect_contract::test_only_strand_lane_swaps(1);
+        let moved = graph::test_only_swap_bank_lanes(self.active(), at(p), at(q));
+        effect_contract::test_only_strand_lane_swaps(0);
+        assert!(!moved, "the stranded trade moves nothing");
+        assert_eq!(
+            graph::lane_swap_defect_count(self.active()),
+            Some(defects + 1),
+            "the strand is a recovered defect"
+        );
+    }
+
+    /// The tracks the active plan pins.
+    fn pinned(&mut self) -> Vec<Box<str>> {
+        graph::test_only_pinned_tracks(self.active())
+    }
+
+    /// The active plan's epoch.
+    fn epoch(&self) -> u64 {
+        self.plan
+            .test_active_epoch()
+            .load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Render and service block by block until the active plan's epoch passes `epoch`; the
+    /// blocks rendered.
+    fn render_until_past(&mut self, epoch: u64) -> usize {
+        for blocks in 1..=MAX_BLOCKS {
+            self.block();
+            self.session.service().expect("service");
+            if self.epoch() > epoch {
+                return blocks;
+            }
+        }
+        panic!("no plan after epoch {epoch} within {MAX_BLOCKS} blocks");
+    }
+
+    /// Commit `edits` as one transaction.
+    fn transact(&mut self, edits: &[SessionEdit]) {
+        self.request += 1;
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(self.request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(self.revision)),
+                    payload: CommandPayload::SessionTransactionApply(edits),
+                },
+                &mut bytes,
+            )
+            .expect("a transaction frame");
+        bytes.truncate(length);
+        let length = self
+            .session
+            .command(&bytes, 65_536)
+            .expect("the edit commits");
+        let mut fields = [0_u16; 64];
+        match codec
+            .decode_typed_response(
+                self.session.command_response(length),
+                &mut DecodeScratch::new(&mut fields),
+            )
+            .expect("a transaction response")
+        {
+            DecodedTypedResponseFrame::Success { .. } => {}
+            DecodedTypedResponseFrame::NonOk { payload, .. } => {
+                panic!("the edit is refused: {payload:?}")
+            }
+        }
+        self.revision += 1;
+        while self
+            .session
+            .dequeue_event(EventLane::Reliable, 65_536)
+            .expect("an event")
+            .is_some()
+        {}
+    }
+}
+
+/// A plan whose trade strands holds residue, and the next service step replaces it once: the
+/// successor restarts both strips, so each renders its own response again, and pins both, so its
+/// packer never trades them again. Further service calls rebuild nothing. At revision 0, which a
+/// residue rebuild keeps as a monitor rebuild does. On the base nothing read the defect: the plan
+/// kept the residue for its life.
+///
+/// Test value: no rebuild on a defect (the residue stays), a rebuild that carries the strips
+/// instead of restarting them, a successor that does not pin them (a bank that strands at every
+/// plan would rebuild at every episode), a rebuild repeated while the residue is gone, or one
+/// that commits as a transaction (refused at revision 0).
+#[test]
+fn a_lane_swap_defect_rebuilds_the_plan_once() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::at(Some(0));
+    let own = rig.responses();
+    assert_ne!(own[0], own[1], "the two strips' defaults differ");
+    assert!(
+        rig.pinned().is_empty(),
+        "nothing is pinned before the defect"
+    );
+    let before = rig.epoch();
+    rig.strand_trade();
+    let traded = rig.responses();
+    assert_eq!(
+        traded,
+        [own[1].clone(), own[0].clone()],
+        "each strip renders the other's defaults: the residue"
+    );
+    rig.session.service().expect("service");
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 0),
+        "one rebuild, published"
+    );
+    rig.render_until_past(before);
+    assert_eq!(
+        rig.responses(),
+        own,
+        "each strip renders its own defaults again"
+    );
+    assert_eq!(
+        rig.pinned(),
+        vec![Box::from("eq0"), Box::from("eq1")],
+        "the successor pins the defect pair"
+    );
+    assert_eq!(graph::lane_swap_defect_count(rig.active()), Some(0));
+    for _ in 0..8 {
+        rig.block();
+        rig.session.service().expect("service");
+    }
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 0),
+        "no further rebuild"
+    );
+}
+
+/// A refused residue rebuild is counted and not retried at every service call; the next
+/// successor any edit makes restarts the residue all the same, and pins the pair.
+///
+/// Test value: a refusal retried at every call (a rebuild storm of refused preparations), or a
+/// residue that only the rebuild itself restarts, so an ordinary successor carries it.
+#[test]
+fn a_refused_rebuild_is_not_retried_and_any_successor_restarts_the_residue() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    rig.strand_trade();
+    rig.session
+        .test_set_structural_faults([Some(TestStructuralFaultPhase::AfterRuntimePrepare), None]);
+    for _ in 0..4 {
+        rig.block();
+        rig.session.service().expect("service");
+    }
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (0, 1),
+        "one refused attempt, never retried"
+    );
+    assert_eq!(rig.responses()[1], own[0], "the residue stays");
+    let before = rig.epoch();
+    rig.transact(&[muted_track("eq9")]);
+    rig.render_until_past(before);
+    assert_eq!(
+        rig.responses(),
+        own,
+        "the edit's successor restarted both strips"
+    );
+    assert_eq!(rig.pinned(), vec![Box::from("eq0"), Box::from("eq1")]);
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (0, 1),
+        "no rebuild needed"
+    );
+}
+
+/// A defect after a successor was prepared, before render adopted it: the successor carried the
+/// residue it did not know of, takes it over at its promotion, and the service step rebuilds it.
+///
+/// Test value: a promotion that drops the displaced plan's late flags, so the successor keeps
+/// the residue for its life.
+#[test]
+fn a_successor_adopted_after_a_late_defect_is_rebuilt() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    let before = rig.epoch();
+    rig.transact(&[muted_track("eq9")]);
+    rig.strand_trade();
+    rig.render_until_past(before);
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 0),
+        "the promotion's inherited residue rebuilt"
+    );
+    let adopted = rig.epoch();
+    rig.render_until_past(adopted);
+    assert_eq!(rig.responses(), own, "both strips are their own again");
+    assert_eq!(rig.pinned(), vec![Box::from("eq0"), Box::from("eq1")]);
+}
+
+/// The quarantine holds across every later successor of the session, and a strip the session
+/// removes leaves it: re-added, it is a new strip, movable again.
+///
+/// Test value: a successor that pins only the residue it restarts (a defect pair is traded, and
+/// rebuilt, again after the next edit), or a quarantine that keeps a removed strip's ID, which
+/// then grows with every removal over the session past its charge.
+#[test]
+fn the_quarantine_holds_across_successors_and_drops_a_removed_strip() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let before = rig.epoch();
+    rig.strand_trade();
+    rig.session.service().expect("service");
+    rig.render_until_past(before);
+    let pair = vec![Box::<str>::from("eq0"), Box::from("eq1")];
+    assert_eq!(rig.pinned(), pair);
+    let before = rig.epoch();
+    rig.transact(&[muted_track("eq9")]);
+    rig.render_until_past(before);
+    assert_eq!(
+        rig.pinned(),
+        pair,
+        "an edit's successor keeps the quarantine"
+    );
+    let (track, route) = fixture_eq1();
+    let before = rig.epoch();
+    rig.transact(&[
+        SessionEdit::RemoveRoute {
+            route_id: route.id.clone(),
+        },
+        SessionEdit::RemoveTrack {
+            track_id: track.id.clone(),
+        },
+    ]);
+    rig.render_until_past(before);
+    let before = rig.epoch();
+    rig.transact(&[
+        SessionEdit::UpsertTrack { track },
+        SessionEdit::UpsertRoute { route },
+    ]);
+    rig.render_until_past(before);
+    assert_eq!(
+        rig.pinned(),
+        vec![Box::<str>::from("eq0")],
+        "the re-added eq1 is not quarantined"
+    );
+    assert_eq!(rig.session.lane_swap_rebuilds(), (1, 0));
+}
+
+/// While the running plan holds residue, a structural edit classified warm (a forced zero lead)
+/// commits. Its lead is derived from the ordinary successor, which restarts the residue, so the
+/// warm successor restarts that residue too. A defect render raises between the two
+/// preparations (here on `eq2`, raised as the warm one starts) is not in the lead: the warm
+/// successor pins it and does not restart it, so its warm invariant holds, and it inherits the
+/// strip at its promotion, which the service step then rebuilds. (The residue rebuild is refused
+/// first, so the edit supersedes no candidate and ducks nothing, the one shape a warm answer is
+/// prepared warm in.)
+///
+/// Test value: a warm successor that restarts residue its lead did not, which its warm invariant
+/// refuses, so a defect raised during a warm edit's preparation fails the edit.
+#[test]
+fn a_warm_edit_over_residue_commits_and_a_late_defect_is_rebuilt() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    rig.strand_trade();
+    rig.session
+        .test_set_structural_faults([Some(TestStructuralFaultPhase::AfterRuntimePrepare), None]);
+    rig.session.service().expect("service");
+    assert_eq!(rig.session.lane_swap_rebuilds(), (0, 1));
+    rig.session.test_set_next_zero_lead(Vec::new());
+    RAISE_IN_WARM.with(|raise| raise.set(Some("eq2")));
+    let before = rig.epoch();
+    rig.transact(&[muted_track("eq9")]);
+    assert_eq!(
+        RAISE_IN_WARM.with(std::cell::Cell::get),
+        None,
+        "the edit was prepared warm"
+    );
+    rig.render_until_past(before);
+    let adopted = rig.epoch();
+    rig.render_until_past(adopted);
+    assert_eq!(rig.responses(), own, "eq0 and eq1 are their own again");
+    assert_eq!(
+        rig.pinned(),
+        ["eq0", "eq1", "eq2"].map(Box::<str>::from).to_vec()
+    );
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 1),
+        "eq2's rebuild after the refused one"
+    );
+}
+
+/// A strip with residue that an edit removes leaves nothing to rebuild: the edit's successor
+/// restarts the residue strip it keeps, and only it beyond what the same edit restarts on a
+/// healthy plan, the removed one is gone, and no rebuild follows the edit's adoption.
+///
+/// Test value: a promotion that hands its successor the residue of a strip it does not have,
+/// which no successor can restart, so every promotion after it rebuilds again (a storm), or a
+/// successor that lists the removed strip as restarted, which `StripsRestarted` then counts.
+#[test]
+fn a_removed_residue_strip_rebuilds_nothing() {
+    bench_support::alloc::assert_installed();
+    let healthy = Rig::new().remove_eq1();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    rig.strand_trade();
+    assert_eq!(
+        rig.remove_eq1(),
+        healthy + 1,
+        "the edit restarts eq0 as well, and lists no removed strip"
+    );
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 0),
+        "the rebuild the edit superseded, and nothing after"
+    );
+    assert_eq!(rig.response_curves("eq0"), own[0], "eq0 is its own again");
+}
+
+/// After a refused rebuild, a new defect pair in the same running plan grows its residue, and the
+/// service step attempts the rebuild again, which restarts all four strips.
+///
+/// Test value: an attempt record that ignores the residue, so a plan whose rebuild was refused
+/// once keeps every later defect's residue for its life.
+#[test]
+fn a_grown_residue_is_rebuilt_after_a_refusal() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    rig.strand_trade();
+    rig.session
+        .test_set_structural_faults([Some(TestStructuralFaultPhase::AfterRuntimePrepare), None]);
+    rig.session.service().expect("service");
+    assert_eq!(rig.session.lane_swap_rebuilds(), (0, 1));
+    rig.strand_lanes(2, 3);
+    let before = rig.epoch();
+    rig.session.service().expect("service");
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 1),
+        "the grown residue rebuilt"
+    );
+    rig.render_until_past(before);
+    assert_eq!(rig.responses(), own);
+    assert_eq!(
+        rig.pinned(),
+        ["eq0", "eq1", "eq2", "eq3"].map(Box::<str>::from).to_vec()
+    );
+}
+
+/// A session whose inventory ceiling has no route slack (the nine tracks with no route) boots,
+/// and so does its residue rebuild after four defect pairs: the projection charges the plan's
+/// lane-swap defect watch, which its inventory holds, and a successor's quarantine and inherited
+/// residue, which the rebuild's inventory holds for eight strips.
+///
+/// Test value: a projection that leaves the watch out (the boot's inventory is over its ceiling)
+/// or a successor's quarantine rows out (the rebuild's is), each of which the preparation refuses
+/// as an internal fault (`host.control.projection`).
+#[test]
+fn a_session_with_no_route_slack_charges_its_defect_watch_and_quarantine() {
+    bench_support::alloc::assert_installed();
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    model.routes.clear();
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let mut rig = Rig::of(&document, model.revision);
+    for pair in 0..4 {
+        rig.strand_positions(2 * pair, 2 * pair + 1);
+    }
+    let before = rig.epoch();
+    rig.session.service().expect("service");
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 0),
+        "the rebuild is admitted"
+    );
+    rig.render_until_past(before);
+    assert_eq!(rig.pinned().len(), 8, "the successor pins the four pairs");
+}
+
+/// A residue rebuild refused with `Backpressure` (the retryable refusal) is retried once a
+/// displaced plan is reclaimed, which frees what it waited for, and not at every call before.
+///
+/// Test value: a `Backpressure` refusal that uses up the running plan's one attempt, so a plan
+/// whose rebuild met a full retirement queue once keeps its residue for its life.
+#[test]
+fn a_backpressured_rebuild_is_retried_after_a_reclaim() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    let own = rig.responses();
+    // An edit's plan is adopted while the plan it displaced waits in the retirement queue.
+    control_plane::test_hold_reclamation(true);
+    let before = rig.epoch();
+    rig.transact(&[muted_track("eq9")]);
+    rig.render_until_past(before);
+    rig.strand_trade();
+    rig.session
+        .test_set_structural_faults([Some(TestStructuralFaultPhase::AfterAdmission), None]);
+    for _ in 0..4 {
+        rig.block();
+        rig.session.service().expect("service");
+    }
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (0, 1),
+        "one refusal, not retried before a reclaim"
+    );
+    control_plane::test_hold_reclamation(false);
+    let before = rig.epoch();
+    rig.session.service().expect("service");
+    assert_eq!(
+        rig.session.lane_swap_rebuilds(),
+        (1, 1),
+        "the reclaim re-armed the attempt"
+    );
+    rig.render_until_past(before);
+    assert_eq!(rig.responses(), own);
+}
+
+/// A residue rebuild whose render half is gone is refused (`Backpressure`) before anything is
+/// prepared: no plan will render a successor.
+///
+/// Test value: a rebuild preamble that skips the plan's liveness, so the service step prepares
+/// and publishes a successor for a render half that no longer exists.
+#[test]
+fn a_rebuild_for_a_dropped_render_half_is_refused() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new();
+    rig.strand_trade();
+    let (mut session, plan) = rig.into_parts();
+    drop(plan);
+    session.service().expect("service");
+    assert_eq!(
+        session.lane_swap_rebuilds(),
+        (0, 1),
+        "refused, with nothing published"
+    );
+}

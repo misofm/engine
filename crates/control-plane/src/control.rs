@@ -357,6 +357,14 @@ enum Rebuild {
         #[cfg(feature = "test-support")]
         injected_refusal: bool,
     },
+    /// A lane-swap residue rebuild (issue #2424): the committed model (the control plane's own
+    /// copy) prepared as an ordinary successor of the running plan, whose preparation restarts
+    /// every strip of the running plan's lane-swap residue and pins the session's quarantine. It
+    /// carries like a transaction with no edit and commits like a monitor rebuild at the
+    /// committed revision with the session's spectrum configuration: nothing is committed and the
+    /// revision does not change. It may be classified warm like any rebuild: a lead is derived
+    /// from the ordinary successor, which restarts the residue, so a warm one restarts it too.
+    LaneSwapResidue(Box<CompiledSession>),
 }
 
 /// The edit ramps of a discontinuity successor: no edit gave a row a length (#1323).
@@ -1520,6 +1528,22 @@ pub struct SessionState<A: ControlAdapter> {
     /// whole and republished). Saturating; copied into the provider's counters with
     /// `strips_restarted`.
     pub(crate) transition_reprepare_refusals: u64,
+    /// The lane-swap residue rebuilds the service step published (issue #2424): each a successor
+    /// of a running plan that held residue, prepared from the committed model. In-process,
+    /// saturating, never reset; a host sees one as the plan epoch advancing.
+    pub(crate) lane_swap_rebuilds: u64,
+    /// The lane-swap residue rebuilds the service step attempted and that were refused (issue
+    /// #2424): each a preparation or admission refusal. In-process, saturating, never reset.
+    pub(crate) lane_swap_rebuild_refusals: u64,
+    /// What the last lane-swap residue rebuild the service step attempted saw (issue #2424): the
+    /// running epoch, its watch's recoveries total and [`Self::plans_reclaimed`]. It attempts
+    /// none again until one of them moves: a new plan (the only way a plan inherits residue), a
+    /// new defect, or a reclaimed plan (what a retryable `Backpressure` refusal waits for), so a
+    /// refused rebuild is never retried at every call.
+    pub(crate) lane_swap_rebuild_attempt: Option<(u64, u64, u64)>,
+    /// The displaced plans [`Self::synchronize_plan_epochs`] has reclaimed (issue #2424): the
+    /// generation a refused residue rebuild is retried on. Saturating, never reset.
+    pub(crate) plans_reclaimed: u64,
     /// The session's `source_frames_discarded` count (#1699 D1): the accepted source frames
     /// render never read because the caller's transaction removed or redeclared their source.
     /// [`Self::synchronize_plan_epochs`] adds each retired plan's unread frames before the plan is
@@ -4075,6 +4099,7 @@ where
             // started.
             let adoption_sample = retired_plan.next_absolute_sample();
             drop(ObservedRetiredPlan::new(retired_plan));
+            self.plans_reclaimed = self.plans_reclaimed.saturating_add(1);
             if retired_epoch.0 == self.providers.epoch {
                 let replacement = self
                     .pending_providers
@@ -4302,6 +4327,12 @@ where
                 return Err(CommandError::Internal);
             };
             let mut next = self.pending_providers.remove(0);
+            // #2424: render displaced the running plan, so its lane-swap flags are final. A strip
+            // it flagged after `next` was prepared carried what it held into `next`, unless `next`
+            // restarted it (a declared discontinuity's successor restarts every strip); `next`
+            // inherits it, and the service step rebuilds.
+            next.inventory
+                .inherit_lane_swap_residue(&self.providers.inventory);
             // #1768: render adopted `next`'s plan, so the strips it starts at rest restarted.
             let restarted =
                 u64::try_from(next.inventory.restarted_strips().len()).unwrap_or(u64::MAX);
@@ -4367,18 +4398,29 @@ where
     /// which runs it first (D2). In order, it
     ///
     /// 1. brings the provider epochs up to render and reclaims retired plans
-    ///    (`synchronize_plan_epochs`);
+    ///    (`synchronize_plan_epochs`), then runs the warm-successor deadline step and the
+    ///    lane-swap residue rebuild (`rebuild_lane_swap_residue`, issue #2424);
     /// 2. refreshes the provider's counters that a source outside it serves (D8);
     /// 3. stages the render observation (`collect_render_activity`);
     /// 4. refreshes those counters again, so a record that staging coalesced or dropped is
     ///    counted in this same call.
     ///
     /// **Bounded (D3).** Every retired plan holds one retirement credit, the credits number the
-    /// retirement queue's capacity, and only a publication -- never this step -- reserves one, so
-    /// one call reclaims at most that capacity of plans. It stages at most one render observation
-    /// and at most one meter batch per closed window the meter queue holds (#1583: its depth and
-    /// one), never loops on render progress and never waits, so its cost does not grow with the
-    /// time since the last call.
+    /// retirement queue's capacity, and only a publication reserves one, so one call reclaims at
+    /// most that capacity of plans. It stages at most one render observation and at most one
+    /// meter batch per closed window the meter queue holds (#1583: its depth and one), never
+    /// loops on render progress and never waits, so its cost does not grow with the time since
+    /// the last call. It prepares at most one plan: the deadline step's transition or the
+    /// lane-swap residue rebuild (issue #2424), which runs only while nothing is pending.
+    ///
+    /// **The residue rebuild and the call it leads (issue #2424).** Every session call runs this
+    /// step first, so a call that finds residue on a running plan with nothing pending prepares
+    /// and publishes the residue rebuild before its own work. A structural transaction then
+    /// supersedes it, as it supersedes any pending candidate: that submit prepares twice, and
+    /// [`Self::lane_swap_rebuilds`] counts the withdrawn rebuild as published. The transaction's
+    /// successor is prepared against the running plan with the residue rebuild's duck in its
+    /// base, so a growth that would be prepared warm takes the transition fallback (a duck, not
+    /// warm) while that rebuild is pending.
     ///
     /// **Pending candidates (D7).** Nothing here takes a pending candidate: it stays in its
     /// mailbox cell, with its plan, epoch, revision gate and retirement credit, until render adopts
@@ -4414,6 +4456,8 @@ where
             Ok(_) | Err(CommandError::Backpressure) => {}
             Err(error) => return Err(ServiceFailure::Deadline(error)),
         }
+        // #2424: after the epochs, so a promotion's inherited residue is seen in this same call.
+        self.rebuild_lane_swap_residue();
         self.poll_response_capture();
         self.refresh_provider_counters();
         self.collect_render_activity();
@@ -5567,6 +5611,47 @@ where
         Ok(reply(&self.spectrum, Some(epoch)))
     }
 
+    /// What a rebuild of the committed model at the committed revision starts from, the one
+    /// preamble of the monitor rebuild (#1594 D6) and the lane-swap residue rebuild (issue
+    /// #2424): the control plane's own copy of the committed model, the committed revision, and
+    /// the overlay and subscription changes of an edit that changes neither (the successor renders
+    /// under the ones the newest plan holds, and every binding keeps its target).
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError::Backpressure`] when the plan is gone; [`CommandError::Internal`] for a
+    /// revision past the gate's or a binding the unchanged model ends;
+    /// [`CommandError::CompileRejected`] when the subscriptions cannot allocate.
+    fn committed_rebuild_parts(
+        &self,
+    ) -> Result<
+        (
+            Box<CompiledSession>,
+            u64,
+            controls::MonitorChange,
+            controls::ObservationChange,
+        ),
+        CommandError,
+    > {
+        if !self.shared.plan_alive.load(Ordering::Acquire) {
+            return Err(CommandError::Backpressure);
+        }
+        let revision = self.controller.session().revision().0;
+        if revision > engine::realtime::GATE_REVISION_MAX {
+            return Err(CommandError::Internal);
+        }
+        let model = Box::new(self.controller.session().compiled().clone());
+        let monitor_change = self.monitor.after(&[], model.normalized_model());
+        let observation_change = self
+            .observation
+            .after(model.normalized_model())
+            .map_err(|_| CommandError::CompileRejected(failure(ResourceFault::Allocation)))?;
+        if !observation_change.ended.is_empty() {
+            return Err(CommandError::Internal);
+        }
+        Ok((model, revision, monitor_change, observation_change))
+    }
+
     /// The monitor rebuild of a `SPECTRUM_CONFIGURE` (#1594 D6): the committed model, prepared
     /// with `configuration` as a successor of the newest plan at the committed revision. Returns
     /// the epoch of the plan it published.
@@ -5574,28 +5659,9 @@ where
         &mut self,
         configuration: Option<host_core::SpectrumConfiguration>,
     ) -> Result<u64, SpectrumRefusal> {
-        if !self.shared.plan_alive.load(Ordering::Acquire) {
-            return Err(SpectrumRefusal::Error(CommandError::Backpressure));
-        }
-        let revision = self.controller.session().revision().0;
-        if revision > engine::realtime::GATE_REVISION_MAX {
-            return Err(SpectrumRefusal::Error(CommandError::Internal));
-        }
-        let model = Box::new(self.controller.session().compiled().clone());
-        // Nothing changes the overlay or the subscriptions: the successor renders under the ones
-        // the newest plan holds, and every binding keeps its target.
-        let monitor_change = self.monitor.after(&[], model.normalized_model());
-        let observation_change =
-            self.observation
-                .after(model.normalized_model())
-                .map_err(|_| {
-                    SpectrumRefusal::Error(CommandError::CompileRejected(failure(
-                        ResourceFault::Allocation,
-                    )))
-                })?;
-        if !observation_change.ended.is_empty() {
-            return Err(SpectrumRefusal::Error(CommandError::Internal));
-        }
+        let (model, revision, monitor_change, observation_change) = self
+            .committed_rebuild_parts()
+            .map_err(SpectrumRefusal::Error)?;
         // This assumes a withdrawal refuses only with `Internal` (`promote_pending_provider`),
         // which the arm below answers as an error, never as a `LimitExceeded` reply.
         let result = self.rebuild_superseding(
@@ -5620,6 +5686,72 @@ where
             )),
             Err(error) => Err(SpectrumRefusal::Error(error)),
         }
+    }
+
+    /// The lane-swap residue rebuild (issue #2424): run once per service step. When nothing is
+    /// pending and the running plan holds lane-swap residue
+    /// ([`PlanStateInventory::lane_swap_residue`]: strips its render flagged, or that it took
+    /// over unrestarted at its adoption), it prepares the committed model as a successor of that
+    /// plan ([`Rebuild::LaneSwapResidue`]), which restarts every strip of the residue and pins the
+    /// session's quarantine, and publishes it. The engine owns no thread, so this is where the
+    /// host's bounded service calls drive the repair (D15-17); render only raised the flags.
+    ///
+    /// **Bounded.** One preparation per call at most, and none while a candidate is pending (its
+    /// adoption hands the residue it did not restart to its own epoch, so the rebuild follows).
+    /// It attempts one rebuild per running epoch, recoveries total and reclaim generation: a
+    /// refused rebuild is counted and not retried until a new plan runs (residue is inherited
+    /// only at a promotion), a new defect is recovered, or a displaced plan is reclaimed (which
+    /// frees the retirement room a `Backpressure` refusal waited for), so a refusal is never
+    /// retried at every call. A rebuild's successor pins every strip of the residue, so the packer never
+    /// trades a defect pair again in the session: each rebuild follows at least one new pair, at
+    /// most one per two strips of a pack group over the session.
+    ///
+    /// **Acked-batch question: can an ack ever precede a drop? No.** It acknowledges nothing and
+    /// commits nothing: the successor is the committed model at the committed revision, and a
+    /// refusal changes nothing (nothing was pending, so nothing is withdrawn or republished).
+    fn rebuild_lane_swap_residue(&mut self) {
+        if !self.pending_providers.is_empty() || !self.providers.inventory.has_lane_swap_residue() {
+            return;
+        }
+        let attempt = (
+            self.providers.epoch,
+            self.providers.inventory.lane_swap_defects().recoveries(),
+            self.plans_reclaimed,
+        );
+        if self.lane_swap_rebuild_attempt == Some(attempt) {
+            return;
+        }
+        self.lane_swap_rebuild_attempt = Some(attempt);
+        match self.publish_lane_swap_residue_rebuild() {
+            Ok(()) => self.lane_swap_rebuilds = self.lane_swap_rebuilds.saturating_add(1),
+            Err(_) => {
+                self.lane_swap_rebuild_refusals = self.lane_swap_rebuild_refusals.saturating_add(1);
+            }
+        }
+    }
+
+    /// [`Self::rebuild_lane_swap_residue`]'s preparation and publication: the committed model at
+    /// the committed revision, under the overlay and subscriptions the running plan holds.
+    fn publish_lane_swap_residue_rebuild(&mut self) -> Result<(), CommandError> {
+        // #1709 D1: the successor's carried level values are composed as `Self::command`'s are.
+        let _canonical = lane::CanonicalFpEnv::enter();
+        let (model, revision, monitor_change, observation_change) =
+            self.committed_rebuild_parts()?;
+        self.rebuild_superseding(
+            Rebuild::LaneSwapResidue(model),
+            revision,
+            monitor_change,
+            observation_change,
+        )
+        .map(|_| ())
+    }
+
+    /// The lane-swap residue rebuilds the service step published, and those that were refused
+    /// (issue #2424): in-process and never reset. A defect-driven rebuild is visible here; a host
+    /// sees it as the plan epoch advancing.
+    #[must_use]
+    pub const fn lane_swap_rebuilds(&self) -> (u64, u64) {
+        (self.lane_swap_rebuilds, self.lane_swap_rebuild_refusals)
     }
 
     /// The warm-successor deadline step (#1358 D3): run once per control call while the newest
@@ -5962,22 +6094,25 @@ where
                     .is_some_and(ProviderEpoch::discontinuity));
         let own_ramps = match &kind {
             Rebuild::Transaction(prepared) => prepared.get().prospective_session().edit_ramps(),
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
-                &NO_EDIT_RAMPS
-            }
+            Rebuild::Discontinuity(_)
+            | Rebuild::Monitor { .. }
+            | Rebuild::Transition { .. }
+            | Rebuild::LaneSwapResidue(_) => &NO_EDIT_RAMPS,
         };
         // Whether B writes a monitor row: then its overlay change's ramp is the latest.
         let writes_monitor = match &kind {
             Rebuild::Transaction(prepared) => !prepared.get().monitor_edits().is_empty(),
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
-                false
-            }
+            Rebuild::Discontinuity(_)
+            | Rebuild::Monitor { .. }
+            | Rebuild::Transition { .. }
+            | Rebuild::LaneSwapResidue(_) => false,
         };
         // #1594 D6: a monitor rebuild keeps the committed revision, which may be 0. Against the
         // running plan its model is the base's, so nothing retargets; across a withdrawn
         // candidate at a newer revision the base is the older plan's, whose retargets the
         // preparation stamps with that revision as it does for a transaction.
-        let monitor = matches!(kind, Rebuild::Monitor { .. });
+        // #2424: a lane-swap residue rebuild commits like one.
+        let monitor = matches!(kind, Rebuild::Monitor { .. } | Rebuild::LaneSwapResidue(_));
         // #1397 D2: the transition fallback across a donor.
         let fallback = matches!(kind, Rebuild::Transition { .. });
         let unchanged_revision = monitor && (!superseding || revision == 0);
@@ -6000,7 +6135,8 @@ where
                 .ok_or(CommandError::Internal)?,
             Rebuild::Discontinuity(model)
             | Rebuild::Monitor { model, .. }
-            | Rebuild::Transition { model, .. } => &**model,
+            | Rebuild::Transition { model, .. }
+            | Rebuild::LaneSwapResidue(model) => &**model,
         };
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
@@ -6548,18 +6684,20 @@ where
                 &candidate_provider.effects,
                 &mut forwards,
             )?,
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
-                Vec::new()
-            }
+            Rebuild::Discontinuity(_)
+            | Rebuild::Monitor { .. }
+            | Rebuild::Transition { .. }
+            | Rebuild::LaneSwapResidue(_) => Vec::new(),
         };
         // #1585 D4: the counter past the tags the preparation issued, installed at the commit.
         let next_arm_tag_after = match &kind {
             Rebuild::Transaction(prepared) => {
                 prepared.get().prospective_session().next_arm_tag_after()
             }
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
-                None
-            }
+            Rebuild::Discontinuity(_)
+            | Rebuild::Monitor { .. }
+            | Rebuild::Transition { .. }
+            | Rebuild::LaneSwapResidue(_) => None,
         };
         let epoch = reservation.epoch();
         candidate_provider.epoch = epoch;
@@ -6718,7 +6856,8 @@ where
             // withdrawn candidate, drops below as a commit's displaced model does.
             Rebuild::Discontinuity(model)
             | Rebuild::Monitor { model, .. }
-            | Rebuild::Transition { model, .. } => (None, Some(*model)),
+            | Rebuild::Transition { model, .. }
+            | Rebuild::LaneSwapResidue(model) => (None, Some(*model)),
         };
         // #2044: the candidate is taken first, so no write below precedes the step after which a
         // panic no longer republishes it.
