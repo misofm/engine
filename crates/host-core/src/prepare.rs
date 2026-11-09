@@ -10439,11 +10439,19 @@ fn projected_inventory_bytes(
     } else {
         arms * core::mem::size_of::<core::sync::atomic::AtomicU8>() + 2 * size_of::<usize>()
     };
-    // Issue #2424: the lane-swap defect watch (at most every strip), and the quarantine and the
-    // inherited residue (each at most every strip, distinct), with their ID text.
-    let lane_swap = graph::lane_swap_defect_watch_bytes(strips, strip_ids)
-        .checked_add(strips.checked_mul(2 * size_of::<Box<str>>())?)?
-        .checked_add(strip_ids.checked_mul(2)?)?;
+    // Issue #2424: the lane-swap defect watch, at most every strip, and only with two strips or
+    // more (a pack group is two peer chains of one strip or more each); and a successor's
+    // quarantine and inherited residue, each at most every strip, distinct, with their ID text (a
+    // plan prepared without a predecessor pins none and is never promoted, so it inherits none).
+    let watch_strips = if strips >= 2 { strips } else { 0 };
+    let lane_swap =
+        graph::lane_swap_defect_watch_bytes(watch_strips, strip_ids).checked_add(if successor {
+            strips
+                .checked_mul(2 * size_of::<Box<str>>())?
+                .checked_add(strip_ids.checked_mul(2)?)?
+        } else {
+            0
+        })?;
     let rows = [
         model
             .sources

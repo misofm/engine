@@ -10261,7 +10261,8 @@ impl LaneMap {
             .saturating_add(slice(&self.dwell))
             .saturating_add(slice(&self.pinned))
             .saturating_add(slice(&self.refused))
-            .saturating_add(self.defects.heap_bytes() as u64)
+            // #2424: the defect watch is charged where the plan's inventory holds it, as the fade
+            // watch is: the inventory's clone keeps it alive past the plan.
             .saturating_add(slice(&self.defect_strip))
             .saturating_add(slice(&self.pattern))
             .saturating_add(slice(&self.target))

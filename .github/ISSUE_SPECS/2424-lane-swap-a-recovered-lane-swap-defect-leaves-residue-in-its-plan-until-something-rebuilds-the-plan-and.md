@@ -55,7 +55,11 @@ So for the rest of the plan's life, a strip whose swap hit a defect renders with
 - The residue is real on the launch banks. The branch's end-to-end test strands a real trade (below): each strip's composed EQ response becomes the other strip's, which is the other's prepared defaults rendering in its lane.
 - The carry's way home ignores pins: `restore_home_lanes` (runtime.rs 11665) trades through `swap_bank_lanes`, and `take_predecessor` (lib.rs 7908) refuses the whole carry (`CarryOutcome::PredecessorMismatch`) when it fails.
 
-**Red on base.** On the base, nothing reads the defect, so the residue lasts for the plan's life. The branch's main test, `a_lane_swap_defect_rebuilds_the_plan_once`, needs this branch's rebuild to pass. Its base equivalent is mutant C1 below (the service step never rebuilds), which is red at "each strip renders its own defaults again".
+**Red on base.** On the base, nothing reads the defect, so the residue lasts for the plan's life.
+- The probe: the base's `graph`, `host-core` and `control-plane` sources, with this branch's `effect-contract` strand hook only, and the branch's test rig. It strands one trade, then renders and services 64 blocks.
+- It fails with `assertion left == right failed: each strip renders its own defaults again`. `eq0`'s left curve is still `eq1`'s flat one (`-3.0103, -2.16, ...` dB, where its own is `-2.43, -1.45, ..., +8.97`).
+- The probe was scratch only and is not committed.
+- On the branch, the same scenario is `a_lane_swap_defect_rebuilds_the_plan_once`, which is green.
 
 **Decisions.**
 1. **The engine requests the rebuild, not the host.**
@@ -113,9 +117,59 @@ So for the rest of the plan's life, a strip whose swap hit a defect renders with
 - The gate asked for a host-core test. The trigger is control-plane's service step, the code both hosts run, so the test lives in the crate that owns the logic. It drives host-core's preparation end to end.
 - No existing test is made useless: the extended assertions sit on the existing defect scenarios.
 
-MUTATION_TABLE
+**Mutation sweep** (`sweep.py`, `sweep2.py` and `sweep3.py` in scratch). Each mutant was applied alone. Its focused tests ran in debug and in release: graph's `runtime::tests` and/or `control-plane --test lane_swap_residue`. The file was then restored from git.
 
-**No bit moved.** NO_BIT_MOVED
+The final code has 34 mutants, and all 34 are red in both builds.
+
+| Mutant | Where | Debug | Release | Red at (among others) |
+| --- | --- | --- | --- | --- |
+| G1: the defect path raises nothing | `LaneMap::quarantine` | red | red | graph defect tests; every e2e test |
+| G2: only one strip raised | `quarantine` | red | red | the same |
+| G3: the total stored is not the whole recoveries total | `swap_bank_lanes` | red | red | `a_row_that_refuses_its_trade_back_...` |
+| G4: raise by position, not by home | `quarantine` | red | red | `a_defect_pins_the_strips_at_its_positions_by_home` |
+| G5: raise drops the group's `base` | `quarantine` | red | red | the same |
+| G6: bind arms no watch | `bind` | red | red | every e2e test |
+| G7: the watch names the next lane's track | `arm_lane_swap_defect_watch` | red | red | graph rig tests; e2e |
+| G8: every position names strip 0 | the same | red | red | the same |
+| G9: `flagged_strips` filter inverted | the watch | red | red | `only_a_defect_raises_the_defect_watch`; e2e |
+| G10: no total stored | `raise` | red | red | graph defect tests |
+| G11: `pin_lane_swap_defect_strips` a no-op | bound plan | red | red | e2e (pins) |
+| G12: the bound plan hands out an empty watch | bound plan | red | red | every e2e test |
+| G13: a flag stored `false` | `raise` | red | red | graph defect tests; e2e |
+| H1: the quarantine drops the residue | host-core prep | red | red | e2e (pins) |
+| H2: the quarantine drops the base's quarantine | prep | red | red | `the_quarantine_holds_across_successors_...` |
+| H3: the quarantine keeps strips outside the model | prep | red | red | the same (re-added `eq1`) |
+| H4: the quarantine is not pinned | prep | red | red | e2e |
+| H5: the residue is not restarted | prep | red | red | e2e (each strip its own again) |
+| H7: the residue is restarted in a warm successor | prep | red | red | `a_warm_edit_over_residue_...` (the warm invariant refuses) |
+| H8: the residue restart ignores the models | prep | red | red | `a_removed_residue_strip_rebuilds_nothing` (`StripsRestarted`) |
+| H9: the residue drops the inherited part | inventory | red | red | `a_successor_adopted_after_a_late_defect_...` |
+| H10: `inherit_lane_swap_residue` a no-op | inventory | red | red | the same |
+| H11: inheritance keeps restarted strips | inventory | red | red | `a_lane_swap_defect_rebuilds_the_plan_once` (a second rebuild) |
+| H12: inheritance keeps strips the plan lacks | inventory | red | red | `a_removed_residue_strip_rebuilds_nothing` (the storm) |
+| H13: the residue merge drops the flagged part | inventory | red | red | e2e |
+| C1: the service step never rebuilds | control plane | red | red | e2e (the base's behaviour) |
+| C2: a rebuild while a candidate is pending | control plane | red | red | e2e |
+| C3: a rebuild of a healthy plan | control plane | red | red | e2e |
+| C4: a refusal retried at every call | control plane | red | red | `a_refused_rebuild_is_not_retried_...` |
+| C5: the attempt keyed by epoch only | control plane | red | red | `a_grown_residue_is_rebuilt_after_a_refusal` |
+| C6: a rebuild not counted | control plane | red | red | e2e |
+| C7: a refusal not counted | control plane | red | red | `a_refused_rebuild_...` |
+| C8: the promotion inherits nothing | control plane | red | red | `a_successor_adopted_after_a_late_defect_...` |
+| C11: the residue rebuild commits as a transaction | `rebuild` | red | red | `a_lane_swap_defect_rebuilds_the_plan_once` (revision 0) |
+
+Mutation numbers H6, C9 and C10 are missing from the table because the sweep showed their guards were redundant. Each was green in both builds, so the guard was removed rather than kept untested:
+- **H6 and C9: discontinuity guards.** There was a residue restart guard and an inheritance guard at a declared discontinuity. A discontinuity's successor already lists every strip as restarted: the `StripsRestarted` probe read +9 for the nine-strip session. So neither guard changes anything, and both were removed, together with their test.
+- **C10: never classify a residue rebuild as warm.** A warm lead's restart set starts from the ordinary successor's restarts, which include the residue (`warm_lead`, prepare.rs, "`R`'s join part: the ordinary successor's restart set"). So a warm residue rebuild restarts the residue too. The guard and its test were removed.
+
+The code each green result names is gone, so no mutant is still green.
+
+
+**No bit moved.** The #2392 instrumentation (`graph-compiler`'s `silent_bank_skip` gate 3: an FNV-1a digest over the moved plan's host PCM and both plans' observed words, `--release`, `digest2392.patch` in scratch, not committed).
+- Base sources (`origin/main` `48ca47617` for `graph` and `effect-contract`): `inserts=false 7d31fea2b6652670`, `inserts=true 8e4dfb8b8dc1d599`.
+- Branch: identical.
+
+These are also the digests #2419 recorded. A healthy trade's only change is the defect arm's call, `quarantine`, in place of `pin_positions`, which a healthy trade never reaches.
 
 **Gates.** GATES_RECORD
 
