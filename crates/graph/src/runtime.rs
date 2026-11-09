@@ -7287,7 +7287,6 @@ fn mark_effect_move_taken(taps: &mut [crate::ObserverTapMove], cursor: &mut usiz
     }
 }
 
-// REALTIME_POLICY_BEGIN
 /// [`Runtime::carry_refusal_count`] of `units`: the restores refused on every effect bank stage
 /// (issue #1279 D6), which the carry's refused-restore path reads while it holds the runtime's
 /// fields apart (issue #2427). Saturating; bounded by the units and their slots.
@@ -7321,7 +7320,6 @@ fn mirror_carry_refusals(
 ) {
     defects.store_carry_refusals(bank_carry_refusals(units).saturating_add(node_refused));
 }
-// REALTIME_POLICY_END
 
 /// The effect bank stage slot `slot` of `chain` holds, of either type (issues #1279, #1280).
 /// Allocation-free: a slot borrow and one downcast.
