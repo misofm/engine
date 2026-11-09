@@ -790,16 +790,16 @@ pub trait BankStage: Send {
     /// Reset lane `lane` and `peer`'s lane to the defaults each now holds, withholding their
     /// `RESTORED` symmetry term (issue #2419): the recovery of a strip that a lane swap left
     /// split, because this stage refused to swap the two lanes back
-    /// ([`BankChain::swap_lanes`]) or a caller could not trade a whole row back
-    /// ([`BankChain::reset_swapped_lanes`]).
+    /// ([`BankChain::swap_lanes`], [`BankChain::swap_lanes_back`]).
     ///
     /// The two lanes may hold each other's state, or what this stage's own refusal left. The
     /// recovery is a stranded swap's (issue #2414): the D7 lane recovery on both lanes, so each
     /// lane's effect state is again a function of the defaults it holds, and neither lane renders
-    /// the other strip's history. A per-lane part that is not effect state (a control lane, a
-    /// tap, a dry-shunt line) stays where it is. A lane past the stage's width changes nothing.
-    /// Allocation-free and bounded by one lane's state size. The default resets nothing: a
-    /// stage that has no lane reset.
+    /// the other strip's effect history. A per-lane part that is not effect state (a control
+    /// lane, a tap, a dry-shunt line, which holds up to a latency of dry input) stays where it
+    /// is. A lane past the stage's width changes nothing. Allocation-free and bounded by one
+    /// lane's state size. The default resets nothing: a stage that has no lane reset, which
+    /// keeps the two lanes as its refusal left them.
     fn reset_swapped_lanes(&mut self, lane: usize, peer: LanePeerMut<'_>) {
         let _ = (lane, peer);
     }
@@ -4066,9 +4066,9 @@ pub struct BankChain {
     /// The lanes any slot's last drain moved into or out of settled bypass (issue #2135,
     /// [`Self::settle_edges`]).
     settle_edges: u32,
-    /// Strips this chain's lane swaps left split, each recovered by a lane reset (issue #2419):
-    /// a slot that refused its swap-back in [`Self::swap_lanes`], or a caller's
-    /// [`Self::reset_swapped_lanes`]. Saturating; a count above zero is a bank's defect.
+    /// Slots that refused a swap-back, in [`Self::swap_lanes`] or [`Self::swap_lanes_back`], each
+    /// recovered by a reset of its two lanes (issue #2419). Saturating; a count above zero is a
+    /// bank's defect.
     lane_swap_split: u64,
 }
 
@@ -4107,9 +4107,12 @@ pub enum ChainLaneSwapRefusal {
     /// in each lane. `slot` is the highest such slot; a lower one may have refused too. The chain
     /// still swapped back every other slot it had swapped, reset both lanes of each slot that
     /// refused its swap-back ([`BankStage::reset_swapped_lanes`]) and counted each
-    /// ([`BankChain::lane_swap_defects`]). So no slot holds the other strip's history, but such a
-    /// slot may hold the other strip's prepared defaults and its non-effect per-lane parts (a
-    /// control lane, taps, a dry-shunt line) until a plan rebuild prepares them fresh.
+    /// ([`BankChain::lane_swap_defects`]). A reset ends the other strip's effect history in such
+    /// a slot, but not all of what the slot holds: the other strip's prepared defaults and its
+    /// per-lane parts that are not effect state (a control lane, taps, and a dry-shunt line,
+    /// which holds up to a latency of the other strip's dry input) stay until a plan rebuild
+    /// prepares them fresh, and a stage with no lane reset (the default, a builtin bank's among
+    /// them) keeps its whole lane traded.
     Split {
         /// The highest slot left split.
         slot: usize,
@@ -5406,21 +5409,12 @@ impl BankChain {
                             self.slots[index].stage.lane_swap_stranded() != stranded,
                             "a checked slot swaps its lanes, or strands and counts it"
                         );
-                        let mut refusal = ChainLaneSwapRefusal::Defect;
-                        for (undo, slot) in self.slots[..index].iter_mut().enumerate().rev() {
-                            if !slot
-                                .stage
-                                .swap_lanes(lane, LanePeerMut::Same(other_lane), scratch)
-                            {
-                                slot.stage
-                                    .reset_swapped_lanes(lane, LanePeerMut::Same(other_lane));
-                                self.lane_swap_split = self.lane_swap_split.saturating_add(1);
-                                if refusal == ChainLaneSwapRefusal::Defect {
-                                    refusal = ChainLaneSwapRefusal::Split { slot: undo };
-                                }
-                            }
-                        }
-                        return Err(refusal);
+                        return Err(self.swap_slots_back(
+                            index,
+                            lane,
+                            ChainLanePeer::Same(other_lane),
+                            scratch,
+                        ));
                     }
                 }
             }
@@ -5451,29 +5445,12 @@ impl BankChain {
                             own.stage.lane_swap_stranded() != stranded,
                             "a checked slot swaps its lanes, or strands and counts it"
                         );
-                        let mut refusal = ChainLaneSwapRefusal::Defect;
-                        for (undo, (own, theirs)) in self.slots[..index]
-                            .iter_mut()
-                            .zip(other.slots[..index].iter_mut())
-                            .enumerate()
-                            .rev()
-                        {
-                            if !own.stage.swap_lanes(
-                                lane,
-                                LanePeerMut::Other(&mut *theirs.stage, other_lane),
-                                scratch,
-                            ) {
-                                own.stage.reset_swapped_lanes(
-                                    lane,
-                                    LanePeerMut::Other(&mut *theirs.stage, other_lane),
-                                );
-                                self.lane_swap_split = self.lane_swap_split.saturating_add(1);
-                                if refusal == ChainLaneSwapRefusal::Defect {
-                                    refusal = ChainLaneSwapRefusal::Split { slot: undo };
-                                }
-                            }
-                        }
-                        return Err(refusal);
+                        return Err(self.swap_slots_back(
+                            index,
+                            lane,
+                            ChainLanePeer::Other(other, other_lane),
+                            scratch,
+                        ));
                     }
                 }
             }
@@ -5481,40 +5458,98 @@ impl BankChain {
         Ok(())
     }
 
-    /// Reset lane `lane` of this chain and `peer`'s lane in **every** slot, at a block boundary
-    /// on the render thread (issue #2419), and count it in [`Self::lane_swap_defects`]: the
-    /// recovery of a strip a caller's multi-chain trade left split, when this chain refused to
-    /// trade the two lanes back and the caller cannot tell which slots hold them traded. Every
-    /// slot's [`BankStage::reset_swapped_lanes`]: each lane's effect state is again a function of
-    /// the defaults it holds, so neither lane renders the other strip's history. A cross-chain
-    /// peer is reset slot for slot, up to the shorter chain. Allocation-free and bounded by the
-    /// slots' lane state sizes.
-    pub fn reset_swapped_lanes(&mut self, lane: usize, peer: ChainLanePeer<'_>) {
+    /// Swap lane `lane` of this chain and `peer`'s lane back in **every** slot, after a caller's
+    /// multi-chain trade swapped them forward through [`Self::swap_lanes`] at this block boundary
+    /// and could not complete (issue #2419): a row of a trade that a later row refused. Every
+    /// slot is asked, last first, and none is unwound: a slot that refuses has both lanes reset
+    /// ([`BankStage::reset_swapped_lanes`]) and is counted in [`Self::lane_swap_defects`], and
+    /// the slots below it are still swapped back. The forward swap already disengaged the
+    /// collapse and lowered the agreement, and nothing has rendered since, so this takes neither
+    /// step again. Allocation-free and bounded by the slots' prepared state sizes.
+    ///
+    /// # Errors
+    ///
+    /// [`ChainLaneSwapRefusal::Split`] when a slot refused, naming the highest; every other slot
+    /// is swapped back.
+    pub fn swap_lanes_back(
+        &mut self,
+        lane: usize,
+        peer: ChainLanePeer<'_>,
+        scratch: &mut [u8],
+    ) -> Result<(), ChainLaneSwapRefusal> {
+        match self.swap_slots_back(self.slots.len(), lane, peer, scratch) {
+            ChainLaneSwapRefusal::Defect => Ok(()),
+            split => Err(split),
+        }
+    }
+
+    /// Swap lane `lane` and `peer`'s lane back in slots `..end`, last first (issue #2419): the
+    /// one body of [`Self::swap_lanes`]'s swap-back and of [`Self::swap_lanes_back`]. A slot that
+    /// refuses has both lanes reset ([`BankStage::reset_swapped_lanes`]) and is counted, and the
+    /// slots below it are still asked. [`ChainLaneSwapRefusal::Split`] naming the highest slot
+    /// that refused, or [`ChainLaneSwapRefusal::Defect`] when none did. A cross-chain peer is
+    /// swapped slot for slot, up to the shorter chain.
+    fn swap_slots_back(
+        &mut self,
+        end: usize,
+        lane: usize,
+        peer: ChainLanePeer<'_>,
+        scratch: &mut [u8],
+    ) -> ChainLaneSwapRefusal {
+        let mut refusal = ChainLaneSwapRefusal::Defect;
         match peer {
             ChainLanePeer::Same(other_lane) => {
-                for slot in &mut self.slots {
-                    slot.stage
-                        .reset_swapped_lanes(lane, LanePeerMut::Same(other_lane));
+                for (undo, slot) in self.slots.iter_mut().take(end).enumerate().rev() {
+                    if !slot
+                        .stage
+                        .swap_lanes(lane, LanePeerMut::Same(other_lane), scratch)
+                    {
+                        slot.stage
+                            .reset_swapped_lanes(lane, LanePeerMut::Same(other_lane));
+                        self.lane_swap_split = self.lane_swap_split.saturating_add(1);
+                        if refusal == ChainLaneSwapRefusal::Defect {
+                            refusal = ChainLaneSwapRefusal::Split { slot: undo };
+                        }
+                    }
                 }
             }
             ChainLanePeer::Other(other, other_lane) => {
-                for (own, theirs) in self.slots.iter_mut().zip(other.slots.iter_mut()) {
-                    own.stage.reset_swapped_lanes(
+                for (undo, (own, theirs)) in self
+                    .slots
+                    .iter_mut()
+                    .zip(other.slots.iter_mut())
+                    .take(end)
+                    .enumerate()
+                    .rev()
+                {
+                    if !own.stage.swap_lanes(
                         lane,
                         LanePeerMut::Other(&mut *theirs.stage, other_lane),
-                    );
+                        scratch,
+                    ) {
+                        own.stage.reset_swapped_lanes(
+                            lane,
+                            LanePeerMut::Other(&mut *theirs.stage, other_lane),
+                        );
+                        self.lane_swap_split = self.lane_swap_split.saturating_add(1);
+                        if refusal == ChainLaneSwapRefusal::Defect {
+                            refusal = ChainLaneSwapRefusal::Split { slot: undo };
+                        }
+                    }
                 }
             }
         }
-        self.lane_swap_split = self.lane_swap_split.saturating_add(1);
+        refusal
     }
     // REALTIME_POLICY_END
 
-    /// The lane swaps a bank's defect made this chain recover (issues #2414, #2419): every
-    /// slot's stranded swaps ([`BankStage::lane_swap_stranded`]) and the strips this chain's
-    /// swaps left split ([`ChainLaneSwapRefusal::Split`], [`Self::reset_swapped_lanes`]).
-    /// Saturating; read after render. A count above zero is a defect: a bank broke its lane-swap
-    /// contract, and a plan rebuild prepares the lanes fresh.
+    /// The lane-swap recoveries a bank's defect made this chain take (issues #2414, #2419): every
+    /// slot's stranded swaps ([`BankStage::lane_swap_stranded`]) and every slot this chain's
+    /// swap-backs reset because it refused ([`ChainLaneSwapRefusal::Split`],
+    /// [`Self::swap_lanes_back`]). It counts recoveries, not strips: a slot that strands on its
+    /// swap-back is counted once as a strand and once as a split. Saturating; read after render.
+    /// A count above zero is a defect: a bank broke its lane-swap contract, and a plan rebuild
+    /// prepares the lanes fresh.
     #[must_use]
     pub fn lane_swap_defects(&self) -> u64 {
         self.slots.iter().fold(self.lane_swap_split, |total, slot| {

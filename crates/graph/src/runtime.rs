@@ -10200,9 +10200,8 @@ pub(crate) struct LaneMap {
 /// Why [`Runtime::swap_bank_lanes`] moved nothing. Every refusal leaves the map unchanged and
 /// leaves the plan as it was, but a defect: a refusal after every row's check passed. A defect
 /// may have reset the two strips' lanes in a slot (`Chain(Defect)`, issue #2414; see
-/// [`rack::ChainLaneSwapRefusal::Defect`]), in the slots a chain could not swap back
-/// (`Chain(Split)`, issue #2419), or in every slot of a row the trade could not trade back
-/// (`Split`), and it pins both strips for the plan's life.
+/// [`rack::ChainLaneSwapRefusal::Defect`]), or in each slot a chain could not swap back
+/// (`Chain(Split)` and `Split`, issue #2419), and it pins both strips for the plan's life.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BankLaneMoveRefusal {
     /// The two units are not banks of one pack group.
@@ -10212,12 +10211,14 @@ pub(crate) enum BankLaneMoveRefusal {
     /// The chains refused ([`rack::ChainLaneSwapRefusal`]): a different slot program, collapse
     /// arming or per-lane state (stored automation into a fader bank with no slot, for one).
     Chain(rack::ChainLaneSwapRefusal),
-    /// A row refused after its check passed, and then a row already traded refused its trade back
-    /// (issue #2419): a **split strip**. `row` is the highest such row; a lower one may have
-    /// refused too. Every other traded row was traded back; each row that refused has its readers
-    /// (member ops, fold entry, source bit, observation rows) traded back and both lanes reset in
-    /// every slot of its chains ([`rack::BankChain::reset_swapped_lanes`]), so each strip is routed
-    /// through its own lanes again and no lane renders the other strip's history.
+    /// A row refused after its check passed, and then a row already traded refused part of its
+    /// trade back (issue #2419): a **split strip**. `row` is the highest such row; a lower one may
+    /// have refused too. Every traded row's readers (member ops, fold entry, source bit,
+    /// observation rows) were traded back, and every slot of its chains was asked to swap back
+    /// ([`rack::BankChain::swap_lanes_back`]): each slot that refused has both lanes reset and
+    /// counted, and every other slot is home. So each strip is routed through its own lanes
+    /// again, and only a refusing slot holds what a reset leaves of the other strip (see
+    /// [`rack::ChainLaneSwapRefusal::Split`]).
     Split {
         /// The highest row left split.
         row: usize,
@@ -11520,9 +11521,10 @@ impl Runtime {
     /// rows already traded are traded back, and that row's chains have recovered their own slot
     /// (a slot whose lane swap stranded reset the two lanes, issue #2414; a slot that refused its
     /// swap-back too, `Chain(Split)`, issue #2419), so no strip moved and the map is not touched.
-    /// Each trade-back is checked (issue #2419): a row that refuses its own is recovered as a
-    /// split strip ([`BankLaneMoveRefusal::Split`], `recover_unit_lanes`) and the trade-back goes
-    /// on with the rows below it. A defect pins both strips for the plan's life (the #2135 pin,
+    /// Each row is traded back slot by slot and checked (issue #2419, `swap_unit_lanes_back`): a
+    /// slot that refuses is reset and counted, the row's readers are traded back whatever its
+    /// slots did, the call returns [`BankLaneMoveRefusal::Split`], and the trade-back goes on with
+    /// the rows below it. A defect pins both strips for the plan's life (the #2135 pin,
     /// [`LaneMap::pin_positions`]), so the packer never asks the broken banks again; a debug build
     /// trips on a refusal no chain recovered and counted. Last, the lane map, which every other
     /// reader translates through.
@@ -11612,16 +11614,21 @@ impl Runtime {
                 );
                 let mut outcome = refusal;
                 for undo in (0..row).rev() {
-                    if let (Some(at_a), Some(at_b)) = (
+                    let (Some(at_a), Some(at_b)) = (
                         lane_map.unit_lane(&pack, position_a, undo),
                         lane_map.unit_lane(&pack, position_b, undo),
-                    ) && swap_unit_lanes(units, identity, &mut lane_map.swap_scratch, at_a, at_b)
-                        .is_err()
-                    {
-                        recover_unit_lanes(units, identity, at_a, at_b);
-                        if !matches!(outcome, BankLaneMoveRefusal::Split { .. }) {
-                            outcome = BankLaneMoveRefusal::Split { row: undo };
-                        }
+                    ) else {
+                        continue;
+                    };
+                    let back = swap_unit_lanes_back(
+                        units,
+                        identity,
+                        &mut lane_map.swap_scratch,
+                        at_a,
+                        at_b,
+                    );
+                    if back.is_err() && !matches!(outcome, BankLaneMoveRefusal::Split { .. }) {
+                        outcome = BankLaneMoveRefusal::Split { row: undo };
                     }
                 }
                 lane_map.pin_positions(group, position_a, position_b);
@@ -11745,9 +11752,10 @@ impl Runtime {
         }
     }
 
-    /// The lane swaps a bank's defect made this runtime's chains recover, summed over every bank
-    /// unit ([`BankChain::lane_swap_defects`], issues #2414, #2419): stranded stage swaps and
-    /// split strips, a row the trade could not trade back included. Saturating.
+    /// The lane-swap recoveries a bank's defect made this runtime's chains take, summed over
+    /// every bank unit ([`BankChain::lane_swap_defects`], issues #2414, #2419): stranded stage
+    /// swaps and slots that refused a swap-back, a row's trade-back included. Recoveries, not
+    /// strips. Saturating.
     pub(crate) fn lane_swap_defect_count(&self) -> u64 {
         self.units.iter().fold(0_u64, |total, unit| match unit {
             RuntimeUnit::Bank { chain, .. } => total.saturating_add(chain.lane_swap_defects()),
@@ -12070,32 +12078,34 @@ fn swap_unit_lanes(
     trade_unit_lanes(units, identity, RowChains::Trade(scratch), a, b)
 }
 
-/// The recovery of a row [`Runtime::swap_bank_lanes`] traded and then could not trade back
-/// (issue #2419), a split strip: both lanes reset in every slot of the row's chains
-/// ([`BankChain::reset_swapped_lanes`]), whose state the refusal left mixed, then every reader
-/// that moved with the strip traded back, as [`swap_unit_lanes`] trades it. Each strip is then
-/// routed through its own lanes again, as the unchanged map says, and neither lane renders the
-/// other strip's history. The caller checked every index.
-fn recover_unit_lanes(
+/// The trade-back of a row [`Runtime::swap_bank_lanes`] traded when a later row refused (issue
+/// #2419): every slot of the row's chains swapped back, none unwound
+/// ([`BankChain::swap_lanes_back`]: a slot that refuses has both lanes reset and is counted), then
+/// every reader that moved with the strip traded back whatever the slots did, so each strip is
+/// routed through its own lanes again, as the unchanged map says. `Err` when a slot refused. The
+/// caller checked every index.
+fn swap_unit_lanes_back(
     units: &mut [RuntimeUnit],
     identity: &mut [UnitIdentity],
+    scratch: &mut [u8],
     a: (usize, usize),
     b: (usize, usize),
-) {
-    // `Err` only for a unit that is not a bank: it holds no lane to recover, and nothing changed.
-    let _ = trade_unit_lanes(units, identity, RowChains::Reset, a, b);
+) -> Result<(), BankLaneMoveRefusal> {
+    trade_unit_lanes(units, identity, RowChains::Back(scratch), a, b)
 }
 
 /// What [`trade_unit_lanes`] does to the chains of a row.
 enum RowChains<'a> {
-    /// Trade the two lanes' whole state, through this scratch ([`BankChain::swap_lanes`]).
+    /// Trade the two lanes' whole state, through this scratch ([`BankChain::swap_lanes`]); a
+    /// refusal returns before the readers move.
     Trade(&'a mut [u8]),
-    /// Reset both lanes in every slot ([`BankChain::reset_swapped_lanes`]).
-    Reset,
+    /// Swap them back slot by slot ([`BankChain::swap_lanes_back`]); the readers move whatever
+    /// it returns.
+    Back(&'a mut [u8]),
 }
 
-/// [`swap_unit_lanes`] and [`recover_unit_lanes`]: the row's chains as `chains` says, then the
-/// readers. `Err` only from a chain trade, or for a unit that is not a bank, with nothing changed.
+/// [`swap_unit_lanes`] and [`swap_unit_lanes_back`]: the row's chains as `chains` says, then the
+/// readers. `Err` from the chains, or for a unit that is not a bank, with nothing changed.
 fn trade_unit_lanes(
     units: &mut [RuntimeUnit],
     identity: &mut [UnitIdentity],
@@ -12103,6 +12113,7 @@ fn trade_unit_lanes(
     a: (usize, usize),
     b: (usize, usize),
 ) -> Result<(), BankLaneMoveRefusal> {
+    let back;
     if a.0 == b.0 {
         let Some(RuntimeUnit::Bank {
             members,
@@ -12114,12 +12125,18 @@ fn trade_unit_lanes(
         else {
             return Err(BankLaneMoveRefusal::Group);
         };
-        match chains {
-            RowChains::Trade(scratch) => chain
-                .swap_lanes(a.1, rack::ChainLanePeer::Same(b.1), scratch)
-                .map_err(BankLaneMoveRefusal::Chain)?,
-            RowChains::Reset => chain.reset_swapped_lanes(a.1, rack::ChainLanePeer::Same(b.1)),
-        }
+        let peer = rack::ChainLanePeer::Same(b.1);
+        back = match chains {
+            RowChains::Trade(scratch) => {
+                chain
+                    .swap_lanes(a.1, peer, scratch)
+                    .map_err(BankLaneMoveRefusal::Chain)?;
+                Ok(())
+            }
+            RowChains::Back(scratch) => chain
+                .swap_lanes_back(a.1, peer, scratch)
+                .map_err(BankLaneMoveRefusal::Chain),
+        };
         // `a.1` and `b.1` are below `lanes`, so every index is below `members.len()`.
         let lanes = *lanes;
         for slot in 0..members.len() / lanes {
@@ -12151,12 +12168,17 @@ fn trade_unit_lanes(
             return Err(BankLaneMoveRefusal::Group);
         };
         let peer = rack::ChainLanePeer::Other(high_chain, high_lane);
-        match chains {
-            RowChains::Trade(scratch) => low_chain
-                .swap_lanes(low_lane, peer, scratch)
-                .map_err(BankLaneMoveRefusal::Chain)?,
-            RowChains::Reset => low_chain.reset_swapped_lanes(low_lane, peer),
-        }
+        back = match chains {
+            RowChains::Trade(scratch) => {
+                low_chain
+                    .swap_lanes(low_lane, peer, scratch)
+                    .map_err(BankLaneMoveRefusal::Chain)?;
+                Ok(())
+            }
+            RowChains::Back(scratch) => low_chain
+                .swap_lanes_back(low_lane, peer, scratch)
+                .map_err(BankLaneMoveRefusal::Chain),
+        };
         let (low_lanes, high_lanes) = (*low_lanes, *high_lanes);
         for slot in 0..low_members.len() / low_lanes {
             if let (Some(own), Some(theirs)) = (
@@ -12195,7 +12217,7 @@ fn trade_unit_lanes(
             );
         }
     }
-    Ok(())
+    back
 }
 
 /// The master fold of a displaced pack group (issue #1782a), after its last unit has run: for
@@ -17440,36 +17462,45 @@ mod tests {
     }
 
     /// Issue #2419: a hand-built runtime of one pack group, two lane chains of three rows, each
-    /// unit a four-lane bank of one [`FaultyStage`] slot. Rows run in schedule order: chain 0's
-    /// unit of row `r` is `2r`, chain 1's is `2r + 1`. Unit `u`'s member op of lane `l` writes
-    /// buffer `16u + l`, and chain 0's units claim the source on lane 1 alone: what the trade's
-    /// readers move.
+    /// unit a four-lane bank of `slots` [`FaultyStage`] slots. Rows run in schedule order: chain
+    /// 0's unit of row `r` is `2r`, chain 1's is `2r + 1`. Unit `u`'s member op of lane `l` writes
+    /// buffer `16u + l` in every slot, and chain 0's units claim the source on lane 1 alone: what
+    /// the trade's readers move.
     struct SwapRig {
         runtime: Runtime,
-        faults: Vec<Arc<SwapFault>>,
+        /// Per unit, per slot.
+        faults: Vec<Vec<Arc<SwapFault>>>,
     }
 
     impl SwapRig {
         const UNITS: usize = 6;
 
-        fn new() -> Self {
-            let faults: Vec<Arc<SwapFault>> = (0..Self::UNITS).map(|_| Arc::default()).collect();
+        fn new(slots: usize) -> Self {
+            let faults: Vec<Vec<Arc<SwapFault>>> = (0..Self::UNITS)
+                .map(|_| (0..slots).map(|_| Arc::default()).collect())
+                .collect();
             let units = faults
                 .iter()
                 .enumerate()
-                .map(|(unit, fault)| {
-                    let stage = FaultyStage {
-                        tags: core::array::from_fn(|lane| (unit * 16 + lane) as u32),
-                        stranded: 0,
-                        fault: Arc::clone(fault),
-                    };
+                .map(|(unit, faults)| {
+                    let slots = faults
+                        .iter()
+                        .map(|fault| BankSlot {
+                            stage: Box::new(FaultyStage {
+                                tags: core::array::from_fn(|lane| (unit * 16 + lane) as u32),
+                                stranded: 0,
+                                fault: Arc::clone(fault),
+                            }),
+                            active_lanes: Box::new([true; 4]),
+                        })
+                        .collect();
                     RuntimeUnit::Bank {
-                        members: (0..4)
-                            .map(|lane| RuntimeOp {
+                        members: (0..4 * faults.len())
+                            .map(|member| RuntimeOp {
                                 inputs: Box::new([]),
                                 staged: Box::new([]),
                                 sidechain: None,
-                                output: (unit * 16 + lane) as u32,
+                                output: (unit * 16 + member % 4) as u32,
                                 kind: NodeKind::BankMember,
                                 observers: Box::new([]),
                             })
@@ -17478,10 +17509,7 @@ mod tests {
                         chain: BankChain::new(
                             AoSoaScratch::new(BankWidth::Four, 2).expect("scratch"),
                             Box::new([true; 4]),
-                            vec![BankSlot {
-                                stage: Box::new(stage),
-                                active_lanes: Box::new([true; 4]),
-                            }],
+                            slots,
                         )
                         .expect("chain"),
                         fold: Box::new([]),
@@ -17538,55 +17566,76 @@ mod tests {
             Self { runtime, faults }
         }
 
-        /// Unit `unit`'s stage tags, member outputs and source bits.
-        fn unit(&mut self, unit: usize) -> ([u32; 4], Vec<u32>, u8) {
+        /// Unit `unit`'s stage tags per slot, its member outputs and its source bits.
+        fn unit(&mut self, unit: usize) -> (Vec<[u32; 4]>, Vec<u32>, u8) {
             let source = self.runtime.identity[unit].source_lanes;
             let RuntimeUnit::Bank { chain, members, .. } = &mut self.runtime.units[unit] else {
                 unreachable!("every unit is a bank");
             };
             let members = members.iter().map(|op| op.output).collect();
-            let stage = chain
-                .slot_stage_mut(0)
-                .and_then(BankStage::as_any_mut)
-                .and_then(|any| any.downcast_mut::<FaultyStage>())
-                .expect("a faulty stage");
-            (stage.tags, members, source)
+            let mut tags = Vec::new();
+            let mut slot = 0;
+            while let Some(stage) = chain.slot_stage_mut(slot) {
+                let stage = stage
+                    .as_any_mut()
+                    .and_then(|any| any.downcast_mut::<FaultyStage>())
+                    .expect("a faulty stage");
+                tags.push(stage.tags);
+                slot += 1;
+            }
+            (tags, members, source)
         }
 
         /// Every home position's pin.
         fn pinned(&self) -> Vec<bool> {
             self.runtime.lane_map.pinned.to_vec()
         }
+
+        /// The pins of exactly the home positions of the strips at row-0 `(unit, lane)` `a` and
+        /// `b`: unit `c` of row 0 is chain `c`.
+        fn pins(a: (usize, usize), b: (usize, usize)) -> Vec<bool> {
+            let mut pinned = vec![false; 8];
+            pinned[4 * a.0 + a.1] = true;
+            pinned[4 * b.0 + b.1] = true;
+            pinned
+        }
     }
 
-    /// Issue #2419: a trade whose row 2 strands and whose trade-back of an earlier row strands too
-    /// (its chain refuses `Defect`, still holding the row traded) leaves a split strip. The trade
-    /// still trades back every other row, recovers each row that refused (both lanes reset in its
-    /// chains, every reader traded back), counts each beside the strands, pins both strips and
-    /// returns `Split` naming the highest such row; the map is unchanged. An in-chain trade (lanes 1 and 2 of chain 0) with rows 1 and 0 both refusing, and
-    /// a cross-chain one (lane 1 of each chain) with row 0 refusing. On the base this was a
-    /// `debug_assert!(false)` (a debug panic) and, in release, a `Chain(Defect)` with the refusing
-    /// row left traded.
+    /// Issue #2419: a trade whose row 2 strands and whose trade-back of an earlier row strands
+    /// too leaves a split strip. Each unit holds a healthy slot 0 and a broken slot 1. The trade
+    /// still trades back every row: in a row whose broken slot refuses its swap-back, that slot is
+    /// reset and counted while the healthy slot swaps back, and the row's readers are traded back.
+    /// It pins both strips and returns `Split` naming the highest such row, with the map
+    /// unchanged. Cases: an in-unit trade on chain 0 with rows 1 and 0 both refusing, a
+    /// cross-unit trade of two different lanes, and an in-unit trade on chain 1, whose units hold
+    /// the counts. On the base this was a `debug_assert!(false)` (a debug panic) and, in release,
+    /// a `Chain(Defect)` with the refusing row left traded.
     ///
-    /// Test value: a trade that takes a refused trade-back for a done one, stops trading back at
-    /// the first refusal, leaves a recovered row's readers traded or its lanes unreset, resets a
-    /// row that traded back, names the lowest split row, does not pin, or does not count the
-    /// row's recovery in the host total.
+    /// Test value: a trade-back that leaves a split row's healthy slots traded (the chain's
+    /// unwinding `swap_lanes`), takes a refused trade-back for a done one, stops at the first
+    /// refusal, leaves a row's readers traded, swaps the peer's lane for the caller's, resets a
+    /// slot that swapped back, names the lowest split row, does not pin, or a host total that
+    /// misses a unit's counts.
     #[test]
     fn a_row_that_refuses_its_trade_back_is_recovered_as_a_split_strip() {
-        // `(a, b, the rows whose trade-back refuses)`: the unit of row 0 for each strip.
+        // `(a, b, the rows whose trade-back refuses)`, each strip by its row-0 unit.
         for (a, b, split) in [
             ((0, 1), (0, 2), &[1_usize, 0][..]),
-            ((0, 1), (1, 1), &[0][..]),
+            ((0, 1), (1, 2), &[0][..]),
+            ((1, 1), (1, 3), &[0][..]),
         ] {
             let what = format!("{a:?} with {b:?}, split rows {split:?}");
-            let mut rig = SwapRig::new();
+            let mut rig = SwapRig::new(2);
             let homes: Vec<_> = (0..SwapRig::UNITS).map(|unit| rig.unit(unit)).collect();
-            // Row 2's calling chain (the lower unit) strands its first swap; each split row's
-            // calling chain strands its second, the trade-back.
-            rig.faults[4].strand.store(1 << 1, Ordering::Relaxed);
+            // The calling unit of row `r` is `2r + a.0`. Row 2's broken slot strands its first
+            // swap, and each split row's broken slot its second: the trade-back.
+            rig.faults[4 + a.0][1]
+                .strand
+                .store(1 << 1, Ordering::Relaxed);
             for &row in split {
-                rig.faults[2 * row].strand.store(1 << 2, Ordering::Relaxed);
+                rig.faults[2 * row + a.0][1]
+                    .strand
+                    .store(1 << 2, Ordering::Relaxed);
             }
             assert_eq!(
                 rig.runtime.swap_bank_lanes(a, b),
@@ -17596,15 +17645,17 @@ mod tests {
             assert_eq!(
                 rig.runtime.lane_swap_defect_count(),
                 1 + 2 * split.len() as u64,
-                "{what}: each strand and each recovered row are counted"
+                "{what}: each strand and each refused swap-back are counted"
             );
-            let mut pinned = vec![false; 8];
-            pinned[a.1] = true;
-            pinned[4 * b.0 + b.1] = true;
-            assert_eq!(rig.pinned(), pinned, "{what}: both strips, and only they");
+            assert_eq!(
+                rig.pinned(),
+                SwapRig::pins(a, b),
+                "{what}: both strips, and only they"
+            );
             for row in 0..3 {
                 for unit in [2 * row, 2 * row + 1] {
-                    // Row 2's strand resets once; a split row's strand, then its recovery, twice.
+                    // Row 2's strand resets once; a split row's strand, then the chain's
+                    // recovery of the refused swap-back, twice.
                     let times = match row {
                         2 => 1,
                         _ if split.contains(&row) => 2,
@@ -17617,9 +17668,10 @@ mod tests {
                         }
                     }
                     assert_eq!(
-                        rig.faults[unit].resets(),
-                        resets,
-                        "{what}: unit {unit}: reset if its row stranded or refused its trade-back"
+                        [rig.faults[unit][0].resets(), rig.faults[unit][1].resets()],
+                        [[0; 4], resets],
+                        "{what}: unit {unit}: the broken slot reset if its row stranded or \
+                         refused its trade-back, the healthy slot never"
                     );
                     let (tags, members, source) = rig.unit(unit);
                     let (home_tags, home_members, home_source) = &homes[unit];
@@ -17628,8 +17680,12 @@ mod tests {
                         (home_members, *home_source),
                         "{what}: unit {unit}: every reader is home"
                     );
+                    assert_eq!(
+                        tags[0], home_tags[0],
+                        "{what}: unit {unit}: the healthy slot swapped back"
+                    );
                     if !split.contains(&row) {
-                        assert_eq!(&tags, home_tags, "{what}: unit {unit}: traded back");
+                        assert_eq!(tags[1], home_tags[1], "{what}: unit {unit}: traded back");
                     }
                 }
             }
@@ -17643,6 +17699,87 @@ mod tests {
         }
     }
 
+    /// Issue #2419: a row whose own chain splits the strip on the forward trade
+    /// (`Chain(Split)`: its broken slot strands and its healthy slot then strands its swap-back)
+    /// is a recovered defect like `Chain(Defect)`: no debug panic, the earlier row traded back,
+    /// both strips pinned and every recovery counted.
+    ///
+    /// Test value: a tripwire that admits only `Chain(Defect)`, so a debug build panics on a
+    /// split the chain recovered and counted, or a split forward row left unpinned.
+    #[test]
+    fn a_row_its_chain_splits_is_a_recovered_defect() {
+        let mut rig = SwapRig::new(2);
+        let homes: Vec<_> = (0..SwapRig::UNITS).map(|unit| rig.unit(unit)).collect();
+        // Row 1 (unit 2): slot 0 swaps, slot 1 strands, then slot 0's swap-back strands.
+        rig.faults[2][1].strand.store(1 << 1, Ordering::Relaxed);
+        rig.faults[2][0].strand.store(1 << 2, Ordering::Relaxed);
+        assert_eq!(
+            rig.runtime.swap_bank_lanes((0, 1), (0, 2)),
+            Err(BankLaneMoveRefusal::Chain(
+                rack::ChainLaneSwapRefusal::Split { slot: 0 }
+            ))
+        );
+        assert_eq!(
+            rig.runtime.lane_swap_defect_count(),
+            3,
+            "two strands and the split slot's recovery"
+        );
+        assert_eq!(rig.pinned(), SwapRig::pins((0, 1), (0, 2)));
+        assert_eq!(rig.unit(0), homes[0].clone(), "row 0 traded back");
+    }
+
+    /// Issue #2419: a defect pins the strips at the trade's two positions by their **home**
+    /// positions, in their own group's table: a group at `base` 8 whose strips a cycle of moves
+    /// displaced, so neither position holds its own strip.
+    ///
+    /// Test value: a pin of the positions instead of the strips there, a pin that drops the
+    /// group's `base` (it lands in the first group) or that reads another group's.
+    #[test]
+    fn a_defect_pins_the_strips_at_its_positions_by_home() {
+        let group = |first: u32, last: u32| DiscoveredGroup {
+            group: PackGroup {
+                first,
+                last,
+                width: 4,
+                chains: last - first + 1,
+                rows: 1,
+                units_base: 0,
+                base: 0,
+                folded: false,
+                master: FoldTarget::Output,
+                displaced: 0,
+                dirty: true,
+                fresh: true,
+                dwelling: 0,
+                ranked_base: 0,
+                ranked: 0,
+            },
+            units: (first..=last).collect(),
+        };
+        let mut map = LaneMap::from_groups(vec![group(0, 1), group(2, 4)], 5, 0, 0);
+        let base = map.groups[1].base as usize;
+        assert_eq!(
+            base, 8,
+            "the second group follows the first's eight positions"
+        );
+        // A cycle: the strip homed at (2, 1) renders at (4, 3), the one homed at (4, 3) at
+        // (3, 0), and the one homed at (3, 0) at (2, 1).
+        assert!(map.record_swap(1, (2, 1), (4, 3)) && map.record_swap(1, (3, 0), (2, 1)));
+        // The trade at local positions 1 and 4: units 2 and 3, lanes 1 and 0.
+        let (a, b) = (1, 4);
+        let homes = [map.home[base + a] as usize, map.home[base + b] as usize];
+        assert!(
+            homes != [a, b] && homes != [b, a],
+            "neither position holds its own strip: {homes:?}"
+        );
+        map.pin_positions(1, a, b);
+        let mut pinned = vec![false; map.pinned.len()];
+        for home in homes {
+            pinned[base + home] = true;
+        }
+        assert_eq!(map.pinned.to_vec(), pinned);
+    }
+
     /// Issue #2419: a pack-group trade that strands a slot is a recovered defect, not a debug
     /// panic: the trade refuses `Chain(Defect)`, counts it in the host total and pins both strips,
     /// so the packer's next episode, which forgets the strips its last one refused, does not ask
@@ -17654,11 +17791,11 @@ mod tests {
     /// a stage's stranded swap.
     #[test]
     fn a_stranded_trade_pins_both_strips_for_the_plan() {
-        let mut rig = SwapRig::new();
+        let mut rig = SwapRig::new(1);
         // Strip 0 is silent at rest, so the packer trades it with strip 1, the first audible one.
         rig.runtime.lane_map.idle[0] = PACK_IDLE_BLOCKS;
         // Row 1's bank strands the first swap it is asked for.
-        rig.faults[2].strand.store(1 << 1, Ordering::Relaxed);
+        rig.faults[2][0].strand.store(1 << 1, Ordering::Relaxed);
         rig.runtime.pack_lanes();
         assert_eq!(
             [
@@ -17673,10 +17810,12 @@ mod tests {
             1,
             "the strand is counted"
         );
-        let mut pinned = vec![false; 8];
-        pinned[..2].fill(true);
-        assert_eq!(rig.pinned(), pinned, "both strips are pinned");
-        let swaps = rig.faults[0].swaps.load(Ordering::Relaxed);
+        assert_eq!(
+            rig.pinned(),
+            SwapRig::pins((0, 0), (0, 1)),
+            "both strips are pinned"
+        );
+        let swaps = rig.faults[0][0].swaps.load(Ordering::Relaxed);
         // A new episode: the packer forgets the strips it refused.
         rig.runtime.lane_map.groups[0].fresh = true;
         rig.runtime.lane_map.groups[0].dirty = true;
@@ -17690,13 +17829,13 @@ mod tests {
             "the next episode asks the broken banks nothing"
         );
         assert_eq!(
-            rig.faults[0].swaps.load(Ordering::Relaxed),
+            rig.faults[0][0].swaps.load(Ordering::Relaxed),
             swaps,
             "no lane swapped"
         );
-        assert_eq!(rig.faults[0].resets(), [0; 4], "row 0 traded back");
+        assert_eq!(rig.faults[0][0].resets(), [0; 4], "row 0 traded back");
         assert_eq!(
-            rig.faults[2].resets(),
+            rig.faults[2][0].resets(),
             [1, 1, 0, 0],
             "row 1's strand reset its two lanes"
         );
@@ -17714,9 +17853,11 @@ mod tests {
         expected = "a checked row trades its lanes, or its chains recover and count the defect"
     )]
     fn an_unrecovered_row_refusal_trips_the_trade_in_debug() {
-        let mut rig = SwapRig::new();
+        let mut rig = SwapRig::new(1);
         // The trade's check is the stage's first; the chain's own, in its swap, the second.
-        rig.faults[0].refuse_check_from.store(2, Ordering::Relaxed);
+        rig.faults[0][0]
+            .refuse_check_from
+            .store(2, Ordering::Relaxed);
         let _ = rig.runtime.swap_bank_lanes((0, 1), (0, 2));
     }
 

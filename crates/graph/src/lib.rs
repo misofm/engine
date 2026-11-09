@@ -5130,10 +5130,12 @@ pub fn carry_refusal_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
     )
 }
 
-/// The render-time lane swaps a bank's defect made this plan recover (issues #2414, #2419): every
-/// bank stage's stranded swaps, which reset two lanes, and every split strip a swap or a row
-/// trade could not swap back, which reset its lanes and pinned both strips. Saturating. `None`
-/// for any other plan.
+/// The render-time lane-swap recoveries a bank's defect made this plan take (issues #2414,
+/// #2419): every bank stage's stranded swap, which reset two lanes, and every slot that refused a
+/// swap-back, in a chain's swap or a row's trade-back, which reset its two lanes; the trade then
+/// pinned both strips. It counts recoveries, not strips: one slot that strands on its swap-back
+/// counts as a strand and as a split, and one trade can count several. Saturating. `None` for any
+/// other plan.
 ///
 /// Read after render, by whoever holds the plan, beside [`carry_refusal_count`]: a bank that
 /// keeps its lane-swap contract never strands, so a nonzero count is a defect, and a plan
