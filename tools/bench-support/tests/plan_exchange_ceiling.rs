@@ -17,7 +17,7 @@ use engine::{
 };
 
 fn plan_with_gate() -> (PreparedRenderPlan, PlanRevisionGate) {
-    let mut plan = PreparedRenderPlan::prepare(PrepareRenderPlan {
+    PreparedRenderPlan::prepare(PrepareRenderPlan {
         plan_id: 1,
         envelope: RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
@@ -26,9 +26,7 @@ fn plan_with_gate() -> (PreparedRenderPlan, PlanRevisionGate) {
         },
         scratch: &[],
     })
-    .expect("plan");
-    let gate = plan.take_revision_gate().expect("a fresh plan's gate");
-    (plan, gate)
+    .expect("plan")
 }
 
 fn config() -> PlanExchangeConfig {

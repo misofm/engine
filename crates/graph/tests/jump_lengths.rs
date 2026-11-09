@@ -156,8 +156,7 @@ type Exchange = (
     (realtime::PlanPublisher, realtime::PlanRetirer),
 );
 
-fn exchange(mut plan: PreparedRenderPlan) -> Exchange {
-    let mut gate = plan.take_revision_gate().expect("a fresh plan's gate");
+fn exchange((plan, mut gate): (PreparedRenderPlan, realtime::PlanRevisionGate)) -> Exchange {
     let (publisher, owner, retirer) = plan_exchange_at_revision(
         plan,
         &mut gate,

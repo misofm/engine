@@ -169,7 +169,8 @@ impl PreparedHost {
     /// Call the whole thing on the render thread the session will render on, or move the
     /// [`PreparedHost`] there first: [`StartedRenderSession`] cannot be moved afterwards. The
     /// returned [`SourceControlSet`] and [`HostPrepareReport`] are `Send` and go back to the
-    /// control thread.
+    /// control thread. The plan's gate handle ([`PreparedHost::gate`]) drops here: a started
+    /// session renders at the plan's prepared revision, and nothing publishes on its gate.
     ///
     /// # Errors
     ///
@@ -189,6 +190,7 @@ impl PreparedHost {
     > {
         let Self {
             plan,
+            gate,
             sources,
             report,
             inventory,
@@ -200,6 +202,7 @@ impl PreparedHost {
             Err((plan, rejection)) => Err((
                 Self {
                     plan,
+                    gate,
                     sources,
                     report,
                     inventory,

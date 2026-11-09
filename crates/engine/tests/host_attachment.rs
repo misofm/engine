@@ -49,6 +49,7 @@ fn plan(id: u64) -> PreparedRenderPlan {
         scratch: &[],
     })
     .expect("plan")
+    .0
 }
 
 fn probe() -> (Probe, Arc<AtomicUsize>, Arc<Mutex<Option<ThreadId>>>) {

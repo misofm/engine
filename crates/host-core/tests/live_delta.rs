@@ -2311,11 +2311,7 @@ fn pushed_records_render_the_rebuilt_plan() {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
-    let mut gate = live
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
-    push_delta(&mut handles, &mut gate, &delta);
+    push_delta(&mut handles, &mut live.gate, &delta);
     let prepare = |compiled: &session::CompiledSession| {
         prepare_host_runtime(compiled, &caps()).unwrap_or_else(|failure| {
             panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
@@ -2345,7 +2341,7 @@ fn pushed_records_render_the_rebuilt_plan() {
             None
         )]
     );
-    push_delta(&mut handles, &mut gate, &unmute);
+    push_delta(&mut handles, &mut live.gate, &unmute);
     let rebuilt = render_blocks(&mut prepare(&compile(&unmuted)), &planes, 0..2 * BLOCKS);
     let second_half = rebuilt[rebuilt.len() / 2..].to_vec();
     assert!(
@@ -4193,11 +4189,7 @@ fn pushed_send_records_render_the_rebuilt_plan() {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
     assert_eq!(handles.route_controls.len(), 1);
-    let mut gate = live
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
-    push_delta(&mut handles, &mut gate, &delta);
+    push_delta(&mut handles, &mut live.gate, &delta);
     let prepare = |compiled: &session::CompiledSession| {
         prepare_host_runtime(compiled, &caps()).unwrap_or_else(|failure| {
             panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
@@ -4215,14 +4207,14 @@ fn pushed_send_records_render_the_rebuilt_plan() {
     // Mute, then a gain move while muted (no record), then the unmute.
     let muted = normalized(&edited(&next, |model| model.routes[send].mute = true));
     let mute = classify_live_delta(&next, &muted, STEP, &EditRamps::new()).expect("live");
-    push_delta(&mut handles, &mut gate, &mute);
+    push_delta(&mut handles, &mut live.gate, &mute);
     let moved = normalized(&edited(&muted, |model| model.routes[send].gain_db = -12.0));
     let held = classify_live_delta(&muted, &moved, STEP, &EditRamps::new()).expect("live");
     assert!(held.routes.is_empty());
     let unmuted = normalized(&edited(&moved, |model| model.routes[send].mute = false));
     let unmute = classify_live_delta(&moved, &unmuted, STEP, &EditRamps::new()).expect("live");
     assert_eq!(unmute.routes.len(), 1);
-    push_delta(&mut handles, &mut gate, &unmute);
+    push_delta(&mut handles, &mut live.gate, &unmute);
     let rebuilt = render_blocks(&mut prepare(&compile(&unmuted)), &planes, 0..2 * BLOCKS);
     let second_half = rebuilt[rebuilt.len() / 2..].to_vec();
     assert!(
@@ -4343,10 +4335,6 @@ fn pushed_vca_and_follow_records_render_the_rebuilt_plan() {
         &HostLiveControlRequest::default(),
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
-    let mut gate = live
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
     let window = 2;
     let quantum = live.report.quantum_frames as usize;
     let planes = feed(quantum * window * (steps.len() + 1));
@@ -4365,7 +4353,7 @@ fn pushed_vca_and_follow_records_render_the_rebuilt_plan() {
         let next = normalized(&edited(&committed, step));
         let delta = classify_live_delta(&committed, &next, STEP, &EditRamps::new())
             .unwrap_or_else(|reason| panic!("{name}: {reason:?}"));
-        push_delta(&mut handles, &mut gate, &delta);
+        push_delta(&mut handles, &mut live.gate, &delta);
         let blocks = (index + 1) * window..(index + 2) * window;
         rendered = render_blocks(&mut live, &planes, blocks.clone());
         let expected = render_blocks(&mut fresh(&next), &planes, 0..blocks.end);

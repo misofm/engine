@@ -6201,7 +6201,7 @@ mod tests {
         fn reference() -> Vec<Block> {
             let validity = Arc::new(AtomicU8::new(0));
             let (_host, source) = filled_source();
-            let mut plan = bind(source, &validity).seal();
+            let mut plan = bind(source, &validity).seal().0;
             let blocks: Vec<Block> = (0..BLOCKS).map(|_| plan_block(&mut plan)).collect();
             assert!(
                 blocks
@@ -6234,7 +6234,7 @@ mod tests {
         fn swap(program: impl FnOnce(u64) -> Option<GraphCarryProgram>) -> SwapRun {
             let validity = Arc::new(AtomicU8::new(0));
             let (host, source) = filled_source();
-            let mut predecessor = bind(source, &validity).seal();
+            let mut predecessor = bind(source, &validity).seal().0;
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
             let (mut publisher, mut owner, _retirer) =
                 plan_exchange(predecessor, exchange_config()).expect("exchange");
@@ -6249,9 +6249,12 @@ mod tests {
                     let plan = successor.take().expect("successor");
                     let plan = match (program.take().expect("program"))(identity) {
                         Some(program) => {
-                            graph::carry_builder(plan, program).expect("install").seal()
+                            graph::carry_builder(plan, program)
+                                .expect("install")
+                                .seal()
+                                .0
                         }
-                        None => plan.seal(),
+                        None => plan.seal().0,
                     };
                     assert!(publisher.publish(plan, 0).is_ok());
                 }
@@ -6367,7 +6370,9 @@ mod tests {
             host.submit(chunk(1, 0, &[&first[0], &first[1]], FRAMES, false))
                 .expect("first block");
             let mut predecessor =
-                bind(SourceGraphSource::new(consumer, resources, 0, 0), &validity).seal();
+                bind(SourceGraphSource::new(consumer, resources, 0, 0), &validity)
+                    .seal()
+                    .0;
             plan_block(&mut predecessor);
             assert_eq!(take_validity(&validity), (false, false));
 
@@ -6391,7 +6396,8 @@ mod tests {
                 carry_source_zero(identity),
             )
             .expect("install")
-            .seal();
+            .seal()
+            .0;
             assert_eq!(
                 successor.adopt_predecessor_plan(&mut predecessor),
                 CarryOutcome::Carried
@@ -6440,14 +6446,16 @@ mod tests {
                 envelope: envelope(),
                 scratch: &[],
             })
-            .expect("plain plan");
+            .expect("plain plan")
+            .0;
             assert_eq!(graph::plan_identity(&mut plain), None);
             // A refused install charges nothing; an accepted one charges its move table.
-            let mut occupied = occupied.seal();
+            let mut occupied = occupied.seal().0;
             assert_eq!(graph::carry_program_retained_bytes(&mut occupied), 0);
             let mut vacant = graph::carry_builder(vacant, program(&[(0, 0)]))
                 .expect("install")
-                .seal();
+                .seal()
+                .0;
             assert_eq!(
                 graph::carry_program_retained_bytes(&mut vacant),
                 core::mem::size_of::<(u32, u32)>() as u64
@@ -6535,8 +6543,9 @@ mod tests {
             let validity = Arc::new(AtomicU8::new(0));
             let (_first, first) = filled_source();
             let (_second, second) = filled_source();
-            let mut predecessor =
-                bind_with(vec![first, second], two_source_mappings(), &validity).seal();
+            let mut predecessor = bind_with(vec![first, second], two_source_mappings(), &validity)
+                .seal()
+                .0;
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
             let successor = bind_with(
                 vec![SourceGraphSource::vacant(2), SourceGraphSource::vacant(2)],
@@ -6552,7 +6561,8 @@ mod tests {
                 },
             )
             .expect("install")
-            .seal();
+            .seal()
+            .0;
             assert_eq!(
                 successor.adopt_predecessor_plan(&mut predecessor),
                 CarryOutcome::PredecessorMismatch
@@ -6660,7 +6670,8 @@ mod tests {
                 vec![mono(a.clone(), 0), mono(b.clone(), 0)],
                 &validity,
             )
-            .seal();
+            .seal()
+            .0;
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
             let successor = bind_with(
                 vec![SourceGraphSource::vacant(2)],
@@ -6669,7 +6680,8 @@ mod tests {
             );
             let mut successor = graph::carry_builder(successor, carry_source_zero(identity))
                 .expect("install")
-                .seal();
+                .seal()
+                .0;
             assert_eq!(
                 successor.adopt_predecessor_plan(&mut predecessor),
                 CarryOutcome::PredecessorMismatch

@@ -884,11 +884,15 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             .expect("the meter text reserve");
     let host_core::PreparedHost {
         plan,
+        gate,
         sources,
         report: host_report,
         inventory,
         control_catalog,
     } = prepared;
+    // The handle shares the plan's gate allocation (#2417); dropped first, the plan is the gate's
+    // last owner, so its drop frees the gate as the plan walk charges it.
+    drop(gate);
     let plan_walk = plan.retained_bytes();
     let owners = HostOwners {
         routes: freed_by_drop(routes),

@@ -204,13 +204,10 @@ fn a_monitor_write_applies_in_the_next_block_and_the_watermark_stays_on_the_revi
     let planes = feed();
     let initial = model(false);
     let target = model(true);
-    let (mut host, mut handles) = prepare_live(&initial);
+    let (host, mut handles) = prepare_live(&initial);
     let quantum = host.report.quantum_frames as usize;
     assert_eq!(host.report.sample_rate_hz, 48_000);
-    let mut gate = host
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
+    let mut gate = host.gate;
     let revision = 3;
     let mut sources = host.sources;
     let (publisher, mut owner, _retirer) =
@@ -313,12 +310,9 @@ fn a_monitor_write_on_a_pending_candidate_applies_at_adoption_with_its_revision(
     let planes = feed();
     let initial = model(false);
     let target = model(true);
-    let (mut host, _handles) = prepare_live(&initial);
+    let (host, _handles) = prepare_live(&initial);
     let quantum = host.report.quantum_frames as usize;
-    let mut gate = host
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
+    let mut gate = host.gate;
     let revision = 3;
     let mut sources = host.sources;
     let (mut publisher, mut owner, _retirer) =
@@ -327,11 +321,8 @@ fn a_monitor_write_on_a_pending_candidate_applies_at_adoption_with_its_revision(
     let watermark = publisher.watermark_reader();
 
     // The candidate carries the model commit r + 1 and is published for a later block.
-    let (mut candidate, mut candidate_handles) = prepare_live(&initial);
-    let mut candidate_gate = candidate
-        .plan
-        .take_revision_gate()
-        .expect("the candidate's gate handle");
+    let (candidate, mut candidate_handles) = prepare_live(&initial);
+    let mut candidate_gate = candidate.gate;
     let model_revision = revision + 1;
     let stamp = candidate_gate.stamp(model_revision).expect("a revision");
     let key = stamp.key();

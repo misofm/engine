@@ -2460,8 +2460,10 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     }
     let host = prepared.report;
     // #1502 D1: the plan's control handle moves into its provider epoch, so the gate, the cells
-    // and the producers that write them follow one routing.
+    // and the producers that write them follow one routing. The handle left the plan by value at
+    // its seal (#2417) and travels in the prepared host.
     let mut plan = prepared.plan;
+    let revision_gate = prepared.gate;
     // #1332: the ring's render half rides the plan itself when the preparer keeps it there, so
     // the plan carries it through the exchange to whichever thread renders it.
     let meter_frames = meter_frames.map(|ring| {
@@ -2471,9 +2473,6 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             preparer.keep_meter_frame_producer(&mut plan, producer),
         )
     });
-    let revision_gate = plan
-        .take_revision_gate()
-        .expect("a freshly prepared plan hands out its revision gate");
     let largest_named = host.largest_engine_allocation_bytes.max(capi.largest);
     let carried = CarriedSourceBytes {
         total: host.carried_source_total_bytes,

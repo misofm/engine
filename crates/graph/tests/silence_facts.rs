@@ -77,7 +77,12 @@ fn estimate() -> GraphResourceEstimate {
 /// Two tracks, each sending through a live route into one submix input, which feeds the output.
 /// `silent[t]` lists the blocks in which track `t`'s input is `+0.0`. Returns the plan and the
 /// two routes' producers.
-fn prepared(silent: [u32; 2]) -> (realtime::PreparedRenderPlan, Vec<GraphRouteControlProducer>) {
+fn prepared(
+    silent: [u32; 2],
+) -> (
+    (realtime::PreparedRenderPlan, realtime::PlanRevisionGate),
+    Vec<GraphRouteControlProducer>,
+) {
     let envelope = RenderEnvelope {
         sample_rate: SampleRateHz(48_000),
         quantum: QuantumFrames(FRAMES as u32),
@@ -243,8 +248,7 @@ fn prepared(silent: [u32; 2]) -> (realtime::PreparedRenderPlan, Vec<GraphRouteCo
 fn a_submix_input_is_silent_iff_every_route_into_it_is() {
     const BLOCKS: usize = 11;
     test_only_state_every_silence_fact(true);
-    let (mut plan, mut producers) = prepared([1 << 0, 0b111_1101_1111]);
-    let mut gate = plan.take_revision_gate().expect("a fresh plan's gate");
+    let ((mut plan, mut gate), mut producers) = prepared([1 << 0, 0b111_1101_1111]);
     let record = |target, mute, length| {
         RouteControlRecord::new(target, mute, length).expect("a legal route record")
     };

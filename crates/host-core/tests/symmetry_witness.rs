@@ -101,8 +101,6 @@ fn live_controls() -> HostLiveControlRequest {
 struct Console {
     prepared: PreparedHost,
     handles: HostLiveControlHandles,
-    /// The plan's gate handle, for stamping and publishing cell writes.
-    gate: engine::realtime::PlanRevisionGate,
     block: usize,
 }
 
@@ -124,22 +122,17 @@ fn prepare(document: &str) -> (CompiledSession, Console) {
 /// of an eight-track fixture reaches an eight-lane bank width. That arm is asserted per track
 /// rather than on the census, so the precondition is not one it owes.
 fn prepare_unbanked(document: &str) -> (CompiledSession, Console) {
-    let (session, mut prepared, handles) =
+    let (session, prepared, handles) =
         prepare_host_session_with_live_controls(document, &caps(), &live_controls())
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
     assert_eq!(handles.strips.len(), TRACKS);
-    let gate = prepared
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
     (
         session,
         Console {
             prepared,
             handles,
-            gate,
             block: 0,
         },
     )
@@ -193,7 +186,10 @@ fn render(console: &mut Console, blocks: usize) {
 }
 
 fn push(console: &mut Console, track_id: &str, record: EffectControlRecord) {
-    let Console { handles, gate, .. } = console;
+    let Console {
+        handles, prepared, ..
+    } = console;
+    let gate = &mut prepared.gate;
     let producer = handles
         .effect_controls
         .iter_mut()
@@ -717,7 +713,10 @@ fn twin_parameter_spans_keep_the_lane_and_a_lone_half_declines_it() {
         value,
     };
     let raw = |console: &mut Console, track_id: &str, record: EffectControlRecord| {
-        let Console { handles, gate, .. } = console;
+        let Console {
+            handles, prepared, ..
+        } = console;
+        let gate = &mut prepared.gate;
         let producer = handles
             .effect_controls
             .iter_mut()
@@ -913,23 +912,21 @@ fn an_observe_record_never_moves_the_witness() {
         observation_taps: 4,
         ..live_controls()
     };
-    let (_session, mut prepared, handles) =
+    let (_session, prepared, handles) =
         prepare_host_session_with_live_controls(&document, &caps(), &request).unwrap_or_else(
             |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
         );
-    let gate = prepared
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle");
     let mut console = Console {
         prepared,
         handles,
-        gate,
         block: 0,
     };
     let [before, lanes] = census(&console);
     assert_eq!(before, lanes, "the mono compressor fixture starts eligible");
-    let Console { handles, gate, .. } = &mut console;
+    let Console {
+        handles, prepared, ..
+    } = &mut console;
+    let gate = &mut prepared.gate;
     let producer = handles
         .effect_controls
         .iter_mut()
@@ -978,7 +975,7 @@ fn seam_side_live_control_traffic_leaves_every_lane_eligible() {
         .iter_mut()
         .find(|producer| producer.track_id.as_ref() == "eq3")
         .expect("a control channel for the addressed track");
-    console.gate.write_published(|stamp| {
+    console.prepared.gate.write_published(|stamp| {
         control.fader.write(
             stamp,
             TrackFaderRecord::FaderDb {

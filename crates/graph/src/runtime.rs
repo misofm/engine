@@ -18500,7 +18500,8 @@ mod tests {
         let bound = plan
             .bind(bindings)
             .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
-            .seal();
+            .seal()
+            .0;
         test_only_set_route_fold_declined(false);
         test_only_set_scatter_redirect_declined(false);
         bound
@@ -19011,7 +19012,8 @@ mod tests {
         let bound = plan
             .bind(bindings)
             .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
-            .seal();
+            .seal()
+            .0;
         test_only_set_route_fold_declined(false);
         bound
     }
@@ -20027,7 +20029,8 @@ mod tests {
         let mut bound = plan
             .bind(bindings)
             .unwrap_or_else(|failure| panic!("control bind: {}", failure.code))
-            .seal();
+            .seal()
+            .0;
         let bits = render_fold_fixture(&mut bound, 13, 2);
         assert!(bits.iter().any(|word| *word != 0), "the control renders");
     }

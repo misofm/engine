@@ -445,7 +445,7 @@ impl From<SpscError> for PlanExchangeError {
 }
 
 /// Prepare the exchange with `initial` at committed revision `initial_revision` (#1314 D1, #1502
-/// D5): `gate` is the initial plan's handle ([`PreparedRenderPlan::take_revision_gate`]), the
+/// D5): `gate` is the initial plan's handle ([`PreparedRenderPlan::prepare`] returns it), the
 /// revision is published on it when it is above 0, and the watermark starts at
 /// `(initial_revision, 0, EXACT)` with every counter 0. The caller keeps the handle: it publishes
 /// the plan's later revisions.

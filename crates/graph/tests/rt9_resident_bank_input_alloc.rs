@@ -519,7 +519,7 @@ fn prepared(
         .bind(runtime_bindings)
         .unwrap_or_else(|failure| panic!("bind {}", failure.code));
     plan.arm_mono_collapse(&|_| mono != 0);
-    (plan.seal(), probe)
+    (plan.seal().0, probe)
 }
 
 fn render(

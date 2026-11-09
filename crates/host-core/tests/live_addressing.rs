@@ -233,14 +233,6 @@ fn addressed<'a>(
     producer
 }
 
-/// The plan's gate handle: live values are cells, written under a stamp of it.
-fn gate_of(prepared: &mut PreparedHost) -> engine::realtime::PlanRevisionGate {
-    prepared
-        .plan
-        .take_revision_gate()
-        .expect("the plan's gate handle")
-}
-
 #[test]
 fn a_live_bypass_reaches_the_addressed_lane() {
     let (mut base, _) = prepare(&document(None));
@@ -248,10 +240,9 @@ fn a_live_bypass_reaches_the_addressed_lane() {
     let mut renders = Vec::new();
     for (address, instance) in ADDRESSES {
         let (mut prepared, mut handles) = prepare(&document(None));
-        let mut gate = gate_of(&mut prepared);
         support::write_effect(
             addressed(&mut handles, address, instance),
-            &mut gate,
+            &mut prepared.gate,
             EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
         );
         let live = render(&mut prepared);
@@ -288,19 +279,20 @@ fn a_live_parameter_reaches_the_addressed_lane() {
     let mut renders = Vec::new();
     for (address, instance) in ADDRESSES {
         let (mut prepared, mut handles) = prepare(&document(None));
-        let mut gate = gate_of(&mut prepared);
-        ride(addressed(&mut handles, address, instance), &mut gate);
+        ride(
+            addressed(&mut handles, address, instance),
+            &mut prepared.gate,
+        );
         let live = render(&mut prepared);
         // The same ride, sent to the channel found by the instance's own identity.
         let (mut oracle, mut oracle_handles) = prepare(&document(None));
-        let mut oracle_gate = gate_of(&mut oracle);
         ride(
             oracle_handles
                 .effect_controls
                 .iter_mut()
                 .find(|producer| &*producer.track_id == TRACK && &*producer.effect_id == instance)
                 .expect("a channel for the instance"),
-            &mut oracle_gate,
+            &mut oracle.gate,
         );
         let oracle = render(&mut oracle);
         assert!(
