@@ -233,9 +233,37 @@ Seven minors, folded on the same branch after merging origin/main (#2425's rulin
    - A following structural transaction supersedes it: that submit prepares twice, and `lane_swap_rebuilds` counts the withdrawn rebuild as published.
    - While that rebuild is pending, its duck is in the transaction's base, so a growth that would be prepared warm takes the transition fallback (a duck).
 
-FOLD_MUT
+**Fold tests.** `a_backpressured_rebuild_is_retried_after_a_reclaim`, the four-pair no-route-slack test (item 3), and `a_rebuild_for_a_dropped_render_half_is_refused`: the residue rebuild's preamble, run with the render half dropped, refuses (`Backpressure`) and publishes nothing.
 
-FOLD_GATES
+**Fold mutation sweep** (`sweep6.py` in scratch; debug and release; each mutant alone):
+
+| Mutant | Debug | Release | Red at |
+| --- | --- | --- | --- |
+| F1: the attempt key ignores reclaims | red | red | `a_backpressured_rebuild_is_retried_after_a_reclaim` |
+| F2: reclaims not counted | red | red | the same |
+| F3: the attempt key ignores new defects (the recoveries total) | red | red | `a_grown_residue_is_rebuilt_after_a_refusal` |
+| H7s: a successor's quarantine and inherited rows never charged (`if successor` -> `if false`) | red | red | `a_session_with_no_route_slack_charges_its_defect_watch_and_quarantine` |
+| P3: the watch not charged (rerun) | red | red | the same |
+| C7: the shared preamble skips `plan_alive` | red | red | `a_rebuild_for_a_dropped_render_half_is_refused` |
+
+C7 was first run over the whole `control-plane` suite with only the shared helper in place. It was green there, so no existing test covered either preamble's liveness check; the new test is what turns it red.
+
+H6s and its order test are gone with the merge (item 4). Item 1's single read has no mutant: no test can place a raise between two reads inside one preparation call.
+
+**Fold gates, on the merged tree.** One private target directory was used, and it is deleted afterwards. All 23 steps passed:
+- `cargo fmt --all --check`;
+- clippy `-D warnings` on `graph`, `effect-contract`, `host-core` and `control-plane` (all targets), with `test-support`, without it, and in release;
+- `cargo doc -D warnings` on the same four crates;
+- `cargo test --locked`:
+  - `effect-contract`, `graph`, `host-core`, `control-plane`, `graph-compiler`, `capi` and `host-web`, in debug;
+  - `graph --lib` and `control-plane --test lane_swap_residue` (10 tests), in release;
+- the policy scripts:
+  - `check-workspace-policy.sh` and `test-workspace-policy.sh`;
+  - `check-graph-policy.sh` (PASS) and `test-graph-policy.sh`;
+  - `check-rack-policy.sh`, `check-host-core-policy.sh` and `check-effect-contract.sh`;
+- `realtime_policy`: ok (315 marked regions in 48 files).
+
+The fold changes no render code: only the watch's doc, and a `test-support` raise for tests. So the web call-graph gate of attempt 1 (closure=38) and its no-bit-moved digests stand.
 
 ## Notes from #2419's review
 - **The carry's way home bypasses pins.** `Runtime::restore_home_lanes` (graph runtime.rs ~11665-11699) trades through `swap_bank_lanes` and does not read pins. It runs on the predecessor at carry (graph lib.rs ~7908). A pinned strip that is still off its home lane is traded again there, can hit the same defect, and then refuses the whole carry (`CarryOutcome::PredecessorMismatch`), so the replacement starts with nothing carried. This issue must decide how that is handled: restore skips or tolerates pinned strips, or a refused carry is accepted and counted. State the bound including this path.
