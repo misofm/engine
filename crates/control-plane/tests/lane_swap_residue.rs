@@ -282,6 +282,35 @@ impl Rig {
         );
     }
 
+    /// The session's `StripsRestarted` counter (#1768): the strips the adopted plans listed.
+    fn strips_restarted(&mut self) -> u64 {
+        self.session
+            .test_provider_counters()
+            .iter()
+            .find(|counter| counter.id == protocol::CounterId::StripsRestarted)
+            .expect("the counter")
+            .value
+    }
+
+    /// Remove `eq1` and its route, render until the edit's plan is adopted, then 16 blocks more;
+    /// the `StripsRestarted` counter's growth.
+    fn remove_eq1(&mut self) -> u64 {
+        let (track, route) = fixture_eq1();
+        self.session.service().expect("service");
+        let restarted = self.strips_restarted();
+        let before = self.epoch();
+        self.transact(&[
+            SessionEdit::RemoveRoute { route_id: route.id },
+            SessionEdit::RemoveTrack { track_id: track.id },
+        ]);
+        self.render_until_past(before);
+        for _ in 0..16 {
+            self.block();
+            self.session.service().expect("service");
+        }
+        self.strips_restarted() - restarted
+    }
+
     /// The tracks the active plan pins.
     fn pinned(&mut self) -> Vec<Box<str>> {
         graph::test_only_pinned_tracks(self.active())
@@ -566,28 +595,24 @@ fn a_warm_edit_over_residue_commits_and_a_late_defect_is_rebuilt() {
 }
 
 /// A strip with residue that an edit removes leaves nothing to rebuild: the edit's successor
-/// restarts the residue strip it keeps, the removed one is gone, and no rebuild follows the
-/// edit's adoption.
+/// restarts the residue strip it keeps, and only it beyond what the same edit restarts on a
+/// healthy plan, the removed one is gone, and no rebuild follows the edit's adoption.
 ///
 /// Test value: a promotion that hands its successor the residue of a strip it does not have,
-/// which no successor can restart, so every promotion after it rebuilds again: a storm.
+/// which no successor can restart, so every promotion after it rebuilds again (a storm), or a
+/// successor that lists the removed strip as restarted, which `StripsRestarted` then counts.
 #[test]
 fn a_removed_residue_strip_rebuilds_nothing() {
     bench_support::alloc::assert_installed();
+    let healthy = Rig::new().remove_eq1();
     let mut rig = Rig::new();
     let own = rig.responses();
     rig.strand_trade();
-    let (track, route) = fixture_eq1();
-    let before = rig.epoch();
-    rig.transact(&[
-        SessionEdit::RemoveRoute { route_id: route.id },
-        SessionEdit::RemoveTrack { track_id: track.id },
-    ]);
-    rig.render_until_past(before);
-    for _ in 0..16 {
-        rig.block();
-        rig.session.service().expect("service");
-    }
+    assert_eq!(
+        rig.remove_eq1(),
+        healthy + 1,
+        "the edit restarts eq0 as well, and lists no removed strip"
+    );
     assert_eq!(
         rig.session.lane_swap_rebuilds(),
         (1, 0),

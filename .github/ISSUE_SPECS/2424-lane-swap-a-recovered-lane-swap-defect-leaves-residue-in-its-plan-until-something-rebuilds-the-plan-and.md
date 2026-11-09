@@ -69,21 +69,20 @@ So for the rest of the plan's life, a strip whose swap hit a defect renders with
 3. **What a successor does with the residue: pinned strips are left as prepared, never carried.**
    - Every successor's preparation restarts each strip of its base's residue. This is not only the rebuild: host-core adds the residue to the restart set where the transition fallback adds its forced restarts. The owners before the fader and the fader start at rest, the fader is armed, the strip is duck-swapped, and it is listed in `restarted_strips`.
    - Why not carry the lane state: none of it is known to be the strip's own. The payload's designed words came from the other strip's defaults. The control lane holds the other strip's cells. The graph cannot tell which slots of a row still hold traded state (#2419). The carry's defaults guarantee covers only the defaults.
-   - Exceptions:
-     - A declared discontinuity starts every owner at rest anyway. Arming a fade there would make two strips fade in where every other strip starts at once.
-     - A warm successor's floors are derived from its lead's restart set. Its lead is taken from the ordinary successor, which restarts the residue, so the residue restarts there too. A defect render raises between the two preparations is not in the lead, and restarting it would break the warm invariant.
-   - Each exception is handed on at promotion (decision 5).
+   - A declared discontinuity's successor lists every strip as restarted already, so it needs no case of its own.
+   - The one exception is a warm successor, which adds no residue itself.
+     - Its floors are derived from its lead's restart set, and the lead is taken from the ordinary successor, which restarts the residue. So the residue restarts there too.
+     - A defect render raises between the two preparations is not in the lead, and restarting it would break the warm invariant. That strip is inherited at promotion (decision 5).
 4. **No rebuild storm: a session-wide quarantine.**
    - Each successor pins its base's quarantine plus its base's residue, at bind (`GraphBoundPlan::pin_lane_swap_defect_strips`, the #2135 pin by track). This set is filtered to the successor's model and recorded as `PlanStateInventory::lane_swap_quarantine`.
    - So the packer never trades a strip of a defect pair again in the session. A bank that strands at every plan strands each pair once.
    - A strip the session removes leaves the quarantine. Re-added, it is a new strip and movable again, which keeps the quarantine bounded by the model.
 5. **A defect raised after a successor was prepared is inherited.**
    - At promotion, the control plane calls `PlanStateInventory::inherit_lane_swap_residue` with the displaced plan's inventory. That plan's flags are final by then. Every strip of its residue that the promoted plan has and did not restart joins the promoted plan's residue, and the next service step rebuilds.
-   - Not at a declared discontinuity, which carried nothing but sources.
    - The inheritance cannot tell a carried strip from one whose whole carry was refused. In that rare case (below) it rebuilds once for nothing.
 6. **The rebuild** is `Rebuild::LaneSwapResidue`.
    - It prepares the committed model as an ordinary successor of the running plan. It carries like a transaction with no edit, and commits like a monitor rebuild at the committed revision (0 included), with the session's spectrum configuration.
-   - It is never classified warm, so its restarts always run.
+   - It is classified like any rebuild. If it comes out warm, its lead is derived from the ordinary successor, which restarts the residue, so it restarts the residue all the same.
    - It runs only while nothing is pending: a pending candidate's adoption hands over what it did not restart (decision 5).
    - It is attempted once per running epoch and residue count. A refused rebuild is counted and is retried only when the epoch changes or the residue grows. Any later successor, for example one an edit makes, restarts the residue anyway.
 7. **The carry's way home (`restore_home_lanes`): unchanged; a refused carry is accepted and counted.**
@@ -107,11 +106,10 @@ So for the rest of the plan's life, a strip whose swap hit a defect renders with
   - `a_lane_swap_defect_rebuilds_the_plan_once`, at revision 0: the residue is visible (each response is the other strip's), one rebuild is published, each strip is its own again, the successor pins the pair, the defect count is 0, and nothing more is rebuilt.
   - `a_refused_rebuild_is_not_retried_and_any_successor_restarts_the_residue`: one refusal, never retried, and an edit's successor restarts and pins the pair.
   - `a_successor_adopted_after_a_late_defect_is_rebuilt`: the inheritance at promotion.
-  - `a_residue_rebuild_is_never_warm`: a forced `Warm` answer does not reach the rebuild.
   - `a_warm_edit_over_residue_commits_and_a_late_defect_is_rebuilt`: a defect raised between an edit's ordinary and warm preparations, through the test preparer and `GraphLaneSwapDefectWatch::test_only_raise`. The edit commits, and the late strip is inherited and rebuilt.
-  - `a_declared_discontinuity_over_residue_needs_no_rebuild`: no fade armed, no inheritance and no rebuild, while the pins hold.
   - `the_quarantine_holds_across_successors_and_drops_a_removed_strip`.
   - `a_removed_residue_strip_rebuilds_nothing`: the storm guard on a strip the successor lacks.
+  - `a_grown_residue_is_rebuilt_after_a_refusal`: the attempt record keys on the residue count as well as the epoch.
 - The gate asked for a host-core test. The trigger is control-plane's service step, the code both hosts run, so the test lives in the crate that owns the logic. It drives host-core's preparation end to end.
 - No existing test is made useless: the extended assertions sit on the existing defect scenarios.
 
