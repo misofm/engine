@@ -94,7 +94,7 @@ The branch's tests (below) assert the documented outcome of each case in both bu
   - `BankChain::lane_swap_defects()` sums every slot's `lane_swap_stranded` and the chain's split count.
   - `Runtime::lane_swap_defect_count` sums it over the bank units.
   - `graph::lane_swap_defect_count(plan)`, beside `carry_refusal_count` and the same shape, is the host-facing total. It is in-process only: `carry_refusal_count` is deliberately off the wire, and a wire `CounterId` is a protocol and C-ABI surface, which needs an owner ruling (follow-up below).
-  - Every refusal after the check passed pins both strips for the plan's life through a new `LaneMap::pin_positions` (the #2135 `pinned` flag, by home position), so the packer never asks the broken banks again. `restore_home_lanes` is unchanged; it does not read pins.
+  - Every refusal after the check passed pins both strips for the plan's life through a new `LaneMap::pin_positions` (the #2135 `pinned` flag, by home position), so the packer never asks for these two strips again. Other strips of the same banks stay movable. `restore_home_lanes` is unchanged; it does not read pins.
 - **(d)** `exchange_lane_defaults`'s doc now says what an exchange may change: a state word that seats the incoming defaults and that the lane's own payload holds (`rest_link`, a glide in flight ended), and nothing else but a collapsed bank's disengage copy (#2352), which moves no bit. It then states the caller's obligation, which `swap_bank_lanes` meets since #2414: restore the payloads afterwards.
 - **Realtime.** No allocation, lock or syscall. Every new branch and method on the render path is inside an existing or new `REALTIME_POLICY` region: the chain's swap-backs and `reset_swapped_lanes`, both stages' `reset_swapped_lanes` and `recover_lane`, and the graph's row code and `pin_positions`. Nothing new runs on a healthy swap but one `RowChains` match per row.
 
@@ -168,7 +168,7 @@ Branches with no reachable mutant:
 
 **Follow-ups (not filed).**
 - A wire `CounterId` for `lane_swap_defect_count` (and `carry_refusal_count`) needs an owner ruling: both are in-process reads today.
-- `graph::lane_swap_defect_count`'s downcast wrapper is reached by no nonzero test. No prepared plan can hold a faulting bank without a test hook in the bound-plan code, which another stream owns. `Runtime::lane_swap_defect_count`, which it returns, is tested.
+- `graph::lane_swap_defect_count`'s downcast wrapper is reached by no nonzero test. `Runtime::lane_swap_defect_count`, which it returns, is tested. *Corrected in attempt 3:* no production hook is needed. A graph `lib.rs` unit test moves the lane-swap rig's runtime into a bound plan.
 - A split slot's residue (the other strip's prepared defaults and its control lane, taps and dry-shunt line) lasts until a plan rebuild. A host that reads a nonzero total could request one; nothing does yet.
 
 **Sol's verdict on attempt 1 (`d4fd3f88e`): FAIL**, with two MAJOR and four MINOR findings, plus a request for successor specs (item 6).
@@ -294,4 +294,49 @@ The four that are not red in both builds:
 **Follow-ups (not filed).**
 - #SUCCESSOR-REBUILD: a plan rebuild on a nonzero lane-swap defect total (`succ/bb.md`).
 - #SUCCESSOR-WIRE: an owner ruling on a wire `CounterId` for `lane_swap_defect_count` and `carry_refusal_count` (`succ/cc.md`).
-- A nonzero test through the pub `graph::lane_swap_defect_count` wrapper needs a fault hook in the bound-plan code, which another stream owns. The downcast is covered by the `Some(0)` read; `Runtime::lane_swap_defect_count` is covered by the graph tests.
+- *Corrected in attempt 3:* a nonzero test through the pub `graph::lane_swap_defect_count` wrapper needed no fault hook. It is `the_lane_swap_defect_total_reads_the_plans_runtime`, and N5 is now red.
+
+**Sol's verdict on attempt 2 (`20f4b3a2a`): FAIL**, with one MAJOR and two MINOR findings. The code was judged correct, and all 12 of the reviewer's mutants were red.
+1. MAJOR: kill N5 in this issue. No production hook is needed (#2417 has merged). A graph `lib.rs` test can move the lane-swap rig's runtime into a bound plan.
+2. MINOR: the pin docs overclaim "never asks the broken banks again". Only the two strips are pinned.
+3. MINOR: two corrections to `succ/bb.md`:
+   - the within-plan bound;
+   - which strip's live writes land in the residual control lane.
+
+### Attempt 3 (Sol's attempt-2 findings folded), same branch, at origin/main `cf108f5b1`
+
+- **Item 1.** `graph` `runtime::tests` is now `pub(crate)`, and so are `SwapRig` (`runtime`, `faults`, `new`), `SwapFault` and its `strand`.
+  - A new graph `lib.rs` test, `the_lane_swap_defect_total_reads_the_plans_runtime`:
+    - strands row 1 of a rig trade;
+    - moves the rig's runtime into `sidechain_pdc_plan(false)` (`core::mem::swap` on `bound.executor().runtime`);
+    - seals it and asserts `lane_swap_defect_count(&mut plan) == Some(1)`.
+  - Test value: a wrapper that reads anything but the plan's runtime total.
+  - Red on mutation, in debug and release: N5 (`Some(0 * ..)`) and N5b (`None`).
+  - It supersedes the attempt-2 `Some(0)` assertion in `silent_bank_skip` gate 3, which only covered the downcast. That assertion is deleted, under the one-test-per-claim rule.
+  - The attempt-1 and attempt-2 follow-up lines that called this impossible are corrected in place.
+- **Item 2.** The `pin_positions` doc, the `swap_bank_lanes` doc, and the pin test's doc and message now say the packer never asks for **these two strips** again. `pin_positions` adds that other strips of the same banks stay movable and may still hit the defect, once per pair.
+- **Item 3.** `succ/bb.md` now:
+  - bounds the defects within one plan at one per pair of unpinned strips (at most `n/2` per group of `n`), plus the cross-plan bound the successor must state;
+  - says the lane map is unchanged, so this strip's own live writes land in a control lane holding the other strip's cells, and the cells it never writes keep the other strip's values.
+
+**Mutation evidence, attempt 3.** Production changed only in doc comments and in the `pub(crate)` visibility of test items, so the attempt-2 sweep stands. The wrapper mutants were rerun against the new test:
+- N5: red in debug and release (`the_lane_swap_defect_total_reads_the_plans_runtime`);
+- N5b: red in debug and release (the same test).
+
+With N5 red, the only mutants not red in both builds are:
+- the two tripwire mutants (G6, N3), compiled out of release by design;
+- the equivalent `designed` refresh (S2-designed).
+
+**No bit moved.** No render code changed since attempt 2's digest (`7d31fea2b6652670` / `8e4dfb8b8dc1d599`).
+
+**Gates**, one crate at a time with `-j 4` and one private target dir, deleted afterwards. Every run passed (21 result lines, all ok, none failing):
+- `cargo test --locked -p graph`, in debug and in release;
+- `cargo test --locked -p graph-compiler --test silent_bank_skip`;
+- clippy `-D warnings` on `rack`, `graph` and `graph-compiler` (all targets), in debug and release: clean;
+- `cargo doc -D warnings` on `rack` and `graph`: clean;
+- `cargo fmt --all --check`: clean;
+- `check-workspace-policy.sh`: ok;
+- `check-rack-policy.sh`: PASS;
+- `realtime_policy`: ok (314 marked regions in 48 files).
+
+No render dispatch changed, so the web gate was not rerun; it passed on attempt 2.

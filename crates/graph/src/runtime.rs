@@ -10677,8 +10677,10 @@ impl LaneMap {
 
     /// Pin the strips at local positions `a` and `b` of group `group` for the plan's life (issue
     /// #2419): a trade of theirs hit a lane-swap defect ([`Runtime::swap_bank_lanes`]), so the
-    /// packer never asks their banks again ([`pack_sort`]), and a broken bank does not have two
-    /// lanes reset again at every episode. A strip is pinned by its home position, as at bind.
+    /// packer never asks for these two strips again ([`pack_sort`]), and their lanes are not reset
+    /// again at every episode. Other strips of the same banks stay movable, and a trade of theirs
+    /// may still hit the defect, once per pair. A strip is pinned by its home position, as at
+    /// bind.
     /// A position outside the group pins nothing. Allocation-free, O(1).
     fn pin_positions(&mut self, group: usize, a: usize, b: usize) {
         let Some(base) = self.groups.get(group).map(|pack| pack.base as usize) else {
@@ -11525,9 +11527,9 @@ impl Runtime {
     /// slot that refuses is reset and counted, the row's readers are traded back whatever its
     /// slots did, the call returns [`BankLaneMoveRefusal::Split`], and the trade-back goes on with
     /// the rows below it. A defect pins both strips for the plan's life (the #2135 pin,
-    /// [`LaneMap::pin_positions`]), so the packer never asks the broken banks again; a debug build
-    /// trips on a refusal no chain recovered and counted. Last, the lane map, which every other
-    /// reader translates through.
+    /// [`LaneMap::pin_positions`]), so the packer never asks for these two strips again; a debug
+    /// build trips on a refusal no chain recovered and counted. Last, the lane map, which every
+    /// other reader translates through.
     ///
     /// Allocation-free: element swaps, the chains' bounded swaps over the preallocated scratch, and
     /// a walk of each row's two units' members.
@@ -14592,7 +14594,7 @@ pub(crate) fn route_folds_over_program(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::GraphEdgeId;
     use crate::program::{BufferRef, InputRef};
@@ -17345,11 +17347,11 @@ mod tests {
     /// `n`-th swap (counted from 1) strands (resets both lanes and counts it, as `rack`'s effect
     /// stages do), and every check from the `n`-th on refuses; with every lane reset it led to.
     #[derive(Default)]
-    struct SwapFault {
+    pub(crate) struct SwapFault {
         swaps: AtomicU32,
         checks: AtomicU32,
         /// Bit `n`: swap `n` strands.
-        strand: AtomicU32,
+        pub(crate) strand: AtomicU32,
         /// Every check from this one on refuses; `0` never.
         refuse_check_from: AtomicU32,
         /// Per lane: resets, by a strand or by [`BankStage::reset_swapped_lanes`].
@@ -17466,16 +17468,16 @@ mod tests {
     /// 0's unit of row `r` is `2r`, chain 1's is `2r + 1`. Unit `u`'s member op of lane `l` writes
     /// buffer `16u + l` in every slot, and chain 0's units claim the source on lane 1 alone: what
     /// the trade's readers move.
-    struct SwapRig {
-        runtime: Runtime,
+    pub(crate) struct SwapRig {
+        pub(crate) runtime: Runtime,
         /// Per unit, per slot.
-        faults: Vec<Vec<Arc<SwapFault>>>,
+        pub(crate) faults: Vec<Vec<Arc<SwapFault>>>,
     }
 
     impl SwapRig {
         const UNITS: usize = 6;
 
-        fn new(slots: usize) -> Self {
+        pub(crate) fn new(slots: usize) -> Self {
             let faults: Vec<Vec<Arc<SwapFault>>> = (0..Self::UNITS)
                 .map(|_| (0..slots).map(|_| Arc::default()).collect())
                 .collect();
@@ -17782,12 +17784,12 @@ mod tests {
 
     /// Issue #2419: a pack-group trade that strands a slot is a recovered defect, not a debug
     /// panic: the trade refuses `Chain(Defect)`, counts it in the host total and pins both strips,
-    /// so the packer's next episode, which forgets the strips its last one refused, does not ask
-    /// their banks again. On the base, a debug build panicked in `debug_assert!(false)` and a
+    /// so the packer's next episode, which forgets the strips its last one refused, never asks for
+    /// these two strips again. On the base, a debug build panicked in `debug_assert!(false)` and a
     /// release build traded the two strips again at the next episode.
     ///
     /// Test value: a defect path that still panics in debug, a trade that does not pin both strips
-    /// (the packer resets the broken bank's lanes at every episode), or a host total that misses
+    /// (the packer resets the two strips' lanes at every episode), or a host total that misses
     /// a stage's stranded swap.
     #[test]
     fn a_stranded_trade_pins_both_strips_for_the_plan() {
@@ -17826,7 +17828,7 @@ mod tests {
                 rig.runtime.lane_map.lane_moves
             ],
             [1, 0],
-            "the next episode asks the broken banks nothing"
+            "the next episode never asks for these two strips again"
         );
         assert_eq!(
             rig.faults[0][0].swaps.load(Ordering::Relaxed),

@@ -11908,6 +11908,26 @@ mod tests {
         assert_eq!(&block[4..], &[0.0, -2.0, -4.0, -6.0]);
     }
 
+    /// Issue #2419: the host's total reads a real plan's runtime. A trade whose row 1 strands
+    /// is made on `runtime`'s lane-swap rig, the rig's runtime is moved into a bound plan, and
+    /// the sealed plan's [`lane_swap_defect_count`] reads the strand.
+    ///
+    /// Test value: a wrapper that reads anything but the plan's runtime total (zero, or another
+    /// counter), which a healthy plan's `Some(0)` cannot tell apart.
+    #[test]
+    fn the_lane_swap_defect_total_reads_the_plans_runtime() {
+        let mut rig = runtime::tests::SwapRig::new(1);
+        rig.faults[2][0].strand.store(1 << 1, Ordering::Relaxed);
+        assert!(
+            rig.runtime.swap_bank_lanes((0, 1), (0, 2)).is_err(),
+            "the trade strands"
+        );
+        let mut bound = sidechain_pdc_plan(false);
+        core::mem::swap(&mut bound.executor().runtime, &mut rig.runtime);
+        let (mut plan, _gate) = bound.seal();
+        assert_eq!(lane_swap_defect_count(&mut plan), Some(1));
+    }
+
     fn sidechain_pdc_plan(delay_main: bool) -> GraphBoundPlan {
         let main_input = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse("main-path").expect("ID"),

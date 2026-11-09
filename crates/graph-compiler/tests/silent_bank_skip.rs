@@ -1542,11 +1542,6 @@ fn gate_three(model: &SessionModel, inserts: bool) {
     }
     assert!(displaced_skips > 0, "a displaced group skipped a bank");
     assert_eq!(regression, 2, "the regression row's two moves were made");
-    // Issue #2419: every forced move took, so neither moved plan recovered a lane-swap defect,
-    // read through the host's total on a real graph plan.
-    for plan in [&mut moved.before.plan, &mut moved.after.plan] {
-        assert_eq!(graph::lane_swap_defect_count(plan), Some(0), "no defect");
-    }
     if inserts {
         assert!(
             live_master > 0,
