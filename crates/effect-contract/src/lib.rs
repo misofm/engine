@@ -10,6 +10,9 @@ mod prepared_target;
 mod response;
 mod step;
 mod symmetry;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use live::test_only_strand_lane_swaps;
 pub use live::{
     BANK_CROSSFADE_LANES, BankCrossfade, BankCrossfadeLane, BypassShunt, BypassSwitch,
     EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneLayout,

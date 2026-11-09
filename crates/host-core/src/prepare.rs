@@ -928,6 +928,81 @@ impl PlanStateInventory {
     pub fn restarted_strips(&self) -> &[Box<str>] {
         &self.restarted
     }
+
+    /// The strips of this plan that hold another strip's lane-swap residue (issue #2424), sorted
+    /// and distinct: each its render flagged ([`graph::GraphLaneSwapDefectWatch`]) and each it took
+    /// over unrestarted at its adoption ([`Self::inherit_lane_swap_residue`]). A successor of this
+    /// plan restarts each one, so it is prepared fresh from its own session values. Allocates
+    /// nothing; any thread that holds the inventory.
+    pub fn lane_swap_residue(&self) -> impl Iterator<Item = &str> {
+        let mut flagged = self.lane_swap_defects.flagged_strips().peekable();
+        let mut inherited = self.lane_swap_inherited.iter().map(|id| &**id).peekable();
+        core::iter::from_fn(move || match (flagged.peek(), inherited.peek()) {
+            (Some(left), Some(right)) if left == right => {
+                inherited.next();
+                flagged.next()
+            }
+            (Some(left), Some(right)) if left > right => inherited.next(),
+            (Some(_), _) => flagged.next(),
+            (None, _) => inherited.next(),
+        })
+    }
+
+    /// Whether this plan holds lane-swap residue ([`Self::lane_swap_residue`]); allocates
+    /// nothing.
+    #[must_use]
+    pub fn has_lane_swap_residue(&self) -> bool {
+        self.lane_swap_residue().next().is_some()
+    }
+
+    /// How many strips hold lane-swap residue ([`Self::lane_swap_residue`]); allocates nothing.
+    #[must_use]
+    pub fn lane_swap_residue_count(&self) -> usize {
+        self.lane_swap_residue().count()
+    }
+
+    /// The plan's lane-swap defect watch (issue #2424), shared with render: its flags and its
+    /// recoveries total, read while the plan renders.
+    #[must_use]
+    pub const fn lane_swap_defects(&self) -> &graph::GraphLaneSwapDefectWatch {
+        &self.lane_swap_defects
+    }
+
+    /// The strips this plan pins for a lane-swap defect (issue #2424), sorted.
+    #[must_use]
+    pub fn lane_swap_quarantine(&self) -> &[Box<str>] {
+        &self.lane_swap_quarantine
+    }
+
+    /// Take over the lane-swap residue this plan inherits from `predecessor`, the plan render
+    /// displaced to adopt it (issue #2424): the control plane calls it at promotion, when the
+    /// predecessor's render has ended, so its flags are final. Every strip of the predecessor's
+    /// residue ([`Self::lane_swap_residue`]) that this plan has and did not restart carried what
+    /// it held: its predecessor's render flagged it after this plan was prepared. A successor of
+    /// this plan restarts it. Allocates only when a strip is inherited.
+    pub fn inherit_lane_swap_residue(&mut self, predecessor: &Self) {
+        let has = |id: &str| {
+            self.strip_stages.iter().any(|row| &*row.id == id)
+                || self.effect_lanes.iter().any(|row| &*row.id == id)
+        };
+        let mut inherited: Vec<Box<str>> = predecessor
+            .lane_swap_residue()
+            .filter(|id| {
+                self.restarted
+                    .binary_search_by(|restarted| (**restarted).cmp(id))
+                    .is_err()
+                    && has(id)
+            })
+            .map(Box::from)
+            .collect();
+        if inherited.is_empty() {
+            return;
+        }
+        inherited.extend(self.lane_swap_inherited.iter().cloned());
+        inherited.sort_unstable();
+        inherited.dedup();
+        self.lane_swap_inherited = inherited.into_boxed_slice();
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -1031,6 +1106,20 @@ pub struct PlanStateInventory {
     /// fired fade is neither carried nor re-armed. #1953b: a route row whose entry fired but has
     /// not settled is re-armed and carried, so its ramp continues.
     fade_watch: graph::GraphFadeArmWatch,
+    /// Which of this plan's grouped strips a lane-swap defect reached at render, and its recoveries
+    /// total (issue #2424): the plan's own watch, shared with render. A successor restarts each
+    /// flagged strip ([`Self::lane_swap_residue`]).
+    lane_swap_defects: graph::GraphLaneSwapDefectWatch,
+    /// The strips this plan pins for a lane-swap defect (issue #2424), sorted: its base's own and
+    /// its base's residue at preparation, each a strip of this plan's model. Every successor pins
+    /// them too, so the packer never trades a strip of a defect pair again in the session, and
+    /// one defect pair rebuilds at most once.
+    lane_swap_quarantine: Box<[Box<str>]>,
+    /// The residue this plan took over when render adopted it (issue #2424), sorted: strips its
+    /// predecessor's render flagged after this plan was prepared, which this plan neither
+    /// restarted nor pins, set by the control plane at promotion
+    /// ([`Self::inherit_lane_swap_residue`]). Empty at preparation; charged at its bound.
+    lane_swap_inherited: Box<[Box<str>]>,
     /// The fading copies this plan compiles (#1953b), sorted by copy ID: each removed or
     /// re-pointed lane-less route's copy, its fade-out entry in the fade table, until that entry
     /// settles. A successor keeps each one that has not settled, carrying its op and its lines.
@@ -1418,6 +1507,11 @@ impl PlanStateInventory {
             restarted: Box::default(),
             fade_arms: Box::default(),
             fade_watch: graph::GraphFadeArmWatch::default(),
+            // #2424: the session's quarantine and the plan's residue hold across a declaration:
+            // the successor pins them, and restarts every strip anyway.
+            lane_swap_defects: self.lane_swap_defects.clone(),
+            lane_swap_quarantine: self.lane_swap_quarantine.clone(),
+            lane_swap_inherited: self.lane_swap_inherited.clone(),
             route_copies: Box::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
@@ -1461,6 +1555,9 @@ impl PlanStateInventory {
             restarted: Box::default(),
             fade_arms: Box::default(),
             fade_watch: graph::GraphFadeArmWatch::default(),
+            lane_swap_defects: graph::GraphLaneSwapDefectWatch::default(),
+            lane_swap_quarantine: Box::default(),
+            lane_swap_inherited: Box::default(),
             route_copies: Box::default(),
             input_floors: self.input_floors.clone(),
             raised_arrivals: self.raised_arrivals.clone(),
@@ -1563,6 +1660,13 @@ impl PlanStateInventory {
             + self.restarted.iter().map(|id| id.len()).sum::<usize>()
             + self.fade_arms.iter().map(|row| row.id.len()).sum::<usize>()
             + self.fade_watch.heap_bytes()
+            + self.lane_swap_defects.heap_bytes()
+            + self
+                .lane_swap_quarantine
+                .iter()
+                .chain(self.lane_swap_inherited.iter())
+                .map(|id| id.len())
+                .sum::<usize>()
             + self
                 .route_copies
                 .iter()
@@ -1589,6 +1693,8 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + core::mem::size_of_val::<[FadeArmInventoryRow]>(&self.fade_arms)
+                + core::mem::size_of_val::<[Box<str>]>(&self.lane_swap_quarantine)
+                + core::mem::size_of_val::<[Box<str>]>(&self.lane_swap_inherited)
                 + core::mem::size_of_val::<[RouteCopyRow]>(&self.route_copies)
                 + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.input_floors)
                 + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.raised_arrivals)
@@ -4875,7 +4981,7 @@ fn prepare_or_project(
             .collect(),
         observers: spectrum_observers,
     };
-    let bound = artifact
+    let mut bound = artifact
         .into_bound_with_source_set(bindings, source_set)
         .map_err(|failure| graph_failure(failure.code))?;
     // Issue #137 D2: exactly the requested live-control halves come back, in canonical track order.
@@ -4938,6 +5044,29 @@ fn prepare_or_project(
     // #1639 D1: the plan's jump-length cell, seeded with the session's lengths, so the plan holds
     // them from its first block. A successor is seeded from the committed model, which holds any
     // edit of them (D4): nothing carries. The plan takes its one cell by value (#2401).
+    // Issue #2424: the session's lane-swap quarantine: the base's, and every strip of the base's
+    // residue, each a strip of this model. The packer never trades one of them in this plan.
+    let lane_swap_quarantine: Box<[Box<str>]> = match successor {
+        Some(base) => {
+            let mut quarantine: Vec<Box<str>> = base
+                .inventory
+                .lane_swap_quarantine
+                .iter()
+                .map(|id| &**id)
+                .chain(base.inventory.lane_swap_residue())
+                .filter(|id| committed_has_strip(model, id))
+                .map(Box::from)
+                .collect();
+            quarantine.sort_unstable();
+            quarantine.dedup();
+            quarantine.into_boxed_slice()
+        }
+        None => Box::default(),
+    };
+    bound
+        .plan
+        .pin_lane_swap_defect_strips(&lane_swap_quarantine);
+    let lane_swap_defects = bound.plan.lane_swap_defect_watch();
     let (mut plan, jump_lengths) = bound
         .plan
         .attach_jump_lengths(session_jump_lengths(model), &live_superseded);
@@ -5212,6 +5341,26 @@ fn prepare_or_project(
         );
         restarted.sort_unstable();
         restarted.dedup();
+    }
+    // Issue #2424: every strip of the base's lane-swap residue restarts, as a join's restart does,
+    // so nothing it holds of another strip carries: it is prepared fresh from its own values. Not
+    // at a declared discontinuity, where every owner starts at rest anyway, and not in a warm
+    // successor, whose floors are derived from its lead's restart set; the residue of either is
+    // inherited at promotion, and the next successor restarts it.
+    if let Some(base) = successor.filter(|base| !base.discontinuity && warm.is_none()) {
+        let before = restarted.len();
+        restarted.extend(
+            base.inventory
+                .lane_swap_residue()
+                .filter(|id| {
+                    committed_has_strip(base.committed, id) && committed_has_strip(model, id)
+                })
+                .map(Box::from),
+        );
+        if restarted.len() != before {
+            restarted.sort_unstable();
+            restarted.dedup();
+        }
     }
     // #1324 D1: a carried effect keyed from a restarted strip's tap behind a restarted owner
     // would read the old chain until `S` and the restarted chain's at-rest output after it, so
@@ -5849,6 +5998,9 @@ fn prepare_or_project(
         restarted: restarted.into_boxed_slice(),
         fade_arms: fade_arm_rows.into_boxed_slice(),
         fade_watch,
+        lane_swap_defects,
+        lane_swap_quarantine,
+        lane_swap_inherited: Box::default(),
         route_copies: route_copy_rows.into_boxed_slice(),
         input_floors,
         raised_arrivals,
@@ -10287,6 +10439,11 @@ fn projected_inventory_bytes(
     } else {
         arms * core::mem::size_of::<core::sync::atomic::AtomicU8>() + 2 * size_of::<usize>()
     };
+    // Issue #2424: the lane-swap defect watch (at most every strip), and the quarantine and the
+    // inherited residue (each at most every strip, distinct), with their ID text.
+    let lane_swap = graph::lane_swap_defect_watch_bytes(strips, strip_ids)
+        .checked_add(strips.checked_mul(2 * size_of::<Box<str>>())?)?
+        .checked_add(strip_ids.checked_mul(2)?)?;
     let rows = [
         model
             .sources
@@ -10341,6 +10498,7 @@ fn projected_inventory_bytes(
         copy_ids,
         arrivals,
         watch,
+        lane_swap,
     ];
     rows.into_iter()
         .try_fold(0_usize, usize::checked_add)
@@ -10825,6 +10983,9 @@ mod tests {
             restarted: Box::default(),
             fade_arms: Box::default(),
             fade_watch: graph::GraphFadeArmWatch::default(),
+            lane_swap_defects: graph::GraphLaneSwapDefectWatch::default(),
+            lane_swap_quarantine: Box::default(),
+            lane_swap_inherited: Box::default(),
             route_copies: Box::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),

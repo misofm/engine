@@ -3234,6 +3234,22 @@ fn crossfade_tail(
 }
 // REALTIME_POLICY_END
 
+#[cfg(feature = "test-support")]
+std::thread_local! {
+    /// Issue #2424: how many more [`swap_bank_lanes`] calls on this thread strand.
+    static TEST_ONLY_STRANDED_LANE_SWAPS: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+
+/// Test-only (issue #2424): the next `count` calls of [`swap_bank_lanes`] on this thread strand,
+/// as a bank whose defaults exchange took and whose payloads never moved: each rotates the two
+/// lanes' prepared defaults and returns [`LaneSwapRefusal::Stranded`], so the caller's recovery
+/// runs on real banks. A host-level test drives a lane-swap defect through it.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_strand_lane_swaps(count: u32) {
+    TEST_ONLY_STRANDED_LANE_SWAPS.with(|left| left.set(count));
+}
+
 /// Why [`swap_bank_lanes`] exchanged nothing. Every refusal but
 /// [`Stranded`](Self::Stranded) leaves both lanes as they were.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3560,6 +3576,20 @@ pub fn swap_bank_lanes(
     };
     if second.is_none() && first_lane == second_lane {
         return Ok(());
+    }
+    // Issue #2424: a test's injected strand, as a broken bank's would leave it: the defaults
+    // rotated, the payloads not, and `Stranded` returned at once.
+    #[cfg(feature = "test-support")]
+    if TEST_ONLY_STRANDED_LANE_SWAPS.with(|left| {
+        let strand = left.get() > 0;
+        left.set(left.get().saturating_sub(1));
+        strand
+    }) {
+        let payload = usize::try_from(sizes.total().unwrap_or(0)).unwrap_or(0);
+        if let Some(spare) = scratch.get_mut(2 * payload..needed) {
+            let _ = rotate_lane_defaults(first, first_lane, second, second_lane, spare);
+        }
+        return Err(LaneSwapRefusal::Stranded);
     }
     // Issue #2229: a bank that swaps its own type directly does so, to the same bits.
     let peer = second

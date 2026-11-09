@@ -4882,6 +4882,147 @@ impl PartialEq for GraphFadeArmWatch {
 
 impl Eq for GraphFadeArmWatch {}
 
+/// Which strips of a plan's pack groups a lane-swap defect reached, and the plan's lane-swap
+/// recoveries total (issue #2424): render's signal that the plan holds residue, which only a
+/// fresh preparation of those strips removes.
+///
+/// A trade that hits a recovered defect ([`lane_swap_defect_count`] counts the recoveries) pins
+/// its two strips for the plan's life (issue #2419) and, on that same path, raises both strips'
+/// flags here and stores the plan's recoveries total. A reset ends the other strip's effect
+/// history in a refusing slot, but the slot keeps the other strip's prepared defaults, its control
+/// lane, taps and dry-shunt line, and a stage with no lane reset keeps its whole lane traded, so
+/// both flagged strips render with some of each other's state until a successor prepares them
+/// fresh. The control thread reads the flags (a successor's preparation restarts each flagged
+/// strip and pins it for the session) and the total.
+///
+/// Render is the only writer and stores only on the defect path, so a healthy block runs no new
+/// instruction; each store is a release store with no lock. Made at bind with one flag per
+/// distinct track of the plan's pack groups, sorted; empty for a plan with no pack group.
+#[derive(Clone, Debug, Default)]
+pub struct GraphLaneSwapDefectWatch(Option<std::sync::Arc<LaneSwapDefectCells>>);
+
+#[derive(Debug)]
+struct LaneSwapDefectCells {
+    /// The distinct tracks of the plan's pack groups, sorted.
+    strips: Box<[Box<str>]>,
+    /// Per track of `strips`: whether a trade of that strip hit a lane-swap defect.
+    flags: Box<[core::sync::atomic::AtomicBool]>,
+    /// The plan's lane-swap recoveries total ([`lane_swap_defect_count`]) at the last raise.
+    recoveries: core::sync::atomic::AtomicU64,
+}
+
+impl GraphLaneSwapDefectWatch {
+    /// A watch over the distinct, sorted tracks `strips`; the empty watch when there is none.
+    /// Bind-time: allocates.
+    pub(crate) fn new(strips: Box<[Box<str>]>) -> Self {
+        if strips.is_empty() {
+            return Self::default();
+        }
+        let flags = strips
+            .iter()
+            .map(|_| core::sync::atomic::AtomicBool::new(false))
+            .collect();
+        Self(Some(std::sync::Arc::new(LaneSwapDefectCells {
+            strips,
+            flags,
+            recoveries: core::sync::atomic::AtomicU64::new(0),
+        })))
+    }
+
+    /// The index of track `strip` in the watch's table; `None` when the watch does not name it.
+    /// Bind-time.
+    pub(crate) fn strip_index(&self, strip: &str) -> Option<usize> {
+        self.0
+            .as_deref()?
+            .strips
+            .binary_search_by(|named| (**named).cmp(strip))
+            .ok()
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Raise the flags of tracks `strips` (indices of the watch's table) and store the plan's
+    /// `recoveries` total. Render-thread code, on the lane-swap defect path only: two flag stores
+    /// and one counter store, release ordered (render is the only writer). An index past the
+    /// table raises nothing.
+    pub(crate) fn raise(&self, strips: [usize; 2], recoveries: u64) {
+        let Some(cells) = self.0.as_deref() else {
+            return;
+        };
+        for strip in strips {
+            if let Some(flag) = cells.flags.get(strip) {
+                flag.store(true, core::sync::atomic::Ordering::Release);
+            }
+        }
+        cells
+            .recoveries
+            .store(recoveries, core::sync::atomic::Ordering::Release);
+    }
+    // REALTIME_POLICY_END
+
+    /// The tracks whose trades hit a lane-swap defect, sorted: each holds residue of the strip it
+    /// traded with until a successor prepares it fresh. Any thread; allocates nothing.
+    pub fn flagged_strips(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().flat_map(|cells| {
+            cells
+                .strips
+                .iter()
+                .zip(cells.flags.iter())
+                .filter(|(_, flag)| flag.load(core::sync::atomic::Ordering::Acquire))
+                .map(|(strip, _)| &**strip)
+        })
+    }
+
+    /// The plan's lane-swap recoveries total ([`lane_swap_defect_count`]) as render last stored
+    /// it on the defect path: 0 until a defect. Any thread.
+    #[must_use]
+    pub fn recoveries(&self) -> u64 {
+        self.0.as_deref().map_or(0, |cells| {
+            cells.recoveries.load(core::sync::atomic::Ordering::Acquire)
+        })
+    }
+
+    /// Heap bytes the watch holds: the shared allocation (its two reference counts, the table
+    /// headers and the total), the flags and the names; none for the empty watch.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        self.0.as_deref().map_or(0, |cells| {
+            lane_swap_defect_watch_bytes(
+                cells.strips.len(),
+                cells.strips.iter().map(|strip| strip.len()).sum(),
+            )
+        })
+    }
+}
+
+/// The heap bytes of a [`GraphLaneSwapDefectWatch`] over `strips` tracks whose IDs total
+/// `id_bytes` (issue #2424): what [`GraphLaneSwapDefectWatch::heap_bytes`] reports, and so the
+/// ceiling a preparation charges for a plan of at most that many strips. 0 for no strip.
+#[must_use]
+pub const fn lane_swap_defect_watch_bytes(strips: usize, id_bytes: usize) -> usize {
+    if strips == 0 {
+        return 0;
+    }
+    WATCH_HEADER_BYTES
+        + core::mem::size_of::<LaneSwapDefectCells>()
+        + strips
+            * (core::mem::size_of::<core::sync::atomic::AtomicBool>()
+                + core::mem::size_of::<Box<str>>())
+        + id_bytes
+}
+
+/// Two watches are equal when they are one table.
+impl PartialEq for GraphLaneSwapDefectWatch {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for GraphLaneSwapDefectWatch {}
+
 /// One fade arm a successor takes from the plan it displaces (issue #1392 D3): entry
 /// `predecessor` of that plan's table hands its render state to entry `successor` of this one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5085,6 +5226,22 @@ pub fn test_only_bank_effect_lanes(
 }
 
 impl<S> GraphBoundPlan<S> {
+    /// The plan's lane-swap defect watch (issue #2424): the flags render raises on the defect
+    /// path and the plan's recoveries total. Read off the render thread, before publication; the
+    /// clone shares the plan's table, so the control thread reads it while the plan renders.
+    #[must_use]
+    pub fn lane_swap_defect_watch(&mut self) -> GraphLaneSwapDefectWatch {
+        self.executor().runtime.lane_swap_defect_watch().clone()
+    }
+
+    /// Pin every grouped strip whose track `strips` names for the plan's life (issue #2424), as a
+    /// defect's pin does (issue #2419): the packer never asks for it, so a strip whose trade hit
+    /// a lane-swap defect in an earlier plan of the session is never traded again. Off the render
+    /// thread, before publication; it only adds pins.
+    pub fn pin_lane_swap_defect_strips(&mut self, strips: &[Box<str>]) {
+        self.executor().runtime.pin_strips(strips);
+    }
+
     /// The bytes [`GraphCarryBuilder::seal`] allocates for the carried slots of the successor lanes
     /// `moves` names (#1633 D1): the part of a carry's charge that depends on the lanes' cell
     /// tables. Read before the install, so preparation admits the carry before it allocates. `None`
@@ -6978,6 +7135,18 @@ pub fn test_only_displaced_tracks(plan: &PreparedRenderPlan) -> Vec<Box<str>> {
         .map_or_else(Vec::new, |executor| executor.runtime.displaced_tracks())
 }
 
+/// Test-only (issue #2424): the tracks of a graph plan's pack groups the packer never moves (a
+/// bypass-automated strip, a strip a defect pinned, a strip pinned at bind for the session), by
+/// the track bind placed at that home; empty for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_pinned_tracks(plan: &PreparedRenderPlan) -> Vec<Box<str>> {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or_else(Vec::new, |executor| executor.runtime.pinned_tracks())
+}
+
 /// Test-only (issue #1981): the strips of a graph plan's pack groups not at their home lane; zero
 /// for any other plan and under the identity map.
 #[cfg(any(test, feature = "test-support"))]
@@ -7276,6 +7445,8 @@ impl GraphExecutor {
         let (mut runtime, bind_identities) =
             runtime::build_sequential(program, &plan.spec, parts, frames, planning, &lent_claims);
         runtime.pin_strips(&plan.pinned_strips);
+        // Issue #2424: the defect watch, named by the tracks bind placed.
+        runtime.arm_lane_swap_defect_watch();
         // The copy loop fills exactly the claims that are not read in place.
         let source_input_buffers: Box<[(usize, u32)]> = source_input_buffers
             .iter()

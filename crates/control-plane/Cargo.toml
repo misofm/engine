@@ -34,6 +34,10 @@ source.workspace = true
 [dev-dependencies]
 # #1685 gate 3: the admission allocation count, by the audited allocator's thread counters.
 bench-support.workspace = true
+# Issue #2424: `tests/lane_swap_residue.rs` trades two strips of the active plan and reads its
+# pins, through graph's test seams, on the active plan engine's test seam lends.
+engine = { workspace = true, features = ["test-support"] }
+graph = { workspace = true, features = ["test-support"] }
 # Issue #2219: the dense gate shape's one builder, for `tests/session_replace.rs`.
 session = { workspace = true, features = ["test-support"] }
 # Issue #2265: the loudness arming model (`loudness_arming_loom`) runs under `--cfg loom`. Test

@@ -10123,6 +10123,9 @@ impl PackGroup {
 /// input term of a per-node op whose producer is a grouped bank (`producer_lane`). The plan carry,
 /// whose tables group a bank's lanes by home location, takes both plans back to the identity first
 /// ([`Runtime::restore_home_lanes`]).
+/// [`LaneMap::defect_strip`] of a padded lane, which names no strip (issue #2424).
+const NO_DEFECT_STRIP: u32 = u32::MAX;
+
 #[derive(Default)]
 pub(crate) struct LaneMap {
     groups: Box<[PackGroup]>,
@@ -10168,6 +10171,13 @@ pub(crate) struct LaneMap {
     /// Home position -> whether a move of that strip was refused in its group's current episode
     /// (issue #2135): fixed until a fact changes.
     refused: Box<[bool]>,
+    /// Which strips a lane-swap defect reached, and the plan's recoveries total (issue #2424):
+    /// raised beside each defect's pin ([`Self::quarantine`]) and read by the control thread.
+    /// Armed at bind ([`Runtime::arm_lane_swap_defect_watch`]).
+    defects: crate::GraphLaneSwapDefectWatch,
+    /// Home position -> the index of its strip in `defects`' table, or [`NO_DEFECT_STRIP`] for a
+    /// padded lane (issue #2424). Empty until bind arms the watch.
+    defect_strip: Box<[u32]>,
     /// Home position -> the strip's pattern, written by each sort ([`pack_step`]).
     pattern: Box<[u16]>,
     /// Position -> the home position of the strip the sort places there, or [`NO_TARGET`] for a
@@ -10251,6 +10261,8 @@ impl LaneMap {
             .saturating_add(slice(&self.dwell))
             .saturating_add(slice(&self.pinned))
             .saturating_add(slice(&self.refused))
+            .saturating_add(self.defects.heap_bytes() as u64)
+            .saturating_add(slice(&self.defect_strip))
             .saturating_add(slice(&self.pattern))
             .saturating_add(slice(&self.target))
             .saturating_add(slice(&self.movable))
@@ -10534,6 +10546,8 @@ impl LaneMap {
             dwell: vec![0; positions].into_boxed_slice(),
             pinned: vec![false; positions].into_boxed_slice(),
             refused: vec![false; positions].into_boxed_slice(),
+            defects: crate::GraphLaneSwapDefectWatch::default(),
+            defect_strip: Box::default(),
             pattern: vec![0; positions].into_boxed_slice(),
             target: vec![NO_TARGET; positions].into_boxed_slice(),
             movable: vec![0; positions].into_boxed_slice(),
@@ -10693,6 +10707,27 @@ impl LaneMap {
                 *pinned = true;
             }
         }
+    }
+
+    /// The defect path of [`Runtime::swap_bank_lanes`] (issues #2419, #2424): pin the strips at
+    /// local positions `a` and `b` of group `group` ([`Self::pin_positions`]) and raise both
+    /// strips' flags in the defect watch, by their home positions, with the plan's `recoveries`
+    /// total. A position outside the group pins and raises nothing. Allocation-free, O(1).
+    fn quarantine(&mut self, group: usize, a: usize, b: usize, recoveries: u64) {
+        self.pin_positions(group, a, b);
+        let Some(base) = self.groups.get(group).map(|pack| pack.base as usize) else {
+            return;
+        };
+        let strip = |position: usize| {
+            let home = *self.home.get(base + position)? as usize;
+            self.defect_strip
+                .get(base + home)
+                .map(|&strip| strip as usize)
+        };
+        let (Some(strip_a), Some(strip_b)) = (strip(a), strip(b)) else {
+            return;
+        };
+        self.defects.raise([strip_a, strip_b], recoveries);
     }
 
     /// Record that the strips at `(unit, lane)` `a` and `b` of group `group` traded places: the
@@ -11372,6 +11407,32 @@ impl Runtime {
         tracks
     }
 
+    /// The tracks of every pack group's pinned strips, by home position (issue #2424). Off the
+    /// render thread.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn pinned_tracks(&self) -> Vec<Box<str>> {
+        let mut tracks = Vec::new();
+        for pack in self.lane_map.groups.iter() {
+            for strip in 0..pack.span() {
+                let pinned = self
+                    .lane_map
+                    .pinned
+                    .get(pack.base as usize + strip)
+                    .is_some_and(|&pinned| pinned);
+                if let (true, Some((unit, lane))) =
+                    (pinned, self.lane_map.unit_lane(pack, strip, 0))
+                    && let Some(track) = self
+                        .identity
+                        .get(unit)
+                        .and_then(|row| row.lane_tracks.get(lane))
+                {
+                    tracks.push(track.clone());
+                }
+            }
+        }
+        tracks
+    }
+
     /// The strips of every pack group not at their home position (issue #1981). Off the render
     /// thread.
     #[cfg(any(test, feature = "test-support"))]
@@ -11449,6 +11510,39 @@ impl Runtime {
             ranked.extend(slots.iter().map(|&(_, row, slot)| (row, slot)));
         }
         self.lane_map.ranked = ranked.into_boxed_slice();
+    }
+
+    /// Issue #2424: arm the lane-swap defect watch: one flag per distinct track of the pack
+    /// groups, named by the track bind placed at each grouped home position
+    /// ([`UnitIdentity::lane_tracks`] of the position's row-0 unit), and each position's index
+    /// into it. Bind-time: allocates, and only when a pack group exists.
+    pub(crate) fn arm_lane_swap_defect_watch(&mut self) {
+        let mut named: Vec<Option<Box<str>>> = Vec::new();
+        for pack in &self.lane_map.groups {
+            for position in 0..pack.span() {
+                let track = self
+                    .lane_map
+                    .unit_lane(pack, position, 0)
+                    .and_then(|(unit, lane)| self.identity.get(unit)?.lane_tracks.get(lane))
+                    .filter(|track| !track.is_empty());
+                named.push(track.cloned());
+            }
+        }
+        let mut strips: Vec<Box<str>> = named.iter().flatten().cloned().collect();
+        strips.sort_unstable();
+        strips.dedup();
+        let watch = crate::GraphLaneSwapDefectWatch::new(strips.into_boxed_slice());
+        self.lane_map.defect_strip = named
+            .iter()
+            .map(|track| {
+                track
+                    .as_deref()
+                    .and_then(|track| watch.strip_index(track))
+                    .and_then(|index| u32::try_from(index).ok())
+                    .unwrap_or(NO_DEFECT_STRIP)
+            })
+            .collect();
+        self.lane_map.defects = watch;
     }
 }
 
@@ -11633,7 +11727,7 @@ impl Runtime {
                         outcome = BankLaneMoveRefusal::Split { row: undo };
                     }
                 }
-                lane_map.pin_positions(group, position_a, position_b);
+                lane_map.quarantine(group, position_a, position_b, lane_swap_defect_total(units));
                 return Err(outcome);
             }
         }
@@ -11759,11 +11853,22 @@ impl Runtime {
     /// swaps and slots that refused a swap-back, a row's trade-back included. Recoveries, not
     /// strips. Saturating.
     pub(crate) fn lane_swap_defect_count(&self) -> u64 {
-        self.units.iter().fold(0_u64, |total, unit| match unit {
-            RuntimeUnit::Bank { chain, .. } => total.saturating_add(chain.lane_swap_defects()),
-            RuntimeUnit::Op(_) => total,
-        })
+        lane_swap_defect_total(&self.units)
     }
+
+    /// The defect watch armed at bind (issue #2424), shared with whoever reads it.
+    pub(crate) fn lane_swap_defect_watch(&self) -> &crate::GraphLaneSwapDefectWatch {
+        &self.lane_map.defects
+    }
+}
+
+/// [`Runtime::lane_swap_defect_count`] of `units`, which the defect path reads while it holds the
+/// runtime's fields apart (issue #2424). Bounded by the unit count.
+fn lane_swap_defect_total(units: &[RuntimeUnit]) -> u64 {
+    units.iter().fold(0_u64, |total, unit| match unit {
+        RuntimeUnit::Bank { chain, .. } => total.saturating_add(chain.lane_swap_defects()),
+        RuntimeUnit::Op(_) => total,
+    })
 }
 
 /// What [`pack_step`] reads and moves (issue #2135): the plan's runtime, or a test's stand-in
@@ -17527,7 +17632,10 @@ mod tests {
                     source_lanes: if unit % 2 == 0 { 0b0010 } else { 0 },
                     stages: 1,
                     upstream_of_seam_stages: 0,
-                    lane_tracks: Box::new([]),
+                    // Issue #2424: chain `c`'s strip on lane `l` is `s{4c + l}` in every row.
+                    lane_tracks: (0..4)
+                        .map(|lane| format!("s{}", 4 * (unit % 2) + lane).into_boxed_str())
+                        .collect(),
                 })
                 .collect();
             let mut runtime = Runtime::new(
@@ -17565,7 +17673,24 @@ mod tests {
                 0,
                 0,
             );
+            runtime.arm_lane_swap_defect_watch();
             Self { runtime, faults }
+        }
+
+        /// The strips the defect watch flags (issue #2424), and the recoveries total it holds.
+        fn flagged(&self) -> (Vec<&str>, u64) {
+            let watch = self.runtime.lane_swap_defect_watch();
+            (watch.flagged_strips().collect(), watch.recoveries())
+        }
+
+        /// The names of the strips at row-0 `(unit, lane)` `a` and `b`, in home order.
+        fn names(a: (usize, usize), b: (usize, usize)) -> Vec<String> {
+            let mut names = [4 * a.0 + a.1, 4 * b.0 + b.1];
+            names.sort_unstable();
+            names
+                .iter()
+                .map(|position| format!("s{position}"))
+                .collect()
         }
 
         /// Unit `unit`'s stage tags per slot, its member outputs and its source bits.
@@ -17653,6 +17778,16 @@ mod tests {
                 rig.pinned(),
                 SwapRig::pins(a, b),
                 "{what}: both strips, and only they"
+            );
+            // Issue #2424: the defect path raised both strips and stored the total it read after
+            // every trade-back.
+            assert_eq!(
+                rig.flagged(),
+                (
+                    SwapRig::names(a, b).iter().map(String::as_str).collect(),
+                    1 + 2 * split.len() as u64
+                ),
+                "{what}: the watch flags both strips with the whole total"
             );
             for row in 0..3 {
                 for unit in [2 * row, 2 * row + 1] {
@@ -17774,12 +17909,31 @@ mod tests {
             homes != [a, b] && homes != [b, a],
             "neither position holds its own strip: {homes:?}"
         );
-        map.pin_positions(1, a, b);
+        // Issue #2424: every grouped home position's own strip, named by its index (`p00`..).
+        let names: Vec<Box<str>> = (0..map.pinned.len())
+            .map(|home| format!("p{home:02}").into_boxed_str())
+            .collect();
+        map.defects = crate::GraphLaneSwapDefectWatch::new(names.into_boxed_slice());
+        map.defect_strip = (0..map.pinned.len() as u32).collect();
+        map.quarantine(1, a, b, 7);
         let mut pinned = vec![false; map.pinned.len()];
         for home in homes {
             pinned[base + home] = true;
         }
         assert_eq!(map.pinned.to_vec(), pinned);
+        let mut flagged: Vec<String> = homes
+            .iter()
+            .map(|home| format!("p{:02}", base + home))
+            .collect();
+        flagged.sort_unstable();
+        assert_eq!(
+            (
+                map.defects.flagged_strips().collect::<Vec<_>>(),
+                map.defects.recoveries()
+            ),
+            (flagged.iter().map(String::as_str).collect(), 7),
+            "issue #2424: the watch flags the same two home positions, with the total"
+        );
     }
 
     /// Issue #2419: the host's total reads a real plan's runtime. A trade whose row 1 strands
@@ -17837,6 +17991,11 @@ mod tests {
             SwapRig::pins((0, 0), (0, 1)),
             "both strips are pinned"
         );
+        assert_eq!(
+            rig.flagged(),
+            (vec!["s0", "s1"], 1),
+            "issue #2424: the watch flags both strips and holds the total"
+        );
         let swaps = rig.faults[0][0].swaps.load(Ordering::Relaxed);
         // A new episode: the packer forgets the strips it refused.
         rig.runtime.lane_map.groups[0].fresh = true;
@@ -17861,6 +18020,28 @@ mod tests {
             [1, 1, 0, 0],
             "row 1's strand reset its two lanes"
         );
+    }
+
+    /// Issue #2424: only a defect raises the defect watch. A healthy trade and a refusal the
+    /// trade's check makes (nothing moved, nothing reset) leave it clear and pin nothing, so a
+    /// plan whose trades are only refused is never rebuilt.
+    ///
+    /// Test value: a raise on every refusal, or on every trade, which would rebuild a healthy
+    /// plan.
+    #[test]
+    fn only_a_defect_raises_the_defect_watch() {
+        let mut rig = SwapRig::new(1);
+        assert_eq!(rig.runtime.swap_bank_lanes((0, 1), (0, 2)), Ok(()));
+        // The trade's check is the stage's first call; refuse it.
+        rig.faults[0][0]
+            .refuse_check_from
+            .store(1, Ordering::Relaxed);
+        assert!(matches!(
+            rig.runtime.swap_bank_lanes((0, 1), (1, 2)),
+            Err(BankLaneMoveRefusal::Chain(_))
+        ));
+        assert_eq!(rig.flagged(), (Vec::new(), 0), "nothing is flagged");
+        assert_eq!(rig.pinned(), vec![false; 8], "nothing is pinned");
     }
 
     /// Issue #2419: in a debug build, a row whose chains refuse after the trade's check passed

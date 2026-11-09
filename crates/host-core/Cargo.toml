@@ -15,6 +15,8 @@ default = []
 control-provider = ["dep:protocol"]
 test-support = [
   "effect-compiler/test-support",
+  # Issue #2424: the injected lane-swap strand a host-level defect test drives.
+  "effect-contract/test-support",
   "builtins-compiler/test-support",
   "graph/test-support",
 ]
