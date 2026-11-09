@@ -8605,24 +8605,33 @@ fn a_bank_of_inserts_falls_apart_at_the_build_width() {
 
 /// Issue #2427: a refused carry restore reaches the successor's defect watch as the plan's exact
 /// carry refusals total, on each of the carry's three refusing paths: a console lane into a
-/// console lane, a per-node insert into a bank lane, and a bank lane into a per-node insert. Two
-/// restores refuse on each (`graph::test_only_refuse_carry_restores` hands them an empty payload
-/// scratch, so the stage, or the per-node count, records a real refusal), and the hand-over still
-/// carries. The console case runs twice: on live stages, and on the plain stages of plans
-/// prepared with no live effect lane (the C ABI's `HostLiveLanes::FADER_AND_MATRIX` shape), each
-/// stage type counting its own refusals. The control plane sums these watches into
-/// `BANK_CONTRACT_DEFECTS`.
+/// console lane, a per-node insert into a bank lane, and a bank lane into a per-node insert. Up to
+/// two restores refuse on each (`graph::test_only_refuse_carry_restores` hands them an empty
+/// payload scratch, so the stage, or the per-node count, records a real refusal), and the
+/// hand-over still carries. The refusals are the seam's two or the carry's effect moves,
+/// whichever is fewer: a console case moves one EQ lane per strip (nine), and an insert form
+/// change moves the per-node side's inserts, one below the build width's padding threshold (one
+/// at four lanes, two at eight), so the expectation follows the width the plan binds. The console
+/// case runs twice: on live stages, and on the plain stages of plans prepared with no live effect
+/// lane (the C ABI's `HostLiveLanes::FADER_AND_MATRIX` shape), each stage type counting its own
+/// refusals. The control plane sums these watches into `BANK_CONTRACT_DEFECTS`.
 ///
 /// Test value: a refusing path that stores nothing (a host never sees a refused carry there), a
 /// store of the one refusal rather than the plan's total, a total that leaves out the banks'
 /// refusals or the per-node ones, or a stage type whose refusals the plan's count misses.
 #[test]
 fn a_refused_carry_restore_reaches_the_defect_watch() {
+    const SEAM: u64 = 2;
     let backend = Backend::current();
     let feed = bursty_feed(SOURCE, 5);
     let a = Session::compile(console_session(false, &["eq"]));
     let b = Session::compile(with_muted_track(console_session(false, &["eq"])));
-    graph::test_only_refuse_carry_restores(2);
+    // The effect moves each carry makes: one console EQ lane per strip the two sessions share,
+    // or the per-node side's inserts of a form change.
+    let console_moves = a.model.tracks.len() as u64;
+    let form_moves = insert_pad_threshold(backend) as u64 - 1;
+    assert!(form_moves > 0, "{backend:?}: a form change moves an insert");
+    graph::test_only_refuse_carry_restores(SEAM as u32);
     let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
     graph::test_only_refuse_carry_restores(0);
     assert_eq!(
@@ -8630,33 +8639,37 @@ fn a_refused_carry_restore_reaches_the_defect_watch() {
         CarryOutcome::Carried,
         "plain console lane to lane: the hand-over"
     );
+    let refused = SEAM.min(console_moves);
     assert_eq!(
         (run.refusals, run.mirrored),
-        (2, 2),
+        (refused, refused),
         "plain console lane to lane: the watch holds the plan's refusals total"
     );
     let console = (
         Session::compile(console_session(false, &["eq"])),
         Session::compile(with_muted_track(console_session(false, &["eq"]))),
     );
-    for (what, (a, b)) in [
-        ("console lane to lane", console),
+    for (what, (a, b), moves) in [
+        ("console lane to lane", console, console_moves),
         (
             "per node to bank",
             form_pair(Insert::Compressor, backend, true),
+            form_moves,
         ),
         (
             "bank to per node",
             form_pair(Insert::Compressor, backend, false),
+            form_moves,
         ),
     ] {
-        graph::test_only_refuse_carry_restores(2);
+        graph::test_only_refuse_carry_restores(SEAM as u32);
         let run = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
         graph::test_only_refuse_carry_restores(0);
         assert_eq!(run.carry, CarryOutcome::Carried, "{what}: the hand-over");
+        let refused = SEAM.min(moves);
         assert_eq!(
             (run.refusals, run.mirrored),
-            (2, 2),
+            (refused, refused),
             "{what}: the watch holds the plan's refusals total"
         );
     }
