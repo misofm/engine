@@ -14594,7 +14594,7 @@ pub(crate) fn route_folds_over_program(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use crate::GraphEdgeId;
     use crate::program::{BufferRef, InputRef};
@@ -17347,11 +17347,11 @@ pub(crate) mod tests {
     /// `n`-th swap (counted from 1) strands (resets both lanes and counts it, as `rack`'s effect
     /// stages do), and every check from the `n`-th on refuses; with every lane reset it led to.
     #[derive(Default)]
-    pub(crate) struct SwapFault {
+    struct SwapFault {
         swaps: AtomicU32,
         checks: AtomicU32,
         /// Bit `n`: swap `n` strands.
-        pub(crate) strand: AtomicU32,
+        strand: AtomicU32,
         /// Every check from this one on refuses; `0` never.
         refuse_check_from: AtomicU32,
         /// Per lane: resets, by a strand or by [`BankStage::reset_swapped_lanes`].
@@ -17468,16 +17468,16 @@ pub(crate) mod tests {
     /// 0's unit of row `r` is `2r`, chain 1's is `2r + 1`. Unit `u`'s member op of lane `l` writes
     /// buffer `16u + l` in every slot, and chain 0's units claim the source on lane 1 alone: what
     /// the trade's readers move.
-    pub(crate) struct SwapRig {
-        pub(crate) runtime: Runtime,
+    struct SwapRig {
+        runtime: Runtime,
         /// Per unit, per slot.
-        pub(crate) faults: Vec<Vec<Arc<SwapFault>>>,
+        faults: Vec<Vec<Arc<SwapFault>>>,
     }
 
     impl SwapRig {
         const UNITS: usize = 6;
 
-        pub(crate) fn new(slots: usize) -> Self {
+        fn new(slots: usize) -> Self {
             let faults: Vec<Vec<Arc<SwapFault>>> = (0..Self::UNITS)
                 .map(|_| (0..slots).map(|_| Arc::default()).collect())
                 .collect();
@@ -17780,6 +17780,26 @@ pub(crate) mod tests {
             pinned[base + home] = true;
         }
         assert_eq!(map.pinned.to_vec(), pinned);
+    }
+
+    /// Issue #2419: the host's total reads a real plan's runtime. A trade whose row 1 strands
+    /// is made on the lane-swap rig, the rig's runtime is moved into a bound plan, and the
+    /// sealed plan's [`crate::lane_swap_defect_count`] reads the strand.
+    ///
+    /// Test value: a wrapper that reads anything but the plan's runtime total (zero, or another
+    /// counter), which a healthy plan's `Some(0)` cannot tell apart.
+    #[test]
+    fn the_lane_swap_defect_total_reads_the_plans_runtime() {
+        let mut rig = SwapRig::new(1);
+        rig.faults[2][0].strand.store(1 << 1, Ordering::Relaxed);
+        assert!(
+            rig.runtime.swap_bank_lanes((0, 1), (0, 2)).is_err(),
+            "the trade strands"
+        );
+        let mut bound = crate::tests::sidechain_pdc_plan(false);
+        core::mem::swap(&mut bound.executor().runtime, &mut rig.runtime);
+        let (mut plan, _gate) = bound.seal();
+        assert_eq!(crate::lane_swap_defect_count(&mut plan), Some(1));
     }
 
     /// Issue #2419: a pack-group trade that strands a slot is a recovered defect, not a debug

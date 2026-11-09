@@ -343,3 +343,22 @@ No render dispatch changed, so the web gate was not rerun; it passed on attempt 
 
 ### Verdict on attempt 3 (Sol, `08d74a5b7`): PASS
 No BLOCKER or MAJOR. N5 (`Some(0 * ..)`), N5b (`None`) and two sibling-counter mutants are red in debug and release. The test items made `pub(crate)` leak nothing into non-test builds. The deleted `Some(0)` assertion in `silent_bank_skip` was a duplicate: rack's exact-count lane-swap test owns that claim (mutant H is red there). The two MINORs on the rebuild successor's bound (the carry path bypasses pins; the bound counts trades, not counter increments) are folded into #2424.
+
+### CI fix after the PASS: the graph dependency-boundary policy (PR #2426)
+
+PR #2426 failed "Rack, builtins and graph dependency-boundary policy" with "publication, I/O, threading, synchronization, or logging leaked into graph path".
+- **Cause.** `scripts/check-graph-policy.sh` strips a test module only when it matches `^#\[cfg(test)\]\nmod NAME {`. Attempt 3 made `runtime.rs`'s `mod tests` into `pub(crate) mod tests`, so the script read that module's `std::sync::Mutex` uses as graph-path code.
+- **Fix.** The gate is unchanged.
+  - `runtime.rs`'s test module is a plain `#[cfg(test)] mod tests` again, and `SwapRig`, `SwapFault` and their fields are private again.
+  - `the_lane_swap_defect_total_reads_the_plans_runtime` moved into `runtime.rs`'s tests. It reaches `lib.rs`'s helper as `crate::tests::sidechain_pdc_plan`, which is now `pub(crate)` inside `lib.rs`'s unchanged `mod tests`. `lib.rs`'s module line is untouched.
+- **Mutation.** Both wrapper mutants are red in debug and release at the moved test: N5 (`Some(0 * ..)`) and N5b (`None`).
+- **Gates.** Every gate below passed, with one private target dir, deleted afterwards:
+  - Policy scripts, each ok:
+    - `check-graph-policy.sh`: PASS;
+    - `test-graph-policy.sh`;
+    - `check-rack-policy.sh` and `test-rack-policy.sh`;
+    - `check-builtins-policy.sh` and `test-builtins-policy.sh`;
+    - `test-workspace-policy.sh` and `check-workspace-policy.sh`.
+  - `cargo test --locked -p graph`, in debug and release;
+  - clippy `-D warnings` on `graph` (all targets), in debug and release;
+  - `cargo doc -D warnings`, `cargo fmt --all --check`.
