@@ -112,3 +112,50 @@ These are also the values #2424 recorded.
 - `realtime_policy`: ok, 315 marked regions in 48 files. The first run found the helpers' own markers nested inside the enclosing region; they were removed.
 - Web: `build-web-audioworklet.sh --named-twin` passed. `check-web-audioworklet.sh --without-metadata-regeneration` passed, using wabt for the call graph. The render closure is 38, the same as #2424, with 5 traps all owned by `render_inner` and `atomic_waits=0`.
 - Wire and ABI gates: `check-capi-abi.sh` passed. That covers the frozen symbol set, the header consumers built at `-Werror`, and shared and static linkage. The SDK checks also passed: `check-sdk-generated.sh` against the built artifact, `check-sdk-deletions.py`, `check-sdk-types.sh` (after `npm ci`), and `check-sdk-headless.sh`, whose evals include "the counter names are the codec's counter IDs". The protocol corpus hash does not move: no corpus frame names counter 23.
+
+### Sol's verdict on attempt 1 (`dab329a47`): PASS, with four minors to fold
+The NIT was skipped, as directed. The fold:
+
+1. **The defect path is O(1), not quadratic.**
+   - Each refusal used to re-walk every slot (`bank_carry_refusals`). Now `carry_effect_lanes` keeps a local `bank_refused` tally. The two bank-stage `else` arms increment it, and every refusal arm stores `bank_refused + node_refused`. The healthy path gains nothing.
+   - The helpers `bank_carry_refusals` and `mirror_carry_refusals` are gone, and `Runtime::carry_refusal_count` has its original body back.
+   - The tally matches the stages' own counts: a checked pair's restore counts each `false` it returns. The host-core test still holds the stored total to `carry_refusal_count`, which comes from the stages.
+2. **The zero-strip charge is now held to the allocator.** A one-track row in `retained_projection.rs::a_projection_is_its_preparations_rows` stayed green under mutant B, so I dropped it rather than add a useless test.
+   - Why it stays green: the projection (`lane_swap_defect_watch_bytes`) and the prepared inventory row (`GraphLaneSwapDefectWatch::heap_bytes`) both call that one formula, so B shifts both sides equally, and the inventory row is only a ceiling anyway.
+   - The new test is `graph` `tests/defect_watch_charge.rs::a_defect_watch_charges_exactly_the_heap_it_holds`, using a test-support constructor, `GraphLaneSwapDefectWatch::test_only_new`. It started as a lib unit test, but that linked bench-support's audited allocator into every graph lib test, and the lib run then aborted (SIGABRT), so it moved to an integration test. It builds a watch with no strip and one with two strips, and holds `heap_bytes` to the bytes the audited allocator saw the watch make (thread-scoped counters), plus the names and table it was given.
+   - Test value: a charge that leaves out the table of a watch with no strip (every plan without a pack group then under-charges its inventory and `capi_retained_bytes`), or a strip's flag or name.
+3. **The resource movement is recorded** in `docs/C_ABI_V1_QUALIFICATION.md`, as a "Resource movement (#2427)" bullet after the counter-snapshot paragraph:
+   - every plan without a pack group now charges 64 bytes on x86-64 (the watch's header and cells), in its inventory and so in `capi_retained_bytes`;
+   - a plan with a pack group charges 8 bytes more;
+   - the provider snapshot gains one slot;
+   - a caller with an exact `maximum_capi_retained_bytes` must raise it.
+4. **A plain-stage arm.** `a_refused_carry_restore_reaches_the_defect_watch` now also runs the console case through `plain_run`. Those plans are prepared with no live effect lane (the `HostLiveLanes::FADER_AND_MATRIX` shape), so the stages are `EffectStageMut::Plain`. `PlainRun` gains `mirrored`.
+
+**Fold mutants.** Each was run in debug and release, and every row is red.
+
+| # | Mutant | Red test |
+|---|---|---|
+| B | `lane_swap_defect_watch_bytes` returns 0 for no strip | graph `a_defect_watch_charges_exactly_the_heap_it_holds` (`0` against `64`) |
+| G | plain bank stages count no refusal (`Self::Plain(stage) => 0`) | host-core watch test, plain arm: `(0, 2)` against `(2, 2)` |
+| T1 | the lane-to-lane refusal stores nothing | host-core watch test |
+| T2 | the lane-to-lane refusal is not tallied | host-core watch test |
+| T3 | the per-node-to-lane refusal stores nothing | host-core watch test |
+| T4 | the per-node-to-lane refusal is not tallied | host-core watch test |
+| T5 | the lane-to-per-node refusal stores nothing | host-core watch test |
+| T6 | the lane-to-per-node store leaves out the per-node term | host-core watch test |
+
+T1 to T6 replace attempt 1's M1 to M6, whose code is gone. M7 to M17 are untouched by the fold.
+
+**No bit moved after the fold.** The #2392 digest on the fold's head is identical to attempt 1 and to the base: `inserts=false 7d31fea2b6652670`, `inserts=true 8e4dfb8b8dc1d599`.
+
+**Fold gates.** One private target directory was used, and it is deleted afterwards. `origin/main` had nothing new to merge: `ca6d112ee` is the base. Every step passed:
+- `cargo fmt --all --check`;
+- `cargo test --locked`, in debug:
+  - `host-core` with `test-support` (484 tests) and again with `control-provider` (629);
+  - `control-plane` (114), `graph` (166, after the test move), `capi` (239) and `host-web` (201);
+- the new `graph` test in release;
+- clippy `-D warnings --all-targets` on the six crates, with and without test-support;
+- `cargo doc -D warnings` on `graph`;
+- `realtime_policy`: ok, 315 marked regions in 48 files;
+- `check-capi-abi.sh`: ok, shared and static;
+- `check-workspace-policy.sh` and `check-graph-policy.sh`.
