@@ -114,12 +114,13 @@ So for the rest of the plan's life, a strip whose swap hit a defect renders with
   - `the_quarantine_holds_across_successors_and_drops_a_removed_strip`.
   - `a_removed_residue_strip_rebuilds_nothing`: the storm guard on a strip the successor lacks.
   - `a_grown_residue_is_rebuilt_after_a_refusal`: the attempt record keys on the residue count as well as the epoch.
+  - `a_session_with_no_route_slack_boots_with_its_defect_watch_charged`: the nine tracks with no route boot. Without the projection's watch row, the inventory exceeds its ceiling (`host.control.projection`), which the probe showed.
 - The gate asked for a host-core test. The trigger is control-plane's service step, the code both hosts run, so the test lives in the crate that owns the logic. It drives host-core's preparation end to end.
 - No existing test is made useless: the extended assertions sit on the existing defect scenarios.
 
 **Mutation sweep** (`sweep.py`, `sweep2.py` and `sweep3.py` in scratch). Each mutant was applied alone. Its focused tests ran in debug and in release: graph's `runtime::tests` and/or `control-plane --test lane_swap_residue`. The file was then restored from git.
 
-The final code has 34 mutants, and all 34 are red in both builds.
+The final code has 39 mutants, and all 39 are red in both builds (the 34 below, then P1-P5, in `sweep4.py` and `sweep5.py`).
 
 | Mutant | Where | Debug | Release | Red at (among others) |
 | --- | --- | --- | --- | --- |
@@ -157,6 +158,11 @@ The final code has 34 mutants, and all 34 are red in both builds.
 | C7: a refusal not counted | control plane | red | red | `a_refused_rebuild_...` |
 | C8: the promotion inherits nothing | control plane | red | red | `a_successor_adopted_after_a_late_defect_...` |
 | C11: the residue rebuild commits as a transaction | `rebuild` | red | red | `a_lane_swap_defect_rebuilds_the_plan_once` (revision 0) |
+| P1: the projection charges the watch for one strip | inventory ceiling | red | red | host-web `representative_retained_projection_...` (identity over-projection) |
+| P2: the projection charges the quarantine rows for a boot | inventory ceiling | red | red | the same (nine-track) |
+| P3: the projection leaves the watch out | inventory ceiling | red | red | `a_session_with_no_route_slack_boots_...` |
+| P4: the plan walk leaves out the position table | `LaneMap::retained_bytes` | red | red | capi `capi_retained_bytes_charge_every_byte_...` |
+| P5: the inventory leaves out the watch | `PlanStateInventory::retained_bytes` | red | red | the same |
 
 Mutation numbers H6, C9 and C10 are missing from the table because the sweep showed their guards were redundant. Each was green in both builds, so the guard was removed rather than kept untested:
 - **H6 and C9: discontinuity guards.** There was a residue restart guard and an inheritance guard at a declared discontinuity. A discontinuity's successor already lists every strip as restarted: the `StripsRestarted` probe read +9 for the nine-strip session. So neither guard changes anything, and both were removed, together with their test.
@@ -171,7 +177,30 @@ The code each green result names is gone, so no mutant is still green.
 
 These are also the digests #2419 recorded. A healthy trade's only change is the defect arm's call, `quarantine`, in place of `pin_positions`, which a healthy trade never reaches.
 
-**Gates.** GATES_RECORD
+**Gates.** Run one crate at a time with `-j 4` and one private target directory, deleted afterwards. Every run below passed, with none failing, on the final tree:
+- `cargo test --locked`:
+  - `effect-contract`, `graph`, `host-core` and `control-plane`, each with its `test-support` feature, in debug;
+  - `graph --lib` and `control-plane --test lane_swap_residue` in release;
+  - `graph-compiler`, `capi` and `host-web` (the hosts of the changed service step and inventory) in debug. No graph plan fixture moved.
+- Clippy `-D warnings` on `graph`, `effect-contract`, `host-core` and `control-plane` (all targets), with and without `test-support` and in release: clean.
+- `cargo doc -D warnings` on the same four crates: clean.
+- `cargo fmt --all --check`: clean.
+- Policy scripts, each ok:
+  - `check-workspace-policy.sh` and `test-workspace-policy.sh`;
+  - `check-graph-policy.sh` (PASS; `runtime.rs`'s test module stays plain) and `test-graph-policy.sh`;
+  - `check-rack-policy.sh` (PASS) and `check-host-core-policy.sh`;
+  - `check-effect-contract.sh`;
+  - `check-test-support-ci.py` and `check-ci-path-routing.py`.
+- `realtime_policy`: ok (315 marked regions in 48 files).
+- `check-web-audioworklet.sh --without-metadata-regeneration`, on a rebuilt artifact and named twin with wabt: passed ("web AudioWorklet static/object checks passed").
+  - `miso_engine_web_v1_render` has closure=38, as on #2419, with atomic_waits=0 and destructor_registration=0.
+  - The strand hook is `test-support` only, so it is not in the artifact.
+
+**Resource accounting.**
+- The watch is charged where the inventory holds it, as the fade watch is: the inventory's clone keeps it alive past the plan. The plan's walk counts only its position table, so dropping the plan frees exactly what the walk names (capi's test).
+- The inventory ceiling charges the watch at every strip, and only for a model of two strips or more: a pack group is two peer chains.
+- It charges the quarantine and the inherited residue at every strip, and only for a successor: a boot plan pins none and is never promoted.
+- The first gate run caught both rows. The walk counted the watch (capi), and the ceiling charged the quarantine rows on a boot (host-web's pinned over-projection).
 
 **Follow-ups (not filed).**
 - #2427 (the counter) reads `PlanStateInventory::lane_swap_defects().recoveries()` per epoch and sums the retired ones: the signal this issue built.
