@@ -51,6 +51,10 @@ release PR is needed. One run:
    the module, BLAKE3 module, named twin and tarball digests, the toolchain, and the npm integrity.
    It attaches the tarball and the named twin.
 
+A failed check job can be rerun alone, `gh run rerun <run> --failed`: it reads the same artifact,
+and `publish` runs once every check is green. The browser legs' suspend-resume stall gate has
+stalled once in WebKit's `worker` leg and passed on rerun.
+
 `sdk/package.json` carries `0.0.0-development`; a version exists only in a release. To rebuild
 one: `git checkout v<version>`, then `npm version <version> --no-git-tag-version` in `sdk/` and the
 same build. Write upgrade notes (`sdk/README.md`, "Upgrading from ...") in the change that needs
