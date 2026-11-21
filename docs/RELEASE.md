@@ -67,8 +67,6 @@ them.
 - Only the `publish` job holds `id-token: write`, and it publishes only on `main`. Only the
   `record` job holds `contents: write`; it checks out and runs no repository code. Everything
   else reads.
-- `scripts/test-npm-publish-modes.py` (run by `qualification.yml`'s lint job) holds this layout
-  and the version, publish and provenance rules.
 
 ## The browser artifact toolchain
 
