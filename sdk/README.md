@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.10.5
+npm install @misofm/engine
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -897,9 +897,9 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 `MisoEngineAsset.load(bytes, expectedSha256)` is available for explicit byte verification.
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
-published archive to its source/workflow; the
-[0.10.5 release record](https://github.com/misofm/engine/issues/2434) contains the accepted artifact
-and archive identities. The manifest is an integrity reference, not an independent trust root.
+published archive to its source/workflow; each release's
+[GitHub Release](https://github.com/misofm/engine/releases) (`v<version>`) records the artifact and
+archive digests. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
 

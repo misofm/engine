@@ -136,30 +136,21 @@ When the user requests fewer CI/CD invocations, use this delivery mode until the
 - Create one local `codex/batch-*` feature branch per worktree (one per stream when parallel
   coordinators run) from the synchronized default branch; root merges them in sequence.  Keep
   frequent exact-path local checkpoint commits, but do not push each checkpoint.
-- Do not open or refresh a pull request while the batch is still accumulating.  A pull-request
-  update is a CI event even when ordinary feature-branch pushes are ignored.
+- Do not open or refresh a pull request while the batch is still accumulating.
 - At a coherent batch boundary, run the proportional local gates once, push the batch branch at
   most once if remote review is needed, then merge or fast-forward and push `main` once.  Do not
   manufacture empty commits or force-push merely to obtain another CI run.
 - GitHub issue evidence may be prepared locally during the batch, but do not claim remote
   synchronization or close an issue until its evidence commit is actually upstream.  Synchronize
   all completed issue bodies/states immediately after the single batch push.
-- `.github/workflows/qualification.yml` is the only required status check on `main` (design #359;
-  its `verdict` job's own `name:` is `qualification`).  It ignores ordinary feature-branch pushes,
-  runs for `main` pushes and pull requests targeting `main`, and cancels superseded pull-request
-  runs for the same ref (never a `main` push, so a superseded push cannot starve its own
-  `rust-cache` saves).  It carries no `paths:`/`paths-ignore:` filter on any trigger -- a required
-  workflow that a path filter can skip leaves that PR's required context pending forever -- so
-  every leaf job is instead gated by its own router's `route` output, and the verdict enforces
-  that every job's result matches a static expectation table.
-- A job that cannot fail a merge does not belong on `qualification.yml`.  `fuzz.yml` and
-  `nightly.yml` are the non-required workflows: `fuzz.yml` is a paths-filtered per-PR workflow for
-  the two bounded fuzz jobs, and `nightly.yml` carries the jobs that gate nothing at all (the
-  non-blocking vectorization report and the release-workspace link proof; #1039 retired the
-  descriptive benchmarks under owner ruling R9)
-  plus the deep fuzzing and math sweeps the per-PR budget cannot afford.  A check that stops
-  reporting on some pull requests must be removed from `main`'s required status checks first, or
-  every pull request that skips it stays permanently pending.
+- CI runs only when releasing (docs/RELEASE.md).  No workflow runs on a pull request, a push or a
+  schedule, and `main` requires no status check.  A release is one dispatch of `npm-publish.yml`
+  (`gh workflow run npm-publish.yml -f version=patch`, or `-f dry_run=true` on any branch); it
+  builds the shipped artifact once and runs only the checks that guard what ships.
+- `qualification.yml` (the full gate set), `nightly.yml` (deep suites) and `fuzz.yml` (fuzz smoke)
+  are manual: `gh workflow run <file> --ref <branch>`.  Run `qualification.yml` deliberately when a
+  change reaches beyond the release checks (AArch64, the C ABI, realtime audits, DSP suites, lint),
+  and cite its run as the change's evidence; local gates remain the default evidence.
 
 Keep feature issues small enough to ship.  A feature issue owns the minimum implementation and
 evidence needed to prove its product contract; generic harness hardening, artifact promotion,

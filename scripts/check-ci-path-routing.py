@@ -303,14 +303,13 @@ def check_self_test_inputs(root: pathlib.Path, tree: ast.Module) -> None:
 
 
 def check_qualification_no_path_filter(text: str) -> None:
-    """qualification.yml is the always-reporting required workflow (design #359 §4/§7): a
-    `paths:`/`paths-ignore:` filter on any of its triggers could leave a PR's required context
-    pending forever, so every leaf job is gated by the router's `if:` instead."""
+    """qualification.yml runs only by hand (docs/RELEASE.md): its one trigger is
+    `workflow_dispatch`, with no path filter, so a manual run always selects every leaf job the
+    router's `if:` admits. A pull_request, push or schedule trigger would put the full gate set
+    back on every change."""
     on_block = section(text, "on:", ("concurrency:",))
-    require("paths:" not in on_block and "paths-ignore:" not in on_block,
-            "qualification.yml: on: must carry no paths:/paths-ignore: filter on any trigger")
-    require("pull_request:" in on_block and "push:" in on_block and "workflow_dispatch:" in on_block,
-            "qualification.yml: must trigger on pull_request, push, and workflow_dispatch")
+    require(on_block.strip() == "workflow_dispatch:",
+            "qualification.yml: on: must be exactly workflow_dispatch (manual runs only)")
 
 
 def check_qualification_permissions(text: str) -> None:
@@ -754,10 +753,32 @@ def check_qualification_metadata_generated_once(text: str, names: list[str]) -> 
                         f"{ARTIFACT_DIRECTORY} and its named twin")
 
 
+# The release workflow's one reader that may pass the flag: its artifact-gates job, which checks
+# its download against the artifact job's closure digest before anything reads it.
+RELEASE_METADATA_SKIP = ("bash scripts/check-web-audioworklet.sh --without-metadata-regeneration "
+                         "target/release-artifacts "
+                         "target/release-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm")
+RELEASE_CLOSURE_CHECK = ('[[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]]')
+
+
+def check_release_metadata_skip(root: pathlib.Path) -> None:
+    """Issue #1044 in npm-publish.yml: the flag only in `artifact-gates`, only for its
+    closure-verified download, and only after that verification."""
+    text = (root / ".github/workflows/npm-publish.yml").read_text(encoding="utf-8")
+    require(text.count(METADATA_SKIP_FLAG) == 1,
+            f"npm-publish.yml: {METADATA_SKIP_FLAG} may appear once, in artifact-gates (#1044)")
+    block = job(text, "artifact-gates")
+    require(RELEASE_METADATA_SKIP in block and RELEASE_CLOSURE_CHECK in block
+            and block.index(RELEASE_CLOSURE_CHECK) < block.index(RELEASE_METADATA_SKIP),
+            f"npm-publish.yml: artifact-gates may pass {METADATA_SKIP_FLAG} only for its download, "
+            "after checking it against the artifact job's closure digest (#1044)")
+
+
 def check_metadata_skip_elsewhere(root: pathlib.Path) -> None:
     """Issue #1044: no other workflow may pass the flag; none of them verifies a closure digest."""
+    check_release_metadata_skip(root)
     for workflow in sorted((root / ".github/workflows").glob("*.y*ml")):
-        if workflow.name == "qualification.yml":
+        if workflow.name in ("qualification.yml", "npm-publish.yml"):
             continue
         require(METADATA_SKIP_FLAG not in workflow.read_text(encoding="utf-8"),
                 f"{workflow.name}: only qualification.yml's closure-verified artifact readers may "

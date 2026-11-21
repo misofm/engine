@@ -1,374 +1,567 @@
-name: Publish @misofm/engine
+name: Release @misofm/engine
+
+# One dispatch releases (docs/RELEASE.md): build the shipped AudioWorklet closure once, run the
+# checks that guard what ships against exactly those bytes, pack one tarball from them, publish
+# that tarball with npm provenance, verify the registry serves it, then record the release as the
+# GitHub Release `v<version>` on the source commit.
+#
+#   gh workflow run npm-publish.yml -f version=patch                 # or minor, major, X.Y.Z
+#   gh workflow run npm-publish.yml -f version=patch -f dry_run=true # everything but publishing
+#
+# The version is not committed: `sdk/package.json` carries 0.0.0-development and the package job
+# stamps the release version into the tree it packs. The tag names the source commit, so a
+# rebuild is `git checkout v<version>` plus the same stamp.
+#
+# Security: the npm trusted publisher (`npm trust`) is this file, `npm-publish.yml`, in
+# misofm/engine. Only the `publish` job holds `id-token: write`, and only on `main`; only `record`
+# holds `contents: write`, and it checks out and runs no repository code. No npm token is read.
 
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "qualify builds; publish sends its exact artifact once; verify only rechecks that artifact"
+      version:
+        description: "patch, minor, major, or an exact X.Y.Z above npm's latest"
         required: true
-        type: choice
-        options: [qualify, publish, verify]
-      expected_sha:
-        description: "Exact 40-character lowercase main commit SHA"
+        default: patch
+        type: string
+      dry_run:
+        description: "Run every check and `npm publish --dry-run`; publish nothing, tag nothing"
         required: true
-        type: string
-      qualification_run_id:
-        description: "Empty for qualify; successful qualifying npm-publish workflow run for this exact SHA (required for publish or verify)"
-        required: false
-        type: string
+        default: false
+        type: boolean
 
 permissions:
-  actions: read
   contents: read
-  id-token: write
-  pull-requests: read
 
 concurrency:
-  group: npm-publish-${{ inputs.mode == 'qualify' && github.ref || 'publish' }}
+  group: npm-publish-${{ inputs.dry_run && github.ref || 'publish' }}
   cancel-in-progress: false
 
 env:
-  PACKAGE_NAME: "@misofm/engine"
-  PACKAGE_VERSION: "0.10.5"
-  EXPECTED_WORKLET_SHA256: "234130dd00d9bfe1c20eaa2117ba6205d84dc07c6e3002b99095d29b894e2839"
-  EXPECTED_BLAKE3_SHA256: "ee373d2f549b0d33bdd0324a8833698158274f516e01a7b0c4018347991a18b1"
+  CARGO_TERM_COLOR: always
   RUSTUP_TOOLCHAIN: "1.99.1"
-  BROWSER_ARTIFACT_TOOLCHAIN: "nightly-2026-08-20"
+  PACKAGE_NAME: "@misofm/engine"
+  NPM_VERSION: "11.19.0"
   NPM_CONFIG_REGISTRY: "https://registry.npmjs.org"
 
 jobs:
-  release:
-    name: ${{ inputs.mode }} @misofm/engine 0.10.5
+  prepare:
+    name: resolve the release version
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Refuse non-main dispatches before checkout
+      - name: Refuse a real release from anywhere but main
         env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-          MODE: ${{ inputs.mode }}
-          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "release dispatches must use main" >&2; exit 1; }
-          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "expected_sha must be a full lowercase SHA" >&2; exit 1; }
-          [[ "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || { echo "workflow_dispatch SHA differs from expected_sha" >&2; exit 1; }
-          case "$MODE" in
-            qualify) [[ -z "$QUALIFICATION_RUN_ID" ]] || { echo "qualify forbids qualification_run_id" >&2; exit 1; } ;;
-            publish|verify) [[ "$QUALIFICATION_RUN_ID" =~ ^[0-9]+$ ]] || { echo "$MODE requires a digits-only qualification_run_id" >&2; exit 1; } ;;
-            *) echo "unknown release mode" >&2; exit 1 ;;
-          esac
+          if [[ "$DRY_RUN" != true && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "a release must be dispatched on main; use dry_run=true on $GITHUB_REF" >&2
+            exit 1
+          fi
+      - id: version
+        name: Resolve the version against the registry
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          npm view "$PACKAGE_NAME" versions --json > "$RUNNER_TEMP/versions.json"
+          latest=$(npm view "$PACKAGE_NAME" dist-tags.latest)
+          version=$(node - "$REQUESTED" "$latest" "$RUNNER_TEMP/versions.json" <<'NODE'
+          const fs = require("node:fs");
+          const [requested, latest, versionsPath] = process.argv.slice(2);
+          const SEMVER = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+          const parse = (text, what) => {
+            const match = SEMVER.exec(text);
+            if (!match) throw new Error(`${what} is not X.Y.Z: ${JSON.stringify(text)}`);
+            return match.slice(1).map(Number);
+          };
+          const [major, minor, patch] = parse(latest, "npm's latest");
+          const next = { patch: [major, minor, patch + 1], minor: [major, minor + 1, 0], major: [major + 1, 0, 0] }[requested]
+            ?? parse(requested, "the version input");
+          const order = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+          if (order(next, [major, minor, patch]) <= 0) throw new Error(`${next.join(".")} is not above npm's latest ${latest}`);
+          const version = next.join(".");
+          const published = JSON.parse(fs.readFileSync(versionsPath, "utf8"));
+          if ((Array.isArray(published) ? published : [published]).includes(version)) throw new Error(`${version} is already on npm`);
+          process.stdout.write(version);
+          NODE
+          )
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing \`$PACKAGE_NAME@$version\` from \`$GITHUB_SHA\` (npm latest: \`$latest\`)" >> "$GITHUB_STEP_SUMMARY"
 
+  # Built exactly once. Every job below downloads it and checks it against this job's digests, and
+  # the package job stages exactly these bytes into the tarball that is published.
+  artifact:
+    name: shipped AudioWorklet artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      sha256: ${{ steps.build.outputs.sha256 }}
+      blake3_sha256: ${{ steps.build.outputs.blake3_sha256 }}
+      named_sha256: ${{ steps.build.outputs.named_sha256 }}
+      closure_sha256: ${{ steps.build.outputs.closure_sha256 }}
+      toolchain: ${{ steps.build.outputs.toolchain }}
+    steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          ref: ${{ inputs.expected_sha }}
-          fetch-depth: 0
+          shared-key: artifact
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain and Wasm standard library
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
+          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+          rustup toolchain install "$channel" --profile minimal --component rust-src
+      - name: Build the exact shipped artifact and its named twin
+        id: build
+        run: |
+          set -euo pipefail
+          rm -rf target/release-artifacts target/release-named-twin
+          mkdir -p target/release-artifacts target/release-named-twin
+          bash scripts/build-web-audioworklet.sh --named-twin target/release-named-twin target/release-artifacts
+          sha256="$(sha256sum target/release-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          blake3_sha256="$(sha256sum target/release-artifacts/miso-engine-v1-blake3.simd128.wasm | awk '{print $1}')"
+          named_sha256="$(sha256sum target/release-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm | awk '{print $1}')"
+          closure="$(cd target/release-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
+          toolchain="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+          {
+            echo "sha256=$sha256"
+            echo "blake3_sha256=$blake3_sha256"
+            echo "named_sha256=$named_sha256"
+            echo "closure_sha256=$closure"
+            echo "toolchain=$toolchain"
+          } >> "$GITHUB_OUTPUT"
+          echo "AudioWorklet module \`$sha256\`, BLAKE3 module \`$blake3_sha256\`, built with \`$toolchain\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check the shipped modules name the browser artifact toolchain's compiler
+        env:
+          TOOLCHAIN: ${{ steps.build.outputs.toolchain }}
+        run: |
+          python3 -B scripts/check-wasm-producers.py --self-test
+          python3 -B scripts/check-wasm-producers.py target/release-artifacts/miso-engine-v1-audio-worklet.simd128.wasm --toolchain "$TOOLCHAIN"
+          python3 -B scripts/check-wasm-producers.py target/release-artifacts/miso-engine-v1-blake3.simd128.wasm --toolchain "$TOOLCHAIN"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: audioworklet
+          path: target/release-artifacts/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: audioworklet-named
+          path: target/release-named-twin/
+          if-no-files-found: error
 
+  # The Rust tests of the crate that is the shipped module (host-web, with its parity against the C
+  # ABI) and of the two contracts the SDK speaks (session JSON and the control protocol). Output
+  # changes in every other crate reach the native-parity and expected-resource digests the artifact
+  # gates and browser legs check; the whole workspace suite is qualification.yml, run by hand.
+  core-tests:
+    name: host-web, session and protocol tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: core-tests
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: host-web, session and protocol tests
+        run: cargo test --locked -p host-web -p session -p protocol --features host-web/test-support,protocol/test-support,session/test-support
+
+  package:
+    name: SDK package and generated surface
+    needs: [prepare, artifact]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: sdk
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: sdk/package-lock.json
-
-      - name: Assert the worklet sha256 pin matches its source-of-truth file
+      - name: Pin npm
         run: |
-          set -euo pipefail
-          pin_file=hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
-          [[ -f "$pin_file" ]] || { echo "missing $pin_file" >&2; exit 1; }
-          pinned=$(<"$pin_file")
-          [[ "$pinned" == "$EXPECTED_WORKLET_SHA256" ]] || {
-            echo "EXPECTED_WORKLET_SHA256 ($EXPECTED_WORKLET_SHA256) has drifted from $pin_file ($pinned)" >&2
-            exit 1
-          }
-
-          blake3_pin_file=hosts/host-web/web/miso-engine-v1-blake3-artifact.sha256
-          [[ -f "$blake3_pin_file" ]] || { echo "missing $blake3_pin_file" >&2; exit 1; }
-          [[ "$(<"$blake3_pin_file")" == "$EXPECTED_BLAKE3_SHA256" ]] || { echo "EXPECTED_BLAKE3_SHA256 differs from $blake3_pin_file" >&2; exit 1; }
-
-      - name: Guard release identity, accepted ancestry, and rejected commits
-        env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-          MODE: ${{ inputs.mode }}
-          GH_TOKEN: ${{ github.token }}
+          npm install --global "npm@$NPM_VERSION"
+          [[ "$(npm --version)" == "$NPM_VERSION" ]]
+      - name: Install pinned Rust toolchain and Wasm standard library
         run: |
-          set -euo pipefail
-          [[ "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || { echo "workflow_dispatch SHA differs from expected_sha" >&2; exit 1; }
-          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]] || { echo "checked-out HEAD differs from expected_sha" >&2; exit 1; }
-          git merge-base --is-ancestor "$EXPECTED_SHA" origin/main || { echo "expected_sha is not in origin/main" >&2; exit 1; }
-          [[ "$(node -p "require('./sdk/package.json').name")" == "$PACKAGE_NAME" ]]
-          [[ "$(node -p "require('./sdk/package.json').version")" == "$PACKAGE_VERSION" ]]
-          [[ "$(node -p "require('./sdk/package-lock.json').name")" == "$PACKAGE_NAME" ]]
-          [[ "$(node -p "require('./sdk/package-lock.json').version")" == "$PACKAGE_VERSION" ]]
-          accepted=$(gh api "repos/$GITHUB_REPOSITORY/pulls/353" --jq 'select(.merged_at != null) | .merge_commit_sha')
-          [[ "$accepted" =~ ^[0-9a-f]{40}$ ]] || { echo "PR #353 is not merged" >&2; exit 1; }
-          git fetch --no-tags origin "$accepted"
-          git merge-base --is-ancestor "$accepted" HEAD || { echo "PR #353 merge commit is not an ancestor" >&2; exit 1; }
-          for rejected in 3ab49a3d bf1a6672 6a08315c; do
-            if git cat-file -e "$rejected^{commit}" 2>/dev/null && git merge-base --is-ancestor "$rejected" HEAD; then
-              echo "rejected #352 commit is in release ancestry: $rejected" >&2
-              exit 1
-            fi
-          done
-
-      - name: Require a successful qualification dispatch before publication or recovery
-        if: inputs.mode != 'qualify'
-        env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          [[ "$QUALIFICATION_RUN_ID" =~ ^[0-9]+$ ]] || { echo "publish and verify require qualification_run_id" >&2; exit 1; }
-          qualification_run=$(mktemp)
-          qualification_jobs=$(mktemp)
-          qualification_artifacts=$(mktemp)
-          trap 'rm -f -- "$qualification_run" "$qualification_jobs" "$qualification_artifacts"' EXIT
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID" > "$qualification_run"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" > "$qualification_jobs"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" > "$qualification_artifacts"
-          node - "$qualification_run" "$qualification_jobs" "$qualification_artifacts" <<'NODE'
-          const fs = require("node:fs");
-          const run = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-          const jobs = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
-          const artifacts = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
-          const expectedArtifact = `engine-sdk-qualify-${process.env.EXPECTED_SHA}`;
-          const qualificationJobs = Array.isArray(jobs.jobs) ? jobs.jobs.filter((job) => job.name === "qualify @misofm/engine 0.10.5" && job.conclusion === "success") : [];
-          const namedArtifacts = Array.isArray(artifacts.artifacts) ? artifacts.artifacts.filter((artifact) => artifact.name === expectedArtifact && artifact.expired === false) : [];
-          if (run.conclusion !== "success" || run.event !== "workflow_dispatch" || run.head_sha !== process.env.EXPECTED_SHA || run.name !== "Publish @misofm/engine" || run.path !== ".github/workflows/npm-publish.yml" || qualificationJobs.length !== 1 || namedArtifacts.length !== 1) {
-            throw new Error("qualification run is not a successful manual npm-publish run for expected_sha");
-          }
-          NODE
-
-      - name: Pin npm 11.19.0 for packing, trusted-publisher checks, and provenance verification
-        run: |
-          set -euo pipefail
-          npm install --global npm@11.19.0
-          [[ "$(npm --version)" == "11.19.0" ]]
-          node --version
-
-      - name: Install the browser artifact toolchain and Rust 1.99.1
-        if: inputs.mode == 'qualify'
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown
-          rustup run "$RUSTUP_TOOLCHAIN" rustc --version
-          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
-          [[ "$channel" == "$BROWSER_ARTIFACT_TOOLCHAIN" ]] || { echo "rust-toolchain.toml's browser artifact channel $channel is not BROWSER_ARTIFACT_TOOLCHAIN $BROWSER_ARTIFACT_TOOLCHAIN" >&2; exit 1; }
-          rustup toolchain install "$channel" --profile minimal --component rust-src
-          rustup run "$channel" rustc --version
-
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
       - name: Install locked SDK dependencies
         working-directory: sdk
-        run: npm ci --ignore-scripts
-
-      - name: Build the shipped Engine AudioWorklet closure once and prove its Linux pin
-        if: inputs.mode == 'qualify'
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet
+          path: target/release-artifacts
+      - name: Verify the download against the artifact job's digests
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}
         run: |
           set -euo pipefail
-          worklet=target/npm-publish/worklet-artifacts
-          mkdir -p "$worklet"
-          bash scripts/build-web-audioworklet.sh "$worklet"
-          [[ "$(sha256sum "$worklet/miso-engine-v1-audio-worklet.simd128.wasm" | awk '{print $1}')" == "$EXPECTED_WORKLET_SHA256" ]]
-
-          [[ "$(sha256sum "$worklet/miso-engine-v1-blake3.simd128.wasm" | awk '{print $1}')" == "$EXPECTED_BLAKE3_SHA256" ]]
-
-      - name: Run generated, deletion, type, headless, and package preparation gates
-        if: inputs.mode == 'qualify'
+          actual="$(sha256sum target/release-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "artifact sha256 mismatch: built $BUILT, got $actual" >&2; exit 1; }
+          closure="$(cd target/release-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
+          [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "artifact closure mismatch: built $CLOSURE, got $closure" >&2; exit 1; }
+      # The output-contract test runs the real builder with only cargo mocked; the builder asks the
+      # browser artifact toolchain for its sysroot.
+      - name: Install the browser artifact toolchain
+        run: |
+          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+          rustup toolchain install "$channel" --profile minimal --component rust-src
+      - name: Stamp the release version
+        working-directory: sdk
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          worklet=target/npm-publish/worklet-artifacts
-          node scripts/test-parse-npm-trust-list.mjs
+          npm version "$VERSION" --no-git-tag-version --ignore-scripts
+          [[ "$(node -p "require('./package.json').version")" == "$VERSION" ]]
+          [[ "$(node -p "require('./package-lock.json').version")" == "$VERSION" ]]
+      - name: Generated surface, types, headless evals, and package build
+        run: |
+          set -euo pipefail
           bash scripts/test-sdk-artifact-builder-output-contract.sh
-          bash scripts/check-sdk-generated.sh
+          bash scripts/check-sdk-generated.sh target/release-artifacts
           python3 -B scripts/check-sdk-deletions.py
           bash scripts/check-sdk-types.sh
-          bash scripts/check-sdk-headless.sh "$worklet"
-          bash scripts/sdk-package.sh build "$worklet"
-
-      - name: Pack exactly one archive, smoke it, and record immutable local evidence
-        if: inputs.mode == 'qualify'
+          bash scripts/check-sdk-headless.sh target/release-artifacts
+          bash scripts/sdk-package.sh build target/release-artifacts
+      - name: Check the source-only SDK assets are current
+        run: cargo test --locked -p parameter-metadata --test response_frame --test session_keys
+      - id: pack
+        name: Pack exactly one tarball, check it carries the built modules, smoke it, dry-run publish it
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          BLAKE3: ${{ needs.artifact.outputs.blake3_sha256 }}
         run: |
           set -euo pipefail
-          evidence=target/npm-publish/evidence
-          pack_dir=target/npm-publish/pack
-          mkdir -p "$evidence" "$pack_dir"
-          npm --version > "$evidence/npm-version.txt"
-          [[ "$(<"$evidence/npm-version.txt")" == "11.19.0" ]]
-          (cd sdk && npm pack --ignore-scripts --json --pack-destination "../$pack_dir" > "../$evidence/npm-pack.json")
+          pack=target/release-pack
+          rm -rf "$pack" && mkdir -p "$pack/unpacked"
+          (cd sdk && npm pack --ignore-scripts --json --pack-destination "../$pack" > "../$pack/npm-pack.json")
           shopt -s nullglob
-          archives=("$pack_dir"/*.tgz)
-          [[ ${#archives[@]} == 1 && -f ${archives[0]} ]] || { echo "expected exactly one packed archive" >&2; exit 1; }
-          archive=${archives[0]}
-          tar -tzf "$archive" > "$evidence/tarball-files.txt"
-          unpack=target/npm-publish/unpacked
-          mkdir -p "$unpack"
-          tar -xzf "$archive" -C "$unpack"
-          node sdk/test/package-tarball-smoke.mjs "$unpack/package"
+          archives=("$pack"/*.tgz)
+          [[ ${#archives[@]} == 1 ]] || { echo "expected exactly one packed archive" >&2; exit 1; }
+          archive=./${archives[0]}
+          tar -xzf "$archive" -C "$pack/unpacked"
+          [[ "$(node -p "require('./$pack/unpacked/package/package.json').version")" == "$VERSION" ]]
+          [[ "$(sha256sum "$pack/unpacked/package/dist/assets/miso-engine-v1-audio-worklet.simd128.wasm" | awk '{print $1}')" == "$BUILT" ]]
+          [[ "$(sha256sum "$pack/unpacked/package/dist/assets/miso-engine-v1-blake3.simd128.wasm" | awk '{print $1}')" == "$BLAKE3" ]]
+          node sdk/test/package-tarball-smoke.mjs "$pack/unpacked/package"
           npm publish --dry-run --ignore-scripts "$archive"
-          sha256sum "$archive" > "$evidence/tarball.sha256"
-          node - "$evidence/npm-pack.json" "$archive" "$evidence/tarball-evidence.json" <<'NODE'
-          const fs = require("node:fs");
-          const crypto = require("node:crypto");
-          const [packJson, archive, output] = process.argv.slice(2);
-          const entries = JSON.parse(fs.readFileSync(packJson, "utf8"));
-          if (!Array.isArray(entries) || entries.length !== 1) throw new Error("npm pack did not report exactly one archive");
-          const item = entries[0];
-          if (item.name !== "@misofm/engine" || item.version !== "0.10.5") throw new Error("packed package identity differs");
-          if (typeof item.integrity !== "string" || !item.integrity.startsWith("sha512-")) throw new Error("npm did not report SHA-512 integrity");
-          const bytes = fs.readFileSync(archive);
-          const sha1 = crypto.createHash("sha1").update(bytes).digest("hex");
-          if (sha1 !== item.shasum) throw new Error("npm shasum does not match archive bytes");
-          fs.writeFileSync(output, JSON.stringify({ package: item.name, version: item.version, archive: archive.split("/").pop(), files: item.files.length, shasum: item.shasum, integrity: item.integrity, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), sha512: crypto.createHash("sha512").update(bytes).digest("hex") }, null, 2) + "\n");
-          NODE
-          cp "$archive" "$evidence/"
-
-      - name: Download the exact prior-qualified archive and evidence
-        if: inputs.mode != 'qualify'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+          echo "tarball=$(basename "$archive")" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$archive" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: engine-sdk-qualify-${{ inputs.expected_sha }}
-          path: target/npm-publish/evidence
-          run-id: ${{ inputs.qualification_run_id }}
-          github-token: ${{ github.token }}
+          name: npm-tarball
+          path: target/release-pack/${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
 
-      - name: Re-smoke and checksum the exact prior-qualified archive
-        if: inputs.mode != 'qualify'
+  artifact-gates:
+    name: AudioWorklet artifact gates and native parity
+    needs: artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: artifact-gates
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain and wabt
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
+          sudo apt-get update
+          sudo apt-get install -y ripgrep wabt
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet
+          path: target/release-artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet-named
+          path: target/release-named-twin
+      - name: Verify the downloads against the artifact job's digests and the twin against the module
         env:
-          MODE: ${{ inputs.mode }}
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}
+          NAMED: ${{ needs.artifact.outputs.named_sha256 }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          archives=(target/npm-publish/evidence/*.tgz)
-          [[ ${#archives[@]} == 1 && -f ${archives[0]} ]] || { echo "qualification artifact must contain exactly one archive" >&2; exit 1; }
-          archive=${archives[0]}
-          unpack=target/npm-publish/publish-unpacked
-          mkdir -p "$unpack"
-          tar -xzf "$archive" -C "$unpack"
-          node sdk/test/package-tarball-smoke.mjs "$unpack/package"
-          if [[ "$MODE" == publish ]]; then
-            npm publish --dry-run --ignore-scripts "$archive"
-          fi
-          node - target/npm-publish/evidence/tarball-evidence.json "$archive" <<'NODE'
+          actual="$(sha256sum target/release-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "artifact sha256 mismatch: built $BUILT, got $actual" >&2; exit 1; }
+          closure="$(cd target/release-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
+          [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "artifact closure mismatch: built $CLOSURE, got $closure" >&2; exit 1; }
+          named="$(sha256sum target/release-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm | awk '{print $1}')"
+          [[ "$NAMED" =~ ^[0-9a-f]{64}$ && "$named" == "$NAMED" ]] || { echo "named twin sha256 mismatch: built $NAMED, got $named" >&2; exit 1; }
+          python3 -B scripts/strip-wasm-names.py check target/release-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm target/release-artifacts/miso-engine-v1-audio-worklet.simd128.wasm
+      - name: Install the browser artifact toolchain
+        run: |
+          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+          rustup toolchain install "$channel" --profile minimal --component rust-src
+      # The frozen export set and single shared-memory import, no relaxed SIMD, the render export's
+      # allocation-free and trap-free closure, the vector-kernel ratchet, and native<->simd128
+      # digest parity over the expected-resource corpus.
+      - name: Browser AudioWorklet artifact gates and native parity
+        run: |
+          bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/release-artifacts target/release-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm
+          python3 -B scripts/check-browser-expected-resources.py --artifacts target/release-artifacts
+      - name: Shipped module contains no whole-plan scalar path
+        run: python3 -B scripts/check-scalar-oracle-absent.py --wasm target/release-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm
+      - name: Hermetic browser host and worklet tests
+        run: bash scripts/test-web-audioworklet.sh
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.2
+      - name: V8 spill gate over the shipped module's EQ cascade loops
+        run: python3 -B scripts/check-web-audioworklet-v8-spill.py target/release-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm
+
+  # `single` is a page without cross-origin isolation (and also runs the BLAKE3 Worker and the
+  # suspended PCM feed rows); `worker` is an isolated page with a control Worker beside the
+  # render-only worklet. Each renders the shipped module in a real AudioContext.
+  browser:
+    name: ${{ matrix.browser }} ${{ matrix.leg }} browser gates
+    needs: artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, webkit]
+        leg: [single, worker]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hosts/host-web/qualification/package-lock.json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet
+          path: target/release-artifacts
+      - name: Verify the download against the artifact job's digests
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}
+        run: |
+          set -euo pipefail
+          actual="$(sha256sum target/release-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "artifact sha256 mismatch: built $BUILT, got $actual" >&2; exit 1; }
+          closure="$(cd target/release-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
+          [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "artifact closure mismatch: built $CLOSURE, got $closure" >&2; exit 1; }
+      - name: Install SDK dependencies for the response Worker bundle
+        working-directory: sdk
+        run: npm ci --no-audit --no-fund --prefer-offline
+      - name: Cache Playwright browser binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('hosts/host-web/qualification/package-lock.json') }}-${{ matrix.browser }}-${{ runner.os }}
+      - name: Install pinned browser
+        working-directory: hosts/host-web/qualification
+        run: |
+          npm ci
+          npx playwright install "${{ matrix.browser }}"
+          # Prefer the runner's official archives; Azure downloads hit the job budget (#1161).
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          npx playwright install-deps "${{ matrix.browser }}"
+          sudo apt-get install -y --no-install-recommends pulseaudio pulseaudio-utils
+      - name: ${{ matrix.browser }} ${{ matrix.leg }} attestation, AudioWorklet, native digest, and stall gates
+        working-directory: hosts/host-web/qualification
+        run: |
+          # A real AudioContext needs an output device even on a headless runner: a private null
+          # PulseAudio sink, on a short socket path (a UNIX socket path stays under 108 bytes).
+          qualification_audio_dir="$(mktemp -d "$RUNNER_TEMP/qualification-audio.XXXXXX")"
+          export PULSE_SERVER="unix:$qualification_audio_dir/native"
+          DBUS_SESSION_BUS_ADDRESS="unix:path=$qualification_audio_dir/no-session-bus" \
+          pulseaudio --daemonize=no --exit-idle-time=-1 --use-pid-file=no --disable-shm=yes -n \
+            --load="module-native-protocol-unix socket=$qualification_audio_dir/native auth-anonymous=1" \
+            --load="module-null-sink sink_name=qualification rate=48000 channels=2" \
+            --log-target="file:$qualification_audio_dir/pulse.log" &
+          qualification_audio_pid=$!
+          trap 'kill "$qualification_audio_pid" 2>/dev/null || true; wait "$qualification_audio_pid" 2>/dev/null || true; cat "$qualification_audio_dir/pulse.log"' EXIT
+          for attempt in {1..50}; do
+            [[ -S "$qualification_audio_dir/native" ]] && break
+            sleep 0.1
+          done
+          [[ -S "$qualification_audio_dir/native" ]]
+          pactl -s "$PULSE_SERVER" info
+          npm run qualify -- --artifacts "$GITHUB_WORKSPACE/target/release-artifacts" --sdk-root "$GITHUB_WORKSPACE/sdk" --browser "${{ matrix.browser }}" --leg "${{ matrix.leg }}" --check-matrix --self-test-mutations
+
+  publish:
+    name: ${{ inputs.dry_run && 'dry-run publish' || 'publish' }} @misofm/engine ${{ needs.prepare.outputs.version }}
+    needs: [prepare, artifact, core-tests, package, artifact-gates, browser]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      integrity: ${{ steps.publish.outputs.integrity }}
+      shasum: ${{ steps.publish.outputs.shasum }}
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Pin npm (trusted publishing needs npm 11.5 or later)
+        run: |
+          npm install --global "npm@$NPM_VERSION"
+          [[ "$(npm --version)" == "$NPM_VERSION" ]]
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-tarball
+          path: release
+      - id: publish
+        name: ${{ inputs.dry_run && 'Dry-run publish the tested tarball' || 'Publish the tested tarball through OIDC with provenance' }}
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          TARBALL: ${{ needs.package.outputs.tarball }}
+          TARBALL_SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          # A leading ./ keeps npm from reading `release/<file>` as a GitHub `user/repo` spec.
+          archive="./release/$TARBALL"
+          [[ "$(sha256sum "$archive" | awk '{print $1}')" == "$TARBALL_SHA256" ]] || { echo "tarball differs from the one the package job tested" >&2; exit 1; }
+          node - "$archive" >> "$GITHUB_OUTPUT" <<'NODE'
           const fs = require("node:fs");
           const crypto = require("node:crypto");
-          const expected = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-          const bytes = fs.readFileSync(process.argv[3]);
-          const actual = {
-            shasum: crypto.createHash("sha1").update(bytes).digest("hex"),
-            sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
-            integrity: `sha512-${crypto.createHash("sha512").update(bytes).digest("base64")}`,
-          };
-          for (const key of Object.keys(actual)) if (actual[key] !== expected[key]) throw new Error(`qualified archive ${key} mismatch`);
+          const bytes = fs.readFileSync(process.argv[2]);
+          console.log(`shasum=${crypto.createHash("sha1").update(bytes).digest("hex")}`);
+          console.log(`integrity=sha512-${crypto.createHash("sha512").update(bytes).digest("base64")}`);
           NODE
-
-      - name: Refuse an existing npm version before publish
-        if: inputs.mode == 'publish'
-        run: |
-          set -euo pipefail
-          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version --json > target/npm-publish/evidence/registry-before.json 2> target/npm-publish/evidence/registry-before.err; then
-            echo "$PACKAGE_NAME@$PACKAGE_VERSION already exists; npm versions are immutable" >&2
-            exit 1
+          if [[ "$DRY_RUN" == true ]]; then
+            npm publish --dry-run --ignore-scripts --access public --tag latest "$archive"
+            echo "Dry run: \`$PACKAGE_NAME@$VERSION\` passed every check; nothing was published." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
-          grep -Eq '(E404|404 Not Found)' target/npm-publish/evidence/registry-before.err || { cat target/npm-publish/evidence/registry-before.err >&2; echo "npm absence check was ambiguous" >&2; exit 1; }
-
-      - name: Publish the already-smoked archive through OIDC, or verify an ambiguous outcome without retrying
-        if: inputs.mode == 'publish'
-        run: |
-          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "refusing to publish from $GITHUB_REF" >&2; exit 1; }
           for fallback in NODE_AUTH_TOKEN NPM_TOKEN NPM_CONFIG__AUTH_TOKEN; do
-            [[ -z "${!fallback:-}" ]] || { echo "refusing populated npm token fallback: $fallback" >&2; exit 1; }
+            [[ -z "${!fallback:-}" ]] || { echo "refusing a populated npm token fallback: $fallback" >&2; exit 1; }
           done
-          oidc_userconfig="$RUNNER_TEMP/npmrc-oidc-only"
-          : > "$oidc_userconfig"
-          export NPM_CONFIG_USERCONFIG="$oidc_userconfig"
-          archive=$(find target/npm-publish/evidence -maxdepth 1 -type f -name '*.tgz' -print -quit)
-          [[ -n "$archive" ]] || { echo "smoked tarball is missing" >&2; exit 1; }
-          published=0
-          if npm publish "$archive" --provenance --access public --tag latest --ignore-scripts; then published=1; else echo "npm publish returned non-zero; proceeding to registry verification; no retry will occur" >&2; fi
-
-      - name: Verify registry version, integrity, public access, and latest converge together
-        if: inputs.mode != 'qualify'
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc-oidc-only"
+          : > "$NPM_CONFIG_USERCONFIG"
+          # npm versions are immutable: a non-zero exit is checked against the registry below, never retried.
+          npm publish "$archive" --provenance --access public --tag latest --ignore-scripts \
+            || echo "npm publish exited non-zero; verifying the registry instead of retrying" >&2
+      - name: Verify the registry serves the tested tarball as latest, public
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHASUM: ${{ steps.publish.outputs.shasum }}
+          INTEGRITY: ${{ steps.publish.outputs.integrity }}
         run: |
           set -euo pipefail
-          evidence=target/npm-publish/evidence
-          converged=0
-          # #2212: the registry served recent versions 97-311 s after the publish step returned; poll about 15 minutes.
-          attempts=60
-          interval_seconds=15
-          for attempt in $(seq 1 "$attempts"); do
-            if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" --json > "$evidence/registry-version.json" 2> "$evidence/registry-version.err" \
-              && npm access get status "$PACKAGE_NAME" --json > "$evidence/registry-access.json" 2> "$evidence/registry-access.err" \
-              && npm view "$PACKAGE_NAME" dist-tags.latest --json > "$evidence/registry-latest.json" 2> "$evidence/registry-latest.err" \
-              && node - "$evidence/tarball-evidence.json" "$evidence/registry-version.json" "$evidence/registry-access.json" "$evidence/registry-latest.json" <<'NODE'
-          const fs = require("node:fs");
-          const [localPath, versionPath, accessPath, latestPath] = process.argv.slice(2);
-          const local = JSON.parse(fs.readFileSync(localPath, "utf8"));
-          const registry = JSON.parse(fs.readFileSync(versionPath, "utf8"));
-          const accessReply = JSON.parse(fs.readFileSync(accessPath, "utf8"));
-          const latest = JSON.parse(fs.readFileSync(latestPath, "utf8"));
-          const access = typeof accessReply === "string" ? accessReply : accessReply?.[local.package] ?? accessReply?.status;
-          if (registry.version !== local.version || registry.dist?.shasum !== local.shasum || registry.dist?.integrity !== local.integrity || access !== "public" || latest !== local.version) {
-            throw new Error("registry did not yet match the exact qualified archive, public access, and latest tag");
-          }
-          NODE
-            then
-              converged=1
-              break
+          # #2212: the registry served recent versions 97-311 s after publish returned; poll about 15 minutes.
+          for attempt in $(seq 1 60); do
+            if [[ "$(npm view "$PACKAGE_NAME@$VERSION" dist.shasum 2>/dev/null)" == "$SHASUM" \
+              && "$(npm view "$PACKAGE_NAME@$VERSION" dist.integrity 2>/dev/null)" == "$INTEGRITY" \
+              && "$(npm view "$PACKAGE_NAME" dist-tags.latest 2>/dev/null)" == "$VERSION" \
+              && "$(npm access get status "$PACKAGE_NAME" --json 2>/dev/null | node -e 'const r=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(typeof r==="string"?r:(r[process.argv[1]]??r.status??""))' "$PACKAGE_NAME")" == public ]]; then
+              echo "registry serves $PACKAGE_NAME@$VERSION (attempt $attempt)"
+              exit 0
             fi
-            [[ "$attempt" == "$attempts" ]] && break
-            sleep "$interval_seconds"
+            sleep 15
           done
-          [[ "$converged" == 1 ]] || {
-            for file in "$evidence"/registry-*.err; do [[ -f "$file" ]] && cat "$file" >&2; done
-            echo "registry verification did not converge; rerun only in verify mode after propagation, never publish again" >&2
-            exit 1
-          }
-
-      - name: Fresh registry install imports all public entries and runs enginectl
-        if: inputs.mode != 'qualify'
+          echo "the registry did not converge on the tested tarball; recheck by hand, never publish again" >&2
+          exit 1
+      - name: Fresh install imports every entry, runs enginectl, and verifies provenance binds this commit
+        if: ${{ !inputs.dry_run }}
         env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           consumer=$(mktemp -d)
-          trap 'rm -rf -- "$consumer"' EXIT
           cd "$consumer"
-          npm install --ignore-scripts --package-lock-only "$PACKAGE_NAME@$PACKAGE_VERSION"
-          npm install --ignore-scripts "$PACKAGE_NAME@$PACKAGE_VERSION"
+          npm install --ignore-scripts "$PACKAGE_NAME@$VERSION"
           node --input-type=module -e 'await import("@misofm/engine"); await import("@misofm/engine/headless"); await import("@misofm/engine/browser"); await import("@misofm/engine/assets")'
-          ./node_modules/.bin/enginectl --version
-          npm audit signatures --json --include-attestations > "$GITHUB_WORKSPACE/target/npm-publish/evidence/npm-audit-signatures.json"
-          node - "$GITHUB_WORKSPACE/target/npm-publish/evidence/tarball-evidence.json" "$GITHUB_WORKSPACE/target/npm-publish/evidence/npm-audit-signatures.json" <<'NODE'
+          [[ "$(./node_modules/.bin/enginectl --version)" == "$VERSION" ]]
+          # The attestation endpoint can answer 404 for minutes after the version is served (0.10.5).
+          for attempt in $(seq 1 40); do
+            npm audit signatures --json --include-attestations > audit.json 2> audit.err && break
+            [[ "$attempt" == 40 ]] && { cat audit.err >&2; exit 1; }
+            sleep 15
+          done
+          node - audit.json <<'NODE'
           const fs = require("node:fs");
-          const local = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-          const report = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
-          const expectedSha = process.env.EXPECTED_SHA;
-          if (!/^[0-9a-f]{40}$/.test(expectedSha ?? "")) throw new Error("expected release SHA was not exported to provenance verification");
-          const target = (entry) => entry && entry.name === local.package && entry.version === local.version;
-          const verified = Array.isArray(report.verified) ? report.verified.filter(target) : [];
-          const rejected = ["invalid", "missing", "unverified"].flatMap((key) => Array.isArray(report[key]) ? report[key].filter(target) : []);
-          if (verified.length !== 1 || rejected.length !== 0) throw new Error("npm did not report exactly one cryptographically verified target package");
-          const bundles = Array.isArray(verified[0].attestationBundles)
-            ? verified[0].attestationBundles.filter((bundle) => bundle?.predicateType === "https://slsa.dev/provenance/v1") : [];
-          if (bundles.length !== 1) throw new Error("expected exactly one verified SLSA v1 attestation bundle");
-          const envelope = bundles[0].bundle?.dsseEnvelope;
-          if (envelope?.payloadType !== "application/vnd.in-toto+json" || typeof envelope.payload !== "string") throw new Error("verified SLSA bundle lacks the required DSSE payload");
-          let statement;
-          try { statement = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8")); } catch { throw new Error("verified attestation DSSE payload is not valid base64 JSON"); }
-          if (statement?._type !== "https://in-toto.io/Statement/v1" || statement?.predicateType !== "https://slsa.dev/provenance/v1") throw new Error("DSSE statement is not SLSA provenance v1");
-          const subjects = Array.isArray(statement.subject) ? statement.subject.filter((subject) => subject?.name === "pkg:npm/%40misofm/engine@0.10.5" && subject?.digest?.sha512 === local.sha512) : [];
-          if (subjects.length !== 1) throw new Error("DSSE statement does not uniquely bind the package PURL and tarball SHA-512");
+          const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          const { PACKAGE_NAME: name, VERSION: version, GITHUB_SHA: sha, GITHUB_REPOSITORY: repository } = process.env;
+          const target = (entry) => entry && entry.name === name && entry.version === version;
+          const verified = (report.verified ?? []).filter(target);
+          const rejected = ["invalid", "missing", "unverified"].flatMap((key) => (report[key] ?? []).filter(target));
+          if (verified.length !== 1 || rejected.length !== 0) throw new Error("npm did not verify exactly one signature for the package");
+          const bundles = (verified[0].attestationBundles ?? []).filter((bundle) => bundle?.predicateType === "https://slsa.dev/provenance/v1");
+          if (bundles.length !== 1) throw new Error("expected exactly one verified SLSA v1 provenance bundle");
+          const statement = JSON.parse(Buffer.from(bundles[0].bundle.dsseEnvelope.payload, "base64").toString("utf8"));
           const workflow = statement?.predicate?.buildDefinition?.externalParameters?.workflow;
-          if (workflow?.repository !== "https://github.com/misofm/engine" || workflow?.path !== ".github/workflows/npm-publish.yml" || workflow?.ref !== "refs/heads/main") throw new Error("DSSE workflow identity differs from the trusted publisher");
-          const dependencies = Array.isArray(statement?.predicate?.buildDefinition?.resolvedDependencies)
-            ? statement.predicate.buildDefinition.resolvedDependencies.filter((dependency) => dependency?.digest?.gitCommit === expectedSha) : [];
-          if (dependencies.length !== 1) throw new Error("DSSE resolved dependencies do not uniquely bind expected_sha");
+          if (workflow?.repository !== `https://github.com/${repository}` || workflow?.path !== ".github/workflows/npm-publish.yml" || workflow?.ref !== "refs/heads/main") throw new Error("provenance names another workflow");
+          const commits = (statement?.predicate?.buildDefinition?.resolvedDependencies ?? []).filter((dependency) => dependency?.digest?.gitCommit === sha);
+          if (commits.length !== 1) throw new Error("provenance does not bind this run's commit");
           NODE
 
-      - name: Upload exact tarball and qualification evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+  # Writes only the tag and the GitHub Release; checks out nothing, runs no repository code.
+  record:
+    name: record v${{ needs.prepare.outputs.version }} as a GitHub Release
+    needs: [prepare, artifact, package, publish]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: engine-sdk-${{ inputs.mode }}-${{ inputs.expected_sha }}
-          path: target/npm-publish/evidence/
-          if-no-files-found: warn
-          retention-days: 30
+          name: npm-tarball
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet-named
+          path: release
+      - name: Create the tag and the release with the shipped digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          WORKLET: ${{ needs.artifact.outputs.sha256 }}
+          BLAKE3: ${{ needs.artifact.outputs.blake3_sha256 }}
+          NAMED: ${{ needs.artifact.outputs.named_sha256 }}
+          TOOLCHAIN: ${{ needs.artifact.outputs.toolchain }}
+          TARBALL_SHA256: ${{ needs.package.outputs.sha256 }}
+          INTEGRITY: ${{ needs.publish.outputs.integrity }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$WORKLET" =~ ^[0-9a-f]{64}$ && "$BLAKE3" =~ ^[0-9a-f]{64}$ ]]
+          cat > notes.md <<EOF
+          \`npm install $PACKAGE_NAME@$VERSION\` ([npm](https://www.npmjs.com/package/$PACKAGE_NAME/v/$VERSION), [run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID))
+
+          | | sha256 |
+          | --- | --- |
+          | \`miso-engine-v1-audio-worklet.simd128.wasm\` | \`$WORKLET\` |
+          | \`miso-engine-v1-blake3.simd128.wasm\` | \`$BLAKE3\` |
+          | named twin (attached, not shipped) | \`$NAMED\` |
+          | npm tarball | \`$TARBALL_SHA256\` |
+
+          Built from \`$GITHUB_SHA\` with \`$TOOLCHAIN\`. npm integrity \`$INTEGRITY\`.
+          EOF
+          start=()
+          previous=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[] | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | .tag_name][0] // empty')
+          [[ -z "$previous" ]] || start=(--generate-notes --notes-start-tag "$previous")
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$PACKAGE_NAME $VERSION" --notes-file notes.md "${start[@]}" --latest \
+            release/*.tgz release/miso-engine-v1-audio-worklet.simd128.named.wasm

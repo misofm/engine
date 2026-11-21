@@ -1,25 +1,15 @@
 name: qualification
 
-# Design #359 WP-4: one PR workflow, one required status context (the `verdict` job, whose own
-# `name:` is `qualification`), eighteen leaf jobs behind one router, one aggregate (#1017 added the
-# two AArch64 jobs, #1061 `artifact-identity` and `artifact-record`, #1043 `gate-self-tests`).
-# Stage 3 (§12) retired the four workflows this one replaced -- ci.yml, sdk.yml,
-# browser-qualification.yml and release-build.yml -- once this workflow had reported on >= 10 PRs
-# and agreed with them; this is now the sole required PR workflow. See design §4/§5/§7/§12.
+# The full gate set, run by hand: `gh workflow run qualification.yml --ref <branch>`. Nothing runs
+# it on a pull request, a push or a schedule, and no status check requires it. A release runs its
+# own smaller set against the bytes it ships (`npm-publish.yml`, docs/RELEASE.md).
 #
-# No `paths:`/`paths-ignore:` anywhere in this file, by design and by policy check: a required
-# workflow that can be skipped by a path filter leaves a PR pending forever. Every job below is
-# itself gated by the router's `route` output instead, and the verdict enforces that every job's
-# result matches a static expectation table -- a leaf `if:` that drifts from the table fails the
-# verdict in both directions.
+# Design #359 WP-4: eighteen leaf jobs behind one router and one aggregate, the `verdict` job (whose
+# own `name:` is `qualification`). A manual run has no base, so the router selects the full route.
+# The verdict enforces that every job's result matches a static expectation table -- a leaf `if:`
+# that drifts from the table fails the verdict in both directions.
 
 on:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 concurrency:
@@ -653,7 +643,9 @@ jobs:
       - name: Release shape policy self-test
         run: python3 -B scripts/check-release-shape.py --self-test
       - name: npm publish mode reachability and trust gates
-        run: python3 -B scripts/test-npm-publish-modes.py
+        run: |
+          python3 -B scripts/test-npm-publish-modes.py
+          node scripts/test-parse-npm-trust-list.mjs
       - name: Stem store V1 gate (mutation ledger moved to nightly)
         run: node scripts/check-stem-store-v1.mjs
       # The stem-identity corpus's only consumer in this repository (#1033): the release CLI copies
