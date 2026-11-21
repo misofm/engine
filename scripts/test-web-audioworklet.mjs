@@ -2475,6 +2475,13 @@ async function testMainRealm() {
       await offlineHost.dispose();
       context.state = "suspended";
 
+      // #2439: iOS reports "interrupted" while another audio session holds the device; it renders
+      // nothing, as a suspended context, so the host boots on it.
+      context.state = "interrupted";
+      const interruptedHost = await create();
+      context.state = "suspended";
+      await interruptedHost.dispose();
+
       const closedHost = await create();
       const closedNode = FakeNode.latest;
       const tick = intervals.at(-1);
