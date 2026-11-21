@@ -1,15 +1,15 @@
 name: nightly
 
-# Everything here used to be a job on `ci`, running on every push to main and every pull request.
-# None of it gates a merge:
+# The deep suites: run by hand, `gh workflow run nightly.yml --ref <branch>`. The name is
+# historical: nothing schedules it any more, and nothing runs it on a pull request or a push
+# (docs/RELEASE.md). None of it gates a merge or a release:
 #
-#   * `native production-kernel release-probe report (non-blocking)` is not a required check -- it
-#     cannot fail a build. It produces a report; a red report fails the job, which `failure-notice`
-#     then reports (issue #1481).
-#   * the two bounded fuzz jobs stayed per-PR, behind a `paths:` filter, in `fuzz.yml`. What moved
-#     here is DEPTH: 10,000 executions per target is a smoke test, and running it on every pull
-#     request buys breadth over diffs that mostly cannot affect a decoder. This job trades that for
-#     a budget three to four orders of magnitude larger, once a day, over every target.
+#   * `native production-kernel release-probe report (non-blocking)` produces a report; a red
+#     report fails the job, which `failure-notice` then reports (issue #1481).
+#   * `deep-fuzz` runs every fuzz target with a budget three to four orders of magnitude larger
+#     than `fuzz.yml`'s smoke run.
+#   * the release link proof, math sweeps, moved mutation suites, release budgets and full-size
+#     debug sweeps.
 #
 # ONE FILE, THREE JOBS -- and why that is not a shared failure mode. The concern with putting three
 # unrelated things in one workflow is that one failure hides another. That happens when they are
@@ -35,10 +35,6 @@ name: nightly
 # (issue #1513).
 
 on:
-  schedule:
-    # 03:17 UTC. Off the hour, because the top of the hour is when GitHub's scheduler is most
-    # loaded and `schedule` events are most likely to be delayed or dropped.
-    - cron: '17 3 * * *'
   workflow_dispatch:
 
 concurrency:

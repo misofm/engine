@@ -1,79 +1,18 @@
 name: fuzz
 
-# The two bounded fuzz jobs used to sit on `ci`, which runs unconditionally on every push to main
-# and every pull request against it. Between them they cost 19.9 job-minutes per 25 runs while
-# gating almost nothing: 10,000 libFuzzer executions per target is a smoke test that the decoder
-# still refuses garbage the same way twice, and the libFuzzer execution itself is under a second
-# per target -- the whole cost is toolchain install and sanitizer builds, paid on every run
-# regardless of whether the diff could possibly change a fuzz outcome.
+# The two bounded fuzz jobs (10,000 libFuzzer executions per target: a smoke test that the session
+# and protocol decoders still refuse garbage the same way). Run by hand:
+# `gh workflow run fuzz.yml --ref <branch>`. Nothing runs it on a pull request, a push or a schedule
+# (docs/RELEASE.md). `nightly.yml`'s `deep-fuzz` job, also manual, runs every target with a far
+# larger budget.
 #
-# They are split into their own workflow for the reason the old `release-build.yml` was (design
-# #359 §12 stage 3 retired it; qualification.yml is its and `ci.yml`'s sole successor): `paths:`
-# is a workflow-level filter, so a filter here would gate every job in whichever workflow carried
-# it, and neither `ci.yml`'s heavy jobs nor qualification.yml's can be path-filtered.
-#
-# The policy this file implements:
-#
-#   push to main   -- filtered, same list as the pull-request leg.
-#   pull request   -- filtered.
-#   dispatch       -- `gh workflow run fuzz.yml --ref <branch>`.
-#   nightly        -- `nightly.yml` runs every target with a far larger budget, unfiltered, on the
-#                     default branch. That is the backstop for anything this filter skips.
-#
-# WHY BOTH LEGS ARE FILTERED, unlike the old `release-build.yml`. That file left its push leg
-# unfiltered because its filter was a heuristic -- a source-only `cfg(debug_assertions)` edit can
-# break a release build without touching any path it lists, so main needed an unfiltered backstop
-# (now `nightly.yml`'s `release-link-proof` job, which is unconditional). This filter is not a
-# heuristic. It is the transitive workspace-dependency closure of the fuzz crate,
-# computed from `cargo metadata`, and the fuzz binaries link nothing outside it. `fuzz/Cargo.toml`
-# depends on exactly two workspace crates:
-#
-#   session          -> engine
-#   protocol         -> engine, session
-#
-# which closes over three crates: engine, protocol, session. Both jobs run
-# `cargo check --manifest-path fuzz/Cargo.toml --bins`, which builds all six fuzz binaries. Nothing
-# outside that closure can change what these binaries do, so a change outside it has nothing to
-# catch -- and if a new dependency edge is ever added without extending this list, the unfiltered
-# nightly finds it within a day. (#1037 removed the `effect_package` and `effect_state` targets and
-# with them the effect-contract, effect-package, lane and math roots.)
-#
-# The remaining entries are the other real inputs: the fuzz crate and its own lockfile and seed
-# corpus (`fuzz/**`), the seed input the session targets are handed
-# (`fixtures/session/v1/canonical.json`), the runner that drives the protocol targets
-# (`scripts/run-protocol-fuzz.sh`), the workspace root manifest (the `crates/*` manifests inherit
-# `[workspace.dependencies]` and profiles from it even when built from the `fuzz/` workspace), the
-# toolchain pin, and this file.
+# The fuzz binaries link exactly the workspace crates engine, protocol and session
+# (`fuzz/Cargo.toml` depends on session -> engine and protocol -> engine, session), so a change
+# outside those crates, `fuzz/**`, `fixtures/session/v1/canonical.json`,
+# `scripts/run-protocol-fuzz.sh`, the root manifest and the toolchain pin cannot change a fuzz
+# outcome.
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'crates/engine/**'
-      - 'crates/protocol/**'
-      - 'crates/session/**'
-      - 'fuzz/**'
-      - 'fixtures/session/v1/canonical.json'
-      - 'scripts/run-protocol-fuzz.sh'
-      - 'Cargo.toml'
-      - 'rust-toolchain.toml'
-      - '.cargo/config.toml'
-      - '.github/workflows/fuzz.yml'
-  pull_request:
-    branches:
-      - main
-    paths:
-      - 'crates/engine/**'
-      - 'crates/protocol/**'
-      - 'crates/session/**'
-      - 'fuzz/**'
-      - 'fixtures/session/v1/canonical.json'
-      - 'scripts/run-protocol-fuzz.sh'
-      - 'Cargo.toml'
-      - 'rust-toolchain.toml'
-      - '.cargo/config.toml'
-      - '.github/workflows/fuzz.yml'
   workflow_dispatch:
 
 concurrency:

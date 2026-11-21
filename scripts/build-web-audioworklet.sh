@@ -3,12 +3,10 @@ set -euo pipefail
 
 # Builds the shipped AudioWorklet module and prints `AudioWorklet module <sha256>` on stdout.
 #
-# Issue #1061 (owner decision 5, docs/rulings/engine-footprint-2026-09-28.md): the module's digest
-# is not held to a committed pin on every change. Every PR builds the module here, every artifact
-# gate reads those exact bytes, and the `artifact-identity` job reports whether they differ from the
-# digest the base commit's own CI run recorded. The committed pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`) is
-# the release fingerprint: a release change re-pins it, and `npm-publish.yml` publishes only bytes
-# equal to it. docs/RELEASE.md is the procedure.
+# A release (`npm-publish.yml`, docs/RELEASE.md) builds the module here once, runs every release
+# gate on those exact bytes, publishes them, and records their digest on the GitHub Release. The
+# committed pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`) is the module
+# of 0.10.x's last pinned release; `--check-pin` still compares a build with it.
 #
 # Issue #1109: one cargo build gives two modules. rustc's output is the *named twin*: it keeps the
 # wasm `name` section, the function names a devtools stack trace prints and the gates that find
@@ -161,7 +159,7 @@ strip_flag="-C strip=${MISO_ENGINE_WEB_STRIP:-debuginfo}"
 # path (under RUSTUP_HOME) lands in std's panic locations as well; the third remap fixes it. #1331a-1
 # measured the same toolchain at two paths giving two digests without it and one with it. The
 # toolchain is an environment prefix on the cargo line, never `cargo +channel`: it also overrides a
-# caller's RUSTUP_TOOLCHAIN (npm-publish.yml sets the stable one job-wide), and
+# caller's RUSTUP_TOOLCHAIN (the workflows set the stable one workflow-wide), and
 # check-artifact-evidence-leak.sh finds this invocation by `cargo build`.
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 sysroot=$(RUSTUP_TOOLCHAIN="$channel" rustc --print sysroot)

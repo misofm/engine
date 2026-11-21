@@ -422,6 +422,8 @@ def workspace(self_test_inputs: bool = False) -> pathlib.Path:
                  root / ".github/workflows/qualification.yml")
     shutil.copy2(ROOT / ".github/workflows/nightly.yml",
                  root / ".github/workflows/nightly.yml")
+    shutil.copy2(ROOT / ".github/workflows/npm-publish.yml",
+                 root / ".github/workflows/npm-publish.yml")
     shutil.copy2(ROUTER, root / "scripts/ci-path-router.py")
     shutil.copy2(CHECKER, root / "scripts/check-ci-path-routing.py")
     shutil.copy2(TEST, root / "scripts/test-ci-path-routing.py")
@@ -805,6 +807,16 @@ def test_generated_once_mutations(checker) -> None:
             "        run: " + skip + "      - name: Format\n")  # lint reads no verified download
         workflow_mutation_fails(
             "nightly.yml", "    steps:\n", "    steps:\n      - run: " + skip)
+        # The release workflow's one closure-verified reader: its download only, verified first.
+        workflow_mutation_fails(
+            "npm-publish.yml", checker.RELEASE_METADATA_SKIP,
+            checker.RELEASE_METADATA_SKIP.replace("target/release-artifacts ", "target/other "))
+        verified = ("          " + checker.RELEASE_CLOSURE_CHECK + ' || { echo "artifact closure '
+                    'mismatch: built $CLOSURE, got $closure" >&2; exit 1; }\n          named=')
+        workflow_mutation_fails("npm-publish.yml", verified, "          true\n          named=")
+        workflow_mutation_fails(
+            "npm-publish.yml", "      - name: Install pinned Rust toolchain\n",
+            "      - run: " + skip + "      - name: Install pinned Rust toolchain\n")
         # The SDK drift gate reads the artifact's closure-verified documents; without the directory
         # it would run the fat-LTO generator a second time in the run.
         workflow_mutation_fails(
@@ -1268,9 +1280,17 @@ def main() -> int:
     root = workspace()
     try:
         mutate(root / ".github/workflows/qualification.yml",
-               "  pull_request:\n    branches:\n      - main\n",
-               "  pull_request:\n    branches:\n      - main\n    paths:\n      - 'sdk/**'\n")
-        checker_fails(root)  # a path filter on the always-required workflow leaves it pending
+               "on:\n  workflow_dispatch:\n",
+               "on:\n  pull_request:\n    branches:\n      - main\n  workflow_dispatch:\n")
+        checker_fails(root)  # a pull_request trigger puts the full gate set back on every change
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/qualification.yml",
+               "on:\n  workflow_dispatch:\n",
+               "on:\n  workflow_dispatch:\n    paths:\n      - 'sdk/**'\n")
+        checker_fails(root)  # a path filter on the manual trigger
     finally:
         shutil.rmtree(root)
     root = workspace()
