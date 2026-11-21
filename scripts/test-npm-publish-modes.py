@@ -197,7 +197,8 @@ def check_publish() -> None:
     result, box, archive = attempt()
     require(result.returncode == 0, f"a release on main failed: {result.stderr}")
     calls = publishes(box)
-    require(len(calls) == 1 and "--provenance" in calls[0] and "--access public" in calls[0]
+    require(len(calls) == 1 and calls[0].startswith("publish ./release/")
+            and "--provenance" in calls[0] and "--access public" in calls[0]
             and "--tag latest" in calls[0], f"expected one provenance publish, got {calls}")
     data = archive.read_bytes()
     require(box.outputs() == {

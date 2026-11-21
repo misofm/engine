@@ -257,7 +257,7 @@ jobs:
           shopt -s nullglob
           archives=("$pack"/*.tgz)
           [[ ${#archives[@]} == 1 ]] || { echo "expected exactly one packed archive" >&2; exit 1; }
-          archive=${archives[0]}
+          archive=./${archives[0]}
           tar -xzf "$archive" -C "$pack/unpacked"
           [[ "$(node -p "require('./$pack/unpacked/package/package.json').version")" == "$VERSION" ]]
           [[ "$(sha256sum "$pack/unpacked/package/dist/assets/miso-engine-v1-audio-worklet.simd128.wasm" | awk '{print $1}')" == "$BUILT" ]]
@@ -437,7 +437,8 @@ jobs:
           TARBALL_SHA256: ${{ needs.package.outputs.sha256 }}
         run: |
           set -euo pipefail
-          archive="release/$TARBALL"
+          # A leading ./ keeps npm from reading `release/<file>` as a GitHub `user/repo` spec.
+          archive="./release/$TARBALL"
           [[ "$(sha256sum "$archive" | awk '{print $1}')" == "$TARBALL_SHA256" ]] || { echo "tarball differs from the one the package job tested" >&2; exit 1; }
           node - "$archive" >> "$GITHUB_OUTPUT" <<'NODE'
           const fs = require("node:fs");
