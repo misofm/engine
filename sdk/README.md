@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.10.4
+npm install @misofm/engine@0.10.5
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -898,7 +898,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.10.4 release record](https://github.com/misofm/engine/issues/2225) contains the accepted artifact
+[0.10.5 release record](https://github.com/misofm/engine/issues/2434) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -924,6 +924,43 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.10.4
+
+0.10.5 removes no export. It adds one browser option and one protocol counter.
+
+- Added: `policy.maximumMemoryBytes` now also caps the shared `WebAssembly.Memory` that the
+  scratch boot and the worklet boot create (the one worker-mode memory included), and
+  `createResponsePreview({ maximumMemoryBytes })` caps the preview Worker's (issue #2431). Each
+  declares the initial pages, the budget plus an eighth, and 35 pages, instead of 512 MiB.
+  WebKit reserves a shared memory's whole maximum up front, so set a budget on iOS. Without
+  one, nothing changes.
+- Changed: a headless `loadSession()` whose budget needs more memory than the instance was created
+  with is refused with `refusedOptions`, `sdk.boot.memory_maximum` (issue #2431).
+- Added: protocol counter `bankContractDefects` (code 23) in `COUNTER_IDS` (issue #2427).
+- Changed: a trap in the worklet ends the instance, never the page (issues #2256, #2291, #2370,
+  #2382). The trap can come from `process()`, a message handler, or the feed's drain. The host
+  answers with sticky result 255, outputs zeros and calls no export again. It reaches the page as
+  `miso.error.v1` (request ID 0 when no request is in flight). A `dispose()` after a trap
+  completes.
+- Changed: a failed host delivers no later meter, telemetry, control-event or watermark frame
+  (`discardedFramesAfterFailure`). A sticky error found after an answered request keeps its own
+  code (issue #2371). A sticky error the control Worker finds stops the worklet too (issue #2267).
+- Changed: `CanonicalPcmPump.pumpUntilFull()` and `seek()` reject with `stem.pump.stopped` once the
+  pump is stopped. A failed pump Worker session stops answering seeks (issue #2263).
+- Fixed, stem store: lease close and the locks under it have deadlines (issues #2372, #2381,
+  #2396, #2397, #2405). A superseded session open no longer commits over a newer one (issue
+  #2266).
+- Fixed: a live send carried across a rebuild completes `EXACT`; `TRANSITION_FALLBACK` is no longer
+  reported for it (issues #1713, #1718).
+- Fixed, DSP:
+  - a parametric EQ band's ramp ends at small quanta (issues #2247, #2250);
+  - the true-peak limiter refuses a restore whose detector history disagrees with its ring
+    (issue #2393);
+  - loudness re-arming at one render sample, and spectrum continuous capture and one-shot windows
+    (issues #2255, #2265, #2272, #2290);
+  - mono collapse entered on a dual block (issue #2274).
+- Changed, performance: the swap block fits the 70 % callback margin at 96 kHz (issue #2229).
 
 ## Upgrading from 0.10.3
 
