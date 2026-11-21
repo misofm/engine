@@ -9,6 +9,9 @@ const CONTROL_WORKER_FILE = "miso-engine-v1-control-worker.js";
 // `memory.maximumPages`. In `worker` mode this realm creates the one memory both instances share.
 const MEMORY_INITIAL_PAGES = 20;
 const MEMORY_MAXIMUM_PAGES = 8192;
+// A context that renders nothing: suspended, or iOS's "interrupted" while another audio session
+// holds the device (#2439; the SDK already reads it so, #2205).
+const renderless = (state) => state === "suspended" || state === "interrupted";
 // Issue #2431: what a budget-capped memory declares beyond its budget's pages. 35 pages are one
 // worker-mode instance reservation, which no budget charges (a 2 MiB stack with its canary and
 // TLS, its leaked record, and a page). An eighth of the budget is a margin for what the budget's
@@ -1692,7 +1695,7 @@ export async function createMisoAudioWorkletHost(options) {
     documentSnapshot = snapshotDocument(descriptors.get("document").value);
     bootOptions = snapshotBootOptions(descriptors.get("options").value);
     if ((preparedModule !== undefined && !(preparedModule instanceof WebAssembly.Module))
-        || contextState !== "suspended"
+        || !renderless(contextState)
         || !validU32(quantumFrames) || quantumFrames === 0
         || !validU32(sampleRateHz) || sampleRateHz === 0
         || documentSnapshot === undefined
@@ -1730,7 +1733,7 @@ export async function createMisoAudioWorkletHost(options) {
     };
     processorOptions.module = selected.module;
     await audioWorklet.addModule(workletModuleUrl);
-    if (context.state !== "suspended"
+    if (!renderless(context.state)
         || context.sampleRate !== sampleRateHz
         || (context.renderQuantumSize ?? 128) !== quantumFrames) {
       throw webError(RESULT_INVALID_ARGUMENT);
