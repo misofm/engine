@@ -9,6 +9,14 @@ const CONTROL_WORKER_FILE = "miso-engine-v1-control-worker.js";
 // `memory.maximumPages`. In `worker` mode this realm creates the one memory both instances share.
 const MEMORY_INITIAL_PAGES = 20;
 const MEMORY_MAXIMUM_PAGES = 8192;
+// Issue #2431: what a budget-capped memory declares beyond its budget's pages. 35 pages are one
+// worker-mode instance reservation, which no budget charges (a 2 MiB stack with its canary and
+// TLS, its leaked record, and a page). An eighth of the budget is a margin for what the budget's
+// projected rows leave out (allocator overhead, a replacement's fragmentation and candidate control
+// rows), until a gate measures an admitted session's growth near its budget (#2433).
+// The SDK's `sharedMemoryMaximumPages` and the worklet carry the same counts.
+const MEMORY_RESERVATION_PAGES = 35;
+const MEMORY_MARGIN_DIVISOR = 8n;
 // Issue #1332 S7 (D7): in `worker` mode the page's requests go to the control Worker, except these,
 // which the worklet answers for its render half.
 const RENDER_PORT_TAGS = new Set(["miso.meters.v1", "miso.telemetry.v1", "miso.renderallocations.v1"]);
@@ -261,6 +269,19 @@ function validU32(value) {
 function validU64(value, positive = false) {
   return typeof value === "bigint" && value >= (positive ? 1n : 0n)
     && value <= 0xffffffffffffffffn;
+}
+
+/// Issue #2431: the maximum of the worker-mode memory, whose instances boot with the validated
+/// `maximumMemoryBytes`. WebKit reserves a shared memory's whole maximum up front, so the memory
+/// declares only what the budget can use: the initial pages, the budget rounded up to pages, the margin and
+/// the reservation pages, never more than the module's maximum. A zero budget is the engine's default,
+/// the module's maximum.
+function memoryMaximumPages(maximumMemoryBytes) {
+  if (maximumMemoryBytes === 0n) return MEMORY_MAXIMUM_PAGES;
+  const margin = MEMORY_MARGIN_DIVISOR * 65536n;
+  const pages = BigInt(MEMORY_INITIAL_PAGES + MEMORY_RESERVATION_PAGES)
+    + (maximumMemoryBytes + 65535n) / 65536n + (maximumMemoryBytes + margin - 1n) / margin;
+  return pages < BigInt(MEMORY_MAXIMUM_PAGES) ? Number(pages) : MEMORY_MAXIMUM_PAGES;
 }
 
 function validResult(value) {
@@ -1719,7 +1740,7 @@ export async function createMisoAudioWorkletHost(options) {
     if (instanceMode === "worker") {
       const memory = new WebAssembly.Memory({
         initial: MEMORY_INITIAL_PAGES,
-        maximum: MEMORY_MAXIMUM_PAGES,
+        maximum: memoryMaximumPages(bootOptions.maximumMemoryBytes),
         shared: true,
       });
       const base = globalThis.document?.baseURI ?? globalThis.location?.href;

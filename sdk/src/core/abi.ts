@@ -111,7 +111,10 @@ export interface BootOptions {
   readonly requireQuantumFrames?: number;
   /** Per-source ring override. Absent selects the engine's stall-tolerance derivation. */
   readonly sourceRingFrames?: number;
-  /** Total boot memory budget. Absent selects the engine's default ceiling. */
+  /**
+   * Total boot memory budget. Absent selects the engine's default ceiling. A nonzero budget also
+   * caps the instance's shared memory at the pages it can use (issue #2431).
+   */
   readonly maximumMemoryBytes?: bigint;
   /**
    * The control frame in bytes (issue #2191). Absent selects the engine's default (the ABI

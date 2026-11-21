@@ -14,6 +14,7 @@ import { WasmBoundary } from "../src/core/boundary.ts";
 import { readFields } from "../src/core/control-frame.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { hexLower } from "../src/core/hex.ts";
+import { sharedMemoryMaximumPages } from "../src/core/memory.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, sessionDocument } from "./support.mjs";
@@ -332,6 +333,69 @@ describe("eval 8 -- lifecycle", () => {
       assert.equal(engine.state(), "ready");
     } finally {
       engine.dispose();
+    }
+  });
+
+  test("#2431: an instance's memory declares only the pages its boot budget can use", async () => {
+    // Red if a memory declares the module's whole maximum whatever the budget (WebKit reserves it
+    // up front, and an iPhone page then fails `new WebAssembly.Memory`), if the cap leaves out the
+    // initial pages, the margin or the reservation pages, rounds the budget down, or ignores the
+    // clamp, or if a reboot admits a budget its instance's memory cannot reach.
+    // initial + 35 reservation pages + ceil(budget / 64 KiB) + ceil(budget / 512 KiB).
+    const initial = ABI_LAYOUT.memory.initialPages;
+    const maximum = ABI_LAYOUT.memory.maximumPages;
+    const page = 65_536n;
+    const fixed = initial + 35;
+    for (const [budget, pages] of [
+      [undefined, maximum], [0n, maximum], [1n, fixed + 1 + 1], [page, fixed + 1 + 1],
+      [page + 1n, fixed + 2 + 1], [8n * page + 1n, fixed + 9 + 2],
+      [64n << 20n, fixed + 1_024 + 128], [512n << 20n, maximum], [1n << 40n, maximum],
+    ]) {
+      assert.equal(sharedMemoryMaximumPages(budget), pages, `budget ${budget}`);
+    }
+
+    const RealMemory = WebAssembly.Memory;
+    const declared = [];
+    WebAssembly.Memory = class extends RealMemory {
+      constructor(descriptor) {
+        declared.push(descriptor.maximum);
+        super(descriptor);
+      }
+    };
+    let engine;
+    try {
+      // The capped memory is enough for the session its budget admits, and too small a budget is
+      // the engine's typed refusal, never a `memory.grow` trap.
+      await assert.rejects(
+        () => createOfflineEngine(sessionDocument(), { asset, maximumMemoryBytes: 1n }),
+        (error) => error instanceof MisoEngineError && error.code === "refusedBudget",
+      );
+      assert.deepEqual(declared, [fixed + 1 + 1]);
+      const budget = 64n << 20n;
+      engine = await createOfflineEngine(sessionDocument(), { asset, maximumMemoryBytes: budget });
+      assert.deepEqual(declared.slice(1), [fixed + 1_024 + 128]);
+      engine.render();
+      engine.loadSession(sessionDocument({ sessionId: "same-budget" }), { maximumMemoryBytes: budget });
+      assert.throws(
+        () => engine.loadSession(sessionDocument({ sessionId: "default-budget" })),
+        (error) => {
+          assert.ok(error instanceof MisoEngineError);
+          assert.equal(error.code, "refusedOptions");
+          assert.deepEqual(error.diagnostics, [
+            { code: "sdk.boot.memory_maximum", path: "$.maximum_memory_bytes" },
+          ]);
+          return true;
+        },
+      );
+      // A budget that is no u64 word is the staging's refusal, not the memory's.
+      assert.throws(
+        () => engine.loadSession(sessionDocument({ sessionId: "bad-budget" }), { maximumMemoryBytes: -1n }),
+        (error) => error?.diagnostics?.[0]?.code !== "sdk.boot.memory_maximum",
+      );
+      assert.equal(declared.length, 2, "a reboot makes no memory");
+    } finally {
+      WebAssembly.Memory = RealMemory;
+      engine?.dispose();
     }
   });
 

@@ -35,6 +35,12 @@ import type { SourceSpec } from "../core/types.ts";
  */
 export interface BrowserBootPolicy {
   readonly sourceRingFrames?: number;
+  /**
+   * The boot memory budget; absent selects the engine's default, 512 MiB. It also caps the shared
+   * memory of the scratch boot and the worklet boot (issue #2431): each declares only the pages the
+   * budget can use, since WebKit reserves a shared memory's whole maximum up front and iOS has
+   * little address space to reserve.
+   */
   readonly maximumMemoryBytes?: bigint;
   /** The control frame in bytes (issue #2191); absent selects the engine's 128 KiB default. */
   readonly maximumControlFrameBytes?: bigint;
