@@ -464,10 +464,11 @@ export class WasmBoundary {
     // Issue #2431: the memory cannot grow past what the first boot's budget declared, so a reboot
     // whose budget needs more is refused, typed, as the engine refuses a budget above the module's
     // maximum, rather than admitted and failed later inside `memory.grow`. A budget that is not a
-    // `bigint` is left to the staging, which refuses it as an invalid word.
+    // u64 `bigint` is left to the staging, which refuses it as an invalid word.
     const budget = snapshot.options.maximumMemoryBytes;
-    if ((budget === undefined || typeof budget === "bigint")
-        && sharedMemoryMaximumPages(budget) > this.#memoryMaximumPages) {
+    const word = budget === undefined
+      || (typeof budget === "bigint" && budget >= 0n && budget <= 0xffff_ffff_ffff_ffffn);
+    if (word && sharedMemoryMaximumPages(budget) > this.#memoryMaximumPages) {
       throw new MisoEngineError(
         "the reboot's memory budget is larger than this instance's memory was created for",
         {

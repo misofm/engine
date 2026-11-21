@@ -15,9 +15,10 @@ export interface BrowserResponsePreviewOptions {
   readonly asset: MisoEngineAsset;
   readonly responseLimits?: ResponsePreviewLimits;
   /**
-   * The bytes the preview Worker's memory may grow by (issue #2431). The memory then declares only
-   * those pages (`sharedMemoryMaximumPages`), instead of the module's whole 512 MiB maximum, which
-   * WebKit reserves up front. Absent or `0n` keeps the module's maximum. The preview's own limits
+   * A memory budget for the preview Worker (issue #2431). Its memory then declares only the pages
+   * `sharedMemoryMaximumPages` gives the budget (the budget, an eighth more and 35 pages), instead
+   * of the module's whole 512 MiB maximum, which WebKit reserves up front. The preview charges
+   * nothing against it. Absent or `0n` keeps the module's maximum. The preview's own limits
    * still bound each query, and one that needs more memory than this fails with the Worker's
    * error. The preview's own limits are the way to keep each query under it.
    */

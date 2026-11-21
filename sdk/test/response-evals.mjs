@@ -180,22 +180,29 @@ test("#2431: the browser response Worker's memory declares only its preview's bu
     const deliver = async (data) => {
       const count = replies.length;
       globalThis.self.onmessage({ data });
-      while (replies.length === count) await new Promise((resolve) => setTimeout(resolve, 1));
+      const deadline = Date.now() + 5_000;
+      while (replies.length === count) {
+        assert.ok(Date.now() < deadline, `the Worker answered no ${data.type}`);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
       return replies.at(-1);
     };
     const ready = await deliver({
       type: "response-init", module: real.module, responseLimits: {}, maximumMemoryBytes: budget,
     });
     assert.equal(ready.type, "response-ready");
-    assert.deepEqual(declared, [ABI_LAYOUT.memory.initialPages + 34 + 128]);
+    assert.deepEqual(declared, [ABI_LAYOUT.memory.initialPages + 35 + 128 + 16]);
     const reply = await deliver({ type: "response-query", requestId: 1, query });
     assert.equal(reply.type, "response-result", "a preview runs on the capped memory");
     await deliver({ type: "response-init", module: real.module, responseLimits: {} });
     assert.equal(declared.at(-1), ABI_LAYOUT.memory.maximumPages, "no budget keeps the module's maximum");
   } finally {
     WebAssembly.Memory = RealMemory;
-    globalThis.self.onmessage({ data: { type: "response-close" } });
-    delete globalThis.self;
+    try {
+      globalThis.self.onmessage?.({ data: { type: "response-close" } });
+    } finally {
+      delete globalThis.self;
+    }
   }
 });
 

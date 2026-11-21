@@ -306,9 +306,11 @@ Every engine instance runs on a shared `WebAssembly.Memory`, and WebKit reserves
 memory's whole declared maximum when it creates it. iOS has little address space for that, so on a
 phone set `policy.maximumMemoryBytes` to what the session needs (issue #2431). The scratch boot's
 memory and the worklet's (in worker mode, the one memory both instances share) then declare only
-the initial pages, the budget rounded up to pages and 34 unbudgeted pages, instead of the module's
-whole 512 MiB. Give `createResponsePreview()` its own `maximumMemoryBytes` for its Worker. A
-session the budget cannot hold is refused at boot with `refusedBudget`.
+the initial pages, the budget plus an eighth of it as a margin, and 35 pages for a worker-mode
+instance's stack, instead of the module's whole 512 MiB. Give `createResponsePreview()` its own
+`maximumMemoryBytes` for its Worker. A session the budget cannot hold is refused at boot with
+`refusedBudget`. Leave room above the session's measured memory: the budget charges the engine's
+projected rows, not every byte the allocator grows, and a memory that cannot grow traps.
 
 For shared-ring delivery, the browser entry exposes `prepareEngineFeed`, `attachEngineFeed`,
 `Msb1RingWriter`, and `waitForPcmRunway`. These transport already-decoded PCM; they do not fetch or

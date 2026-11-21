@@ -21,14 +21,17 @@ scarce, and a page that holds two or three such memories at once fails with
 
 ## Contract
 - Every site creates its memory with
-  `maximum = min(memory.maximumPages, memory.initialPages + ceil(budget / 65536) + 34)` when a
-  budget is given, and `memory.maximumPages` otherwise.
+  `maximum = min(memory.maximumPages, memory.initialPages + 35 + ceil(budget / 64 KiB) + ceil(budget / 512 KiB))`
+  when a budget is given, and `memory.maximumPages` otherwise.
   - The budget charges growth past the initial pages, which hold the first instance's stack, the
     static data and the TLS block (`check-web-boot-budget.mjs` measures growth).
-  - 34 pages are the bytes no budget charges: a worker-mode instance reservation (a 2 MiB stack,
-    its 64-byte canary and its TLS block, 272 bytes in today's module; 33 pages) and the one page
-    of growth past the budget the boot gates allow.
-  - So the memory can grow as far as the engine admits.
+  - 35 pages are a worker-mode instance reservation, which no budget charges: a 2 MiB stack, its
+    64-byte canary and its TLS block (272 bytes in today's module), 33 pages through the
+    allocator, its leaked record, and one page.
+  - An eighth of the budget is a margin. The budget charges projected rows, not allocator overhead
+    or a replacement's fragmentation, and a live replacement does not add its candidate's control
+    rows to its aggregate peak. No gate measures an admitted session's growth near its budget yet;
+    #2433 owns that gate and the margin's final size.
 - The budget is the boot policy's `maximumMemoryBytes`. Absent or `0n` keeps 8192 pages, so the
   default is unchanged. A budget above the module's maximum still clamps to 8192 pages, and boot
   still refuses it with `web.boot.memory_maximum`.
@@ -61,7 +64,7 @@ scarce, and a page that holds two or three such memories at once fails with
 
 ## Evidence / attempt record
 
-### Attempt 1 (2026-11-21)
+### Attempt 1 (2026-11-21, `da55bba75`)
 - Five sites follow the budget: `miso-engine-v1-audio-worklet-host.js` (worker mode, the page
   realm's memory), `miso-engine-v1-audio-worklet.js` (single mode), and `sdk/src/core/memory.ts`
   (`sharedMemoryMaximumPages`), which `MisoEngineAsset.instantiate(budget)` (scratch boot, headless
@@ -84,3 +87,29 @@ scarce, and a page that holds two or three such memories at once fails with
   - `response-evals` "#2431": a preview that drops its budget on the way to the Worker, or a Worker
     whose memory ignores it.
   - Hermetic rows: a worker-mode or single-mode host whose memory ignores the boot budget.
+
+### Adversarial verdict on attempt 1: FAIL
+1. High: a live replacement checks only `graph_peak + source_total + transition_bytes` against its
+   aggregate, so it can be admitted above the budget by its candidate's control rows; with one page
+   of slack the capped memory then traps mid-session.
+2. High: "one page of growth past the budget the boot gates allow" was extrapolated from refusal
+   gates; nothing measures an admitted session near its budget, and allocator overhead is
+   uncharged.
+3. Low: the reservation can use all 34 pages (33 for the block, one for its record).
+4. Low: the reboot guard named `sdk.boot.memory_maximum` for a negative or over-u64 bigint.
+5. Test hygiene: the response eval's `finally` could mask an error and skip `delete
+   globalThis.self`; `deliver` had no deadline; the hermetic row did not restore `expectedMemory`
+   when `construct` threw.
+
+### Attempt 2 (the fold)
+- Findings 1 and 2: the cap adds an eighth of the budget, and #2433 owns the near-budget gate and
+  either charging the replacement's control rows or pinning the margin to a measurement. All the
+  docs now say so; the "one page the gates allow" claim is gone.
+- Finding 3: 35 reservation pages.
+- Finding 4: the guard runs only for a u64 `bigint` (or none); a new assertion holds a `-1n`
+  reboot to the staging's refusal (red with the range check removed).
+- Finding 5: fixed as described.
+- Desktop Chromium, the app's 40-stem mixer at a 128 MiB budget (attempt-1 rule, 2102 pages): the
+  page realm's worker-mode memory, the scratch Worker's and the response Worker's each declared
+  2102 pages; the session memory was 31.0 MB ready and playing, 33.2 MB with a Pro FX sheet open;
+  0 underruns after a 3 s settle, no `refusedBudget`, no console error.

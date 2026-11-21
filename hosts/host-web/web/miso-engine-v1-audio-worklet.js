@@ -59,10 +59,14 @@ const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 // the memory this file creates to the layout's.
 const MEMORY_INITIAL_PAGES = 20;
 const MEMORY_MAXIMUM_PAGES = 8192;
-// Issue #2431: the pages a budget-capped memory declares beyond its budget's, the bytes no budget
-// charges: one instance reservation (a 2 MiB stack with its canary and TLS, 33 pages) and the one
-// page of growth the boot gates allow. The SDK's `sharedMemoryMaximumPages` carries the same count.
-const MEMORY_UNBUDGETED_PAGES = 34;
+// Issue #2431: what a budget-capped memory declares beyond its budget's pages. 35 pages are one
+// worker-mode instance reservation, which no budget charges (a 2 MiB stack with its canary and
+// TLS, its leaked record, and a page). An eighth of the budget is a margin for what the budget's
+// projected rows leave out (allocator overhead, a replacement's fragmentation and candidate control
+// rows), until a gate measures an admitted session's growth near its budget (#2433).
+// The SDK's `sharedMemoryMaximumPages` and the worklet host carry the same counts.
+const MEMORY_RESERVATION_PAGES = 35;
+const MEMORY_MARGIN_DIVISOR = 8n;
 
 // The telemetry window: 128 blocks is ~341 ms at 48 kHz with a 128-frame quantum, long enough for
 // a millisecond-resolution clock to accumulate a usable ratio and short enough to be a live meter.
@@ -122,15 +126,16 @@ function renderClock() {
 
 /// Issue #2431: the maximum of a memory whose instance boots with `maximumMemoryBytes`. WebKit
 /// reserves a shared memory's whole maximum up front, so the memory declares only what the budget
-/// can use: the initial pages, the budget rounded up to pages and the unbudgeted pages, never more
-/// than the module's maximum. A zero budget is the engine's default, the module's maximum, and so
+/// can use: the initial pages, the budget rounded up to pages, the margin and the reservation
+/// pages, never more than the module's maximum. A zero budget is the engine's default, the module's maximum, and so
 /// is a word that is not a positive `bigint`, which the boot then refuses itself.
 function memoryMaximumPages(maximumMemoryBytes) {
   if (typeof maximumMemoryBytes !== "bigint" || maximumMemoryBytes <= 0n) {
     return MEMORY_MAXIMUM_PAGES;
   }
-  const pages = BigInt(MEMORY_INITIAL_PAGES + MEMORY_UNBUDGETED_PAGES)
-    + (maximumMemoryBytes + 65535n) / 65536n;
+  const margin = MEMORY_MARGIN_DIVISOR * 65536n;
+  const pages = BigInt(MEMORY_INITIAL_PAGES + MEMORY_RESERVATION_PAGES)
+    + (maximumMemoryBytes + 65535n) / 65536n + (maximumMemoryBytes + margin - 1n) / margin;
   return pages < BigInt(MEMORY_MAXIMUM_PAGES) ? Number(pages) : MEMORY_MAXIMUM_PAGES;
 }
 
