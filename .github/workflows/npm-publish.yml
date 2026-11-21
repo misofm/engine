@@ -493,7 +493,12 @@ jobs:
           npm install --ignore-scripts "$PACKAGE_NAME@$VERSION"
           node --input-type=module -e 'await import("@misofm/engine"); await import("@misofm/engine/headless"); await import("@misofm/engine/browser"); await import("@misofm/engine/assets")'
           [[ "$(./node_modules/.bin/enginectl --version)" == "$VERSION" ]]
-          npm audit signatures --json --include-attestations > audit.json
+          # The attestation endpoint can answer 404 for minutes after the version is served (0.10.5).
+          for attempt in $(seq 1 40); do
+            npm audit signatures --json --include-attestations > audit.json 2> audit.err && break
+            [[ "$attempt" == 40 ]] && { cat audit.err >&2; exit 1; }
+            sleep 15
+          done
           node - audit.json <<'NODE'
           const fs = require("node:fs");
           const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
