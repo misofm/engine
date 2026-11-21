@@ -302,6 +302,14 @@ mode is `"single"`: one instance, whose control work runs in the worklet's messa
 on a page without isolation is refused. Worker mode is qualified on desktop Chromium and WebKit;
 iOS Safari is not qualified.
 
+Every engine instance runs on a shared `WebAssembly.Memory`, and WebKit reserves a shared
+memory's whole declared maximum when it creates it. iOS has little address space for that, so on a
+phone set `policy.maximumMemoryBytes` to what the session needs (issue #2431). The scratch boot's
+memory and the worklet's (in worker mode, the one memory both instances share) then declare only
+the initial pages, the budget rounded up to pages and 34 unbudgeted pages, instead of the module's
+whole 512 MiB. Give `createResponsePreview()` its own `maximumMemoryBytes` for its Worker. A
+session the budget cannot hold is refused at boot with `refusedBudget`.
+
 For shared-ring delivery, the browser entry exposes `prepareEngineFeed`, `attachEngineFeed`,
 `Msb1RingWriter`, and `waitForPcmRunway`. These transport already-decoded PCM; they do not fetch or
 decode media. The shared-ring path requires `SharedArrayBuffer` and a cross-origin-isolated page.

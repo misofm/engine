@@ -117,9 +117,15 @@ export class MisoEngineAsset {
    *
    * Instantiation is cheap next to compilation and is *not* counted: an instance is a session, so
    * a mix switch and a `validate()` both make one. What must never happen twice is the compile.
+   *
+   * `maximumMemoryBytes` is the boot budget the instance will boot with (issue #2431): its memory
+   * declares only the pages that budget can use (`sharedMemoryMaximumPages`).
    */
-  async instantiate(): Promise<WebAssembly.Instance> {
-    const instance = await WebAssembly.instantiate(this.#module, sharedMemoryImports());
+  async instantiate(maximumMemoryBytes?: bigint): Promise<WebAssembly.Instance> {
+    const instance = await WebAssembly.instantiate(
+      this.#module,
+      sharedMemoryImports(maximumMemoryBytes),
+    );
     const exports = instance.exports as Record<string, unknown>;
     const versionExport = exports[ABI_LAYOUT.stagingSequence[0]];
     if (typeof versionExport !== "function") {

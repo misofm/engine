@@ -296,7 +296,10 @@ export interface MisoWebBootOptions {
   sourceRingFrames: number;
   /// Total boot memory budget, or `0n` for the engine-owned default ceiling.
   /// A budget above the module's shared-memory maximum (the ABI layout's `memory.maximumPages`
-  /// pages, 512 MiB) is refused with `web.boot.memory_maximum` (issue #1380).
+  /// pages, 512 MiB) is refused with `web.boot.memory_maximum` (issue #1380). A nonzero budget also
+  /// sets the shared memory's declared maximum (issue #2431): the initial pages, the budget rounded
+  /// up to pages and 34 unbudgeted pages (a worker-mode instance's reservation and one page of
+  /// slack), at most the module's maximum. WebKit reserves that maximum up front.
   maximumMemoryBytes: bigint;
   /// The control frame in bytes, or `0n` for the engine's default, 128 KiB (offset 32 of the boot
   /// options, issue 2191). It bounds every control frame, response and event; the engine refuses

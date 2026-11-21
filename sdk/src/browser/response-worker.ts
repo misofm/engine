@@ -8,7 +8,13 @@ import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import { sharedMemoryImports } from "../core/memory.ts";
 
 export type ResponseWorkerRequest =
-  | { readonly type: "response-init"; readonly module: WebAssembly.Module; readonly responseLimits: ResponsePreviewLimits }
+  | {
+    readonly type: "response-init";
+    readonly module: WebAssembly.Module;
+    readonly responseLimits: ResponsePreviewLimits;
+    /** The preview's memory budget (issue #2431); absent keeps the module's maximum. */
+    readonly maximumMemoryBytes?: bigint;
+  }
   | { readonly type: "response-query"; readonly requestId: number; readonly query: ResponsePreviewQuery }
   | { readonly type: "response-close" };
 
@@ -53,7 +59,9 @@ async function handle(event: MessageEvent<ResponseWorkerRequest>): Promise<void>
     const request = event.data;
     if (request.type === "response-init") {
       preview?.close();
-      preview = new ResponsePreviewModule(new WebAssembly.Instance(request.module, sharedMemoryImports()), request.responseLimits);
+      const imports = sharedMemoryImports(request.maximumMemoryBytes);
+      const instance = new WebAssembly.Instance(request.module, imports);
+      preview = new ResponsePreviewModule(instance, request.responseLimits);
       scope.postMessage({ type: "response-ready" });
     } else if (request.type === "response-query") {
       if (preview === undefined) throw new MisoUsageError("the response Worker is not initialized");

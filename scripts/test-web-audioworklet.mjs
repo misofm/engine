@@ -2791,6 +2791,18 @@ async function testMainRealm() {
           assert.equal(trappedWorker.posts.filter((message) => message.tag === "miso.dispose.v1").length, 1);
           assert.equal(trappedNode.disconnectCount, 1, "teardown runs exactly once");
         }
+        // #2431 parity row: with a budget, the page realm's one memory declares only the pages
+        // the budget can use; the boot above, with none, declared the layout's maximum.
+        {
+          const budgeted = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: { ...limits, maximumMemoryBytes: 128n << 20n },
+            simd128ModuleUrl: "simd.wasm", workletModuleUrl: "https://example.test/w.js",
+          });
+          assert.equal(memories.at(-1).descriptor.maximum, abiLayout.memory.initialPages + 34 + 2048,
+            "the worker-mode memory declares the budget's pages");
+          assert.equal(workers.at(-1).posts[0].memory, memories.at(-1), "the Worker boots on it");
+          await budgeted.dispose();
+        }
         // The Worker answers the dispose with 255 (a trap it caught): the dispose rejects with it
         // and still tears down once.
         {
@@ -4561,11 +4573,13 @@ async function testProcessor() {
       this.buffer = new SharedArrayBuffer(descriptor.initial * 65536);
     }
   };
-  const expectedMemory = {
+  const layoutMemory = {
     initial: abiLayout.memory.initialPages,
     maximum: abiLayout.memory.maximumPages,
     shared: true,
   };
+  // Issue #2431: a boot with a budget expects the budget's maximum; every other boot, the layout's.
+  let expectedMemory = layoutMemory;
   // Issue #1332 S7: in `worker` mode the worklet joins the memory its options carry.
   let workerModeMemory = null;
   WebAssembly.Instance = class {
@@ -4630,6 +4644,19 @@ async function testProcessor() {
       assert.equal(processor.port.posts[0].message.result, 0, "the boot is ready");
       assert.deepEqual(fake.calls.boot, [[processorSessionDocument.byteLength]],
         "the boot export's arguments");
+    }
+
+    // #2431 parity row: a budget caps the worklet's memory at the pages it can use, the initial
+    // pages, the budget rounded up to pages and 34 unbudgeted pages; a zero budget (every other
+    // boot here) keeps the layout's maximum. The import check above holds the descriptor.
+    {
+      const before = importViolations.length;
+      expectedMemory = { ...layoutMemory, maximum: abiLayout.memory.initialPages + 34 + 2 };
+      const fake = createFakeExports(64);
+      const processor = construct(fake, { ...limits, maximumMemoryBytes: 65_537n });
+      expectedMemory = layoutMemory;
+      assert.equal(processor.port.posts[0].message.result, 0, "the budgeted boot is ready");
+      assert.equal(importViolations.length, before, "the budgeted memory declares the budget's pages");
     }
 
     // #2166 parity row: the processor stages the boot command before the boot export, so the

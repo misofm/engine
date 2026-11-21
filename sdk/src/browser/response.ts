@@ -14,6 +14,14 @@ import type { ResponseWorker, ResponseWorkerError, ResponseWorkerFactory, Respon
 export interface BrowserResponsePreviewOptions {
   readonly asset: MisoEngineAsset;
   readonly responseLimits?: ResponsePreviewLimits;
+  /**
+   * The bytes the preview Worker's memory may grow by (issue #2431). The memory then declares only
+   * those pages (`sharedMemoryMaximumPages`), instead of the module's whole 512 MiB maximum, which
+   * WebKit reserves up front. Absent or `0n` keeps the module's maximum. The preview's own limits
+   * still bound each query, and one that needs more memory than this fails with the Worker's
+   * error. The preview's own limits are the way to keep each query under it.
+   */
+  readonly maximumMemoryBytes?: bigint;
   readonly responseWorkerModuleUrl?: string | URL;
   readonly createWorker?: ResponseWorkerFactory;
   readonly signal?: AbortSignal;
@@ -24,6 +32,7 @@ export class BrowserResponsePreview {
   readonly #asset: MisoEngineAsset;
   readonly #worker: ResponseWorker;
   readonly #responseLimits: ResponsePreviewLimits;
+  readonly #maximumMemoryBytes: bigint | undefined;
   #closed = false;
   #nextRequestId = 1;
   #pending: { readonly requestId: number; readonly resolve: (result: ResponsePreviewResult) => void; readonly reject: (error: unknown) => void; readonly timer: ReturnType<typeof setTimeout> } | undefined;
@@ -31,10 +40,16 @@ export class BrowserResponsePreview {
   #resolveReady!: () => void;
   #rejectReady!: (error: unknown) => void;
 
-  private constructor(asset: MisoEngineAsset, worker: ResponseWorker, responseLimits: ResponsePreviewLimits) {
+  private constructor(
+    asset: MisoEngineAsset,
+    worker: ResponseWorker,
+    responseLimits: ResponsePreviewLimits,
+    maximumMemoryBytes: bigint | undefined,
+  ) {
     this.#asset = asset;
     this.#worker = worker;
     this.#responseLimits = responseLimits;
+    this.#maximumMemoryBytes = maximumMemoryBytes;
     this.#ready = new Promise<void>((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
@@ -51,6 +66,12 @@ export class BrowserResponsePreview {
     if (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647) {
       throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
     }
+    const maximumMemoryBytes = options.maximumMemoryBytes;
+    if (maximumMemoryBytes !== undefined
+        && (typeof maximumMemoryBytes !== "bigint" || maximumMemoryBytes < 0n
+          || maximumMemoryBytes > 0xffff_ffff_ffff_ffffn)) {
+      throw new MisoUsageError("maximumMemoryBytes must be a bigint from 0 to 2^64 - 1");
+    }
     options.signal?.throwIfAborted();
     let worker: ResponseWorker;
     try {
@@ -63,7 +84,12 @@ export class BrowserResponsePreview {
     } catch (error) {
       throw new MisoUsageError(`response Worker could not start: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const preview = new BrowserResponsePreview(options.asset, worker, responseLimits);
+    const preview = new BrowserResponsePreview(
+      options.asset,
+      worker,
+      responseLimits,
+      maximumMemoryBytes,
+    );
     try {
       await preview.initialize(options.signal, deadline);
       return preview;
@@ -112,7 +138,13 @@ export class BrowserResponsePreview {
     signal?.addEventListener("abort", abort, { once: true });
     try {
       timer = setTimeout(() => this.#rejectReady(new MisoUsageError("response Worker initialization exceeded its deadline")), deadline);
-      this.#worker.postMessage({ type: "response-init", module: this.#asset.module, responseLimits: this.#responseLimits });
+      this.#worker.postMessage({
+        type: "response-init",
+        module: this.#asset.module,
+        responseLimits: this.#responseLimits,
+        ...(this.#maximumMemoryBytes === undefined
+          ? {} : { maximumMemoryBytes: this.#maximumMemoryBytes }),
+      });
       await this.#ready;
     } finally {
       if (timer !== undefined) clearTimeout(timer);

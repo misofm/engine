@@ -7,6 +7,7 @@ import { RESPONSE_CAPABILITIES, ResponsePreviewModule } from "../src/core/respon
 import { createResponsePreview as createHeadlessResponsePreview } from "../src/headless/response.ts";
 import { decodeResponseReply, encodeResponseRequest } from "../src/core/response-frame.ts";
 import { effect } from "../src/core/session.ts";
+import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { moduleBytes } from "./support.mjs";
 
 class FakeWorker {
@@ -141,6 +142,60 @@ test("browser response Worker failure messages are terminal", async () => {
     assert.equal(worker.terminated, 1);
     await assert.rejects(preview.query(query), /closed/);
     await preview.close();
+  }
+});
+
+test("#2431: the browser response Worker's memory declares only its preview's budget", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  // Red if the preview drops its budget on the way to the Worker, accepts a budget that is not a
+  // u64 bigint, or if the Worker's memory declares the module's whole 512 MiB maximum anyway.
+  const budget = 8n << 20n;
+  const fake = new FakeWorker();
+  const browser = await BrowserResponsePreview.create({
+    asset, maximumMemoryBytes: budget, createWorker: () => fake,
+  });
+  assert.equal(fake.requests[0].maximumMemoryBytes, budget);
+  await browser.close();
+  for (const maximumMemoryBytes of [8, -1n, 1n << 64n]) {
+    await assert.rejects(
+      BrowserResponsePreview.create({ asset, maximumMemoryBytes, createWorker: () => new FakeWorker() }),
+      MisoUsageError,
+    );
+  }
+
+  const real = await MisoEngineAsset.load(await moduleBytes());
+  const replies = [];
+  const RealMemory = WebAssembly.Memory;
+  const declared = [];
+  globalThis.self = { onmessage: null, postMessage: (reply) => replies.push(reply) };
+  WebAssembly.Memory = class extends RealMemory {
+    constructor(descriptor) {
+      declared.push(descriptor.maximum);
+      super(descriptor);
+    }
+  };
+  try {
+    await import("../src/browser/response-worker.ts");
+    const deliver = async (data) => {
+      const count = replies.length;
+      globalThis.self.onmessage({ data });
+      while (replies.length === count) await new Promise((resolve) => setTimeout(resolve, 1));
+      return replies.at(-1);
+    };
+    const ready = await deliver({
+      type: "response-init", module: real.module, responseLimits: {}, maximumMemoryBytes: budget,
+    });
+    assert.equal(ready.type, "response-ready");
+    assert.deepEqual(declared, [ABI_LAYOUT.memory.initialPages + 34 + 128]);
+    const reply = await deliver({ type: "response-query", requestId: 1, query });
+    assert.equal(reply.type, "response-result", "a preview runs on the capped memory");
+    await deliver({ type: "response-init", module: real.module, responseLimits: {} });
+    assert.equal(declared.at(-1), ABI_LAYOUT.memory.maximumPages, "no budget keeps the module's maximum");
+  } finally {
+    WebAssembly.Memory = RealMemory;
+    globalThis.self.onmessage({ data: { type: "response-close" } });
+    delete globalThis.self;
   }
 });
 

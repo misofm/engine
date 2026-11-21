@@ -9,6 +9,7 @@ import {
 import type { BootOptions } from "./abi.ts";
 import { refuseRetiredObservationTaps } from "../internal/retired-options.ts";
 import { MisoEngineAsset } from "./asset.ts";
+import { sharedMemoryMaximumPages } from "./memory.ts";
 import { controlCallFailure, encodeRevisionProbe, malformed } from "./control-frame.ts";
 import { readControlStripOrderSync } from "./control-list.ts";
 import type { ControlStripOrder } from "./control-list.ts";
@@ -363,6 +364,8 @@ export class WasmBoundary {
   #spectrumQuery: SpectrumQuery | undefined;
   #spectrumCollection: SpectrumCollection | undefined;
   #spectrumActiveQuery: SpectrumQuery | undefined;
+  /** The pages the instance's memory declares (issue #2431), from its first boot's budget. */
+  readonly #memoryMaximumPages: number;
 
   private constructor(
     exports: ExportTable,
@@ -371,8 +374,10 @@ export class WasmBoundary {
     metersAttached: boolean,
     spectrumQuery: SpectrumQuery | undefined,
     spectrumCollection: SpectrumCollection | undefined,
+    memoryMaximumPages: number,
   ) {
     this.#exports = exports;
+    this.#memoryMaximumPages = memoryMaximumPages;
     this.#handle = handle;
     this.#optionBytes = optionBytes;
     this.#metersAttached = metersAttached;
@@ -416,7 +421,8 @@ export class WasmBoundary {
     snapshot: BootSnapshot,
     bootCommand: Uint8Array | undefined,
   ): Promise<WasmBoundary> {
-    const exports = exportsOf(await asset.instantiate());
+    // Issue #2431: the instance's memory declares only the pages its boot budget can use.
+    const exports = exportsOf(await asset.instantiate(snapshot.options.maximumMemoryBytes));
     const staged = stage(exports, document, snapshot.options, bootCommand);
     const boundary = new WasmBoundary(
       exports,
@@ -425,6 +431,7 @@ export class WasmBoundary {
       (snapshot.options.liveControls?.meterBlocks ?? 0) > 0,
       snapshot.spectrumQuery,
       snapshot.spectrumCollection,
+      sharedMemoryMaximumPages(snapshot.options.maximumMemoryBytes),
     );
     try {
       if (wantsSpectrum(snapshot)) boundary.#requireSpectrumCapability();
@@ -454,6 +461,23 @@ export class WasmBoundary {
     this.dispose();
     this.#stripOrder = undefined;
     this.#stripOrders.clear();
+    // Issue #2431: the memory cannot grow past what the first boot's budget declared, so a reboot
+    // whose budget needs more is refused, typed, as the engine refuses a budget above the module's
+    // maximum, rather than admitted and failed later inside `memory.grow`. A budget that is not a
+    // `bigint` is left to the staging, which refuses it as an invalid word.
+    const budget = snapshot.options.maximumMemoryBytes;
+    if ((budget === undefined || typeof budget === "bigint")
+        && sharedMemoryMaximumPages(budget) > this.#memoryMaximumPages) {
+      throw new MisoEngineError(
+        "the reboot's memory budget is larger than this instance's memory was created for",
+        {
+          phase: "boot",
+          code: "refusedOptions",
+          result: constantValue("bootResultAliases", "refusedOptions"),
+          diagnostics: [{ code: "sdk.boot.memory_maximum", path: "$.maximum_memory_bytes" }],
+        },
+      );
+    }
     const staged = stage(this.#exports, document, snapshot.options, bootCommandOf(snapshot));
     this.#handle = staged.handle;
     this.#optionBytes = staged.optionBytes;
